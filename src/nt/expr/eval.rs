@@ -503,9 +503,12 @@ impl Expr {
             ));
         }
 
-        let read = context.expression_memory().read::<u64>(scalar)?;
+        let arch = context.arch();
+        let mut bytes = [0u8; 8];
+        let bytes = &mut bytes[..arch.pointer_size() as usize];
+        context.expression_memory().read_bytes(scalar, bytes)?;
         Ok(ExprValue::Raw {
-            value: VirtAddr(read),
+            value: arch.decode_pointer(bytes),
             address: None,
         })
     }

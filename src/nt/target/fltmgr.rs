@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use super::{Target, bounded_record_list_walk};
 use crate::base::error::{Error, Result};
-use crate::base::memory::MemoryOps;
 use crate::base::types::VirtAddr;
 use crate::nt::layout::{StructRef, TypeInfo, Types};
 use ntoseye_macros::record;
@@ -219,9 +218,8 @@ impl Target {
         limit: usize,
     ) -> (Vec<VirtAddr>, Option<String>) {
         let memory = self.kernel_address_space();
-        let (records, termination) = bounded_record_list_walk(head, link_offset, limit, |link| {
-            memory.read::<VirtAddr>(link)
-        });
+        let (records, termination) =
+            bounded_record_list_walk(head, link_offset, limit, |link| memory.read_pointer(link));
         (records, termination.diagnostic())
     }
 

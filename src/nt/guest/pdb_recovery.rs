@@ -247,14 +247,13 @@ impl<'a> Walker<'a> {
             .ok()
             .flatten()
             .ok_or("nt!PspSystemPartition is not in the kernel's symbols")?;
-        let partition: u64 = memory
-            .read(partition_pointer)
+        let partition = memory
+            .read_pointer(partition_pointer)
             .map_err(|error| error.to_string())?;
-        let cc_partition: u64 = memory
-            .read(VirtAddr(
-                partition + offset(&*layout("_EPARTITION")?, "CcPartition")?,
-            ))
-            .map_err(|error| error.to_string())?;
+        let cc_partition = memory
+            .read_pointer(partition + offset(&*layout("_EPARTITION")?, "CcPartition")?)
+            .map_err(|error| error.to_string())?
+            .0;
         let cc = layout("_CC_PARTITION")?;
         let cursor = layout("_SHARED_CACHE_MAP_LIST_CURSOR")?;
         let map = layout("_SHARED_CACHE_MAP")?;
@@ -283,8 +282,11 @@ impl<'a> Walker<'a> {
         })
     }
 
-    fn u64_at(&self, address: u64) -> Option<u64> {
-        self.memory.read::<u64>(VirtAddr(address)).ok()
+    fn pointer_at(&self, address: u64) -> Option<u64> {
+        self.memory
+            .read_pointer(VirtAddr(address))
+            .ok()
+            .map(|pointer| pointer.0)
     }
 
     /// For each tail, the data control areas of files it names, with the
@@ -322,7 +324,10 @@ impl<'a> Walker<'a> {
             if !self.is_data_control_area(control_area, true) {
                 return;
             }
-            let file_object = self.u64_at(control_area + o.ca_file_pointer).unwrap_or(0) & !0xF;
+            let file_object = self
+                .pointer_at(control_area + o.ca_file_pointer)
+                .unwrap_or(0)
+                & !0xF;
             if let Some(name) = self.file_name(file_object, shortest) {
                 record(control_area, name);
             }
@@ -333,7 +338,7 @@ impl<'a> Walker<'a> {
     /// Call `visit` with each link of the list headed at `head`.
     fn walk_list(&self, head: u64, mut visit: impl FnMut(u64)) -> Result<(), String> {
         let mut link = self
-            .u64_at(head)
+            .pointer_at(head)
             .ok_or_else(|| format!("list {head:#x} is unreadable"))?;
         let mut walked = 0;
         while link != head {
@@ -345,7 +350,7 @@ impl<'a> Walker<'a> {
             }
             visit(link);
             link = self
-                .u64_at(link)
+                .pointer_at(link)
                 .ok_or_else(|| format!("list {head:#x} is unreadable part way"))?;
         }
         Ok(())
@@ -362,13 +367,13 @@ impl<'a> Walker<'a> {
         if u64::from(node_size) != cache.map_size {
             return None;
         }
-        let file_object = self.u64_at(map + cache.map_file_object)? & !0xF;
+        let file_object = self.pointer_at(map + cache.map_file_object)? & !0xF;
         let name = self.file_name(file_object, min_len)?;
-        let pointers = self.u64_at(file_object + self.offsets.file_section_pointers)?;
-        if self.u64_at(pointers + cache.pointers_cache_map)? != map {
+        let pointers = self.pointer_at(file_object + self.offsets.file_section_pointers)?;
+        if self.pointer_at(pointers + cache.pointers_cache_map)? != map {
             return None;
         }
-        let control_area = self.u64_at(pointers + cache.pointers_data_section)?;
+        let control_area = self.pointer_at(pointers + cache.pointers_data_section)?;
         self.is_data_control_area(control_area, false)
             .then_some((control_area, name))
     }
@@ -380,7 +385,7 @@ impl<'a> Walker<'a> {
         let o = &self.offsets;
         let (Ok(flags), Some(segment)) = (
             self.memory.read::<u32>(VirtAddr(control_area + o.ca_flags)),
-            self.u64_at(control_area + o.ca_segment),
+            self.pointer_at(control_area + o.ca_segment),
         ) else {
             return false;
         };
@@ -388,7 +393,7 @@ impl<'a> Walker<'a> {
             && flags >> o.flag_file & 1 != 0
             && (!on_unused_list || flags >> o.flag_unused & 1 != 0)
             && segment != 0
-            && self.u64_at(segment + o.segment_control_area) == Some(control_area)
+            && self.pointer_at(segment + o.segment_control_area) == Some(control_area)
     }
 
     /// The name of file object `file_object`, when it is one and its name
@@ -410,9 +415,14 @@ impl<'a> Walker<'a> {
         if length / 2 < min_len || length > 0x1000 {
             return None;
         }
-        let buffer = self.memory.read::<u64>(name + 8u64).ok()?;
+        // `UNICODE_STRING.Buffer` follows the two `USHORT` lengths, aligned
+        // to a pointer.
+        let buffer = self
+            .memory
+            .read_pointer(name + self.memory.arch().pointer_size())
+            .ok()?;
         let mut bytes = vec![0u8; length];
-        self.memory.read_bytes(VirtAddr(buffer), &mut bytes).ok()?;
+        self.memory.read_bytes(buffer, &mut bytes).ok()?;
         Some(utf16le_lossy(&bytes))
     }
 
@@ -423,7 +433,7 @@ impl<'a> Walker<'a> {
         let mut subsections = Vec::new();
         let mut subsection = control_area + o.ca_size;
         while subsection != 0 && subsections.len() < MAX_SUBSECTIONS {
-            let read = |offset: u64| self.u64_at(subsection + offset);
+            let read = |offset: u64| self.pointer_at(subsection + offset);
             if read(o.sub_control_area) != Some(control_area) {
                 break;
             }
@@ -443,7 +453,8 @@ impl<'a> Walker<'a> {
                 if index < *ptes {
                     // A prototype PTE page that is not present holds no
                     // resident page's PTE.
-                    let pte = PageTableEntry(self.u64_at(base + index * 8)?);
+                    let pte =
+                        PageTableEntry(self.memory.read::<u64>(VirtAddr(base + index * 8)).ok()?);
                     return if pte.is_present() {
                         Some(pte.page_frame())
                     } else if pte.is_transition() {

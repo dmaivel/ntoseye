@@ -248,9 +248,7 @@ impl Target {
         let link = class.private.field_offset("AllFdosListEntry")?;
         let memory = self.kernel_address_space();
         let (privates, termination) =
-            bounded_record_list_walk(head, link, MAX_CLASS_DEVICES, |at| {
-                memory.read::<VirtAddr>(at)
-            });
+            bounded_record_list_walk(head, link, MAX_CLASS_DEVICES, |at| memory.read_pointer(at));
         Ok((privates, termination.diagnostic()))
     }
 
@@ -466,7 +464,7 @@ impl Target {
         let list_link = class.packet.field_offset("AllPktsListEntry")?;
         let (all_packets, termination) =
             bounded_record_list_walk(all, list_link, MAX_TRANSFER_PACKETS, |at| {
-                memory.read::<VirtAddr>(at)
+                memory.read_pointer(at)
             });
         packets.stopped.extend(
             termination
@@ -499,7 +497,7 @@ impl Target {
                         .push(format!("{owner}'s free list repeats {:#x}", entry.0));
                     break;
                 }
-                match memory.read::<VirtAddr>(entry) {
+                match memory.read_pointer(entry) {
                     Ok(next) => entry = next,
                     Err(error) => {
                         packets

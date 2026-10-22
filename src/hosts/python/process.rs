@@ -97,7 +97,7 @@ impl Process {
                 .struct_at("_EPROCESS", info.eprocess)
                 .map_err(err)?;
             let ppid = session.target.process_parent_pid(&info).map_err(err)?;
-            let peb = eprocess.read_field::<VirtAddr>("Peb").map_err(err)?;
+            let peb = eprocess.read_pointer("Peb").map_err(err)?;
             Ok(ProcessDetails {
                 ppid,
                 session: session.target.process_session_id(info.eprocess),

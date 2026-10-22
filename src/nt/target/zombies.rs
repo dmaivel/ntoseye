@@ -190,7 +190,7 @@ impl Target {
         let header = nt.types().layout("_OBJECT_HEADER")?;
         let index_offset = nt.types().layout("_OBJECT_TYPE")?.field_offset("Index")?;
         let type_index = |type_symbol: &str| -> Result<u8> {
-            let object = nt.symbol(type_symbol)?.read::<VirtAddr>()?;
+            let object = nt.symbol(type_symbol)?.read_pointer()?;
             memory.read::<u8>(object + index_offset)
         };
         let query = ObjectQuery {

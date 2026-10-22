@@ -177,7 +177,7 @@ impl Target {
                 return Ok(partitions);
             }
         }
-        Ok(vec![ntos.symbol("PspSystemPartition")?.read()?])
+        Ok(vec![ntos.symbol("PspSystemPartition")?.read_pointer()?])
     }
 
     /// Decode every executive worker queue: counters, the pending work items
@@ -189,6 +189,7 @@ impl Target {
         let ntos = &guest.ntoskrnl;
         let types = ntos.types();
         let memory = ntos.memory();
+        let pointer_size = memory.arch().pointer_size();
         let unsupported = |why: String| {
             Error::DebugInfo(format!(
                 "no partitioned executive work queues on this build ({why}); !exqueue reads the \
@@ -275,7 +276,7 @@ impl Target {
                 }
             };
             for node in 0..node_count {
-                let Ok(per_node) = memory.read::<VirtAddr>(work_queues + node * 8) else {
+                let Ok(per_node) = memory.read_pointer(work_queues + node * pointer_size) else {
                     detail.errors.push(format!(
                         "_EX_PARTITION {:#x}: node {node}'s queue array is unreadable",
                         ex_partition.0
@@ -286,7 +287,7 @@ impl Target {
                     continue;
                 }
                 for index in 0..index_count {
-                    let Ok(queue) = memory.read::<VirtAddr>(per_node + index * 8) else {
+                    let Ok(queue) = memory.read_pointer(per_node + index * pointer_size) else {
                         continue;
                     };
                     // ExpTryQueueWorkItem takes a slot with bit 0 set as no queue.

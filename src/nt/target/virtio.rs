@@ -11,6 +11,7 @@ use ntoseye_macros::record;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::types::VirtAddr;
+use crate::nt::layout::le_uint;
 use crate::nt::target::Target;
 use crate::nt::target::pci::{PciTreeBus, PciTreeDevice};
 use crate::nt::target::virtio_request::{RequestKind, VirtioRequestKind};
@@ -977,6 +978,7 @@ pub struct DeviceFields {
     pub size: usize,
     pub max_queues: usize,
     pub info: usize,
+    pub pointer_size: usize,
 }
 
 /// Whether `value` is a canonical kernel address.
@@ -988,11 +990,14 @@ fn kernel_address(value: u64) -> bool {
 /// a queue count a device has and a kernel address for its queue table.
 fn plausible_device(header: &[u8], fields: DeviceFields) -> bool {
     let read = |at: usize, len: usize| header.get(at..at + len);
-    let (Some(queues), Some(info)) = (read(fields.max_queues, 4), read(fields.info, 8)) else {
+    let (Some(queues), Some(info)) = (
+        read(fields.max_queues, 4),
+        read(fields.info, fields.pointer_size),
+    ) else {
         return false;
     };
     let queues = u32::from_le_bytes(queues.try_into().unwrap_or_default());
-    let info = u64::from_le_bytes(info.try_into().unwrap_or_default());
+    let info = le_uint(info);
     (1..=MAX_QUEUES).contains(&u64::from(queues)) && kernel_address(info)
 }
 
@@ -1009,9 +1014,10 @@ pub fn locate_device(
     mut is_device: impl FnMut(u64) -> bool,
     mut read_block: impl FnMut(u64) -> Vec<u8>,
 ) -> Option<u64> {
+    let pointer_size = fields.pointer_size;
     let embedded_in = |block: &[u8], at: u64, is_device: &mut dyn FnMut(u64) -> bool| {
-        (0..block.len().saturating_sub(7))
-            .step_by(8)
+        (0..block.len().saturating_sub(pointer_size - 1))
+            .step_by(pointer_size)
             .filter(|offset| {
                 block.len() - offset >= fields.size && plausible_device(&block[*offset..], fields)
             })
@@ -1019,7 +1025,7 @@ pub fn locate_device(
             .find(|address| is_device(*address))
     };
     let mut followed = std::collections::HashSet::new();
-    for offset in (0..bytes.len().saturating_sub(7)).step_by(8) {
+    for offset in (0..bytes.len().saturating_sub(pointer_size - 1)).step_by(pointer_size) {
         let here = &bytes[offset..];
         if here.len() >= fields.size && plausible_device(here, fields) {
             let address = base + offset as u64;
@@ -1027,7 +1033,7 @@ pub fn locate_device(
                 return Some(address);
             }
         }
-        let pointer = u64::from_le_bytes(here[..8].try_into().unwrap_or_default());
+        let pointer = le_uint(&here[..pointer_size]);
         if !kernel_address(pointer) {
             continue;
         }
@@ -1048,14 +1054,14 @@ pub fn locate_device(
 /// Whether `block` holds a display miniport's copy of its
 /// `DXGKRNL_INTERFACE`: the device handle dxgkrnl gave it, the adapter's
 /// FDO, followed by dxgkrnl's callbacks.
-pub fn holds_display_interface(block: &[u8], fdo: u64, in_dxgkrnl: impl Fn(u64) -> bool) -> bool {
-    let qwords: Vec<u64> = block
-        .as_chunks::<8>()
-        .0
-        .iter()
-        .map(|chunk| u64::from_le_bytes(*chunk))
-        .collect();
-    qwords
+pub fn holds_display_interface(
+    block: &[u8],
+    pointer_size: usize,
+    fdo: u64,
+    in_dxgkrnl: impl Fn(u64) -> bool,
+) -> bool {
+    let pointers: Vec<u64> = block.chunks_exact(pointer_size).map(le_uint).collect();
+    pointers
         .windows(1 + DISPLAY_CALLBACKS)
         .any(|run| run[0] == fdo && run[1..].iter().all(|callback| in_dxgkrnl(*callback)))
 }
@@ -1282,21 +1288,23 @@ impl Target {
         let dxgkrnl = self.module_named("dxgkrnl")?;
         let code = dxgkrnl.base_address.0..dxgkrnl.base_address.0 + u64::from(dxgkrnl.size);
         let object = types.struct_at("_DEVICE_OBJECT", fdo).ok()?;
-        let header = types.layout("_DEVICE_OBJECT").ok()?.size as u64;
+        let layout = types.layout("_DEVICE_OBJECT").ok()?;
+        let header = layout.size as u64;
+        let pointer_size = usize::from(layout.pointer_size);
         let extension = object.read_pointer("DeviceExtension").ok()?;
         let length = object.read_uint("Size").ok()?.checked_sub(header)?;
         let bytes = self.read_readable(extension, length.min(MAX_CONTEXT_SCAN) as usize);
         let mut seen = std::collections::HashSet::new();
         bytes
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|chunk| u64::from_le_bytes(*chunk))
+            .chunks_exact(pointer_size)
+            .map(le_uint)
             .filter(|pointer| kernel_address(*pointer) && seen.insert(*pointer))
             .take(MAX_FOLLOWED_POINTERS)
             .find(|pointer| {
                 let block = self.read_readable(VirtAddr(*pointer), POINTED_BLOCK_SCAN);
-                holds_display_interface(&block, fdo.0, |callback| code.contains(&callback))
+                holds_display_interface(&block, pointer_size, fdo.0, |callback| {
+                    code.contains(&callback)
+                })
             })
             .map(|context| DriverContext {
                 address: VirtAddr(context),
@@ -1313,6 +1321,7 @@ impl Target {
             size: device.size as usize,
             max_queues: device.field_offset("maxQueues").ok()? as usize,
             info: device.field_offset("info").ok()? as usize,
+            pointer_size: usize::from(device.pointer_size),
         };
         let len = context
             .size
@@ -1365,12 +1374,14 @@ impl Target {
             let memory = self.kernel_address_space();
             let mut queues = 0;
             for index in 0..count {
-                let vq = memory.read::<u64>(info + (index * entry.size as u64 + vq_offset))?;
+                let vq = memory
+                    .read_pointer(info + (index * entry.size as u64 + vq_offset))?
+                    .0;
                 if vq == 0 {
                     continue;
                 }
                 if !kernel_address(vq)
-                    || memory.read::<u64>(VirtAddr(vq) + vdev_offset)? != address.0
+                    || memory.read_pointer(VirtAddr(vq) + vdev_offset)? != address
                 {
                     return Ok(false);
                 }
@@ -2031,6 +2042,7 @@ mod tests {
         size: 0x30,
         max_queues: 0x10,
         info: 0x18,
+        pointer_size: 8,
     };
     const BASE: u64 = 0xffff_c000_0000_0000;
 
@@ -2139,15 +2151,21 @@ mod tests {
         ];
         let mut copy = vec![0x0000_300e_0000_0100, fdo];
         copy.extend(callbacks);
-        assert!(holds_display_interface(&block(&copy), fdo, dxgkrnl));
+        assert!(holds_display_interface(&block(&copy), 8, fdo, dxgkrnl));
         assert!(!holds_display_interface(
             &block(&[0, fdo, 0, 0, 0, 0]),
+            8,
             fdo,
             dxgkrnl
         ));
         let mut elsewhere = vec![fdo];
         elsewhere.extend([0xffff_f804_0000_1000; 4]);
-        assert!(!holds_display_interface(&block(&elsewhere), fdo, dxgkrnl));
+        assert!(!holds_display_interface(
+            &block(&elsewhere),
+            8,
+            fdo,
+            dxgkrnl
+        ));
     }
 
     fn ring(avail_idx: u16, used_idx: u16) -> SplitRing {

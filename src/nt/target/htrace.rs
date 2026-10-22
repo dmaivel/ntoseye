@@ -137,17 +137,17 @@ impl Target {
                     return Ok(None);
                 }
                 let client = entry.embedded("ClientId")?;
-                let stack = entry.read_field_bytes("StackTrace", 8 * 64)?;
+                let arch = self.arch();
+                let pointer_size = arch.pointer_size() as usize;
+                let stack = entry.read_field_bytes("StackTrace", pointer_size * 64)?;
                 Ok(Some(HandleTrace {
                     handle: traced,
                     kind: entry.read_field("Type")?,
                     process_id: client.read_uint("UniqueProcess")?,
                     thread_id: client.read_uint("UniqueThread")?,
                     stack: stack
-                        .as_chunks::<8>()
-                        .0
-                        .iter()
-                        .map(|bytes| VirtAddr(u64::from_le_bytes(*bytes)))
+                        .chunks_exact(pointer_size)
+                        .map(|bytes| arch.decode_pointer(bytes))
                         .take_while(|address| !address.is_zero())
                         .map(|address| {
                             let symbol =

@@ -332,7 +332,12 @@ impl Guest {
     fn mapped_image_name(&self, info: &ProcessInfo, base: VirtAddr) -> Option<String> {
         let types = self.ntoskrnl.types_in(info.dtb);
         let memory = self.ntoskrnl.memory_in(info.dtb);
-        let link = |address: VirtAddr| memory.read::<u64>(address).ok().map(vad_tree_link);
+        let link = |address: VirtAddr| {
+            memory
+                .read_pointer(address)
+                .ok()
+                .map(|raw| vad_tree_link(raw.0))
+        };
         let vad_root = types
             .struct_at("_EPROCESS", info.eprocess)
             .ok()?
@@ -413,7 +418,7 @@ impl Guest {
         let head = self.ntoskrnl.symbol("PsLoadedModuleList")?;
         // At a reboot's first boot notification the list is not built yet,
         // but the kernel itself is loaded; stacks unwind through it.
-        if head.read::<VirtAddr>()?.is_zero() {
+        if head.read_pointer()?.is_zero() {
             return Ok(vec![ModuleInfo::new(
                 "ntoskrnl.exe".to_string(),
                 self.ntoskrnl.base_address,
@@ -457,8 +462,9 @@ impl Guest {
         // past it are found backward, and only that entry's is missing.
         if let Some(error) = broken {
             let memory = self.ntoskrnl.memory();
+            let blink_offset = memory.arch().pointer_size();
             let tail = links_back_to(head, &reached, MAX_LOADER_MODULES, |link| {
-                memory.read::<VirtAddr>(link + 8u64)
+                memory.read_pointer(link + blink_offset)
             });
             for link in tail.into_iter().rev() {
                 let record = types

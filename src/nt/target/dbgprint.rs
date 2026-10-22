@@ -91,7 +91,7 @@ impl Target {
     pub fn kernel_print_position(&self) -> Result<PrintPosition> {
         let guest = self.guest()?;
         let nt = &guest.ntoskrnl;
-        let buffer = VirtAddr(nt.symbol("KdPrintCircularBuffer")?.read::<u64>()?);
+        let buffer = nt.symbol("KdPrintCircularBuffer")?.read_pointer()?;
         let size = nt.symbol("KdPrintBufferSize")?.read::<u32>()? as usize;
         if buffer.is_zero() || size == 0 || size > MAX_RING_SIZE {
             return Err(Error::DebugInfo(format!(
@@ -104,7 +104,7 @@ impl Target {
         let rollovers = nt.symbol("KdPrintRolloverCount")?;
         for _ in 0..3 {
             let before = rollovers.read::<u32>()?;
-            let write = writer.read::<u64>()?;
+            let write = writer.read_pointer()?.0;
             if rollovers.read::<u32>()? != before {
                 continue;
             }

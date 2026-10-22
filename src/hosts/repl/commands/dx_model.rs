@@ -225,7 +225,7 @@ pub fn elements(target: &Target, value: &ModelValue) -> Result<Vec<(u64, ModelVa
             let idle = guest
                 .ntoskrnl
                 .symbol("PsIdleProcess")
-                .and_then(|symbol| symbol.read::<VirtAddr>())
+                .and_then(|symbol| symbol.read_pointer())
                 .and_then(|eprocess| guest.process_at(eprocess))
                 .ok();
             let listed = target.matching_processes(None)?;

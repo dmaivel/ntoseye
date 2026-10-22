@@ -203,13 +203,13 @@ impl Target {
         let record_at = context.field_offset("DriverBugCheckCallbackRecord")?;
         let memory = self.kernel_address_space();
         let (links, termination) =
-            bounded_list_walk(head, MAX_CALLBACKS, |at| memory.read::<VirtAddr>(at));
+            bounded_list_walk(head, MAX_CALLBACKS, |at| memory.read_pointer(at));
         // `Entry` is the record's first field, so a link is its record.
         let contexts = links
             .into_iter()
             .filter(|&link| {
                 memory
-                    .read::<VirtAddr>(link + routine_at)
+                    .read_pointer(link + routine_at)
                     .is_ok_and(|callback| callback == routine)
             })
             .map(|link| link - record_at)
@@ -226,7 +226,7 @@ impl Target {
         let head = address + context.layout().field_offset("LogListHead")?;
         let memory = self.kernel_address_space();
         let (logs, termination) =
-            bounded_record_list_walk(head, link, MAX_LOGS, |at| memory.read::<VirtAddr>(at));
+            bounded_record_list_walk(head, link, MAX_LOGS, |at| memory.read_pointer(at));
         Ok(RcdrDriver {
             context: address,
             name: c_string_lossy(&context.read_field_bytes("FileBaseName", 64)?),

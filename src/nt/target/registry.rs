@@ -1018,7 +1018,7 @@ fn read_hive_list(
 ) -> Result<HiveList> {
     let link = types.layout("_CMHIVE")?.field_offset("HiveList")?;
     let (addresses, termination) =
-        bounded_record_list_walk(head, link, MAX_HIVES, |at| memory.read::<VirtAddr>(at));
+        bounded_record_list_walk(head, link, MAX_HIVES, |at| memory.read_pointer(at));
     let hives = addresses
         .into_iter()
         .map(|address| {
@@ -1127,9 +1127,12 @@ impl<'a> Registry<'a> {
             .map_err(|error| format!("cell {cell:#x}: {kind} {error}"))?;
         let entry = table_address + self.map.table + u64::from(table) * self.map.entry_size;
         let read = |at: u64| -> Read<u64> {
-            self.memory.read::<u64>(entry + at).map_err(|error| {
-                format!("cell {cell:#x}: its cell map entry at {entry:#x}: {error}")
-            })
+            self.memory
+                .read_pointer(entry + at)
+                .map(|value| value.0)
+                .map_err(|error| {
+                    format!("cell {cell:#x}: its cell map entry at {entry:#x}: {error}")
+                })
         };
         let (base, block_offset) = match self.map.entry {
             MapEntryLayout::Bin {
@@ -1760,7 +1763,7 @@ impl Target {
         let pointer = |name: &str| {
             self.kernel_global(name)
                 .ok()
-                .and_then(|at| kernel.read::<VirtAddr>(at).ok())
+                .and_then(|at| kernel.read_pointer(at).ok())
                 .filter(|pointer| !pointer.is_zero())
         };
         let head = self.kernel_global("CmpHiveListHead")?;

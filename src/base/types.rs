@@ -4,6 +4,8 @@ use std::ops::{Add, AddAssign, Sub, SubAssign};
 use ntoseye_macros::record;
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
+use crate::base::bytes::read_u64;
+
 /// x64 page-table entry physical-address field: bits 51:12 (MAXPHYADDR = 52).
 pub const PFN_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 pub const PAGE_SHIFT: u32 = 12;
@@ -215,6 +217,24 @@ impl Arch {
         match self {
             Self::Amd64 => 1,
             Self::Arm64 => 4,
+        }
+    }
+
+    /// Bytes in a kernel pointer: a `LIST_ENTRY` link, a slot of a pointer
+    /// array, a stack slot.
+    pub const fn pointer_size(self) -> u64 {
+        match self {
+            Self::Amd64 | Self::Arm64 => 8,
+        }
+    }
+
+    /// The kernel pointer at the start of `bytes`, which holds at least
+    /// [`Arch::pointer_size`] bytes. Panics when it does not: the caller
+    /// sized the buffer from the layout.
+    #[track_caller]
+    pub fn decode_pointer(self, bytes: &[u8]) -> VirtAddr {
+        match self {
+            Self::Amd64 | Self::Arm64 => VirtAddr(read_u64(bytes, 0)),
         }
     }
 

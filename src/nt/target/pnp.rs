@@ -203,7 +203,7 @@ impl<'a> DevNodeReader<'a> {
             .guest()?
             .ntoskrnl
             .symbol("IopRootDeviceNode")?
-            .read::<VirtAddr>()
+            .read_pointer()
     }
 
     fn read_node(&self, address: VirtAddr) -> Result<DevNode> {

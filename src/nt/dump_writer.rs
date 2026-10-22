@@ -18,7 +18,7 @@ use crate::backend::dbg_backend::RegisterMap;
 use crate::base::bytes::{write_u32, write_u64};
 use crate::base::error::{Error, Result};
 use crate::base::memory::{MemoryOps, PAGE_SIZE};
-use crate::base::types::{Arch, MAX_PROCESSORS, PhysAddr, VirtAddr};
+use crate::base::types::{Arch, MAX_PROCESSORS, PhysAddr};
 use crate::nt::dmp::{IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64};
 use crate::nt::layout::{FieldInfo, ParsedType};
 use crate::nt::target::Target;
@@ -477,7 +477,7 @@ fn physical_runs_from_symbol(target: &Target) -> Result<Option<Vec<(u64, u64)>>>
         Err(Error::SymbolNotFound(_)) | Err(Error::ExpectedSymbols) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let descriptor_address: VirtAddr = symbol.read()?;
+    let descriptor_address = symbol.read_pointer()?;
     if descriptor_address.is_zero() {
         return Err(Error::DebugInfo("nt!MmPhysicalMemoryBlock is null".into()));
     }

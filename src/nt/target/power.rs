@@ -1401,11 +1401,7 @@ impl Target {
         let reader = self.power_reader()?;
         let address = match address {
             Some(address) => address,
-            None => self
-                .guest()?
-                .ntoskrnl
-                .symbol("PopPolicy")?
-                .read::<VirtAddr>()?,
+            None => self.guest()?.ntoskrnl.symbol("PopPolicy")?.read_pointer()?,
         };
         if address.is_zero() {
             return Err(Error::DebugInfo("the policy address is null".to_string()));

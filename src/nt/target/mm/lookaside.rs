@@ -5,7 +5,6 @@ use std::collections::HashSet;
 
 use super::{LookasideDetail, LookasideListsDetail, PoolTag};
 use crate::base::error::{Error, Result};
-use crate::base::memory::MemoryOps;
 use crate::base::types::VirtAddr;
 use crate::nt::layout::TypeInfo;
 use crate::nt::target::pool::{kernel_symbol_address, read_pool_field};
@@ -95,7 +94,7 @@ impl Target {
             return (Vec::new(), format!("{symbol} unavailable"));
         };
         let memory = self.kernel_address_space();
-        let Ok(first_link) = memory.read::<VirtAddr>(symbol_address) else {
+        let Ok(first_link) = memory.read_pointer(symbol_address) else {
             return (Vec::new(), format!("{symbol} unreadable"));
         };
         let Some(link_offset) = ti.fields.get("ListEntry").map(|field| field.offset as u64) else {
@@ -130,7 +129,7 @@ impl Target {
             };
             detail.index = start_index + records.len();
             records.push(detail);
-            let Ok(next) = memory.read::<VirtAddr>(current_link) else {
+            let Ok(next) = memory.read_pointer(current_link) else {
                 termination = "unreadable link".to_string();
                 break;
             };

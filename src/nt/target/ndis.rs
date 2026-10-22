@@ -1018,7 +1018,7 @@ impl Target {
                 .symbols
                 .find_symbol_across_modules(self.kernel_dtb(), name)?
             {
-                return self.kernel_address_space().read::<VirtAddr>(head);
+                return self.kernel_address_space().read_pointer(head);
             }
         }
         Err(Error::DebugInfo(format!(

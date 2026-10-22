@@ -40,6 +40,23 @@ impl<'a> StackTracer<'a> {
     /// A stack slot, from the per-trace page cache.
     pub(super) fn stack_u64(&self, address: u64) -> Result<u64> {
         let mut bytes = [0u8; 8];
+        self.stack_bytes(address, &mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    /// A pointer-sized stack slot, as wide as the traced space's
+    /// architecture's pointers.
+    fn stack_pointer(&self, address: u64) -> Result<u64> {
+        let arch = self.memory.arch();
+        let mut bytes = [0u8; 8];
+        let bytes = &mut bytes[..arch.pointer_size() as usize];
+        self.stack_bytes(address, bytes)?;
+        Ok(arch.decode_pointer(bytes).0)
+    }
+
+    /// `bytes.len()` bytes of stack at `address`, from the per-trace page
+    /// cache.
+    fn stack_bytes(&self, address: u64, bytes: &mut [u8]) -> Result<()> {
         let mut done = 0usize;
         while done < bytes.len() {
             let at = address
@@ -72,7 +89,7 @@ impl<'a> StackTracer<'a> {
             bytes[done..done + take].copy_from_slice(&data.bytes[offset..offset + take]);
             done += take;
         }
-        Ok(u64::from_le_bytes(bytes))
+        Ok(())
     }
 
     pub(super) fn scan_stack(
@@ -91,7 +108,8 @@ impl<'a> StackTracer<'a> {
             return frames;
         }
 
-        for slot in 0..(STACK_SCAN_BYTES / 8) {
+        let slot_size = self.memory.arch().pointer_size() as usize;
+        for slot in 0..(STACK_SCAN_BYTES / slot_size) {
             if frames.len() >= limit {
                 break;
             }
@@ -99,8 +117,8 @@ impl<'a> StackTracer<'a> {
                 break;
             }
 
-            let sp = start_rsp.saturating_add((slot * 8) as u64);
-            let potential_ip = match self.stack_u64(sp) {
+            let sp = start_rsp.saturating_add((slot * slot_size) as u64);
+            let potential_ip = match self.stack_pointer(sp) {
                 Ok(addr) => {
                     failures = 0;
                     addr

@@ -400,10 +400,10 @@ fn nested_field(
     };
     let address = base + u64::from(field.offset);
     let address = if pointer {
-        let pointer: VirtAddr = kernel(target)?
+        let pointer = kernel(target)?
             .types()
             .struct_with_layout(Arc::clone(parent), base)
-            .read_field(name)?;
+            .read_pointer(name)?;
         if pointer.is_zero() {
             return Err(Error::DebugInfo(format!("field {} is null", names[0])));
         }

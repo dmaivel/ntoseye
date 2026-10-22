@@ -328,7 +328,9 @@ impl Target {
         let ntos = &guest.ntoskrnl;
         let types = self.types_in(self.kernel_dtb());
         let memory = self.kernel_address_space();
-        let arrays: VirtAddr = ntos.symbol("CcVacbArrays")?.read()?;
+        let arrays = ntos.symbol("CcVacbArrays")?.read_pointer()?;
+        let arch = memory.arch();
+        let pointer_size = arch.pointer_size();
         let highest: u32 = ntos.symbol("CcVacbArraysHighestUsedIndex")?.read()?;
         let free_vacbs = DiagnosticValue::from_result(
             ntos.symbol("CcNumberOfFreeVacbs")
@@ -343,7 +345,7 @@ impl Target {
         let mut vacb_arrays = 0;
         let mut interrupted = false;
         'arrays: for index in 0..array_count {
-            let Ok(header) = memory.read::<VirtAddr>(arrays + index * 8) else {
+            let Ok(header) = memory.read_pointer(arrays + index * pointer_size) else {
                 continue;
             };
             if header.is_zero() {
@@ -367,8 +369,8 @@ impl Target {
                 }
                 let field = |name: &str| -> Option<u64> {
                     let offset = vacb_layout.field_offset(name).ok()? as usize;
-                    let raw = vacb_bytes.get(offset..offset + 8)?;
-                    Some(u64::from_le_bytes(raw.try_into().ok()?))
+                    let raw = vacb_bytes.get(offset..offset + pointer_size as usize)?;
+                    Some(arch.decode_pointer(raw).0)
                 };
                 let (Some(base), Some(map), Some(head)) = (
                     field("BaseAddress"),

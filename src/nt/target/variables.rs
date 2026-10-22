@@ -247,14 +247,14 @@ impl Target {
     /// expression reports an error rather than handing back zero.
     fn current_process_peb(&self) -> Option<u64> {
         let eprocess_va = self.process.as_ref()?.eprocess;
-        let peb: VirtAddr = self
+        let peb = self
             .guest()
             .ok()?
             .ntoskrnl
             .types_in(self.kernel_dtb())
             .struct_at("_EPROCESS", eprocess_va)
             .ok()?
-            .read_field("Peb")
+            .read_pointer("Peb")
             .ok()?;
         (!peb.is_zero()).then_some(peb.0)
     }
@@ -263,11 +263,11 @@ impl Target {
     /// `ImageBaseAddress`. `None` for a kernel-only process.
     fn current_process_image_base(&self) -> Option<u64> {
         let peb = VirtAddr(self.current_process_peb()?);
-        let base: VirtAddr = self
+        let base = self
             .types_in(self.process_dtb())
             .struct_at("_PEB", peb)
             .ok()?
-            .read_field("ImageBaseAddress")
+            .read_pointer("ImageBaseAddress")
             .ok()?;
         Some(base.0)
     }

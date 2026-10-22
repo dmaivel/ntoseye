@@ -1462,11 +1462,11 @@ impl Target {
         let link = wdf.globals.field_offset("Linkage")?;
         let memory = self.kernel_address_space();
         let (mut links, termination) =
-            bounded_list_walk(head, MAX_DRIVERS, |link| memory.read::<VirtAddr>(link));
+            bounded_list_walk(head, MAX_DRIVERS, |link| memory.read_pointer(link));
         let pointer = u64::from(wdf.pointer_size);
         let (linked, broken) = doubly_linked_prefix(head, &links, |link| {
             memory
-                .read::<VirtAddr>(link + pointer)
+                .read_pointer(link + pointer)
                 .map_err(|error| error.to_string())
         });
         links.truncate(linked);
@@ -2032,7 +2032,7 @@ impl Target {
         let memory = self.kernel_address_space();
         let (records, termination) =
             bounded_record_list_walk(head, entry_offset, MAX_CHILDREN, |link| {
-                memory.read::<VirtAddr>(link)
+                memory.read_pointer(link)
             });
         let mut stopped = termination.diagnostic();
         let mut children = Vec::with_capacity(records.len());
@@ -2184,7 +2184,7 @@ impl Target {
         let head = pkg_io + pkg_layout.field_offset("m_IoQueueListHead")?;
         let memory = self.kernel_address_space();
         let (links, termination) =
-            bounded_list_walk(head, MAX_QUEUES, |link| memory.read::<VirtAddr>(link));
+            bounded_list_walk(head, MAX_QUEUES, |link| memory.read_pointer(link));
         let mut stopped = termination.diagnostic();
         let mut queues = Vec::new();
         for link in links {
@@ -2362,7 +2362,7 @@ impl Target {
         let memory = self.kernel_address_space();
         let (entries, termination) =
             bounded_record_list_walk(head, link_offset, MAX_IO_TARGETS, |link| {
-                memory.read::<VirtAddr>(link)
+                memory.read_pointer(link)
             });
         let mut stopped = termination.diagnostic();
         let mut targets = Vec::with_capacity(entries.len());
@@ -2465,13 +2465,13 @@ impl Target {
         let memory = self.kernel_address_space();
         let (irps, termination) =
             bounded_record_list_walk(head, list_offset, MAX_REQUESTS, |link| {
-                memory.read::<VirtAddr>(link)
+                memory.read_pointer(link)
             });
         let mut stopped = termination.diagnostic();
         let mut requests = Vec::with_capacity(irps.len());
         for irp in irps {
             let request = memory
-                .read::<VirtAddr>(irp + context_offset)
+                .read_pointer(irp + context_offset)
                 .map_err(|error| error.to_string())
                 .and_then(|csq| {
                     let back = wdf
@@ -2510,7 +2510,7 @@ impl Target {
         let memory = self.kernel_address_space();
         let (addresses, termination) =
             bounded_record_list_walk(head, link_offset, MAX_REQUESTS, |link| {
-                memory.read::<VirtAddr>(link)
+                memory.read_pointer(link)
             });
         let mut stopped = termination.diagnostic();
         let mut requests = Vec::with_capacity(addresses.len());

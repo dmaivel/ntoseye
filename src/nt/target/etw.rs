@@ -1343,7 +1343,7 @@ impl Target {
                     .into(),
             )
         })?;
-        let silo_state: VirtAddr = silo_symbol.read()?;
+        let silo_state = silo_symbol.read_pointer()?;
         if silo_state.is_zero() {
             return Err(Error::DebugInfo(
                 "nt!EtwpHostSiloState is null: ETW is not initialized".into(),
@@ -1362,13 +1362,15 @@ impl Target {
                 silo_state.0, context_array.0
             )));
         }
-        let mut raw = vec![0u8; max_loggers as usize * 8];
-        self.kernel_address_space()
-            .read_bytes(context_array, &mut raw)?;
+        let memory = self.kernel_address_space();
+        let arch = memory.arch();
+        let pointer_size = arch.pointer_size() as usize;
+        let mut raw = vec![0u8; max_loggers as usize * pointer_size];
+        memory.read_bytes(context_array, &mut raw)?;
         let types = self.etw_types()?;
         let mut loggers = Vec::new();
-        for (slot, bytes) in raw.as_chunks::<8>().0.iter().enumerate() {
-            let context = u64::from_le_bytes(*bytes);
+        for (slot, bytes) in raw.chunks_exact(pointer_size).enumerate() {
+            let context = arch.decode_pointer(bytes).0;
             // A free slot holds 1 (ETW_UNUSED_LOGGER), a never-used one 0.
             if context <= 1 {
                 continue;
@@ -1376,7 +1378,7 @@ impl Target {
             if !looks_like_kernel_pointer(context) {
                 return Err(Error::DebugInfo(format!(
                     "EtwpLoggerContext[{slot:#x}] at {:#x} holds {context:#x}, not a logger context",
-                    context_array.0 + slot as u64 * 8
+                    context_array.0 + (slot * pointer_size) as u64
                 )));
             }
             let logger = self.read_etw_logger(&types.logger, VirtAddr(context))?;
@@ -1487,7 +1489,7 @@ impl Target {
         let memory = self.kernel_address_space();
         let head = logger.address + types.logger.field_offset("GlobalList")?;
         let global_entry = types.buffer.field_offset("GlobalEntry")?;
-        let next = |link: VirtAddr| memory.read::<VirtAddr>(link).map_err(|e| e.to_string());
+        let next = |link: VirtAddr| memory.read_pointer(link).map_err(|e| e.to_string());
         let mut buffers = Vec::new();
         let mut cursor = ListCursor::new(head, MAX_LOGGER_BUFFERS);
         cursor.advance(next(head));
@@ -1495,7 +1497,9 @@ impl Target {
             // Windows 10 links a small node per buffer ({LIST_ENTRY, buffer
             // pointer}, pool tag Etwn); earlier kernels linked the buffers'
             // own GlobalEntry. Take whichever is one of this logger's buffers.
-            let node_buffer = memory.read::<VirtAddr>(link + 0x10u64).ok();
+            let node_buffer = memory
+                .read_pointer(link + 2 * memory.arch().pointer_size())
+                .ok();
             let buffer = [
                 node_buffer,
                 Some(VirtAddr(link.0.wrapping_sub(global_entry))),

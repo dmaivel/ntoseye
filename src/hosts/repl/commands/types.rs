@@ -813,7 +813,9 @@ impl ReplState<'_> {
         }
         if named_type(&last.info.type_data, "_LIST_ENTRY") {
             let entry_offset = link_offset.saturating_add(last.info.offset as u64);
-            return Ok((entry_offset, entry_offset, 8));
+            // `_LIST_ENTRY` is Flink then Blink, so each link is half its size.
+            let pointer_size = (self.type_view().field_size(&last.info) / 2).clamp(1, 8);
+            return Ok((entry_offset, entry_offset, pointer_size));
         }
         let next_offset = link_offset.saturating_add(last.info.offset as u64);
         let pointer_size = self.type_view().field_size(&last.info).clamp(1, 8);
@@ -1032,19 +1034,24 @@ impl ReplState<'_> {
             None => 2,
         };
         let mut cursor = ListCursor::from_first(address, limit);
+        let arch = self.ctx.target.arch();
+        let pointer = arch.pointer_size() as usize;
         let mut bytes = [0u8; MAX_DL_WORDS * 8];
         while let Some(current) = cursor.take_current() {
             let read_words = display_words.max(2);
-            let width = read_words * 8;
+            let width = read_words * pointer;
             if let Err(error) = self.ctx.read_masked(current, &mut bytes[..width]) {
                 outln!("{}: <unavailable: {}>", ui::addr(current.0), error);
                 cursor.advance(Err(error.to_string()));
                 continue;
             }
-            let first = le_uint(&bytes[..8]);
-            let second = le_uint(&bytes[8..16]);
+            let first = arch.decode_pointer(&bytes).0;
+            let second = arch.decode_pointer(&bytes[pointer..]).0;
             let words = (0..display_words)
-                .map(|index| format!("{:#x}", le_uint(&bytes[index * 8..index * 8 + 8])))
+                .map(|index| {
+                    let word = &bytes[index * pointer..(index + 1) * pointer];
+                    format!("{:#x}", le_uint(word))
+                })
                 .collect::<Vec<_>>();
             outln!("{}  {}", ui::addr(current.0), words.join(" "));
             let next = if backward { second } else { first };

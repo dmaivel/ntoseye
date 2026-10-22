@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use crate::backend::dbg_backend::ProcessorRead;
 use crate::base::error::{Error, Result};
-use crate::base::memory::MemoryOps;
 use crate::base::types::VirtAddr;
 use crate::nt::layout::{TypeInfo, Types};
 use crate::nt::target::{Target, bounded_list_walk};
@@ -571,7 +570,7 @@ impl Target {
         let memory = self.kernel_address_space();
         // `ListEntry` is the record's first field, so a link is its record.
         let (links, termination) =
-            bounded_list_walk(head, MAX_CONTROLLERS, |at| memory.read::<VirtAddr>(at));
+            bounded_list_walk(head, MAX_CONTROLLERS, |at| memory.read_pointer(at));
         let controllers = links
             .into_iter()
             .map(
@@ -604,7 +603,7 @@ impl Target {
         let head = address + layout.field_offset("LinesHead")?;
         let memory = self.kernel_address_space();
         let (links, termination) =
-            bounded_list_walk(head, MAX_LINE_RANGES, |at| memory.read::<VirtAddr>(at));
+            bounded_list_walk(head, MAX_LINE_RANGES, |at| memory.read_pointer(at));
         let line_types = self.nt_enum("_INTERRUPT_LINE_TYPE");
         let polarities = self.nt_enum("_KINTERRUPT_POLARITY");
         let targets = self.nt_enum("_INTERRUPT_TARGET_TYPE");

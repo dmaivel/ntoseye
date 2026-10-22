@@ -145,7 +145,7 @@ fn a_page_the_target_refuses_is_read_through_its_frame() {
     });
     let worker = serve_virtual_memory(kernel, vec![(ROOT, physical)]);
 
-    let space = AddressSpace::new(&phys, ROOT);
+    let space = AddressSpace::new_amd64(&phys, ROOT);
     assert_eq!(
         space.read::<u64>(VirtAddr(MAPPED)).unwrap(),
         0x1122_3344_5566_7788

@@ -33,7 +33,7 @@ fn is_valid_kernel_dtb_amd64(phys: &PhysMem, dtb: Dtb) -> Result<bool> {
     // Check if use KUSER_SHARED_DATA is mapped
     const KUSER_SHARED_DATA_VA: VirtAddr = VirtAddr::from_u64(0xfffff78000000000);
 
-    let addr_space = AddressSpace::new(phys, dtb);
+    let addr_space = AddressSpace::new_amd64(phys, dtb);
 
     if let Some(xlat) = addr_space.virt_to_phys(KUSER_SHARED_DATA_VA)?
         && !xlat.user
@@ -440,7 +440,7 @@ pub(super) fn find_ntoskrnl_va_arm64(kernel_dtb: Dtb, phys: &PhysMem) -> Result<
 /// marker, the same heuristic `is_ntoskrnl_pte` uses but at the virtual
 /// layer.
 pub(super) fn find_ntoskrnl_va_triage(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>> {
-    let space = AddressSpace::new(phys, kernel_dtb);
+    let space = AddressSpace::new_amd64(phys, kernel_dtb);
 
     // No PDB yet, so PsLoadedModuleList can't be walked; probe the data
     // blocks for kernel-space PE headers instead.

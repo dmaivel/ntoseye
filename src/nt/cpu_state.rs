@@ -26,7 +26,8 @@ fn processor_block(target: &Target, index: u16) -> Result<VirtAddr> {
     }
     let nt = kernel(target)?;
     let symbol = nt.symbol("KiProcessorBlock")?;
-    nt.memory().read(symbol.address() + (u64::from(index) * 8))
+    let memory = nt.memory();
+    memory.read_pointer(symbol.address() + u64::from(index) * memory.arch().pointer_size())
 }
 
 fn prcb_offset(target: &Target) -> Result<u64> {
@@ -102,9 +103,10 @@ pub fn processor_count(target: &Target) -> Result<u16> {
     // a hard cap rather than probing arbitrary physical memory.
     let block = nt.symbol("KiProcessorBlock")?.address();
     let memory = nt.memory();
+    let pointer_size = memory.arch().pointer_size();
     let mut count = 0u16;
     for index in 0..MAX_PROCESSORS {
-        match memory.read::<VirtAddr>(block + (u64::from(index) * 8)) {
+        match memory.read_pointer(block + u64::from(index) * pointer_size) {
             Ok(entry) if !entry.is_zero() => count += 1,
             Ok(_) | Err(_) => break,
         }

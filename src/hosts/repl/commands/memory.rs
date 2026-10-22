@@ -828,7 +828,7 @@ fn string_descriptor_fields(
     let buffer = if bits == CODE_BITNESS_X86 {
         best_effort(mem.read::<u32>(address + 4u64))?.map(VirtAddr::from)
     } else {
-        best_effort(mem.read::<VirtAddr>(address + 8u64))?
+        best_effort(mem.read_pointer(address + mem.arch().pointer_size()))?
     };
     Ok(StringDescriptorFields {
         length: best_effort(mem.read(address))?,

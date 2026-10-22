@@ -482,9 +482,7 @@ fn descriptor_field(
     } else if let Some(relative) = relative {
         relative.read_field::<u32>(field_name).map(u64::from)
     } else {
-        descriptor
-            .read_field::<VirtAddr>(field_name)
-            .map(|value| value.0)
+        descriptor.read_pointer(field_name).map(|value| value.0)
     }
 }
 
@@ -665,7 +663,7 @@ impl Target {
             .ntoskrnl
             .types()
             .struct_at("_OBJECT_HEADER", header.header)?;
-        let fast_reference = object_header.read_field::<u64>("SecurityDescriptor")?;
+        let fast_reference = object_header.read_uint("SecurityDescriptor")?;
         let descriptor_address = fast_ref_address(fast_reference);
         let descriptor = if descriptor_address.is_zero() {
             None
@@ -689,7 +687,7 @@ impl Target {
         let types = self.guest().ok()?.ntoskrnl.types_in(kernel_dtb);
         let eprocess = types.struct_at("_EPROCESS", eprocess).ok()?;
         if let Some(session) = eprocess
-            .read_field::<VirtAddr>("Session")
+            .read_pointer("Session")
             .ok()
             .filter(|address| !address.is_zero())
             && let Ok(session) = types.struct_at("_MM_SESSION_SPACE", session)
@@ -699,7 +697,7 @@ impl Target {
         }
 
         let token = eprocess
-            .read_field::<u64>("Token")
+            .read_uint("Token")
             .ok()
             .map(fast_ref_address)
             .filter(|address| !address.is_zero())?;

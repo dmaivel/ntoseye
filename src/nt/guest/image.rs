@@ -38,6 +38,11 @@ impl SymbolRef<'_> {
     {
         self.obj.memory().read(self.address())
     }
+
+    /// The kernel pointer the symbol holds (a pointer-typed global).
+    pub fn read_pointer(&self) -> Result<VirtAddr> {
+        self.obj.memory().read_pointer(self.address())
+    }
 }
 
 /// A PE image mapped into guest memory: ntoskrnl, a driver, or a user-mode

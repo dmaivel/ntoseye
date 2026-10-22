@@ -237,7 +237,8 @@ fn read_kernel_global_u32(debugger: &Target, name: &str) -> Result<u32> {
 }
 
 pub(crate) fn read_kernel_global_ptr(debugger: &Target, name: &str) -> Result<VirtAddr> {
-    read_kernel_global_u64(debugger, name).map(VirtAddr)
+    let address = kernel_symbol_address(debugger, name)?;
+    debugger.kernel_address_space().read_pointer(address)
 }
 
 /// Read a contiguous table in a handful of large requests.  A request that
@@ -539,6 +540,7 @@ fn collect_tracker_usage(
     }
 
     let memory = debugger.kernel_address_space();
+    let pointer_size = memory.arch().pointer_size();
     let mut tables = Vec::new();
     let mut seen_tables = HashSet::new();
     if let Some(table) = read_kernel_global_ptr(debugger, "PoolTrackTable")
@@ -556,11 +558,14 @@ fn collect_tracker_usage(
     {
         source = "ExPoolTagTables";
         for index in 0..u64::from(processors).min(u64::from(MAX_PROCESSORS)) {
-            let Some(pointer_address) = array.0.checked_add(index.saturating_mul(8)).map(VirtAddr)
+            let Some(pointer_address) = array
+                .0
+                .checked_add(index.saturating_mul(pointer_size))
+                .map(VirtAddr)
             else {
                 break;
             };
-            let Ok(table) = memory.read::<VirtAddr>(pointer_address) else {
+            let Ok(table) = memory.read_pointer(pointer_address) else {
                 continue;
             };
             if !table.is_zero() && seen_tables.insert(table.0) {

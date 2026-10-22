@@ -592,7 +592,9 @@ impl Target {
             Err(error) => return (DiagnosticValue::unavailable(error.to_string()), false),
         };
         let types = guest.ntoskrnl.types();
-        let mut next: VirtAddr = match guest.ntoskrnl.memory().read(kprcb + layout.mailbox) {
+        let memory = guest.ntoskrnl.memory();
+        let arch = memory.arch();
+        let mut next = match memory.read_pointer(kprcb + layout.mailbox) {
             Ok(head) => head,
             Err(error) => return (DiagnosticValue::unavailable(error.to_string()), false),
         };
@@ -616,14 +618,15 @@ impl Target {
                 .map(|index| index as u16);
             let packet = mailbox.embedded("RequestPacket").map(|packet| {
                 let worker = packet.read_pointer("WorkerRoutine");
-                let parameters = packet.read_field_bytes("CurrentPacket", 64).map(|bytes| {
-                    bytes
-                        .as_chunks::<8>()
-                        .0
-                        .iter()
-                        .map(|word| u64::from_le_bytes(*word))
-                        .collect::<Vec<_>>()
-                });
+                let pointer_size = arch.pointer_size() as usize;
+                let parameters = packet
+                    .read_field_bytes("CurrentPacket", 8 * pointer_size)
+                    .map(|bytes| {
+                        bytes
+                            .chunks_exact(pointer_size)
+                            .map(|word| arch.decode_pointer(word).0)
+                            .collect::<Vec<_>>()
+                    });
                 (worker, parameters)
             });
             let (worker_routine, parameters) = match packet {

@@ -433,7 +433,7 @@ impl Target {
             None => header.type_object.is_some_and(|object| {
                 self.guest()
                     .and_then(|guest| guest.ntoskrnl.symbol("AlpcPortObjectType"))
-                    .and_then(|symbol| symbol.read::<VirtAddr>())
+                    .and_then(|symbol| symbol.read_pointer())
                     .is_ok_and(|port_type| port_type == object)
             }),
         };

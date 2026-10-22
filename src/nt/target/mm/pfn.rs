@@ -7,7 +7,9 @@ use crate::base::error::{Error, Result};
 use crate::base::memory::{MemoryOps, PAGE_SIZE};
 use crate::base::types::VirtAddr;
 use crate::nt::layout::{TypeInfo, le_uint};
-use crate::nt::target::pool::{pool_field_from_buf, read_kernel_global_u64};
+use crate::nt::target::pool::{
+    pool_field_from_buf, read_kernel_global_ptr, read_kernel_global_u64,
+};
 use crate::nt::target::{DiagnosticValue, Target};
 
 const MMPFN_U1_OFFSET: usize = 0;
@@ -37,7 +39,8 @@ impl Target {
                 "PFN {pfn:#x} exceeds MmHighestPhysicalPage {highest:#x}"
             )));
         }
-        let database = read_kernel_global_u64(self, "MmPfnDatabase")
+        let database = read_kernel_global_ptr(self, "MmPfnDatabase")
+            .map(|pointer| pointer.0)
             .map_err(|error| Error::DebugInfo(format!("PFN database: {error}")))?;
         if database == 0 {
             return Err(Error::DebugInfo(

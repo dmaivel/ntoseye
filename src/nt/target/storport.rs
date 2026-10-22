@@ -13,9 +13,10 @@ use std::sync::Arc;
 use ntoseye_macros::record;
 
 use super::{Target, bounded_record_list_walk};
+use crate::backend::phys::PhysMem;
 use crate::base::bytes::{before_nul, utf16le_nul_terminated};
 use crate::base::error::{Error, Result};
-use crate::base::memory::MemoryOps;
+use crate::base::memory::{AddressSpace, MemoryOps};
 use crate::base::types::VirtAddr;
 use crate::nt::layout::{ParsedType, StructRef, TypeInfo, Types, le_uint};
 use crate::nt::target::etw::format_filetime_precise;
@@ -537,14 +538,13 @@ fn enum_value(variants: &[(String, i64)], name: &str) -> Option<u64> {
 /// Each record from `head` in a bounded walk, its link `link_offset` into
 /// it, and why the walk stopped short.
 fn walk(
-    memory: &impl MemoryOps<VirtAddr>,
+    memory: &AddressSpace<'_, PhysMem>,
     head: VirtAddr,
     link_offset: u64,
     limit: usize,
 ) -> (Vec<VirtAddr>, Option<String>) {
-    let (records, termination) = bounded_record_list_walk(head, link_offset, limit, |link| {
-        memory.read::<VirtAddr>(link)
-    });
+    let (records, termination) =
+        bounded_record_list_walk(head, link_offset, limit, |link| memory.read_pointer(link));
     (records, termination.diagnostic())
 }
 
@@ -642,7 +642,7 @@ impl Target {
                 )
             })?;
         let memory = self.kernel_address_space();
-        let port_data = memory.read::<VirtAddr>(pointer)?;
+        let port_data = memory.read_pointer(pointer)?;
         if port_data.is_zero() {
             return Ok(StorDrivers {
                 port_data,
@@ -832,10 +832,10 @@ impl Target {
             let reasons = self.stor_enum_variants("_DBG_LOG_REASON");
             let field = |name: &str| {
                 entry_layout
-                    .field_offset(name)
-                    .map(|offset| offset as usize)
+                    .field(name)
+                    .map(|field| (field.offset as usize, field.size as usize))
             };
-            let reason_at = field("Reason")?;
+            let (reason_at, _) = field("Reason")?;
             let time_at = field("Timestamp")?;
             let parameter_at = [
                 field("Parameter1")?,
@@ -846,8 +846,8 @@ impl Target {
             for number in log_ring_numbers(newest, size) {
                 let slot = (number % u64::from(size) * entry_size) as usize;
                 let entry = &bytes[slot..slot + entry_size as usize];
-                let u64_at = |at: usize| le_uint(&entry[at..at + 8]);
-                let time = u64_at(time_at);
+                let uint_at = |(at, size): (usize, usize)| le_uint(&entry[at..at + size]);
+                let time = uint_at(time_at);
                 // A slot storport has not written yet holds zeros.
                 if time == 0 {
                     continue;
@@ -856,7 +856,7 @@ impl Target {
                     number,
                     time,
                     reason: stor_enum(&reasons, le_uint(&entry[reason_at..reason_at + 4])),
-                    parameters: parameter_at.map(u64_at),
+                    parameters: parameter_at.map(uint_at),
                 });
             }
         }

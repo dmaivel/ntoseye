@@ -1020,7 +1020,7 @@ impl Target {
                 Error::SymbolNotFound("HalpPciMcfgTable (the HAL's ACPI MCFG table)".into())
             })?;
         let memory = self.kernel_address_space();
-        let table: VirtAddr = memory.read(table)?;
+        let table = memory.read_pointer(table)?;
         if table.is_zero() {
             return Ok(Vec::new());
         }
@@ -1057,7 +1057,7 @@ impl Target {
             errors: Vec::new(),
         };
         let mut segments = Vec::new();
-        let mut next: VirtAddr = self.kernel_address_space().read(list)?;
+        let mut next = self.kernel_address_space().read_pointer(list)?;
         while !next.is_zero() {
             if segments.len() >= MAX_SEGMENTS || !walk.seen.insert(next.0) {
                 walk.truncated = true;

@@ -7,8 +7,8 @@ use ntoseye_macros::record;
 
 use crate::backend::dbg_backend::processor_index_from_backend_thread_id;
 use crate::base::error::{Error, Result};
-use crate::base::memory::MemoryOps;
-use crate::base::types::{MAX_PROCESSORS, VirtAddr};
+use crate::base::memory::{AddressSpace, MemoryOps};
+use crate::base::types::{MAX_PROCESSORS, PhysAddr, VirtAddr};
 use crate::nt::cpu_state::{kpcr_for_processor, kprcb_for_processor, processor_count};
 use crate::nt::guest::ProcessInfo;
 use crate::nt::kuser_shared::KuserSharedData;
@@ -839,7 +839,7 @@ fn read_list_next(target: &Target, address: VirtAddr) -> Result<VirtAddr> {
         .ntoskrnl
         .types()
         .struct_at("_LIST_ENTRY", address)?
-        .read_field("Flink")
+        .read_pointer("Flink")
 }
 
 /// The records of the kernel `_LIST_ENTRY` list at `head`, each
@@ -878,7 +878,7 @@ fn read_kthread_pointer(target: &Target, prcb: VirtAddr, field: &str) -> Result<
         .ntoskrnl
         .types()
         .struct_at("_KPRCB", prcb)?
-        .read_field(field)
+        .read_pointer(field)
 }
 
 fn decode_running_thread(
@@ -1062,7 +1062,7 @@ impl Target {
         match self
             .guest()
             .and_then(|guest| guest.ntoskrnl.types().struct_at(type_name, base))
-            .and_then(|cursor| cursor.read_field::<VirtAddr>(field))
+            .and_then(|cursor| cursor.read_pointer(field))
         {
             Ok(value) if value.is_zero() => DiagnosticValue::Available(None),
             Ok(value) => DiagnosticValue::Available(Some(value)),
@@ -1277,7 +1277,7 @@ impl Target {
             match cursor.as_ref() {
                 Ok(cursor) => DiagnosticValue::from_result(
                     cursor
-                        .read_field::<VirtAddr>("Dpc")
+                        .read_pointer("Dpc")
                         .map(|address| (!address.is_zero()).then_some(address)),
                 ),
                 Err(error) => DiagnosticValue::unavailable(error.to_string()),
@@ -1426,7 +1426,7 @@ impl Target {
                 match self
                     .guest()
                     .and_then(|guest| guest.ntoskrnl.types().struct_at("_KPRCB", prcb))
-                    .and_then(|cursor| cursor.read_field::<VirtAddr>("TimerTable"))
+                    .and_then(|cursor| cursor.read_pointer("TimerTable"))
                 {
                     Ok(address) if !address.is_zero() => address,
                     Ok(_) => {
@@ -1694,11 +1694,11 @@ impl Target {
 
         let mut threads = Vec::new();
         let mut cursor = ListCursor::new(head, 16384);
-        cursor.advance(Ok(memory.read(head)?));
+        cursor.advance(Ok(memory.read_pointer(head)?));
         while let Some(current) = cursor.take_current() {
             let ethread = current - thread_list_entry_offset;
             threads.push(self.thread_info_from_ethread_with_hint(ethread, Some(process))?);
-            cursor.advance(Ok(memory.read(current)?));
+            cursor.advance(Ok(memory.read_pointer(current)?));
         }
 
         Ok(threads)
@@ -1762,27 +1762,29 @@ impl Target {
             client_id_layout
                 .as_ref()
                 .and_then(|layout| layout.field_offset("UniqueThread").ok())
-                .and_then(|offset| memory.read::<u64>(base + offset).ok())
+                .and_then(|offset| memory.read_pointer(base + offset).ok())
+                .map(|id| id.0)
         });
         let pid = cid_base.and_then(|base| {
             client_id_layout
                 .as_ref()
                 .and_then(|layout| layout.field_offset("UniqueProcess").ok())
-                .and_then(|offset| memory.read::<u64>(base + offset).ok())
+                .and_then(|offset| memory.read_pointer(base + offset).ok())
+                .map(|id| id.0)
         });
 
         let read_ethread_ptr = |field: &str| -> Option<VirtAddr> {
             ethread_layout
                 .field_offset(field)
                 .ok()
-                .and_then(|offset| memory.read::<VirtAddr>(ethread + offset).ok())
+                .and_then(|offset| memory.read_pointer(ethread + offset).ok())
                 .filter(|addr| !addr.is_zero())
         };
         let read_kthread_ptr = |field: &str| -> Option<VirtAddr> {
             kthread_layout
                 .field_offset(field)
                 .ok()
-                .and_then(|offset| memory.read::<VirtAddr>(kthread + offset).ok())
+                .and_then(|offset| memory.read_pointer(kthread + offset).ok())
                 .filter(|addr| !addr.is_zero())
         };
         let read_kthread_u8 = |field: &str| -> Option<u8> {
@@ -1801,8 +1803,8 @@ impl Target {
                 ethread_layout
                     .field_offset("ProcessFastRef")
                     .ok()
-                    .and_then(|offset| memory.read::<u64>(ethread + offset).ok())
-                    .map(fast_ref_address)
+                    .and_then(|offset| memory.read_pointer(ethread + offset).ok())
+                    .map(|fast_ref| fast_ref_address(fast_ref.0))
                     .filter(|addr| !addr.is_zero())
             });
 
@@ -1855,7 +1857,7 @@ impl Target {
 
     fn thread_pending_irps(
         &self,
-        memory: &impl MemoryOps<VirtAddr>,
+        memory: &AddressSpace<'_, impl MemoryOps<PhysAddr>>,
         ethread_layout: &TypeInfo,
         ethread: VirtAddr,
     ) -> Option<Vec<VirtAddr>> {
@@ -1864,11 +1866,15 @@ impl Target {
         let thread_list_entry_offset = irp_layout.field_offset("ThreadListEntry").ok()?;
         let head = ethread + irp_list_offset;
         let mut cursor = ListCursor::new(head, 256);
-        cursor.advance(Ok(memory.read(head).ok()?));
+        cursor.advance(Ok(memory.read_pointer(head).ok()?));
         let mut irps = Vec::new();
         while let Some(current) = cursor.take_current() {
             irps.push(current - thread_list_entry_offset);
-            cursor.advance(memory.read(current).map_err(|error| error.to_string()));
+            cursor.advance(
+                memory
+                    .read_pointer(current)
+                    .map_err(|error| error.to_string()),
+            );
         }
 
         Some(irps)
@@ -1910,7 +1916,7 @@ impl Target {
             .layout("_ETHREAD")?
             .field_offset("Tcb")
             .unwrap_or(0);
-        let kthread: VirtAddr = memory.read(prcb + prcb_current_thread_offset)?;
+        let kthread = memory.read_pointer(prcb + prcb_current_thread_offset)?;
         if kthread.is_zero() {
             return Err(Error::DebugInfo(format!(
                 "KPRCB.CurrentThread for processor {} is null",

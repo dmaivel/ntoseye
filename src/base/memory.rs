@@ -365,7 +365,8 @@ impl Translation {
 }
 
 impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
-    pub fn new(backend: &'a B, dtb: Dtb) -> Self {
+    /// AMD64 address space: one CR3 at `dtb` covers both halves.
+    pub fn new_amd64(backend: &'a B, dtb: Dtb) -> Self {
         Self {
             backend,
             dtb,
@@ -377,6 +378,19 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
     /// The page-table root this space walks (TTBR0 on AArch64).
     pub fn dtb(&self) -> Dtb {
         self.dtb
+    }
+
+    /// The architecture whose page tables and pointers this space reads.
+    pub fn arch(&self) -> Arch {
+        self.arch
+    }
+
+    /// The kernel pointer at `va`, [`Arch::pointer_size`] bytes wide.
+    pub fn read_pointer(&self, va: VirtAddr) -> Result<VirtAddr> {
+        let mut bytes = [0u8; 8];
+        let size = self.arch.pointer_size() as usize;
+        self.read_bytes(va, &mut bytes[..size])?;
+        Ok(self.arch.decode_pointer(&bytes))
     }
 
     /// AArch64 address space with separate TTBR0 (user) and TTBR1 (kernel)
@@ -394,7 +408,7 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
     /// `kernel_dtb` (TTBR1) whatever `dtb` is; one AMD64 CR3 covers both halves.
     pub fn for_arch(backend: &'a B, dtb: Dtb, kernel_dtb: Dtb, arch: Arch) -> Self {
         match arch {
-            Arch::Amd64 => Self::new(backend, dtb),
+            Arch::Amd64 => Self::new_amd64(backend, dtb),
             Arch::Arm64 => Self::new_arm64(backend, dtb, kernel_dtb),
         }
     }
@@ -870,7 +884,7 @@ mod tests {
             data,
             invalid_pte_mask: 0,
         };
-        let space = AddressSpace::new(&mem, 0x1000);
+        let space = AddressSpace::new_amd64(&mem, 0x1000);
         let base = 0xffff_f800_0000_0000u64;
         let mut visits = Vec::new();
         space
@@ -911,7 +925,7 @@ mod tests {
     fn transition_pte_reads_the_frame_it_still_owns() {
         // PFN 0x5, valid clear, transition (bit 11) set.
         let (mem, va) = amd64_space(0x5000 | (1 << 11));
-        let space = AddressSpace::new(&mem, 0x1000);
+        let space = AddressSpace::new_amd64(&mem, 0x1000);
 
         let mut buf = [0u8; 8];
         space.read_bytes(va, &mut buf).unwrap();
@@ -937,7 +951,7 @@ mod tests {
             let (mut mem, va) = amd64_space(leaf);
             mem.invalid_pte_mask = MASK;
             let mut buf = [0u8; 8];
-            AddressSpace::new(&mem, 0x1000)
+            AddressSpace::new_amd64(&mem, 0x1000)
                 .read_bytes(va, &mut buf)
                 .map(|()| u64::from_le_bytes(buf))
         };
@@ -960,7 +974,7 @@ mod tests {
             ("page file", 0x5000u64),
         ] {
             let (mem, va) = amd64_space(leaf);
-            let space = AddressSpace::new(&mem, 0x1000);
+            let space = AddressSpace::new_amd64(&mem, 0x1000);
             let mut buf = [0u8; 8];
             assert!(
                 space.read_bytes(va, &mut buf).is_err(),
@@ -988,7 +1002,7 @@ mod tests {
             invalid_pte_mask: 0,
         };
 
-        let value: u64 = AddressSpace::new(&mem, 0x1000).read(va).unwrap();
+        let value: u64 = AddressSpace::new_amd64(&mem, 0x1000).read(va).unwrap();
 
         assert_eq!(value, 0xfeed_face);
     }
@@ -1026,7 +1040,7 @@ mod tests {
             data,
             invalid_pte_mask: 0,
         };
-        let space = AddressSpace::new(&mem, DTB_IDENTITY);
+        let space = AddressSpace::new_amd64(&mem, DTB_IDENTITY);
 
         let mut buf = [0u8; 8];
         space.read_bytes(VirtAddr(0x1000), &mut buf).unwrap();
@@ -1043,7 +1057,7 @@ mod tests {
             data,
             invalid_pte_mask: 0,
         };
-        let space = AddressSpace::new(&mem, DTB_IDENTITY);
+        let space = AddressSpace::new_amd64(&mem, DTB_IDENTITY);
 
         let mut buf = [0u8; 0x20];
         space.read_bytes(VirtAddr(0xFF0), &mut buf).unwrap();
@@ -1194,18 +1208,18 @@ mod tests {
             cache: TranslationCache::default(),
         };
 
-        let first: u64 = AddressSpace::new(&mem, root as u64).read(va).unwrap();
+        let first: u64 = AddressSpace::new_amd64(&mem, root as u64).read(va).unwrap();
         assert_eq!(first, 0x1111_2222_3333_4444);
         assert_eq!(mem.reads.get(), 5);
 
-        let second: u64 = AddressSpace::new(&mem, root as u64)
+        let second: u64 = AddressSpace::new_amd64(&mem, root as u64)
             .read(VirtAddr(va.0 + 0x10))
             .unwrap();
         assert_eq!(second, 0x5555_6666_7777_8888);
         assert_eq!(mem.reads.get(), 6);
 
         mem.cache.clear();
-        let _: u64 = AddressSpace::new(&mem, root as u64).read(va).unwrap();
+        let _: u64 = AddressSpace::new_amd64(&mem, root as u64).read(va).unwrap();
         assert_eq!(mem.reads.get(), 11);
     }
 
@@ -1295,7 +1309,7 @@ mod tests {
             |space: &AddressSpace<'_, ViewedPhysMem>, va: VirtAddr| space.read::<u64>(va).ok();
 
         let (mem, va) = viewed_space(0, 0);
-        let space = AddressSpace::new(&mem, 0x1000);
+        let space = AddressSpace::new_amd64(&mem, 0x1000);
         assert_eq!(read(&space, va), Some(0x1122_3344_5566_7788));
         assert_eq!(read(&space, va + 0x1000u64), Some(0x9999_aaaa_bbbb_cccc));
         assert!(matches!(
@@ -1305,13 +1319,13 @@ mod tests {
 
         let pointer = (KERNEL + 0x308) << 16 | 1 << 10;
         let (mem, va) = viewed_space(pointer, 0);
-        let space = AddressSpace::new(&mem, 0x1000);
+        let space = AddressSpace::new_amd64(&mem, 0x1000);
         assert_eq!(read(&space, va), Some(0x9999_aaaa_bbbb_cccc));
 
         let (mut mem, va) = viewed_space(0, 0);
         let pde = 0x3000 + 8 * va.pd_index();
         mem.inner.data[pde..pde + 8].fill(0);
-        let space = AddressSpace::new(&mem, 0x1000);
+        let space = AddressSpace::new_amd64(&mem, 0x1000);
         assert_eq!(read(&space, va), Some(0x1122_3344_5566_7788));
         // No view maps the pages below it.
         assert_eq!(read(&space, VirtAddr(va.0 - 0x10000)), None);
@@ -1322,10 +1336,18 @@ mod tests {
     #[test]
     fn private_and_paged_out_pages_are_not_read_from_a_section() {
         let (mem, va) = viewed_space(0, 1 << 21);
-        assert!(AddressSpace::new(&mem, 0x1000).read::<u64>(va).is_err());
+        assert!(
+            AddressSpace::new_amd64(&mem, 0x1000)
+                .read::<u64>(va)
+                .is_err()
+        );
 
         let (mem, va) = viewed_space(0x5000, 0);
-        assert!(AddressSpace::new(&mem, 0x1000).read::<u64>(va).is_err());
+        assert!(
+            AddressSpace::new_amd64(&mem, 0x1000)
+                .read::<u64>(va)
+                .is_err()
+        );
     }
 
     #[test]

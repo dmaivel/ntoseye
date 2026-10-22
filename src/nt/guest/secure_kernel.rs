@@ -176,7 +176,7 @@ fn discover(
                 .to_string(),
         ));
     }
-    let nt_header = AddressSpace::new(phys, nt_dtb)
+    let nt_header = AddressSpace::new_amd64(phys, nt_dtb)
         .virt_to_phys(nt_base)?
         .map(|translation| translation.address);
     let mut chunk = vec![0u8; SCAN_BYTES];
@@ -213,7 +213,7 @@ fn discover(
                 // SK and NT may randomly choose the same self-map slot; the
                 // slot number alone is not an address-space identity.
                 let maps_nt = nt_header.is_some()
-                    && AddressSpace::new(phys, dtb)
+                    && AddressSpace::new_amd64(phys, dtb)
                         .virt_to_phys(nt_base)
                         .ok()
                         .flatten()
@@ -254,7 +254,7 @@ fn search_roots(
     for dtb in roots {
         let mut search = ImageSearch {
             phys,
-            memory: AddressSpace::new(phys, dtb),
+            memory: AddressSpace::new_amd64(phys, dtb),
             interrupt,
             tables: 0,
             probes: 0,
@@ -298,7 +298,8 @@ impl SecureKernel {
         // Loader roots can retain an alias of the live image. SK records its
         // relocated canonical base, which must identify the same header page.
         let canonical_base = image.symbol("SkImageBase")?.read::<VirtAddr>()?;
-        let canonical = AddressSpace::new(phys.as_ref(), system).virt_to_phys(canonical_base)?;
+        let canonical =
+            AddressSpace::new_amd64(phys.as_ref(), system).virt_to_phys(canonical_base)?;
         if canonical.is_none_or(|t| t.address != translation.address) {
             return Err(Error::SecureKernel(format!(
                 "system root {system:#x} does not map image {base:?} found under {root:#x} at PA {:#x}",
@@ -432,7 +433,7 @@ impl SecureKernel {
             let nt = processes.iter().find(|p| p.pid == pid).ok_or_else(|| {
                 Error::SecureKernel("trustlet PID is not in the NT process list".to_string())
             })?;
-            let root = AddressSpace::new(self.image.phys.as_ref(), dtb);
+            let root = AddressSpace::new_amd64(self.image.phys.as_ref(), dtb);
             if root
                 .virt_to_phys(self.image.base_address)?
                 .is_none_or(|t| t.address != self.header_physical)
@@ -601,7 +602,7 @@ mod tests {
         let search = |ram: &Ram| {
             ImageSearch {
                 phys: ram,
-                memory: AddressSpace::new(ram, 0x1000),
+                memory: AddressSpace::new_amd64(ram, 0x1000),
                 interrupt: &interrupt,
                 tables: 0,
                 probes: 0,

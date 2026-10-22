@@ -14,7 +14,7 @@ use super::symbols::load_scope_symbols;
 use super::{MAX_READ_LEN, err, raise};
 use crate::base::bytes::utf16le_lossy;
 use crate::base::error::Error;
-use crate::base::types::VirtAddr;
+use crate::base::types::{Arch, VirtAddr};
 use crate::nt::guest::ProcessInfo;
 use crate::nt::target::MemoryKind;
 use crate::nt::target::memory::SearchSpace;
@@ -131,6 +131,13 @@ impl Memory {
         Ok(bytes)
     }
 
+    /// The guest architecture, whose pointer width `$ptrsize` and `poi` use.
+    fn arch(&self, py: Python<'_>) -> PyResult<Arch> {
+        self.owner.with_in(py, &self.space.context(), |session| {
+            Ok(session.target.arch())
+        })
+    }
+
     /// Decode the `kind` descriptor at `addr` in the `bits`-wide layout, or
     /// the one `.effmach` selects.
     fn read_descriptor(
@@ -218,15 +225,19 @@ impl Memory {
 
     /// The guest pointer width, in bytes (`$ptrsize`).
     #[getter]
-    fn pointer_size(&self) -> PyResult<u64> {
+    fn pointer_size(&self, py: Python<'_>) -> PyResult<u64> {
         self.space.require_virtual()?;
-        Ok(8)
+        Ok(self.arch(py)?.pointer_size())
     }
 
     /// Read a pointer-sized value at `address` (`poi`).
     fn read_pointer(&self, py: Python<'_>, address: AddressArg) -> PyResult<u64> {
         let addr = self.address(py, address)?;
-        Ok(u64::from_le_bytes(self.read_fixed::<8>(py, addr)?))
+        let arch = self.arch(py)?;
+        let mut bytes = [0; 8];
+        let width = arch.pointer_size() as usize;
+        self.read_into(py, addr, &mut bytes[..width])?;
+        Ok(arch.decode_pointer(&bytes[..width]).0)
     }
 
     /// Read a NUL-terminated ANSI string at `address` (`da`).

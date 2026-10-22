@@ -955,7 +955,7 @@ mod tests {
     fn open_image(memory: &Arc<ImageMemory>) -> PeImage {
         let memory = Arc::clone(memory);
         read_pe_image(VirtAddr(memory.base), move |address, buf| {
-            AddressSpace::new(&memory, DTB_IDENTITY).read_bytes(address, buf)
+            AddressSpace::new_amd64(&memory, DTB_IDENTITY).read_bytes(address, buf)
         })
         .unwrap()
     }
@@ -1200,14 +1200,14 @@ mod tests {
     fn read_pe_header_page_extends_past_probe_only_when_needed() {
         let base = 0x10_0000u64;
         let memory = ImageMemory::new(base, synthetic_image());
-        let space = AddressSpace::new(&memory, DTB_IDENTITY);
+        let space = AddressSpace::new_amd64(&memory, DTB_IDENTITY);
         let header = read_pe_header_page(VirtAddr(base), &space).unwrap();
         assert_eq!(memory.bytes_read(), PE_HEADER_PROBE);
         assert_eq!(&header[..PE_HEADER_PROBE], &memory.bytes[..PE_HEADER_PROBE]);
 
         let late_pe = PE_HEADER_PROBE - 0x40;
         let memory = ImageMemory::new(base, synthetic_image_with_pe_at(late_pe));
-        let space = AddressSpace::new(&memory, DTB_IDENTITY);
+        let space = AddressSpace::new_amd64(&memory, DTB_IDENTITY);
         let header = read_pe_header_page(VirtAddr(base), &space).unwrap();
         let table_end = late_pe + 24 + 240 + 2 * 40;
         assert_eq!(memory.bytes_read(), table_end);

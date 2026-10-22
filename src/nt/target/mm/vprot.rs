@@ -416,7 +416,7 @@ impl Target {
         let user_end = guest
             .ntoskrnl
             .symbol("MmHighestUserAddress")
-            .and_then(|symbol| symbol.read::<VirtAddr>())
+            .and_then(|symbol| symbol.read_pointer())
             .map_or(0x7FFF_FFFF_0000, |highest| {
                 (highest.0 | (PAGE_SIZE as u64 - 1)).saturating_add(1)
             });
@@ -554,7 +554,8 @@ impl Target {
             let read = |name: &str| -> u64 {
                 mmvad
                     .field_offset(name)
-                    .and_then(|offset| kernel.read::<u64>(vad + offset))
+                    .and_then(|offset| kernel.read_pointer(vad + offset))
+                    .map(|pointer| pointer.0)
                     .unwrap_or(0)
             };
             (read("FirstPrototypePte"), read("LastContiguousPte"))

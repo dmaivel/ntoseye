@@ -169,7 +169,7 @@ impl Session {
                         .and_then(|guest| {
                             guest.ntoskrnl.types().struct_at("_KTHREAD", thread.kthread)
                         })
-                        .and_then(|cursor| cursor.read_field::<VirtAddr>("ApcState"))
+                        .and_then(|cursor| cursor.read_pointer("ApcState"))
                     {
                         Ok(address) if !address.is_zero() => Some(address),
                         Ok(_) => {

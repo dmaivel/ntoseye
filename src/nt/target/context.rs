@@ -270,7 +270,7 @@ impl Target {
         };
         if self
             .address_space(dtb)
-            .read::<u64>(process_list.address())
+            .read_pointer(process_list.address())
             .is_ok()
         {
             return dtb;
@@ -435,6 +435,8 @@ impl Target {
             .ok_or(Error::NtoskrnlNotFound)?;
 
         let dtb = self.kernel_dtb();
+        let arch = self.arch();
+        let pointer_size = arch.pointer_size() as usize;
         let eprocess_layout = self
             .symbols
             .find_type_across_modules(dtb, "_EPROCESS")
@@ -445,14 +447,8 @@ impl Target {
             .ok()
             .and_then(|off| {
                 let off = off as usize;
-                if off + 8 <= proc_snap.len() {
-                    proc_snap[off..off + 8]
-                        .try_into()
-                        .ok()
-                        .map(u64::from_le_bytes)
-                } else {
-                    None
-                }
+                (off + pointer_size <= proc_snap.len())
+                    .then(|| arch.decode_pointer(&proc_snap[off..]).0)
             })
             .unwrap_or(0);
 

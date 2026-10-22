@@ -20,6 +20,7 @@ const IMAGE_FILE_NAME_LEN: usize = 15;
 /// The `_EPROCESS` fields process enumeration needs, fetched with one read
 /// covering their span instead of one request per field over the transport.
 struct EprocessSpan {
+    arch: Arch,
     start: u64,
     bytes: Vec<u8>,
     unique_process_id_offset: u64,
@@ -33,6 +34,8 @@ struct EprocessSpan {
 impl EprocessSpan {
     fn new(guest: &Guest) -> Result<Self> {
         let eprocess = guest.ntoskrnl.types().layout("_EPROCESS")?;
+        let arch = guest.ntoskrnl.arch();
+        let pointer_size = arch.pointer_size();
         let kprocess = guest.ntoskrnl.types().layout("_KPROCESS")?;
         let unique_process_id_offset = eprocess.field_offset("UniqueProcessId")?;
         let dir_table_base_offset =
@@ -48,12 +51,13 @@ impl EprocessSpan {
             .min(active_process_links_offset)
             .min(image_file_name_offset)
             .min(wow64_process_offset.unwrap_or(u64::MAX));
-        let end = (unique_process_id_offset + 8)
+        let end = (unique_process_id_offset + pointer_size)
             .max(dir_table_base_offset + 8)
-            .max(active_process_links_offset + 8)
+            .max(active_process_links_offset + pointer_size)
             .max(image_file_name_offset + IMAGE_FILE_NAME_LEN as u64)
-            .max(wow64_process_offset.map_or(0, |offset| offset + 8));
+            .max(wow64_process_offset.map_or(0, |offset| offset + pointer_size));
         Ok(Self {
+            arch,
             start,
             bytes: vec![0u8; (end - start) as usize],
             unique_process_id_offset,
@@ -73,8 +77,13 @@ impl EprocessSpan {
         read_u64(&self.bytes, start)
     }
 
+    fn pointer_at(&self, offset: u64) -> VirtAddr {
+        let start = (offset - self.start) as usize;
+        self.arch.decode_pointer(&self.bytes[start..])
+    }
+
     fn pid(&self) -> u64 {
-        self.u64_at(self.unique_process_id_offset)
+        self.pointer_at(self.unique_process_id_offset).0
     }
 
     fn dtb(&self) -> Dtb {
@@ -82,7 +91,7 @@ impl EprocessSpan {
     }
 
     fn active_process_links_flink(&self) -> VirtAddr {
-        VirtAddr(self.u64_at(self.active_process_links_offset))
+        self.pointer_at(self.active_process_links_offset)
     }
 
     fn image_file_name(&self) -> &[u8] {
@@ -93,7 +102,7 @@ impl EprocessSpan {
     /// `_EPROCESS.WoW64Process`: null for a native process.
     fn wow64_process(&self) -> Option<VirtAddr> {
         self.wow64_process_offset
-            .map(|offset| VirtAddr(self.u64_at(offset)))
+            .map(|offset| self.pointer_at(offset))
             .filter(|pointer| !pointer.is_zero())
     }
 }
@@ -107,14 +116,17 @@ impl Guest {
         let memory = self.ntoskrnl.memory();
         let mut span = EprocessSpan::new(self)?;
 
-        let ps_initial_system_process: VirtAddr =
-            self.ntoskrnl.symbol("PsInitialSystemProcess")?.read()?;
+        let ps_initial_system_process = self
+            .ntoskrnl
+            .symbol("PsInitialSystemProcess")?
+            .read_pointer()?;
         let ps_active_process_head = self
             .ntoskrnl
             .symbol("PsActiveProcessHead")
             .ok()
             .map(|s| s.address());
 
+        let blink_offset = memory.arch().pointer_size();
         let mut processes = Vec::new();
         let mut reached = HashSet::new();
         let mut broken = None;
@@ -147,7 +159,7 @@ impl Guest {
         if let Some(error) = broken {
             if let Some(head) = ps_active_process_head {
                 let tail = links_back_to(head, &reached, PROCESS_WALK_LIMIT, |link| {
-                    memory.read::<VirtAddr>(link + 8u64)
+                    memory.read_pointer(link + blink_offset)
                 });
                 for link in tail.into_iter().rev() {
                     let eprocess = link - span.active_process_links_offset;
@@ -291,7 +303,7 @@ impl Guest {
             .struct_at("_EPROCESS", eprocess_va)?;
 
         let peb = eprocess.follow("Peb")?;
-        let image_base: VirtAddr = peb.read_field("ImageBaseAddress")?;
+        let image_base = peb.read_pointer("ImageBaseAddress")?;
         if image_base.is_zero() {
             return Err(Error::MissingImageBase);
         }
@@ -302,7 +314,7 @@ impl Guest {
             "InLoadOrderLinks",
         )? {
             let record = record?;
-            let dll_base: VirtAddr = record.read_field("DllBase")?;
+            let dll_base = record.read_pointer("DllBase")?;
             if dll_base == image_base {
                 return record.unicode_string("BaseDllName");
             }

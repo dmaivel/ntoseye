@@ -576,12 +576,12 @@ struct ObjectDirectoryLayout {
 /// `_IRP.Thread` is a direct field on some builds and inside the `Tail.Overlay`
 /// union on others; read whichever is present, else null (never fatal).
 pub(crate) fn irp_thread(irp: &StructRef) -> VirtAddr {
-    if let Ok(t) = irp.read_field::<VirtAddr>("Thread") {
+    if let Ok(t) = irp.read_pointer("Thread") {
         return t;
     }
     irp.embedded("Tail")
         .and_then(|tail| tail.embedded("Overlay"))
-        .and_then(|ov| ov.read_field::<VirtAddr>("Thread"))
+        .and_then(|ov| ov.read_pointer("Thread"))
         .unwrap_or(VirtAddr(0))
 }
 
@@ -643,10 +643,10 @@ fn read_io_stack(
                     argument("Argument3")?,
                     argument("Argument4")?,
                 ],
-                device_object: ios.read_field("DeviceObject")?,
-                file_object: ios.read_field("FileObject")?,
-                completion_routine: ios.read_field("CompletionRoutine")?,
-                context: ios.read_field("Context")?,
+                device_object: ios.read_pointer("DeviceObject")?,
+                file_object: ios.read_pointer("FileObject")?,
+                completion_routine: ios.read_pointer("CompletionRoutine")?,
+                context: ios.read_pointer("Context")?,
             })
         };
         match read() {
@@ -721,7 +721,7 @@ impl Target {
         let buckets = dir_type.field("HashBuckets")?;
         Ok(ObjectDirectoryLayout {
             buckets_offset: buckets.offset as u64,
-            bucket_count: (buckets.size / 8).max(1),
+            bucket_count: (buckets.size / self.arch().pointer_size()).max(1),
             chain_offset: entry_type.field_offset("ChainLink")?,
             object_offset: entry_type.field_offset("Object")?,
             name_offset: entry_type.fields.get("Name").map(|f| f.offset as u64),
@@ -735,11 +735,13 @@ impl Target {
         object_name: &ObjectNameLayout,
     ) -> Result<Vec<(String, VirtAddr)>> {
         let memory = self.guest()?.ntoskrnl.memory();
+        let pointer_size = memory.arch().pointer_size();
         let mut out = Vec::new();
         for bucket in 0..dir.bucket_count {
-            let entry: VirtAddr = memory.read(directory + dir.buckets_offset + bucket * 8)?;
+            let entry =
+                memory.read_pointer(directory + dir.buckets_offset + bucket * pointer_size)?;
             Self::walk_object_directory_bucket(entry, |entry| {
-                let object: VirtAddr = memory.read(entry + dir.object_offset)?;
+                let object = memory.read_pointer(entry + dir.object_offset)?;
                 if !object.is_zero() {
                     let name = match dir.name_offset {
                         Some(offset) => Some(self.read_kernel_unicode_string(entry + offset)?),
@@ -751,7 +753,7 @@ impl Target {
                         out.push((name, object));
                     }
                 }
-                memory.read(entry + dir.chain_offset)
+                memory.read_pointer(entry + dir.chain_offset)
             })?;
         }
         out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -788,7 +790,7 @@ impl Target {
             .filter(|component| !component.is_empty());
         let guest = self.guest()?;
         let root_ptr = guest.ntoskrnl.symbol("ObpRootDirectoryObject")?.address();
-        let mut object: VirtAddr = guest.ntoskrnl.memory().read(root_ptr)?;
+        let mut object = guest.ntoskrnl.memory().read_pointer(root_ptr)?;
         let object_name = self.object_name_layout()?;
         let dir = self.object_directory_layout()?;
         let mut walked = String::new();
@@ -858,10 +860,10 @@ impl Target {
             drivers.push(DriverObjectInfo {
                 name: format!("\\Driver\\{name}"),
                 object,
-                driver_start: driver.read_field("DriverStart")?,
+                driver_start: driver.read_pointer("DriverStart")?,
                 driver_size: driver.read_field::<u32>("DriverSize")? as u64,
-                device_object: driver.read_field("DeviceObject")?,
-                driver_unload: driver.read_field("DriverUnload")?,
+                device_object: driver.read_pointer("DeviceObject")?,
+                driver_unload: driver.read_pointer("DriverUnload")?,
             });
         }
         Ok(drivers)
@@ -896,9 +898,9 @@ impl Target {
             pending_returned: irp.read_field::<u8>("PendingReturned")? != 0,
             requestor_mode: irp.read_field("RequestorMode")?,
             io_status,
-            user_event: irp.read_field("UserEvent")?,
-            user_buffer: irp.read_field("UserBuffer")?,
-            mdl_address: irp.read_field("MdlAddress")?,
+            user_event: irp.read_pointer("UserEvent")?,
+            user_buffer: irp.read_pointer("UserBuffer")?,
+            mdl_address: irp.read_pointer("MdlAddress")?,
             system_buffer,
             thread: irp_thread(irp),
             stack: read_io_stack(irp.types(), address, stack_count).unwrap_or_default(),
@@ -928,8 +930,8 @@ impl Target {
             device_type: d.read_field("DeviceType")?,
             flags: d.read_field("Flags")?,
             characteristics: d.read_field("Characteristics")?,
-            attached: d.read_field("AttachedDevice")?,
-            next: d.read_field("NextDevice")?,
+            attached: d.read_pointer("AttachedDevice")?,
+            next: d.read_pointer("NextDevice")?,
         })
     }
 
@@ -942,7 +944,8 @@ impl Target {
         let size_off = layout.field_offset("Size")?;
         let mf_off = layout.field_offset("MajorFunction")?;
         let name_off = layout.field_offset("DriverName")?;
-        let min_size = mf_off + 28 * 8;
+        let pointer_size = mem.arch().pointer_size();
+        let min_size = mf_off + 28 * pointer_size;
 
         // A `_DRIVER_OBJECT` has Type == 4 (IO_TYPE_DRIVER) and is large enough
         // to hold the dispatch table; use that to tell a direct object from a
@@ -962,7 +965,7 @@ impl Target {
         let object = if valid(addr) {
             addr
         } else {
-            let ptr: VirtAddr = mem.read(addr)?;
+            let ptr = mem.read_pointer(addr)?;
             if !ptr.is_zero() && valid(ptr) {
                 ptr
             } else {
@@ -980,7 +983,7 @@ impl Target {
             .filter(|s| !s.is_empty());
 
         let mut device_chain = Vec::new();
-        let mut devices = ListCursor::from_first(drv.read_field("DeviceObject")?, 128);
+        let mut devices = ListCursor::from_first(drv.read_pointer("DeviceObject")?, 128);
         while let Some(cur) = devices.take_current() {
             let Ok(link) = self.read_device_link(cur) else {
                 break;
@@ -993,7 +996,7 @@ impl Target {
         let mut dispatch = Vec::with_capacity(28);
         for index in 0..28usize {
             let routine = mem
-                .read::<VirtAddr>(object + mf_off + index as u64 * 8)
+                .read_pointer(object + mf_off + index as u64 * pointer_size)
                 .unwrap_or(VirtAddr(0));
             dispatch.push(IrpDispatchRoutine {
                 index,
@@ -1006,10 +1009,10 @@ impl Target {
             object,
             via_pointer: object != addr,
             name,
-            driver_start: drv.read_field("DriverStart")?,
+            driver_start: drv.read_pointer("DriverStart")?,
             driver_size: drv.read_field::<u32>("DriverSize")? as u64,
-            driver_section: drv.read_field("DriverSection")?,
-            driver_unload: drv.read_field("DriverUnload")?,
+            driver_section: drv.read_pointer("DriverSection")?,
+            driver_unload: drv.read_pointer("DriverUnload")?,
             devices: device_chain,
             dispatch,
         })
@@ -1039,7 +1042,7 @@ impl Target {
         let object = if valid(addr) {
             addr
         } else {
-            let ptr: VirtAddr = mem.read(addr)?;
+            let ptr = mem.read_pointer(addr)?;
             if !ptr.is_zero() && valid(ptr) {
                 ptr
             } else {
@@ -1051,7 +1054,7 @@ impl Target {
         };
 
         let dev = self.kernel_struct("_DEVICE_OBJECT", object)?;
-        let attached_device: VirtAddr = dev.read_field("AttachedDevice")?;
+        let attached_device = dev.read_pointer("AttachedDevice")?;
 
         let mut attached_stack = Vec::new();
         let mut devices = ListCursor::from_first(attached_device, 64);
@@ -1059,10 +1062,10 @@ impl Target {
             let Ok(d) = self.kernel_struct("_DEVICE_OBJECT", cur) else {
                 break;
             };
-            let next: VirtAddr = d.read_field("AttachedDevice")?;
+            let next = d.read_pointer("AttachedDevice")?;
             attached_stack.push(AttachedDevice {
                 device: cur,
-                driver_object: d.read_field("DriverObject")?,
+                driver_object: d.read_pointer("DriverObject")?,
                 device_type: d.read_field("DeviceType")?,
                 flags: d.read_field("Flags")?,
             });
@@ -1075,11 +1078,11 @@ impl Target {
             device_type: dev.read_field("DeviceType")?,
             flags: dev.read_field("Flags")?,
             characteristics: dev.read_field("Characteristics")?,
-            driver_object: dev.read_field("DriverObject")?,
+            driver_object: dev.read_pointer("DriverObject")?,
             attached_device,
-            next_device: dev.read_field("NextDevice")?,
-            current_irp: dev.read_field("CurrentIrp")?,
-            device_extension: dev.read_field("DeviceExtension")?,
+            next_device: dev.read_pointer("NextDevice")?,
+            current_irp: dev.read_pointer("CurrentIrp")?,
+            device_extension: dev.read_pointer("DeviceExtension")?,
             attached_stack,
         })
     }
@@ -1092,12 +1095,14 @@ impl Target {
         entry_size: usize,
     ) -> Result<VirtAddr> {
         let memory = self.kernel_address_space();
+        let pointer_size = memory.arch().pointer_size() as usize;
+        let pointers_per_page = PAGE_SIZE / pointer_size;
         let leaf_entries = PAGE_SIZE / entry_size;
         match level {
             0 => Ok(table_base + (index * entry_size) as u64),
             1 => {
-                let leaf: VirtAddr =
-                    memory.read(table_base + ((index / leaf_entries) * 8) as u64)?;
+                let leaf = memory
+                    .read_pointer(table_base + ((index / leaf_entries) * pointer_size) as u64)?;
                 if leaf.is_zero() {
                     return Err(Error::DebugInfo(format!(
                         "handle leaf {} is null",
@@ -1107,15 +1112,16 @@ impl Target {
                 Ok(leaf + ((index % leaf_entries) * entry_size) as u64)
             }
             2 => {
-                let middle_index = index / (leaf_entries * 512);
-                let leaf_index = (index / leaf_entries) % 512;
-                let middle: VirtAddr = memory.read(table_base + (middle_index * 8) as u64)?;
+                let middle_index = index / (leaf_entries * pointers_per_page);
+                let leaf_index = (index / leaf_entries) % pointers_per_page;
+                let middle =
+                    memory.read_pointer(table_base + (middle_index * pointer_size) as u64)?;
                 if middle.is_zero() {
                     return Err(Error::DebugInfo(format!(
                         "handle middle table {middle_index} is null"
                     )));
                 }
-                let leaf: VirtAddr = memory.read(middle + (leaf_index * 8) as u64)?;
+                let leaf = memory.read_pointer(middle + (leaf_index * pointer_size) as u64)?;
                 if leaf.is_zero() {
                     return Err(Error::DebugInfo(format!(
                         "handle leaf {middle_index}:{leaf_index} is null"
@@ -1213,14 +1219,17 @@ impl Target {
         // directory.
         let types = self.guest()?.ntoskrnl.types_in(self.kernel_dtb());
         let eprocess = types.struct_at("_EPROCESS", process.eprocess)?;
-        let table: VirtAddr = eprocess.read_field("ObjectTable")?;
+        let table = eprocess.read_pointer("ObjectTable")?;
         if table.is_zero() {
             return Err(Error::DebugInfo(
                 "_EPROCESS.ObjectTable is null".to_string(),
             ));
         }
         let table_layout = types.layout("_HANDLE_TABLE")?;
-        let table_code: u64 = self.read_kernel_layout_field(&table_layout, table, "TableCode")?;
+        let table_code = types
+            .struct_with_layout(Arc::clone(&table_layout), table)
+            .read_pointer("TableCode")?
+            .0;
         let level = (table_code & 3) as u8;
         if level > 2 {
             return Err(Error::DebugInfo(format!(
@@ -1311,17 +1320,15 @@ impl Target {
     pub fn inspect_file_object(&self, address: VirtAddr) -> Result<FileObject> {
         let types = self.guest()?.ntoskrnl.types_in(self.kernel_dtb());
         let layout = types.layout("_FILE_OBJECT")?;
-        let read_ptr = |name| {
-            DiagnosticValue::from_result(self.read_kernel_layout_field(&layout, address, name))
-        };
+        let file = types.struct_with_layout(Arc::clone(&layout), address);
+        let read_ptr = |name| DiagnosticValue::from_result(file.read_pointer(name));
         let read_bool = |name| {
             DiagnosticValue::from_result(
                 self.read_kernel_layout_field::<u8>(&layout, address, name)
                     .map(|value| value != 0),
             )
         };
-        let device_object: Result<VirtAddr> =
-            self.read_kernel_layout_field(&layout, address, "DeviceObject");
+        let device_object = file.read_pointer("DeviceObject");
         let device_type = match &device_object {
             Ok(device) if !device.is_zero() => DiagnosticValue::from_result(
                 self.inspect_device_object(*device)
@@ -1390,11 +1397,16 @@ impl Target {
         let types = self.guest()?.ntoskrnl.types_in(self.kernel_dtb());
         let layout = types.layout("_ERESOURCE")?;
         let owner_layout = types.layout("_OWNER_ENTRY")?;
+        let owner_thread = |entry: VirtAddr| -> Result<u64> {
+            Ok(types
+                .struct_with_layout(Arc::clone(&owner_layout), entry)
+                .read_pointer("OwnerThread")?
+                .0)
+        };
         let owners = DiagnosticValue::from_result((|| -> Result<Vec<ResourceOwner>> {
             let mut owners = Vec::new();
             let owner_entry = address + layout.field_offset("OwnerEntry")?;
-            let thread: u64 =
-                self.read_kernel_layout_field(&owner_layout, owner_entry, "OwnerThread")?;
+            let thread = owner_thread(owner_entry)?;
             let count: i32 =
                 self.read_kernel_layout_field(&owner_layout, owner_entry, "OwnerCount")?;
             if thread & !3 != 0 && count != 0 {
@@ -1404,7 +1416,9 @@ impl Target {
                 });
             }
 
-            let table: VirtAddr = self.read_kernel_layout_field(&layout, address, "OwnerTable")?;
+            let table = types
+                .struct_with_layout(Arc::clone(&layout), address)
+                .read_pointer("OwnerTable")?;
             if table.is_zero() {
                 return Ok(owners);
             }
@@ -1417,8 +1431,7 @@ impl Target {
             }
             for index in 1..table_size as usize {
                 let entry = table + (index * owner_layout.size) as u64;
-                let thread: u64 =
-                    self.read_kernel_layout_field(&owner_layout, entry, "OwnerThread")?;
+                let thread = owner_thread(entry)?;
                 let count: i32 =
                     self.read_kernel_layout_field(&owner_layout, entry, "OwnerCount")?;
                 if thread & !3 != 0 && count != 0 {
@@ -1470,9 +1483,8 @@ impl Target {
         let layout = guest.ntoskrnl.types().layout("_ERESOURCE")?;
         let link_offset = layout.field_offset("SystemResourcesList")?;
         let memory = self.kernel_address_space();
-        let (records, termination) = bounded_record_list_walk(head, link_offset, limit, |link| {
-            memory.read::<VirtAddr>(link)
-        });
+        let (records, termination) =
+            bounded_record_list_walk(head, link_offset, limit, |link| memory.read_pointer(link));
         let resources = records
             .into_iter()
             .map(|resource| self.inspect_resource(resource))
@@ -1515,7 +1527,7 @@ impl Target {
         let candidate_type_object = |header: VirtAddr| -> Option<VirtAddr> {
             let raw: u8 = mem.read(header + type_index_off).ok()?;
             let index = u64::from(raw ^ ((header.0 >> 8) as u8) ^ cookie);
-            mem.read::<VirtAddr>(type_table? + index * 8)
+            mem.read_pointer(type_table? + index * mem.arch().pointer_size())
                 .ok()
                 .filter(|object| looks_like_kernel_pointer(object.0))
         };
@@ -1559,7 +1571,7 @@ impl Target {
         let (type_object, type_name) = match (type_table, type_index) {
             (Some(table), Some(index)) => {
                 let resolved = mem
-                    .read::<VirtAddr>(table + index * 8)
+                    .read_pointer(table + index * mem.arch().pointer_size())
                     .ok()
                     .filter(|object| looks_like_kernel_pointer(object.0));
                 let name = resolved.and_then(|t| {
@@ -1620,14 +1632,15 @@ impl Target {
 
         let guest = self.guest()?;
         let mem = guest.ntoskrnl.memory();
+        let pointer_size = mem.arch().pointer_size();
         let ex_callback_size = guest
             .ntoskrnl
             .types()
             .layout("_EX_CALLBACK")
             .ok()
             .map(|l| l.size as u64)
-            .filter(|s| (8..=0x40).contains(s))
-            .unwrap_or(8);
+            .filter(|s| (pointer_size..=0x40).contains(s))
+            .unwrap_or(pointer_size);
         let block_layout = guest
             .ntoskrnl
             .types()
@@ -1636,11 +1649,11 @@ impl Target {
         let function_off = block_layout
             .as_ref()
             .and_then(|l| l.field_offset("Function").ok())
-            .unwrap_or(8);
+            .unwrap_or(pointer_size);
         let context_off = block_layout
             .as_ref()
             .and_then(|l| l.field_offset("Context").ok())
-            .unwrap_or(16);
+            .unwrap_or(2 * pointer_size);
 
         let is_kernel = |a: VirtAddr| a.0 >= 0xffff_0000_0000_0000;
         let dtb = self.kernel_dtb();
@@ -1653,7 +1666,7 @@ impl Target {
             let base = sym.address();
             for i in 0..MAX_NOTIFY {
                 let entry = base + i * ex_callback_size;
-                let Ok(raw): Result<VirtAddr> = mem.read(entry) else {
+                let Ok(raw) = mem.read_pointer(entry) else {
                     continue;
                 };
                 if raw.is_zero() {
@@ -1667,14 +1680,16 @@ impl Target {
                 // EX_RUNDOWN_REF / function / context shape when it doesn't
                 // point at a kernel routine.
                 let mut function = mem
-                    .read::<VirtAddr>(block + function_off)
+                    .read_pointer(block + function_off)
                     .unwrap_or(VirtAddr(0));
-                let mut context = mem
-                    .read::<VirtAddr>(block + context_off)
-                    .unwrap_or(VirtAddr(0));
+                let mut context = mem.read_pointer(block + context_off).unwrap_or(VirtAddr(0));
                 if !is_kernel(function) {
-                    function = mem.read::<VirtAddr>(block + 8u64).unwrap_or(VirtAddr(0));
-                    context = mem.read::<VirtAddr>(block + 16u64).unwrap_or(VirtAddr(0));
+                    function = mem
+                        .read_pointer(block + pointer_size)
+                        .unwrap_or(VirtAddr(0));
+                    context = mem
+                        .read_pointer(block + 2 * pointer_size)
+                        .unwrap_or(VirtAddr(0));
                 }
                 if !is_kernel(function) {
                     continue;
@@ -1756,7 +1771,7 @@ impl Target {
                 .and_then(|l| l.field_offset("Limit").ok())
                 .unwrap_or(0x10);
             let win32k = sdt.address() + desc_size;
-            if let Ok(w_base) = mem.read::<VirtAddr>(win32k + base_off)
+            if let Ok(w_base) = mem.read_pointer(win32k + base_off)
                 && !w_base.is_zero()
             {
                 let w_limit = mem.read::<u32>(win32k + limit_off).unwrap_or(0);
@@ -1804,7 +1819,7 @@ impl Target {
                 .ok()
                 .and_then(|l| l.field_offset(field).ok())
         };
-        let read_ptr = |a: VirtAddr| mem.read::<VirtAddr>(a).ok();
+        let read_ptr = |a: VirtAddr| mem.read_pointer(a).ok();
 
         let filter_l = filter.map(|f| f.to_ascii_lowercase());
         let numeric_filter = filter.and_then(|f| f.parse::<u64>().ok());
@@ -1839,18 +1854,19 @@ impl Target {
             // Walk the process thread list (ETHREAD.ThreadListEntry).
             let head = p.eprocess + head_off;
             let (ethreads, _) =
-                bounded_record_list_walk(head, link_off, 4096, |link| mem.read(link));
+                bounded_record_list_walk(head, link_off, 4096, |link| mem.read_pointer(link));
             for ethread in ethreads {
                 let tid = cid_off
                     .zip(unique_thread_off)
-                    .and_then(|(c, u)| mem.read::<u64>(ethread + c + u).ok());
+                    .and_then(|(c, u)| mem.read_pointer(ethread + c + u).ok())
+                    .map(|id| id.0);
                 let state = state_off.and_then(|o| mem.read::<u8>(ethread + tcb_off + o).ok());
                 let wait = wait_off.and_then(|o| mem.read::<u8>(ethread + tcb_off + o).ok());
 
                 // Walk this thread's IrpList (IRP.ThreadListEntry).
                 let (irps, _) =
                     bounded_record_list_walk(ethread + list_off, rec_off, 256, |link| {
-                        mem.read(link)
+                        mem.read_pointer(link)
                     });
                 for irp in irps {
                     if let Some((sc, cl)) = self.plausible_irp(irp) {
@@ -1903,7 +1919,7 @@ impl Target {
                             });
                         }
                         devices.advance(
-                            mem.read(dev + next_off)
+                            mem.read_pointer(dev + next_off)
                                 .map_err(|error: Error| error.to_string()),
                         );
                     }

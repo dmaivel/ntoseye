@@ -1150,7 +1150,7 @@ impl Target {
         let guest = ept::EptMemory::new(&*self.phys, state.ept_pointer, state.mode_based_execute());
         if virtual_address {
             require_four_level_paging(state)?;
-            AddressSpace::new(&guest, state.cr3 & self.arch().dtb_page_mask())
+            AddressSpace::new_amd64(&guest, state.cr3 & self.arch().dtb_page_mask())
                 .read_bytes(VirtAddr(address), buf)
         } else {
             guest.read_bytes(address, buf)
@@ -1167,8 +1167,9 @@ impl Target {
     ) -> Result<Option<(u64, u64)>> {
         require_four_level_paging(state)?;
         let guest = ept::EptMemory::new(&*self.phys, state.ept_pointer, state.mode_based_execute());
-        let Some(translation) = AddressSpace::new(&guest, state.cr3 & self.arch().dtb_page_mask())
-            .virt_to_phys(VirtAddr(address))?
+        let Some(translation) =
+            AddressSpace::new_amd64(&guest, state.cr3 & self.arch().dtb_page_mask())
+                .virt_to_phys(VirtAddr(address))?
         else {
             return Ok(None);
         };
