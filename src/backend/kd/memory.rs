@@ -232,7 +232,11 @@ impl KdBackend {
     /// AMD64 only: CR3 sits in the special registers cached per halt, while
     /// the ARM64 user root (TTBR0) would cost a request of its own to learn.
     fn serving_processor_runs_on(&mut self, root: Dtb) -> bool {
-        if self.arch != Arch::Amd64 || self.require_remote_memory_stopped().is_err() {
+        match self.arch {
+            Arch::Amd64 => {}
+            Arch::Arm64 => return false,
+        }
+        if self.require_remote_memory_stopped().is_err() {
             return false;
         }
         let processor = self.last_stop_processor;

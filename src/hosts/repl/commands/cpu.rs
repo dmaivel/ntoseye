@@ -96,7 +96,6 @@ fn render_descriptor(value: &DiagnosticValue<DescriptorRegister>) -> String {
 /// An ARM64 `_KPCR` embeds its PRCB, which the first line names, and has
 /// no descriptor tables or TSS, so those rows are AMD64's alone.
 fn print_pcr(detail: &Pcr, arch: Arch) {
-    let amd64 = arch == Arch::Amd64;
     outln!(
         "KPCR for processor {} at {} (KPRCB {})",
         detail.processor,
@@ -108,12 +107,13 @@ fn print_pcr(detail: &Pcr, arch: Arch) {
         "KdVersionBlock",
         diagnostic_addr(&detail.kd_version_block)
     );
-    if amd64 {
-        outln!(
+    match arch {
+        Arch::Amd64 => outln!(
             "  {:<20}: {}",
             "CurrentPrcb",
             diagnostic_addr(&detail.current_prcb)
-        );
+        ),
+        Arch::Arm64 => {}
     }
     outln!("  {:<20}: {}", "Irql", render_decimal(&detail.irql));
     outln!("  {:<20}: {}", "Self", diagnostic_addr(&detail.self_pcr));
@@ -133,10 +133,13 @@ fn print_pcr(detail: &Pcr, arch: Arch) {
         "IdleThread",
         diagnostic_addr(&detail.idle_thread)
     );
-    if amd64 {
-        outln!("  {:<20}: {}", "IDTR", render_descriptor(&detail.idtr));
-        outln!("  {:<20}: {}", "GDTR", render_descriptor(&detail.gdtr));
-        outln!("  {:<20}: {}", "TssBase", diagnostic_addr(&detail.tss_base));
+    match arch {
+        Arch::Amd64 => {
+            outln!("  {:<20}: {}", "IDTR", render_descriptor(&detail.idtr));
+            outln!("  {:<20}: {}", "GDTR", render_descriptor(&detail.gdtr));
+            outln!("  {:<20}: {}", "TssBase", diagnostic_addr(&detail.tss_base));
+        }
+        Arch::Arm64 => {}
     }
 }
 
@@ -735,10 +738,13 @@ fn idt(
     #[arg(receiver, parse = current_processor)] processor: Option<Processor>,
     #[arg(parse = idt_vector, positional)] vector: Option<u16>,
 ) -> Result<Idt> {
-    if session.target.arch() == Arch::Arm64 {
-        return Err(Error::DebugInfo(
-            "!idt is not defined on ARM64 targets".into(),
-        ));
+    match session.target.arch() {
+        Arch::Amd64 => {}
+        Arch::Arm64 => {
+            return Err(Error::DebugInfo(
+                "!idt is not defined on ARM64 targets".into(),
+            ));
+        }
     }
     let processor = session.processor(processor)?;
     session
@@ -755,10 +761,13 @@ impl Render for Idt {
 /// The GDT of `processor`, for `!gdt` and `dg`, which `name` the error on an
 /// ARM64 target.
 fn read_gdt(session: &mut Session, processor: Option<Processor>, name: &str) -> Result<Gdt> {
-    if session.target.arch() == Arch::Arm64 {
-        return Err(Error::DebugInfo(format!(
-            "{name} is not defined on ARM64 targets"
-        )));
+    match session.target.arch() {
+        Arch::Amd64 => {}
+        Arch::Arm64 => {
+            return Err(Error::DebugInfo(format!(
+                "{name} is not defined on ARM64 targets"
+            )));
+        }
     }
     let processor = session.processor(processor)?;
     session

@@ -118,10 +118,13 @@ impl Session {
     /// IDTR, falling back to backend register reads when PDB state is absent;
     /// each entry field preserves its own memory/symbol diagnostic.
     pub fn inspect_idt(&mut self, processor: u16, vector: Option<u16>) -> Result<Idt> {
-        if self.target.arch() == Arch::Arm64 {
-            return Err(Error::DebugInfo(
-                "!idt is not defined on ARM64 targets".into(),
-            ));
+        match self.target.arch() {
+            Arch::Amd64 => {}
+            Arch::Arm64 => {
+                return Err(Error::DebugInfo(
+                    "!idt is not defined on ARM64 targets".into(),
+                ));
+            }
         }
         validate_idt_vector(vector)?;
         let descriptor = self.descriptor_for_cpu(processor, DescriptorTable::Idt)?;
@@ -132,10 +135,13 @@ impl Session {
     /// registers when PDB state is absent; each entry field preserves its own
     /// raw/descriptor diagnostic.
     pub fn inspect_gdt(&mut self, processor: u16) -> Result<Gdt> {
-        if self.target.arch() == Arch::Arm64 {
-            return Err(Error::DebugInfo(
-                "!gdt is not defined on ARM64 targets".into(),
-            ));
+        match self.target.arch() {
+            Arch::Amd64 => {}
+            Arch::Arm64 => {
+                return Err(Error::DebugInfo(
+                    "!gdt is not defined on ARM64 targets".into(),
+                ));
+            }
         }
         let descriptor = self.descriptor_for_cpu(processor, DescriptorTable::Gdt)?;
         Ok(decode_gdt(&self.target, processor, descriptor))
@@ -183,10 +189,13 @@ impl Session {
     /// Refuse an I/O-port access the backend cannot make, saying why, or one
     /// the target cannot take while running.
     fn check_io_ports(&self) -> Result<()> {
-        if self.target.arch() == Arch::Arm64 {
-            return Err(Error::DebugInfo(
-                "ARM64 has no I/O-port space; devices are memory-mapped".into(),
-            ));
+        match self.target.arch() {
+            Arch::Amd64 => {}
+            Arch::Arm64 => {
+                return Err(Error::DebugInfo(
+                    "ARM64 has no I/O-port space; devices are memory-mapped".into(),
+                ));
+            }
         }
         if !self.backend.supports_io_ports() {
             return Err(Error::DebugInfo(format!(
@@ -227,10 +236,13 @@ impl Session {
     /// through its MSRs, in xAPIC mode through its registers at the
     /// physical base `IA32_APIC_BASE` names, read uncached.
     pub fn local_apic(&mut self, processor: u16) -> Result<LocalApic> {
-        if self.target.arch() != Arch::Amd64 {
-            return Err(Error::DebugInfo(
-                "!apic reads an x86 local APIC; an ARM64 target has a GIC".into(),
-            ));
+        match self.target.arch() {
+            Arch::Amd64 => {}
+            Arch::Arm64 => {
+                return Err(Error::DebugInfo(
+                    "!apic reads an x86 local APIC; an ARM64 target has a GIC".into(),
+                ));
+            }
         }
         if self.backend.is_running() {
             return Err(Error::TargetRunning(

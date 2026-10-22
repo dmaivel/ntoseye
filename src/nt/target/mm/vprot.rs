@@ -409,10 +409,8 @@ impl Target {
         process: &ProcessInfo,
         address: VirtAddr,
     ) -> Result<MemoryBasicInformation> {
-        if !matches!(self.arch(), Arch::Amd64 | Arch::Arm64) {
-            return Err(Error::UnsupportedArchitecture(
-                "!vprot decodes AMD64 and ARM64 page tables only".into(),
-            ));
+        match self.arch() {
+            Arch::Amd64 | Arch::Arm64 => {}
         }
         let guest = self.guest()?;
         let user_end = guest

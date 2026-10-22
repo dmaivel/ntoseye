@@ -467,10 +467,10 @@ impl BreakpointManager {
         let nx = match (debugger.arch(), address.0 & (1 << 55) != 0, &translation) {
             (Arch::Arm64, true, _) => false,
             (Arch::Arm64, false, Some(translation)) => translation.uxn,
-            (_, _, Some(translation)) => translation.nx,
+            (Arch::Amd64, _, Some(translation)) => translation.nx,
             // No translation to judge: the executable-section check below is
             // the only evidence available, and it does not need the page.
-            (_, _, None) => false,
+            (Arch::Amd64 | Arch::Arm64, _, None) => false,
         };
 
         if nx {

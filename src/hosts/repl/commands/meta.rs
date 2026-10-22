@@ -129,12 +129,14 @@ fn effmach(
         session.target.effmach = match machine.as_str() {
             "x86" => Some(CodeMachine::X86),
             "amd64" => Some(CodeMachine::Amd64),
-            "arm64" if session.target.arch() == Arch::Arm64 => Some(CodeMachine::Arm64),
-            "arm64" => {
-                return Err(Error::DebugInfo(
-                    "an AMD64 target runs no ARM64 code; use x86, amd64, or auto".to_string(),
-                ));
-            }
+            "arm64" => match session.target.arch() {
+                Arch::Arm64 => Some(CodeMachine::Arm64),
+                Arch::Amd64 => {
+                    return Err(Error::DebugInfo(
+                        "an AMD64 target runs no ARM64 code; use x86, amd64, or auto".to_string(),
+                    ));
+                }
+            },
             "." | "auto" => None,
             _ => {
                 return Err(Error::DebugInfo(format!(

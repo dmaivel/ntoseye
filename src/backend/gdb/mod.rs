@@ -675,7 +675,11 @@ impl GdbClient {
     fn software_breakpoint_packet(&mut self, op: char, addr: u64) -> Result<String> {
         let packet = format!("{op}0,{addr:x},{}", self.arch.breakpoint_size());
         let response = self.send_packet(&packet)?;
-        if !response.starts_with('E') || self.arch != Arch::Amd64 || addr < KERNEL_HALF {
+        let borrows_kernel_root = match self.arch {
+            Arch::Amd64 => true,
+            Arch::Arm64 => false,
+        };
+        if !response.starts_with('E') || !borrows_kernel_root || addr < KERNEL_HALF {
             return Ok(response);
         }
         if let Some(response) = self.through_another_vcpu(&packet)? {
@@ -1258,35 +1262,38 @@ impl GdbClient {
             .cloned()
             .collect();
 
-        if self.arch == Arch::Arm64 {
-            push_arm64_aliases(&mut registers).map_err(|missing| {
-                Error::UnsupportedArchitecture(format!(
-                    "the stub's AArch64 description has no `{missing}` register"
-                ))
-            })?;
+        match self.arch {
+            Arch::Amd64 => {}
+            Arch::Arm64 => {
+                push_arm64_aliases(&mut registers).map_err(|missing| {
+                    Error::UnsupportedArchitecture(format!(
+                        "the stub's AArch64 description has no `{missing}` register"
+                    ))
+                })?;
 
-            let mut offset = g_bytes;
-            for (name, system_register) in ARM64_SYSTEM_REGISTERS {
-                let Some(source) = description
-                    .registers()
-                    .iter()
-                    .find(|reg| reg.name == system_register)
-                else {
-                    return Err(Error::UnsupportedArchitecture(format!(
-                        "the stub's AArch64 description has no `{system_register}`, \
+                let mut offset = g_bytes;
+                for (name, system_register) in ARM64_SYSTEM_REGISTERS {
+                    let Some(source) = description
+                        .registers()
+                        .iter()
+                        .find(|reg| reg.name == system_register)
+                    else {
+                        return Err(Error::UnsupportedArchitecture(format!(
+                            "the stub's AArch64 description has no `{system_register}`, \
                          which ntoseye needs to follow the guest's page tables"
-                    )));
-                };
-                self.extra_registers.push(ExtraRegister {
-                    regnum: source.regnum,
-                });
-                registers.push(RegisterInfo {
-                    name: name.to_string(),
-                    offset,
-                    size: 8,
-                    regnum: source.regnum,
-                });
-                offset += 8;
+                        )));
+                    };
+                    self.extra_registers.push(ExtraRegister {
+                        regnum: source.regnum,
+                    });
+                    registers.push(RegisterInfo {
+                        name: name.to_string(),
+                        offset,
+                        size: 8,
+                        regnum: source.regnum,
+                    });
+                    offset += 8;
+                }
             }
         }
 

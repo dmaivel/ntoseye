@@ -474,8 +474,9 @@ impl DebugBackend for KdBackend {
     /// breakpoint hit can decide it has no single-step residue to clear
     /// without fetching a `CONTEXT` it would read two fields from.
     fn stop_trap_state(&mut self) -> Option<TrapState> {
-        if self.arch != Arch::Amd64 {
-            return None;
+        match self.arch {
+            Arch::Amd64 => {}
+            Arch::Arm64 => return None,
         }
         self.registers
             .report(self.current_processor)?
@@ -501,7 +502,9 @@ impl DebugBackend for KdBackend {
     fn supports_watchpoints(&self) -> bool {
         // Both architectures expose per-processor debug state through KD
         // KSPECIAL_REGISTERS (DR0-DR7 on AMD64; BVR/BCR and WVR/WCR on ARM64).
-        matches!(self.arch, Arch::Amd64 | Arch::Arm64)
+        match self.arch {
+            Arch::Amd64 | Arch::Arm64 => true,
+        }
     }
 
     fn hardware_breakpoint_slots(&self) -> usize {
@@ -543,7 +546,9 @@ impl DebugBackend for KdBackend {
 
     fn supports_user_mode_breakpoints(&self) -> bool {
         // GuestMemoryPatch emits `int3` on AMD64 and `brk #0xF000` on ARM64.
-        matches!(self.arch, Arch::Amd64 | Arch::Arm64)
+        match self.arch {
+            Arch::Amd64 | Arch::Arm64 => true,
+        }
     }
 
     fn supports_msr(&self) -> bool {

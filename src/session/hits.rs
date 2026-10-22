@@ -724,8 +724,9 @@ pub fn rewind_thread_off_breakpoint(
     breakpoints: &BreakpointManager,
     arch: Arch,
 ) {
-    if arch == Arch::Arm64 {
-        return;
+    match arch {
+        Arch::Amd64 => {}
+        Arch::Arm64 => return,
     }
     let Ok(regs) = backend.read_registers() else {
         return;

@@ -6,6 +6,7 @@ use tern_sdk::ui::{self, Align, Column, Gap, Node, Span, Table, TableRow, Wrap};
 use super::{CHANGED, MUTED, addr, code, span, stack, symbol};
 use crate::base::disasm::DisasmRow;
 use crate::base::output::strip_ansi;
+use crate::base::types::Arch;
 use crate::hosts::repl::commands::display;
 use crate::hosts::repl::{StackColumns, format_rflags};
 use crate::nt::trapframe::{KtrapFrame, KtrapFrameData, TrapKind};
@@ -51,11 +52,11 @@ type RegisterCell = (&'static str, Vec<Span>);
 /// `r`: the general-purpose grid in the text grid's rows, as a header-less
 /// table of (name, value) column pairs so the values line up in columns,
 /// then the control and segment registers in a second such table.
-/// `read` answers a register by name; `arm64` picks the trailer's layout as
-/// the text renderer does (`Target::arch`), the grid's layout follows
-/// whether the map has `pc`. `control` is false for a context that records
-/// no control registers (a user-mode minidump's).
-pub fn registers(read: &dyn Fn(&str) -> Option<u64>, arm64: bool, control: bool) -> View {
+/// `read` answers a register by name; `arch` (`Target::arch`) picks the
+/// grid's and the trailer's layout as the text renderer does. `control` is
+/// false for a context that records no control registers (a user-mode
+/// minidump's).
+pub fn registers(read: &dyn Fn(&str) -> Option<u64>, arch: Arch, control: bool) -> View {
     let value = |name: &str| -> Vec<Span> {
         match read(name) {
             Some(value) => vec![addr(value)],
@@ -71,21 +72,26 @@ pub fn registers(read: &dyn Fn(&str) -> Option<u64>, arm64: bool, control: bool)
         (name, vec![value])
     };
     let mut trailer: Vec<Vec<RegisterCell>> = Vec::new();
-    if control && arm64 {
-        trailer.push(vec![cell("ttbr0"), ("ttbr1", value("cr3"))]);
-        trailer.push(vec![cell("esr"), cell("far")]);
-    } else if control {
-        trailer.push(vec![cell("cr0"), cell("cr2"), cell("cr3")]);
-        trailer.push(vec![cell("cr4"), cell("cr8")]);
-    }
-    if !arm64 {
-        trailer.push(vec![segment("cs"), segment("ds"), segment("es")]);
-        trailer.push(vec![segment("fs"), segment("gs"), segment("ss")]);
+    match arch {
+        Arch::Arm64 => {
+            if control {
+                trailer.push(vec![cell("ttbr0"), ("ttbr1", value("cr3"))]);
+                trailer.push(vec![cell("esr"), cell("far")]);
+            }
+        }
+        Arch::Amd64 => {
+            if control {
+                trailer.push(vec![cell("cr0"), cell("cr2"), cell("cr3")]);
+                trailer.push(vec![cell("cr4"), cell("cr8")]);
+            }
+            trailer.push(vec![segment("cs"), segment("ds"), segment("es")]);
+            trailer.push(vec![segment("fs"), segment("gs"), segment("ss")]);
+        }
     }
 
     View::new().main([ui::col()
         .role("ntoseye.registers")
-        .child(register_grid(read, &|_| false))
+        .child(register_grid(read, arch, &|_| false))
         .child(register_table(&trailer))])
 }
 
@@ -94,6 +100,7 @@ pub fn registers(read: &dyn Fn(&str) -> Option<u64>, arm64: bool, control: bool)
 /// since the last stop standing out.
 pub fn register_grid(
     read: &dyn Fn(&str) -> Option<u64>,
+    arch: Arch,
     changed: &dyn Fn(&str) -> bool,
 ) -> Table<()> {
     let value = |name: &str| -> Vec<Span> {
@@ -108,46 +115,49 @@ pub fn register_grid(
         (!names.is_empty()).then(|| span(format!("  {}", names.join(" ")), MUTED))
     };
 
-    let grid: Vec<Vec<RegisterCell>> = if read("pc").is_some() {
-        let mut rows: Vec<Vec<RegisterCell>> = [
-            ["x0", "x1", "x2", "x3"],
-            ["x4", "x5", "x6", "x7"],
-            ["x8", "x9", "x10", "x11"],
-            ["x12", "x13", "x14", "x15"],
-            ["x16", "x17", "x18", "x19"],
-            ["x20", "x21", "x22", "x23"],
-            ["x24", "x25", "x26", "x27"],
-            ["x28", "fp", "lr", "sp"],
-        ]
-        .into_iter()
-        .map(|row| row.into_iter().map(cell).collect())
-        .collect();
-        let mut cpsr = value("cpsr");
-        cpsr.extend(flags(cpsr_flags(read("cpsr").unwrap_or(0))));
-        rows.push(vec![cell("pc"), ("cpsr", cpsr)]);
-        rows
-    } else {
-        let mut rows: Vec<Vec<RegisterCell>> = [
-            ["rax", "rbx", "rcx"],
-            ["rdx", "rsi", "rdi"],
-            ["rsp", "rbp", "rip"],
-            ["r8", "r9", "r10"],
-            ["r11", "r12", "r13"],
-        ]
-        .into_iter()
-        .map(|row| row.into_iter().map(cell).collect())
-        .collect();
-        let rflags = format_rflags(read("eflags").unwrap_or(0));
-        let names: Vec<&str> = rflags
-            .trim()
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .split_whitespace()
+    let grid: Vec<Vec<RegisterCell>> = match arch {
+        Arch::Arm64 => {
+            let mut rows: Vec<Vec<RegisterCell>> = [
+                ["x0", "x1", "x2", "x3"],
+                ["x4", "x5", "x6", "x7"],
+                ["x8", "x9", "x10", "x11"],
+                ["x12", "x13", "x14", "x15"],
+                ["x16", "x17", "x18", "x19"],
+                ["x20", "x21", "x22", "x23"],
+                ["x24", "x25", "x26", "x27"],
+                ["x28", "fp", "lr", "sp"],
+            ]
+            .into_iter()
+            .map(|row| row.into_iter().map(cell).collect())
             .collect();
-        let mut rfl = value("eflags");
-        rfl.extend(flags(names));
-        rows.push(vec![cell("r14"), cell("r15"), ("rfl", rfl)]);
-        rows
+            let mut cpsr = value("cpsr");
+            cpsr.extend(flags(cpsr_flags(read("cpsr").unwrap_or(0))));
+            rows.push(vec![cell("pc"), ("cpsr", cpsr)]);
+            rows
+        }
+        Arch::Amd64 => {
+            let mut rows: Vec<Vec<RegisterCell>> = [
+                ["rax", "rbx", "rcx"],
+                ["rdx", "rsi", "rdi"],
+                ["rsp", "rbp", "rip"],
+                ["r8", "r9", "r10"],
+                ["r11", "r12", "r13"],
+            ]
+            .into_iter()
+            .map(|row| row.into_iter().map(cell).collect())
+            .collect();
+            let rflags = format_rflags(read("eflags").unwrap_or(0));
+            let names: Vec<&str> = rflags
+                .trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split_whitespace()
+                .collect();
+            let mut rfl = value("eflags");
+            rfl.extend(flags(names));
+            rows.push(vec![cell("r14"), cell("r15"), ("rfl", rfl)]);
+            rows
+        }
     };
     register_table(&grid)
 }
@@ -201,14 +211,10 @@ pub fn displays(shown: &[display::Shown]) -> Node {
 
 /// The general-purpose registers `changed` since the last stop, in the
 /// grid's order.
-pub fn changed_registers(
-    read: &dyn Fn(&str) -> Option<u64>,
-    changed: &dyn Fn(&str) -> bool,
-) -> Vec<&'static str> {
-    let names: &[&'static str] = if read("pc").is_some() {
-        &ARM64_GRID
-    } else {
-        &X64_GRID
+pub fn changed_registers(arch: Arch, changed: &dyn Fn(&str) -> bool) -> Vec<&'static str> {
+    let names: &[&'static str] = match arch {
+        Arch::Arm64 => &ARM64_GRID,
+        Arch::Amd64 => &X64_GRID,
     };
     names.iter().copied().filter(|name| changed(name)).collect()
 }

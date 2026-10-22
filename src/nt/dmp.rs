@@ -347,8 +347,13 @@ impl DmpContext {
         }
     }
 
-    pub fn is_arm64(&self) -> bool {
-        self.arm64.is_some()
+    /// The context's architecture: the struct's own fields hold AMD64
+    /// registers, ARM64's live in `arm64`.
+    pub fn arch(&self) -> Arch {
+        match self.arm64 {
+            Some(_) => Arch::Arm64,
+            None => Arch::Amd64,
+        }
     }
 
     pub fn instruction_pointer(&self) -> u64 {
@@ -781,11 +786,10 @@ pub struct DmpBackend {
 
 impl DmpBackend {
     pub fn new(info: &DmpInfo) -> Self {
-        let is_arm64 = info.context.is_arm64();
-        let register_map = if is_arm64 {
-            arm64::build_register_map()
-        } else {
-            amd64::build_register_map()
+        let arch = info.context.arch();
+        let register_map = match arch {
+            Arch::Arm64 => arm64::build_register_map(),
+            Arch::Amd64 => amd64::build_register_map(),
         };
         let n = info.number_processors.max(1) as usize;
 
@@ -794,15 +798,9 @@ impl DmpBackend {
         let mut per_cpu = Vec::with_capacity(n);
         per_cpu.push(cpu0_data);
         for _ in 1..n {
-            let mut data = if is_arm64 {
-                vec![0u8; arm64::REGISTER_BUFFER_SIZE]
-            } else {
-                vec![0u8; amd64::REGISTER_BUFFER_SIZE]
-            };
-            let dtb_offset = if is_arm64 {
-                arm64::OFFSET_CR3
-            } else {
-                amd64::OFFSET_CR3
+            let (mut data, dtb_offset) = match arch {
+                Arch::Arm64 => (vec![0u8; arm64::REGISTER_BUFFER_SIZE], arm64::OFFSET_CR3),
+                Arch::Amd64 => (vec![0u8; amd64::REGISTER_BUFFER_SIZE], amd64::OFFSET_CR3),
             };
             data[dtb_offset..dtb_offset + 8]
                 .copy_from_slice(&info.directory_table_base.to_le_bytes());
@@ -847,13 +845,12 @@ impl DmpBackend {
         }
 
         let matches_header = |regs: &Vec<u8>| {
-            if self.header_context.is_arm64() {
-                read_u64(regs, arm64::OFFSET_PC) == self.header_context.instruction_pointer()
-                    && read_u64(regs, arm64::OFFSET_SP) == self.header_context.stack_pointer()
-            } else {
-                read_u64(regs, amd64::OFFSET_RIP) == self.header_context.instruction_pointer()
-                    && read_u64(regs, amd64::OFFSET_RSP) == self.header_context.stack_pointer()
-            }
+            let (pc_offset, sp_offset) = match self.header_context.arch() {
+                Arch::Arm64 => (arm64::OFFSET_PC, arm64::OFFSET_SP),
+                Arch::Amd64 => (amd64::OFFSET_RIP, amd64::OFFSET_RSP),
+            };
+            read_u64(regs, pc_offset) == self.header_context.instruction_pointer()
+                && read_u64(regs, sp_offset) == self.header_context.stack_pointer()
         };
         match self.per_cpu_registers.iter().position(matches_header) {
             Some(i) => self.current_processor = i,

@@ -453,8 +453,9 @@ impl Target {
         rip: u64,
         processor: Option<u16>,
     ) -> Result<Vec<SavedVtlContext>> {
-        if self.arch() != Arch::Amd64 {
-            return Ok(Vec::new());
+        match self.arch() {
+            Arch::Amd64 => {}
+            Arch::Arm64 => return Ok(Vec::new()),
         }
         let mask = self.arch().dtb_page_mask();
         let pages = self
@@ -1254,10 +1255,13 @@ impl Target {
     /// (their host GS base) and from the selected vCPU when it is halted in
     /// the hypervisor, and its image through the first root that maps it.
     fn locate_hypervisor(&self) -> Result<HypervisorLocation<'_>> {
-        if self.arch() != Arch::Amd64 {
-            return Err(Error::Hypervisor(
-                "the Windows hypervisor needs an AMD64 target".to_string(),
-            ));
+        match self.arch() {
+            Arch::Amd64 => {}
+            Arch::Arm64 => {
+                return Err(Error::Hypervisor(
+                    "the Windows hypervisor needs an AMD64 target".to_string(),
+                ));
+            }
         }
         // A guest partition's memory holds no hypervisor: the target's runs
         // it, and is inspected from the target.

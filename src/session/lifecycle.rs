@@ -22,7 +22,7 @@ use crate::nt::dmp::{DmpBackend, DmpInfo};
 use crate::nt::target::hang::bugcheck_processor_from_freeze_states;
 use crate::session::exception_policy::ExceptionPolicyTable;
 
-use crate::base::types::VirtAddr;
+use crate::base::types::{Arch, VirtAddr};
 use crate::nt::symbols::ntoseye_home;
 use crate::nt::target::{Target, TargetKind};
 use crate::nt::userdump::{self, UserDump, UserDumpBackend};
@@ -49,18 +49,19 @@ fn locate_debugger_data(target: &mut Target, backend: &mut dyn DebugBackend) {
 /// context alone.
 fn read_processor_contexts(target: &Target, info: &DmpInfo, backend: &mut DmpBackend) {
     let processors = backend.processor_count();
-    let saved = if info.context.is_arm64() {
-        cpu_state::read_arm64_prcb_contexts(target, processors)
-    } else {
-        // Triage dumps carry the offset from their embedded KDBG copy; full
-        // dumps read it from the KDBG the header names.
-        let offset = info.offset_prcb_context.or_else(|| {
-            cpu_state::prcb_context_offset(target, VirtAddr(info.debugger_data_block?))
-        });
-        let Some(offset) = offset else {
-            return;
-        };
-        cpu_state::read_amd64_prcb_contexts(target, processors, offset)
+    let saved = match info.context.arch() {
+        Arch::Arm64 => cpu_state::read_arm64_prcb_contexts(target, processors),
+        Arch::Amd64 => {
+            // Triage dumps carry the offset from their embedded KDBG copy; full
+            // dumps read it from the KDBG the header names.
+            let offset = info.offset_prcb_context.or_else(|| {
+                cpu_state::prcb_context_offset(target, VirtAddr(info.debugger_data_block?))
+            });
+            let Some(offset) = offset else {
+                return;
+            };
+            cpu_state::read_amd64_prcb_contexts(target, processors, offset)
+        }
     };
     backend.set_processor_contexts(saved.contexts, saved.warnings);
     // Without a header context to match, the processor that bugchecked is

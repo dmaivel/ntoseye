@@ -287,19 +287,22 @@ impl Session {
         memory.read_bytes(VirtAddr(pc), &mut bytes)?;
         self.mask_code(VirtAddr(pc), &mut bytes, active_dtb);
 
-        if self.target.arch() == Arch::Arm64 {
-            let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            let Ok(instruction) = bad64::decode(word, pc) else {
-                return Err(Error::DebugInfo(format!(
-                    "failed to decode instruction at {pc:#x}"
-                )));
-            };
-            let mnem = instruction.op().mnem();
-            // `bl`/`blr` are the call forms; AArch64 instructions are 4 bytes.
-            return Ok(CurrentInstruction {
-                is_call: mnem == "bl" || mnem == "blr",
-                next_ip: pc.wrapping_add(4),
-            });
+        match self.target.arch() {
+            Arch::Amd64 => {}
+            Arch::Arm64 => {
+                let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                let Ok(instruction) = bad64::decode(word, pc) else {
+                    return Err(Error::DebugInfo(format!(
+                        "failed to decode instruction at {pc:#x}"
+                    )));
+                };
+                let mnem = instruction.op().mnem();
+                // `bl`/`blr` are the call forms; AArch64 instructions are 4 bytes.
+                return Ok(CurrentInstruction {
+                    is_call: mnem == "bl" || mnem == "blr",
+                    next_ip: pc.wrapping_add(4),
+                });
+            }
         }
 
         let bitness = self.target.code_bitness(VirtAddr(pc));
@@ -399,10 +402,9 @@ impl Session {
             .read_u64(self.target.arch().dtb_register(), &registers)
             .unwrap_or(0);
         let mut bytes = [0u8; 16];
-        let length = if self.target.arch() == Arch::Arm64 {
-            4
-        } else {
-            bytes.len()
+        let length = match self.target.arch() {
+            Arch::Arm64 => 4,
+            Arch::Amd64 => bytes.len(),
         };
         self.read_masked(VirtAddr(ip), &mut bytes[..length])?;
         let bitness = self.target.code_bitness(VirtAddr(ip));
@@ -612,11 +614,15 @@ impl Session {
     ) -> Result<WalkStep> {
         // An instruction without known successors is not followed; one run
         // alone fails its step the same way.
-        let (successors, floor) = match walked {
-            Some(_) if self.target.arch() != Arch::Arm64 => self
-                .walk_continuation(state, registers, bytes)
-                .unwrap_or_default(),
-            _ => (Vec::new(), None),
+        let follows = match self.target.arch() {
+            Arch::Amd64 => walked.is_some(),
+            Arch::Arm64 => false,
+        };
+        let (successors, floor) = if follows {
+            self.walk_continuation(state, registers, bytes)
+                .unwrap_or_default()
+        } else {
+            (Vec::new(), None)
         };
         let vcpu = self.current_thread.clone();
         let (outcome, stepped) = self.step_once()?;
@@ -801,7 +807,7 @@ impl Session {
         // Each open frame with the stack pointer it was entered with.
         let mut stack = vec![(frame(name(&self.target, &current)), current.sp)];
         let mut instructions = 0usize;
-        let arm64 = self.target.arch() == Arch::Arm64;
+        let arch = self.target.arch();
         // The user breakpoint the trace ended at, whose action runs then.
         let mut hit = None;
         let end = loop {
@@ -865,7 +871,11 @@ impl Session {
             if current.flow == ControlFlow::Call {
                 stack.push((frame(name(&self.target, &next)), next.sp));
             } else if current.flow == ControlFlow::Ret
-                && (next.sp > *entry_sp || (arm64 && next.sp >= *entry_sp))
+                && (next.sp > *entry_sp
+                    || match arch {
+                        Arch::Arm64 => next.sp >= *entry_sp,
+                        Arch::Amd64 => false,
+                    })
             {
                 let (completed, _) = stack.pop().expect("an open frame");
                 match stack.last_mut() {
@@ -921,7 +931,11 @@ impl Session {
                 stack_pointer(&self.register_map, &registers).map(|sp| {
                     // An x86 `ret` pops its return address; an AArch64 `ret`
                     // leaves the stack pointer where the callee found it.
-                    if stack == StepStack::FunctionReturn && self.target.arch() != Arch::Arm64 {
+                    let pops = match self.target.arch() {
+                        Arch::Amd64 => true,
+                        Arch::Arm64 => false,
+                    };
+                    if stack == StepStack::FunctionReturn && pops {
                         sp + 1
                     } else {
                         sp

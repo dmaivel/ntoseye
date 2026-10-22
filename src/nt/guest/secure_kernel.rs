@@ -494,10 +494,13 @@ impl Guest {
         symbols: &Arc<SymbolStore>,
         interrupt: &AtomicBool,
     ) -> Result<Arc<SecureKernel>> {
-        if self.ntoskrnl.arch() != Arch::Amd64 {
-            return Err(Error::SecureKernel(
-                "discovery currently requires AMD64".to_string(),
-            ));
+        match self.ntoskrnl.arch() {
+            Arch::Amd64 => {}
+            Arch::Arm64 => {
+                return Err(Error::SecureKernel(
+                    "discovery currently requires AMD64".to_string(),
+                ));
+            }
         }
         let mut cached = self
             .secure_kernel

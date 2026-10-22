@@ -449,22 +449,25 @@ impl KdBackend {
         })?;
         kd_trace!("kd: read_registers: got {} context bytes", ctx.len());
         self.append_control_registers(&mut ctx)?;
-        if self.arch == Arch::Amd64 {
-            let efer = self.efer_cache.get(&processor).copied().or_else(|| {
-                match self.read_msr_value(processor, MSR_EFER) {
-                    Ok(value) => {
-                        self.efer_cache.insert(processor, value);
-                        Some(value)
+        match self.arch {
+            Arch::Amd64 => {
+                let efer = self.efer_cache.get(&processor).copied().or_else(|| {
+                    match self.read_msr_value(processor, MSR_EFER) {
+                        Ok(value) => {
+                            self.efer_cache.insert(processor, value);
+                            Some(value)
+                        }
+                        Err(error) => {
+                            kd_trace!("kd: EFER read unavailable: {error}");
+                            None
+                        }
                     }
-                    Err(error) => {
-                        kd_trace!("kd: EFER read unavailable: {error}");
-                        None
-                    }
+                });
+                if let Some(efer) = efer {
+                    bytes::write_u64(&mut ctx, amd64::OFFSET_EFER, efer);
                 }
-            });
-            if let Some(efer) = efer {
-                bytes::write_u64(&mut ctx, amd64::OFFSET_EFER, efer);
             }
+            Arch::Arm64 => {}
         }
         kd_trace!("kd: read_registers: extended to {} bytes", ctx.len());
         if trace_enabled() {

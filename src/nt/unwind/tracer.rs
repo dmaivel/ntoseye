@@ -173,8 +173,9 @@ impl<'a> StackTracer<'a> {
     /// ranges of a hybrid one, are AMD64; code outside any image (the
     /// emulator's translation cache) is the processor's own.
     pub(super) fn code_machine_at(&mut self, address: u64) -> CodeMachine {
-        if self.target.arch() == Arch::Amd64 {
-            return CodeMachine::Amd64;
+        match self.target.arch() {
+            Arch::Amd64 => return CodeMachine::Amd64,
+            Arch::Arm64 => {}
         }
         let Some(module) = self.module_containing(address) else {
             return CodeMachine::Arm64;

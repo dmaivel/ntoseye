@@ -785,10 +785,13 @@ impl Target {
     /// fields carry individual byte/symbol failures; `truncated` reports a
     /// descriptor shorter than the full bounded table.
     pub fn inspect_idt(&self, processor: u16, vector: Option<u16>) -> Result<Idt> {
-        if self.arch() == Arch::Arm64 {
-            return Err(Error::DebugInfo(
-                "!idt is not defined on ARM64 targets".into(),
-            ));
+        match self.arch() {
+            Arch::Amd64 => {}
+            Arch::Arm64 => {
+                return Err(Error::DebugInfo(
+                    "!idt is not defined on ARM64 targets".into(),
+                ));
+            }
         }
         validate_idt_vector(vector)?;
         let location = cpu_location(self, processor)?;

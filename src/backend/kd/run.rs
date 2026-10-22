@@ -367,7 +367,11 @@ impl KdBackend {
         // inside nt!KiFreezeTargetExecution, with debug exceptions masked
         // (PSTATE.D), not as the code the freeze interrupted, so the trace
         // flag is set in a state where no step can occur.
-        if processor != owner && self.arch == Arch::Arm64 {
+        let owner_only_steps = match self.arch {
+            Arch::Arm64 => true,
+            Arch::Amd64 => false,
+        };
+        if processor != owner && owner_only_steps {
             return Err(Error::Kd(format!(
                 "{} stopped the target, and on ARM64 only that processor can step; select it \
                  with ~{owner}s, or resume with g",
@@ -429,12 +433,15 @@ impl KdBackend {
         if processor == owner {
             return request(self);
         }
-        if self.arch == Arch::Arm64 {
-            return Err(Error::Kd(format!(
-                "{} stopped the target, and on ARM64 the target reads registers only on that \
-                 processor",
-                thread_id_for(owner)
-            )));
+        match self.arch {
+            Arch::Amd64 => {}
+            Arch::Arm64 => {
+                return Err(Error::Kd(format!(
+                    "{} stopped the target, and on ARM64 the target reads registers only on that \
+                     processor",
+                    thread_id_for(owner)
+                )));
+            }
         }
         kd_trace!(
             "kd: switching from p{} to p{} for a register read",

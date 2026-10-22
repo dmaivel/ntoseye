@@ -1492,7 +1492,11 @@ impl Target {
         // KiSystemStartup's `lea rcx, [rip+...]` that fills
         // __guard_dispatch_icall_fptr. Both ends must start a dispatch
         // routine of the module, so code pointed anywhere else still counts.
-        if self.arch() == Arch::Amd64
+        let rip_relative = match self.arch() {
+            Arch::Amd64 => true,
+            Arch::Arm64 => false,
+        };
+        if rip_relative
             && let Some((expected_target, actual_target)) =
                 rip_relative_retarget(expected, expected_ip, actual, actual_ip)
             && self.starts_dispatch_routine(

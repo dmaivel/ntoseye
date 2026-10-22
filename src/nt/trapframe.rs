@@ -228,8 +228,11 @@ pub struct KtrapFrame {
 }
 
 impl KtrapFrame {
-    pub fn is_arm64(&self) -> bool {
-        matches!(&self.data, KtrapFrameData::Arm64(_))
+    pub fn arch(&self) -> Arch {
+        match &self.data {
+            KtrapFrameData::Amd64(_) => Arch::Amd64,
+            KtrapFrameData::Arm64(_) => Arch::Arm64,
+        }
     }
 
     pub fn instruction_pointer(&self) -> u64 {
@@ -516,10 +519,14 @@ pub fn decode_kswitch_frame_seed(
     dtb: Dtb,
     address: VirtAddr,
 ) -> Result<SavedThreadRegisters> {
-    if debugger.arch() == Arch::Arm64 {
-        return Err(Error::DebugInfo(
-            "ARM64 _KSWITCH_FRAME layout is not verified; use a PDB-described KTRAP_FRAME".into(),
-        ));
+    match debugger.arch() {
+        Arch::Amd64 => {}
+        Arch::Arm64 => {
+            return Err(Error::DebugInfo(
+                "ARM64 _KSWITCH_FRAME layout is not verified; use a PDB-described KTRAP_FRAME"
+                    .into(),
+            ));
+        }
     }
     let layout = debugger
         .symbols
@@ -546,8 +553,9 @@ pub fn ktrap_frame_at_machine_frame(
     machine_frame: u64,
     interrupted: u64,
 ) -> Option<KtrapFrame> {
-    if debugger.arch() != Arch::Amd64 {
-        return None;
+    match debugger.arch() {
+        Arch::Amd64 => {}
+        Arch::Arm64 => return None,
     }
     let layout = debugger
         .symbols

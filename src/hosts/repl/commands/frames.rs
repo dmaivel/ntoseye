@@ -727,7 +727,7 @@ fn registers(
         || {
             native::frames::registers(
                 &|name: &str| register_map.read_u64(name, &regs).ok(),
-                arch == Arch::Arm64,
+                arch,
                 control,
             )
         },
@@ -1189,10 +1189,9 @@ pub fn registers_from_trap_frame(frame: &KtrapFrame) -> HashMap<String, u64> {
         "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26",
         "x27", "x28", "x29", "x30", "sp", "pc", "cpsr", "fp", "lr",
     ];
-    let names = if frame.is_arm64() {
-        &ARM64_NAMES[..]
-    } else {
-        &AMD64_NAMES[..]
+    let names = match frame.arch() {
+        Arch::Arm64 => &ARM64_NAMES[..],
+        Arch::Amd64 => &AMD64_NAMES[..],
     };
     for name in names {
         if let Some(value) = saved.get(name) {
@@ -1227,7 +1226,7 @@ fn print_exception_record(record: &ExceptionRecord) {
 /// `r`'s text: the general-purpose grid, then the control (when `control`)
 /// and segment registers.
 fn print_register_grid(register_map: &RegisterMap, regs: &[u8], arch: Arch, control: bool) {
-    print_registers(register_map, regs, None, false);
+    print_registers(register_map, arch, regs, None, false);
     // Control registers match the GP-register cluster's
     // styling; segment selectors are 16-bit, so render
     // them as 4 digits rather than padding to 64-bit
@@ -1246,13 +1245,16 @@ fn print_register_grid(register_map: &RegisterMap, regs: &[u8], arch: Arch, cont
 
     outln!();
     // The ARM64 maps answer `cr3` with TTBR1_EL1, the kernel's root.
-    if arch == Arch::Arm64 {
-        if control {
-            outln!("  ttbr0 {}   ttbr1 {}", read_cr("ttbr0"), read_cr("cr3"));
-            outln!("  esr   {}   far   {}", read_cr("esr"), read_cr("far"));
-            outln!();
+    match arch {
+        Arch::Amd64 => {}
+        Arch::Arm64 => {
+            if control {
+                outln!("  ttbr0 {}   ttbr1 {}", read_cr("ttbr0"), read_cr("cr3"));
+                outln!("  esr   {}   far   {}", read_cr("esr"), read_cr("far"));
+                outln!();
+            }
+            return;
         }
-        return;
     }
     if control {
         outln!(

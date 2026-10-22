@@ -361,7 +361,13 @@ impl ReplState<'_> {
                                 return;
                             }
                         };
-                        print_registers(&self.ctx.register_map, &regs, None, false);
+                        print_registers(
+                            &self.ctx.register_map,
+                            self.ctx.target.arch(),
+                            &regs,
+                            None,
+                            false,
+                        );
                     }
                 }
                 Some(_) if action.numeric => {}

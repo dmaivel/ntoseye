@@ -106,8 +106,9 @@ impl Target {
         let Ok(guest) = self.guest() else {
             return Vec::new();
         };
-        if self.arch() != Arch::Amd64 {
-            return Vec::new();
+        match self.arch() {
+            Arch::Amd64 => {}
+            Arch::Arm64 => return Vec::new(),
         }
         let address = |name: &str| guest.ntoskrnl.symbol(name).ok().map(|s| s.address().0);
         let debugger_entry = address(DEBUGGER_ENTRY);

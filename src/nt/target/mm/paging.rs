@@ -102,18 +102,21 @@ impl Target {
                 section: translation.is_some_and(|value| value.residency == Residency::Section),
             });
         }
-        if self.arch() != Arch::Amd64 {
-            let translation = self.address_space(dtb).virt_to_phys(address)?;
-            return Ok(VtopDetail {
-                address,
-                dtb,
-                levels: Vec::new(),
-                physical: translation.map(|value| value.address),
-                large: translation.is_some_and(|value| value.large),
-                transition: translation
-                    .is_some_and(|value| value.residency == Residency::Transition),
-                section: translation.is_some_and(|value| value.residency == Residency::Section),
-            });
+        match self.arch() {
+            Arch::Amd64 => {}
+            Arch::Arm64 => {
+                let translation = self.address_space(dtb).virt_to_phys(address)?;
+                return Ok(VtopDetail {
+                    address,
+                    dtb,
+                    levels: Vec::new(),
+                    physical: translation.map(|value| value.address),
+                    large: translation.is_some_and(|value| value.large),
+                    transition: translation
+                        .is_some_and(|value| value.residency == Residency::Transition),
+                    section: translation.is_some_and(|value| value.residency == Residency::Section),
+                });
+            }
         }
         let mut detail = explicit_amd64_walk(self, dtb, address)?;
         // The tables end short of a frame; the page's section may hold one.
@@ -145,10 +148,14 @@ impl Target {
                 interrupted: false,
             });
         }
-        if self.arch() != Arch::Amd64 {
-            return Err(Error::DebugInfo(
-                "!ptov reverse walking is currently available for AMD64 targets only".to_string(),
-            ));
+        match self.arch() {
+            Arch::Amd64 => {}
+            Arch::Arm64 => {
+                return Err(Error::DebugInfo(
+                    "!ptov reverse walking is currently available for AMD64 targets only"
+                        .to_string(),
+                ));
+            }
         }
         let mut visited = HashSet::new();
         let mut table_pages = 0usize;

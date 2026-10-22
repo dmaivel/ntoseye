@@ -228,7 +228,7 @@ pub struct AddressSpace<'a, B: MemoryOps<PhysAddr>> {
     /// `dtb` is the TTBR0/process root for the user half. Ignored on AMD64,
     /// where one CR3 covers both halves.
     kernel_dtb: Option<Dtb>,
-    arm64: bool,
+    arch: Arch,
 }
 
 #[derive(Clone, Copy)]
@@ -370,7 +370,7 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             backend,
             dtb,
             kernel_dtb: None,
-            arm64: false,
+            arch: Arch::Amd64,
         }
     }
 
@@ -386,7 +386,7 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             backend,
             dtb: ttbr0,
             kernel_dtb: Some(ttbr1),
-            arm64: true,
+            arch: Arch::Arm64,
         }
     }
 
@@ -414,10 +414,9 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
     /// Page-table root that maps `va`: AArch64 selects TTBR1 for the kernel
     /// half by bit 55; one AMD64 CR3 covers both halves.
     fn root_for(&self, va: VirtAddr) -> Dtb {
-        if self.arm64 && va.0 & (1 << 55) != 0 {
-            self.kernel_dtb.unwrap_or(self.dtb)
-        } else {
-            self.dtb
+        match self.arch {
+            Arch::Arm64 if va.0 & (1 << 55) != 0 => self.kernel_dtb.unwrap_or(self.dtb),
+            Arch::Arm64 | Arch::Amd64 => self.dtb,
         }
     }
 
@@ -557,8 +556,8 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
                 entries[at..at + 8].try_into().expect("8-byte entry"),
             ));
             let entry_base = base + index * span;
-            let leaf = if self.arm64 {
-                match level {
+            let leaf = match self.arch {
+                Arch::Arm64 => match level {
                     _ if !entry.arm64_is_valid() => continue,
                     // Windows maps no 512 GiB level-0 blocks.
                     0 if entry.arm64_is_block() => continue,
@@ -567,15 +566,14 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
                     3 if entry.0 & 0b11 != 0b11 => continue,
                     3 => Some(entry.arm64_page_frame()),
                     _ => None,
-                }
-            } else {
-                match level {
+                },
+                Arch::Amd64 => match level {
                     _ if !entry.is_present() => continue,
                     1 if entry.is_large_page() => Some(entry.huge_page_frame()),
                     2 if entry.is_large_page() => Some(entry.large_page_frame()),
                     3 => Some(entry.page_frame()),
                     _ => None,
-                }
+                },
             };
             let flow = match leaf {
                 Some(frame) => {
@@ -584,10 +582,9 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
                     visit(VirtAddr(from), frame + (from - entry_base), to - from + 1)
                 }
                 None => {
-                    let next = if self.arm64 {
-                        entry.arm64_page_frame()
-                    } else {
-                        entry.page_frame()
+                    let next = match self.arch {
+                        Arch::Arm64 => entry.arm64_page_frame(),
+                        Arch::Amd64 => entry.page_frame(),
                     };
                     self.visit_table(next, level + 1, entry_base, start, end, visit)?
                 }
@@ -610,10 +607,9 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
                 residency: Residency::Mapped,
             }));
         }
-        let walked = if self.arm64 {
-            self.walk_arm64(va)?
-        } else {
-            self.walk_amd64(va)?
+        let walked = match self.arch {
+            Arch::Arm64 => self.walk_arm64(va)?,
+            Arch::Amd64 => self.walk_amd64(va)?,
         };
         match walked {
             Walked::Mapped(translation) => Ok(Some(translation)),
@@ -695,10 +691,9 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             Some(_) => None,
         }?;
         let pte = PageTableEntry(self.read::<u64>(prototype).ok()?);
-        let valid = if self.arm64 {
-            (pte.0 & 0b11 == 0b11).then(|| pte.arm64_page_frame())
-        } else {
-            pte.is_present().then(|| pte.page_frame())
+        let valid = match self.arch {
+            Arch::Arm64 => (pte.0 & 0b11 == 0b11).then(|| pte.arm64_page_frame()),
+            Arch::Amd64 => pte.is_present().then(|| pte.page_frame()),
         };
         let frame = valid.or_else(|| {
             pte.is_transition()

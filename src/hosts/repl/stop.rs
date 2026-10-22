@@ -391,7 +391,12 @@ fn print_stop_text(session: &Session, stop: &StopContext) {
             return;
         }
         StopDetail::Changes { stack } => {
-            print_changed_registers(&session.register_map, &stop.regs, stop.before.as_deref());
+            print_changed_registers(
+                &session.register_map,
+                session.target.arch(),
+                &stop.regs,
+                stop.before.as_deref(),
+            );
             print_disasm_lines(session, &stop.trace, stop.rip, COMPACT_DISASM_INSTRUCTIONS);
             if stack {
                 print_stacktrace(
@@ -416,6 +421,7 @@ fn print_stop_text(session: &Session, stop: &StopContext) {
     }
     print_registers(
         &session.register_map,
+        session.target.arch(),
         &stop.regs,
         stop.before.as_deref(),
         true,
@@ -466,9 +472,10 @@ fn stop_view(session: &Session, stop: &StopContext, tone: tern_sdk::ui::Tone) ->
             let changed = |name: &str| {
                 read(name).is_some_and(|value| changed(map, name, value, stop.before.as_deref()))
             };
-            let grid = native::frames::register_grid(&read, &changed);
+            let arch = session.target.arch();
+            let grid = native::frames::register_grid(&read, arch, &changed);
             // Folded by default, the section's head names what changed.
-            let names = native::frames::changed_registers(&read, &changed);
+            let names = native::frames::changed_registers(arch, &changed);
             let mut head = vec![native::span("registers", "")];
             if !names.is_empty() {
                 head.push(native::span(
