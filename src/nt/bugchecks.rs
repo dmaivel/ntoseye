@@ -240,6 +240,30 @@ pub fn bugcheck_trap_frame_on_stack(
     })
 }
 
+/// The fault a trap frame records: the instruction it interrupted, in the
+/// driver that contains it. `None` if the frame did not decode.
+pub fn fault_at_trap_frame(
+    debugger: &Target,
+    trace: &ThreadTraceContext,
+    trap: &BugcheckTrapFrame,
+) -> Option<BugcheckFault> {
+    let ip = trap.frame.as_ref()?.instruction_pointer();
+    (ip != 0).then(|| BugcheckFault {
+        ip,
+        symbol: format_symbol(debugger, trace, ip),
+        driver: driver_filename_for_address(debugger, trace, ip),
+    })
+}
+
+/// Whether the innermost trap on a bugcheck's stack (see
+/// [`bugcheck_trap_frame_on_stack`]) is the fault: an
+/// UNEXPECTED_KERNEL_MODE_TRAP is that trap (a double fault, say), so the
+/// instruction it interrupted is the fault. A minidump records the code as
+/// its alias, 0x1000007F.
+pub fn trap_on_stack_is_the_fault(code: u32) -> bool {
+    matches!(code, 0x0000_007f | 0x1000_007f)
+}
+
 /// Resolve parameter meanings that vary by bugcheck parameter values.
 ///
 /// [`BugcheckDescriptor::arguments`] stays a code-only, conservative fallback;
@@ -455,10 +479,6 @@ pub fn analyze_bugcheck(debugger: &Target, info: &BugcheckInfo) -> BugcheckAnaly
         .to_string();
     let description = descriptor.and_then(|d| d.description).map(str::to_string);
     let arg_descriptions = bugcheck_argument_descriptions(info);
-    let driver = info
-        .driver
-        .clone()
-        .or_else(|| site.as_ref().and_then(|(_, _, driver)| driver.clone()));
     let args = info
         .parameters
         .iter()
@@ -469,7 +489,7 @@ pub fn analyze_bugcheck(debugger: &Target, info: &BugcheckInfo) -> BugcheckAnaly
         })
         .collect();
     let fault = site.map(|(ip, symbol, driver)| BugcheckFault { ip, symbol, driver });
-    let trap_frames = bugcheck_trap_frame_address(info)
+    let trap_frames: Vec<BugcheckTrapFrame> = bugcheck_trap_frame_address(info)
         .map(|address| {
             let (frame, error) = match read_ktrap_frame(debugger, VirtAddr(address)) {
                 Ok(frame) => (Some(frame), None),
@@ -487,6 +507,18 @@ pub fn analyze_bugcheck(debugger: &Target, info: &BugcheckInfo) -> BugcheckAnaly
         })
         .into_iter()
         .collect();
+    // The parameters name the trap frame of the exception that caused the
+    // bugcheck (0x139's __fastfail): without a faulting instruction among
+    // them, the instruction it interrupted is the fault.
+    let fault = fault.or_else(|| {
+        trap_frames
+            .first()
+            .and_then(|trap| fault_at_trap_frame(debugger, &trace, trap))
+    });
+    let driver = info
+        .driver
+        .clone()
+        .or_else(|| fault.as_ref().and_then(|fault| fault.driver.clone()));
 
     BugcheckAnalysis {
         code: info.code,

@@ -69,6 +69,14 @@ impl Session {
             return Ok((outcome, RunPast::Kept));
         }
         self.require_steppable_vcpu()?;
+        // A walk that reaches the kernel's return to user mode ends here
+        // too, on the instruction it could not step, with this error.
+        if self.run_backend().debug_traps_reach_target() {
+            let rip = VirtAddr(self.current_rip());
+            if let Some(refusal) = self.target.kernel_transition_refusal(rip, "a single step") {
+                return Err(Error::DebugInfo(refusal));
+            }
+        }
         self.target.selected_frame = None;
         // Advancing the VM spends any stop `service_idle` parked, so drop it (the
         // other advance paths clear it via `resume`; a bare single-step doesn't).
@@ -652,6 +660,23 @@ impl Session {
             return Ok(plain(self));
         };
         let elsewhere = self.current_thread != vcpu;
+        // A step an interrupt came before can end on another vCPU, with the
+        // walked thread: switched out with the trap flag in its saved flags,
+        // it took the step's trap where it was switched back in. It is then
+        // at a successor, at no lower a stack than the floor, and done; were
+        // its successors planted instead, the run to them would step it off
+        // the one it is on, past it.
+        let completed_elsewhere = elsewhere
+            && nt_thread_on(&self.target, &self.current_thread) == Some(walked.ethread.0)
+            && successors.contains(&rip)
+            && self
+                .read_registers()
+                .ok()
+                .and_then(|registers| stack_pointer(&self.register_map, &registers))
+                .is_some_and(|sp| floor.is_none_or(|floor| sp >= floor));
+        if completed_elsewhere {
+            return Ok(WalkStep::At(rip));
+        }
         // NT makes the next thread current before it loads that thread's
         // stack, so in a context switch a step lands on a successor with
         // another thread current and the walked one still running. Once the

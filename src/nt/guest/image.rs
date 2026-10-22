@@ -10,11 +10,15 @@ use crate::{
     },
     nt::{
         layout::Types,
-        pe::{HeaderPage, PeImage, read_pe_header_page, read_pe_image, size_of_image},
+        pe::{
+            HeaderPage, PeImage, headers::decode_headers, read_pe_header_page, read_pe_image,
+            size_of_image,
+        },
         symbols::SymbolStore,
     },
 };
 use pelite::PeView;
+use std::ops::Range;
 use std::sync::{Arc, Mutex, PoisonError};
 use zerocopy::{FromBytes, IntoBytes};
 
@@ -133,6 +137,27 @@ impl Image {
 
     pub fn address_of(&self, rva: impl Into<u64>) -> VirtAddr {
         self.base_address + rva.into()
+    }
+
+    /// The addresses the section named `name` is mapped at, from the header
+    /// page read at symbol load, or else from the mapped image's own. `None`
+    /// when the image has no such section or its headers cannot be read.
+    pub fn section_range(&self, name: &str) -> Option<Range<VirtAddr>> {
+        let image;
+        let headers = match self.headers.as_deref() {
+            Some(headers) => headers.as_ref(),
+            None => {
+                image = self.image()?;
+                image.headers()
+            }
+        };
+        let section = decode_headers(headers)
+            .ok()?
+            .sections
+            .into_iter()
+            .find(|section| section.name == name)?;
+        let start = u64::from(section.virtual_address);
+        Some(self.address_of(start)..self.address_of(start + u64::from(section.virtual_size)))
     }
 
     pub fn memory(&self) -> AddressSpace<'_, Arc<PhysMem>> {

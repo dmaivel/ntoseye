@@ -19,6 +19,7 @@ use crate::nt::breakpoints::{BreakpointManager, SiteJournal, breakpoint_opcode};
 use crate::nt::bugchecks::plausible_bugcheck_code;
 use crate::nt::cpu_state;
 use crate::nt::dmp::{DmpBackend, DmpInfo};
+use crate::nt::target::hang::bugcheck_processor_from_freeze_states;
 use crate::session::exception_policy::ExceptionPolicyTable;
 
 use crate::base::types::VirtAddr;
@@ -62,6 +63,17 @@ fn read_processor_contexts(target: &Target, info: &DmpInfo, backend: &mut DmpBac
         cpu_state::read_amd64_prcb_contexts(target, processors, offset)
     };
     backend.set_processor_contexts(saved.contexts, saved.warnings);
+    // Without a header context to match, the processor that bugchecked is
+    // the one it did not freeze.
+    if backend.header_context_is_empty()
+        && let Some(index) = target
+            .ipi_frozen_states()
+            .ok()
+            .as_deref()
+            .and_then(bugcheck_processor_from_freeze_states)
+    {
+        backend.select_bugcheck_processor(index);
+    }
 }
 
 pub(super) fn prepare_backend_after_cleanup(

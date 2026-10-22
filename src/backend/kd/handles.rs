@@ -93,6 +93,9 @@ impl DebugBackend for KdBackendHandle {
     fn registers_are_context(&self) -> bool {
         true
     }
+    fn debug_traps_reach_target(&self) -> bool {
+        true
+    }
 
     fn revalidate_host_memory(&mut self, phys: &PhysMem) -> Result<()> {
         // Target-mediated memory is the target itself: there is no host

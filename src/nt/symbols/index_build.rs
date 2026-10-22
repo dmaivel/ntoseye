@@ -2,20 +2,25 @@
 //! streams under the PDB lock, then publishing the derived indexes.
 
 use super::{
-    AddressEntry, IndexedSymbol, ProcedureSpan, SourceChecksum, SourceLineEntry, SourceLocation,
-    SymbolIndex, SymbolIndexDiagnostic, SymbolRvas, SymbolStore, SymbolVisibility,
+    AddressEntry, IndexedSymbol, LoadedModule, ProcedureSpan, SourceChecksum, SourceLineEntry,
+    SourceLocation, SymbolIndex, SymbolIndexDiagnostic, SymbolRvas, SymbolStore, SymbolVisibility,
     source::recorded_checksum,
 };
 use crate::base::error::{Error, Result};
+use crate::base::types::Dtb;
+use crate::nt::guest::ModuleInfo;
 use crate::nt::layout::aggregate_key;
+use crate::nt::pe::ModuleExportInfo;
 use crate::nt::wpp::{MessageKey, TmfMessage};
+use dashmap::mapref::entry::Entry;
 use pdb2::{AddressMap, FallibleIterator, StringTable, TypeData, TypeIndex};
 use rayon::slice::ParallelSliceMut;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHasher};
 use std::{
     collections::HashMap,
+    hash::{Hash, Hasher},
     io::Cursor,
-    sync::{Arc, OnceLock},
+    sync::{Arc, OnceLock, atomic::Ordering},
 };
 
 /// What one PDB's symbol, line and module streams contribute to the symbol
@@ -306,6 +311,86 @@ impl SymbolStore {
     pub(super) fn publish_symbol_rvas(&self, guid: u128, rvas: SymbolRvas) {
         self.symbol_addresses.insert(guid, address_index(&rvas));
         self.symbol_rvas.insert(guid, rvas);
+    }
+
+    /// Index a module's export table as its symbols and register the module
+    /// in the module list: the fallback for a module whose PDB no symbol
+    /// source has — a vendor driver never published — which the Windows
+    /// debugger serves from the image the same way. Its frames then resolve
+    /// to `module!export+offset` instead of `module+offset`. A PDB indexed
+    /// later under the same identity replaces the export index.
+    pub fn index_module_exports(
+        &self,
+        dtb: Dtb,
+        module: &ModuleInfo,
+        guid: u128,
+        exports: &[ModuleExportInfo],
+    ) {
+        let module_key = Self::module_key(dtb, module.base_address);
+        match self.modules.entry(module_key) {
+            // Another image is registered there now: this load is stale.
+            Entry::Occupied(existing) if existing.get().guid != guid => return,
+            Entry::Occupied(_) => {}
+            Entry::Vacant(vacant) => {
+                vacant.insert(LoadedModule {
+                    name: module.name.clone(),
+                    short_name: module.short_name.clone(),
+                    guid,
+                    base_address: module.base_address,
+                    size: module.size,
+                    dtb,
+                });
+            }
+        }
+        // An indexed PDB is strictly more than the export table, and the
+        // same image's exports may be indexed already from another root.
+        if !self.symbol_rvas.contains_key(&guid) {
+            // An ordinal-only export has no name to index, and a forwarder
+            // no address of its own.
+            self.publish_public_names(
+                guid,
+                exports
+                    .iter()
+                    .filter_map(|export| Some((export.name.as_deref()?, export.rva?))),
+            );
+        }
+        self.load_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// The key a module's export symbols are indexed under when no PDB
+    /// identity is known for it: its image's name, timestamp and size, so
+    /// one image shares it across address spaces. Without a timestamp the
+    /// base address stands in, as two builds may share name and size. A
+    /// PDB GUID is random, so this collides with none.
+    pub fn image_exports_key(module: &ModuleInfo) -> u128 {
+        let mut hasher = FxHasher::default();
+        module.name.to_ascii_lowercase().hash(&mut hasher);
+        match module.time_date_stamp {
+            Some(stamp) => stamp.hash(&mut hasher),
+            None => module.base_address.0.hash(&mut hasher),
+        }
+        (u128::from(hasher.finish()) << 64) | u128::from(module.size)
+    }
+
+    /// Index `names` at their RVAs as public symbols of `guid`, for an image
+    /// whose names come from somewhere other than a PDB.
+    pub(super) fn publish_public_names<'a>(
+        &self,
+        guid: u128,
+        names: impl IntoIterator<Item = (&'a str, u32)>,
+    ) {
+        let mut rvas = SymbolRvas::default();
+        let mut index_names = Vec::new();
+        for (name, rva) in names {
+            index_names.push(name.to_string());
+            insert_symbol_rva(&mut rvas, name, rva, SymbolVisibility::Public, None);
+        }
+        // The index's names are sorted and deduped, as a PDB load leaves them.
+        index_names.sort_unstable();
+        index_names.dedup();
+        self.index
+            .insert(guid, SymbolIndex::from_names(index_names));
+        self.publish_symbol_rvas(guid, rvas);
     }
 }
 

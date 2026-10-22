@@ -29,7 +29,7 @@
 
 The line under the function names the features that change how the queues work: packed or split rings, the event index, which lets each side say when it wants to be signalled, and MSI-X interrupts.
 
-For the queues, `ntoseye` needs the driver's private PDB. The drivers of the virtio-win project share the VirtIO library, and its structures (`virtio_device`, `virtqueue_split`, `virtqueue_packed`) are in each driver's private PDB but not in a public one. The virtio-win ISO has the PDB next to each driver, for example `NetKVM/w11/amd64/netkvm.pdb` and `viostor/w11/amd64/viostor.pdb`, and your own build writes it next to the `.sys` file. Add that directory to the symbol path with `--sympath-append` at the start or {command}`.sympath+` in the REPL. The PDB must come from the same build as the driver that runs. See [Symbols and source](symbols.md).
+For the queues, `ntoseye` needs the driver's private PDB. The drivers of the virtio-win project share the VirtIO library, and its structures (`virtio_device`, `virtqueue_split`, `virtqueue_packed`) are in each driver's private PDB but not in a public one. The virtio-win ISO has the PDB next to each driver, for example `NetKVM/w11/amd64/netkvm.pdb` and `viostor/w11/amd64/viostor.pdb`, and your own build writes it next to the `.sys` file. Add the ISO's mount point, or your build's output directory, to the symbol path with `--sympath-append` at the start or {command}`.sympath+` in the REPL; ntoseye finds the PDB in its subdirectories. The PDB must come from the same build as the driver that runs. See [Symbols and source](symbols.md).
 
 `ntoseye` finds the device's `virtio_device` in the state the driver keeps for the device:
 

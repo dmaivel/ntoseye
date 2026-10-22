@@ -15,6 +15,27 @@ Keeping this file:
 
 ## Unreleased
 
+### Added
+
+- A module whose PDB no symbol source has — a vendor driver never published — falls back to the export table of its image in the dump, as the Windows debugger does, so `k`, `ln` and `!analyze` name its functions (`myfault!nmf_fault_irql+0x35`) where they showed `module+offset`, and a deferred breakpoint on an export binds. So does a module whose image names no PDB at all (no CodeView record), once fetching the image does not name one either. A PDB acquired later (a source added, the process attached again) replaces the export symbols.
+
+### Fixed
+
+- Modules are named after their image file, as WinDbg's `lm` names them, not the loader's alias for it: `kd.dll` rather than `kdcom.dll`, `mcupdate_GenuineIntel.dll` rather than `mcupdate.dll`, in a WOW64 process's 32-bit module list too. Their `module!` prefixes follow (`kd!`, `mcupdate_genuineintel!`).
+
+## v0.51.0 (2026-10-19)
+
+### Added
+
+- A local directory on the symbol path (`--sympath-append`, `.sympath+`) supplies the PDBs in its subdirectories too, eight levels down, so a mounted virtio-win ISO's driver PDBs (`viostor/w11/amd64/viostor.pdb`) load without copying them out. ntoseye reads each directory once; `.reload` reads it again for PDBs put there since.
+
+### Fixed
+
+- `!analyze` names the faulting instruction and its driver for a KERNEL_SECURITY_CHECK_FAILURE (0x139) and an UNEXPECTED_KERNEL_MODE_TRAP (0x7F, or 0x1000007F in a minidump), from the trap frame the parameters name or the stack crosses, and buckets the crash and names the culprit by that driver. It named no fault for them, and bucketed them on the instruction the processor stopped at.
+- A kernel dump that QEMU wrote (`dump-guest-memory -w`, which libvirt runs when a guest crashes) now opens on the processor that bugchecked, so `!analyze`, `k` and the registers show the crash. ntoseye opened such a dump on processor 0, which on a multiprocessor guest was usually a processor that the bugcheck froze in `nt!KiFreezeTargetExecution`. `!analyze` starts that processor's stack at `nt!KeBugCheckEx`, as for a dump Windows wrote, rather than in the bugcheck callback (pvpanic's) that QEMU's dump was taken in, and no longer takes that callback for the current instruction when it buckets the crash or names a culprit.
+
+## v0.50.0 (2026-10-16)
+
 The Python SDK is now generated from the same definitions as the REPL: each command's SDK method takes the same arguments, runs the same checks, and returns the record the command prints, with the command's help as its docstring. Results are typed records that behave as values, and a stop is one `Stop` hierarchy that `match` and `isinstance()` narrow to the kind of stop and its own parts. Scripts written for v0.49 need changes; the [Python SDK guide](https://ntoseye.com/scripting/sdk/) shows the current API, and the [SDK reference](https://ntoseye.com/reference/sdk/) lists every class.
 
 ### Added
@@ -63,6 +84,9 @@ The Python SDK is now generated from the same definitions as the REPL: each comm
 
 ### Fixed
 
+- Over KD, ntoseye refuses, with the reason, what crashed Windows with bugcheck `0x7F` (`UNEXPECTED_KERNEL_MODE_TRAP`): a single step or breakpoint in the code where Windows switches between kernel and user mode (ntoskrnl's `KVASCODE` section, such as `nt!KiKernelSysretExit`), and a breakpoint, `ba e1` included, in the code Windows runs to dispatch a debug trap before it reports the trap to the debugger (such as `nt!KiDispatchException` and `nt!RtlpValidateContextFlags2`). A step that reaches the switch, such as `pt` past a system call's return, stops before it with the same error, and a `wt` or SDK walk whose thread an interrupt delayed into the dispatch code ends there instead of planting a breakpoint in it.
+- Over KD, `wt`, `pt` and the SDK's `trace_calls()` and `step(until=)` keep to their thread when a step it took an interrupt before ends on another processor. They lost it there, ran on, and could trace past the function's return, into the next system call or the switch to user mode.
+- Over KD, a breakpoint that another processor hit just as ntoseye removed it no longer stops the target as an unexplained breakpoint exception: the processor goes on with the instruction, which a step or `wt` that was following a thread reported as `the target stopped on an exception while the traced thread was switched out`.
 - `!pfn <value> -a` reads the physical address, as `-a` asks; a `-a` after the value was ignored.
 - The SDK's `Memory.disassemble()` returns the instructions that are readable when the rest of the window is not, and names their targets as `u` does, instead of raising; a count outside 1-4096 raises for `disassemble()` and `disassemble_back()` alike.
 - On a user-mode minidump, `Process.protection()` reads the dump's memory information instead of failing.

@@ -8,11 +8,12 @@ use crate::backend::dbg_backend::{
     processor_index_from_backend_thread_id,
 };
 use crate::base::error::Result;
+use crate::base::memory::MemoryOps;
 use crate::base::types::{Arch, VirtAddr};
-use crate::nt::breakpoints::{BreakpointInfo, BreakpointManager};
+use crate::nt::breakpoints::{BreakpointInfo, BreakpointManager, breakpoint_opcode};
 use crate::nt::guest::{ModuleInfo, ProcessInfo};
 use crate::nt::target::{BreakpointStop, HYPERVISOR_CONTEXT, ThreadInfo};
-use crate::nt::unwind::{UNKNOWN_CONTEXT, try_format_symbol_at};
+use crate::nt::unwind::{UNKNOWN_CONTEXT, thread_root, try_format_symbol_at};
 use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
     windows_thread_on_backend_thread,
@@ -536,10 +537,39 @@ impl Session {
                 condition_error,
             },
             BreakpointStopAction::Resumed => StopResolution::Resumed,
+            BreakpointStopAction::NotBreakpoint
+                if self.is_stale_breakpoint_hit(&event, rip, cr3) =>
+            {
+                self.continue_backend(ContinueDisposition::Handled)?;
+                StopResolution::Resumed
+            }
             BreakpointStopAction::NotBreakpoint => StopResolution::Stopped { event, rip },
         };
         self.record_visible_stop(&resolution);
         Ok(resolution)
+    }
+
+    /// Whether `event` is a breakpoint trap on a site that was lifted while
+    /// the target ran: another processor executed the `int3` just before the
+    /// debugger took it out, and the kernel, whose breakpoint table no longer
+    /// has the site, reports the trap as an exception at `rip`, where the
+    /// displaced instruction is back. Resumed, the processor runs that
+    /// instruction; a hard-coded `int3` (a break-in) is still there to tell
+    /// it apart. Only where the kernel dispatches the traps (KD): a stub's
+    /// breakpoints never reach it.
+    fn is_stale_breakpoint_hit(&self, event: &StopEvent, rip: u64, cr3: u64) -> bool {
+        if event.exception_code != Some(STATUS_BREAKPOINT)
+            || !self.backend.debug_traps_reach_target()
+        {
+            return false;
+        }
+        let opcode = breakpoint_opcode(self.target.arch());
+        let mut bytes = [0u8; 4];
+        let bytes = &mut bytes[..opcode.len()];
+        self.target
+            .address_space(thread_root(&self.target, cr3))
+            .read_bytes(VirtAddr(rip), bytes)
+            .is_ok_and(|()| bytes != opcode)
     }
 
     /// Block until the backend produces a meaningful stop, routing every raw

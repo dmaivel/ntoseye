@@ -454,11 +454,23 @@ jobs:
         id: crates-auth
         uses: rust-lang/crates-io-auth-action@v1
       - name: Publish crates
-        run: |
-          cargo publish --locked --no-verify -p ntoseye-macros
-          cargo publish --locked --no-verify -p ntoseye
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+        # A crate whose version crates.io already has is skipped, so a
+        # release whose macros were published by hand (a crate's first
+        # version cannot come from trusted publishing), or a re-run after
+        # one crate was published, publishes only what is missing.
+        run: |
+          version="${RELEASE_TAG#v}"
+          for crate in ntoseye-macros ntoseye; do
+            status="$(curl -s -o /dev/null -w '%{http_code}' -A 'ntoseye release workflow' "https://crates.io/api/v1/crates/$crate/$version")"
+            if [[ "$status" == 200 ]]; then
+              echo "$crate $version is already on crates.io; skipping"
+              continue
+            fi
+            cargo publish --locked --no-verify -p "$crate"
+          done
 
   publish-python:
     needs:

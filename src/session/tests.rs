@@ -117,6 +117,12 @@ pub struct MockBackend {
     threads: Arc<Mutex<HashMap<u16, VirtAddr>>>,
     /// Where single steps end, before stepping one byte on.
     step_landings: VecDeque<Landing>,
+    /// The vCPU, and its processor, that reports the trap of a step that
+    /// lands on `step_landings`, which then runs the landing's thread; by
+    /// default the stepped one, processor 0.
+    step_reported_by: Option<(&'static str, u16)>,
+    /// The vCPU that reported the last step, while it is not processor 0.
+    step_reporter: Option<&'static str>,
     /// Where runs of every vCPU stop on a breakpoint, before `released_to`.
     schedule: VecDeque<Landing>,
     /// Where runs of the lone vCPU stop on a breakpoint, before `landings`.
@@ -188,6 +194,8 @@ impl Default for MockBackend {
             one_vcpu: false,
             threads: Arc::new(Mutex::new(HashMap::new())),
             step_landings: VecDeque::new(),
+            step_reported_by: None,
+            step_reporter: None,
             schedule: VecDeque::new(),
             alone_schedule: VecDeque::new(),
             parked_vcpu: None,
@@ -489,13 +497,22 @@ impl DebugBackend for MockBackend {
             !self.single_step_unsafe,
             "single-stepped where it is unsafe"
         );
+        let mut event = single_step_event();
+        self.step_reporter = None;
         if let Some(landing) = self.step_landings.pop_front() {
             self.land(landing);
+            if let Some((vcpu, processor)) = self.step_reported_by {
+                self.threads
+                    .lock()
+                    .insert(processor, VirtAddr(landing.ethread));
+                event.thread_id = Some(vcpu.into());
+                self.step_reporter = Some(vcpu);
+            }
         } else {
             let rip = self.get("rip");
             self.set("rip", rip + 1);
         }
-        self.interrupt_events.push_back(single_step_event());
+        self.interrupt_events.push_back(event);
         Ok(())
     }
     fn interrupt(&mut self) -> Result<StopEvent> {
@@ -580,7 +597,7 @@ impl DebugBackend for MockBackend {
     }
     fn stopped_thread_id(&mut self) -> Result<String> {
         if self.one_vcpu {
-            Ok("p01.01".to_string())
+            Ok(self.step_reporter.unwrap_or("p01.01").to_string())
         } else {
             Err(Error::NotSupported)
         }
@@ -2193,6 +2210,44 @@ fn a_walk_step_that_reached_its_successor_on_another_stack_is_followed() {
         .unwrap();
     assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1002 }));
     assert_eq!(continues.load(Ordering::Relaxed), 1);
+}
+
+/// A step whose trap the walked thread took on another vCPU, which it was
+/// switched out to with the trap flag set, completed: it is at the next
+/// instruction there, and the walk goes on from it. Followed instead, the
+/// run to the next instruction would step the thread off it, and wait for
+/// it to get there again.
+#[test]
+fn a_walk_step_its_thread_completed_on_another_vcpu_is_not_followed() {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        one_vcpu: true,
+        step_landings: VecDeque::from([Landing {
+            rip: 0x1001,
+            rsp: 0x2000,
+            ethread: WALKED,
+        }]),
+        step_reported_by: Some(("p01.02", 1)),
+        ..MockBackend::default()
+    };
+    backend.land(Landing {
+        rip: 0x1000,
+        rsp: 0x2000,
+        ethread: WALKED,
+    });
+    let continues = Arc::clone(&backend.continues);
+    let mut session = session_running_code(&[0x90u8; 0x40], backend);
+
+    let outcome = session
+        .step_until(
+            StepMode::Into,
+            16,
+            &Cancel::within(Duration::from_millis(300)),
+            |ip, _| ip == 0x1002,
+        )
+        .unwrap();
+    assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1002 }));
+    assert_eq!(continues.load(Ordering::Relaxed), 0);
 }
 
 /// A hit stepped over where single steps are unsafe runs its vCPU alone

@@ -5,7 +5,7 @@ use crate::{
     nt::{
         guest::ModuleInfo,
         layout::{EnumDef, ParsedType, TypeInfo},
-        pe::PeImage,
+        pe::{ModuleExportInfo, PeImage},
         wpp::{MessageKey, TmfMessage},
     },
 };
@@ -14,7 +14,7 @@ use memmap2::Mmap;
 use ntoseye_macros::record;
 use pdb2::TypeIndex;
 use rustc_hash::FxHashMap;
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 use spin::{Mutex, RwLock};
 use std::{
     collections::{HashMap, HashSet},
@@ -313,7 +313,8 @@ pub struct SymbolStore {
 pub enum SymbolSource {
     /// ntoseye's managed on-disk symbol cache.
     Cache,
-    /// A directory containing either bare PDBs or a conventional symbol store.
+    /// A directory containing bare PDBs, a conventional symbol store, or
+    /// PDBs in subdirectories.
     LocalDirectory(PathBuf),
     /// An HTTP(S) symbol server root.
     Http(String),
@@ -888,6 +889,10 @@ pub struct ModuleSymbolLoad {
     /// Why the PDB could not be rebuilt from guest memory, when that was
     /// tried and failed.
     pub memory_recovery: Option<String>,
+    /// The module's named exports, read while guest memory was reachable
+    /// from the loading thread: the symbol fallback for when no source has
+    /// the PDB (see [`SymbolStore::index_module_exports`]).
+    pub exports: Option<Vec<ModuleExportInfo>>,
 }
 
 impl ModuleSymbolLoad {
@@ -905,6 +910,7 @@ impl ModuleSymbolLoad {
             module,
             dtb,
             memory_recovery: None,
+            exports: None,
         }
     }
 
@@ -1017,9 +1023,11 @@ impl SymbolStore {
         self.unavailable.lock().get(&job.path).cloned()
     }
 
-    /// Let every file that was unavailable be fetched again.
+    /// Let every file that was unavailable be fetched again, and the local
+    /// directories be read again for it.
     pub fn forget_unavailable(&self) {
         self.unavailable.lock().clear();
+        forget_nested_pdbs();
     }
 
     /// See [`SymbolStore::load_generation`] field docs.
@@ -1184,25 +1192,9 @@ impl SymbolStore {
     ) {
         if !self.symbol_rvas.contains_key(&guid) {
             self.symbol_extents.insert(guid, extents);
-            self.index.insert(
+            self.publish_public_names(
                 guid,
-                SymbolIndex::from_names(symbols.iter().map(|(name, _)| name.clone()).collect()),
-            );
-            self.publish_symbol_rvas(
-                guid,
-                symbols
-                    .iter()
-                    .map(|(name, rva)| {
-                        (
-                            Arc::from(name.as_str()),
-                            smallvec![IndexedSymbol {
-                                rva: *rva,
-                                visibility: SymbolVisibility::Public,
-                                compiland: None,
-                            }],
-                        )
-                    })
-                    .collect(),
+                symbols.iter().map(|(name, rva)| (name.as_str(), *rva)),
             );
         }
         self.modules.insert(
@@ -1280,30 +1272,11 @@ impl SymbolStore {
                     .collect(),
             ),
         );
-        self.index.insert(
-            guid,
-            sorted(symbols.iter().map(|(name, _)| name.to_string()).collect()),
-        );
         for type_info in types {
             self.type_cache
                 .insert((guid, type_info.name.clone()), Some(Arc::new(type_info)));
         }
-        self.publish_symbol_rvas(
-            guid,
-            symbols
-                .iter()
-                .map(|(name, rva)| {
-                    (
-                        Arc::from(*name),
-                        smallvec![IndexedSymbol {
-                            rva: *rva,
-                            visibility: SymbolVisibility::Public,
-                            compiland: None,
-                        }],
-                    )
-                })
-                .collect(),
-        );
+        self.publish_public_names(guid, symbols.iter().copied());
         // Symbols became available: what a real load reports through the
         // generation counter.
         self.load_generation.fetch_add(1, Ordering::AcqRel);
@@ -1674,6 +1647,7 @@ mod source;
 mod types;
 
 use cache::{ModuleIdentities, symbols_directory};
+use download::forget_nested_pdbs;
 pub use index::SymbolIndex;
 pub use inline::ProcedureInlines;
 

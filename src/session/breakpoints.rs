@@ -535,6 +535,12 @@ impl Session {
             None => config,
         };
         let (breakpoints, backend, target) = self.breakpoint_sites();
+        if access == HwBreakpointAccess::Execute
+            && backend.debug_traps_reach_target()
+            && let Some(refusal) = target.breakpoint_site_refusal(addr)
+        {
+            return Err(Error::Breakpoint(refusal));
+        }
         breakpoints.add_hardware_configured(backend, target, addr, access, len, symbol, config)
     }
 

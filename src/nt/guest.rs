@@ -12,7 +12,8 @@ use crate::{
 };
 use ntoseye_macros::record;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::AtomicBool};
+use std::ops::Range;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, atomic::AtomicBool};
 use vad::{MissingOffset, VadTreeOffsets};
 
 mod discovery;
@@ -236,6 +237,14 @@ pub struct ModuleSymbolLoadReport {
 
 pub struct Guest {
     pub ntoskrnl: Image,
+    /// ntoskrnl's `KVASCODE` section (see [`Self::kernel_transition_code`]),
+    /// looked up when first asked for: only a debugger whose traps reach
+    /// Windows asks, and a kernel whose headers were not read at symbol
+    /// load costs a read.
+    kernel_transition_code: OnceLock<Option<Range<VirtAddr>>>,
+    /// The code a trap runs before the kernel reports it to the debugger,
+    /// found once per boot (see [`Self::trap_dispatch_code`]).
+    trap_dispatch_code: OnceLock<Vec<Range<VirtAddr>>>,
     memo: Mutex<HaltMemo>,
     secure_kernel: Mutex<Option<Arc<SecureKernel>>>,
     /// Whether saved VTL state already looked for the secure kernel, which
@@ -336,6 +345,8 @@ impl Guest {
             ntoskrnl.phys.set_pte_self_map(pte_base);
         }
         Self {
+            kernel_transition_code: OnceLock::new(),
+            trap_dispatch_code: OnceLock::new(),
             ntoskrnl,
             memo: Mutex::new(HaltMemo::default()),
             secure_kernel: Mutex::new(None),
@@ -349,6 +360,33 @@ impl Guest {
             processor_vps: Mutex::new(None),
             vp_register_layouts: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// ntoskrnl's `KVASCODE` section: the code that switches between user
+    /// and kernel mode, the system-call entry and the exits back to user
+    /// mode (`KiSystemCall64Shadow`, `KiKernelSysretExit`, `KiKernelExit`),
+    /// which kernel VA shadowing maps in the user page tables too. Its
+    /// exits use the stack pointer as a scratch register and load the user
+    /// CR3 before they leave, so a debug exception taken in between finds
+    /// no usable kernel stack: Windows bugchecks with
+    /// `UNEXPECTED_KERNEL_MODE_TRAP` (a double fault) in
+    /// `KiDebugTrapOrFault`. `None` when the kernel has no such section
+    /// (ARM64) or its headers cannot be read.
+    pub fn kernel_transition_code(&self) -> Option<&Range<VirtAddr>> {
+        self.kernel_transition_code
+            .get_or_init(|| self.ntoskrnl.section_range("KVASCODE"))
+            .as_ref()
+    }
+
+    /// The code a trap runs through before the kernel reports it to the
+    /// debugger, as sorted, disjoint ranges: `find` finds it the first
+    /// time, from the kernel's code and symbols, which only the target
+    /// resolves.
+    pub fn trap_dispatch_code(
+        &self,
+        find: impl FnOnce() -> Vec<Range<VirtAddr>>,
+    ) -> &[Range<VirtAddr>] {
+        self.trap_dispatch_code.get_or_init(find)
     }
 
     /// Where the VPs of the hypervisor image at `base` keep their saved

@@ -799,6 +799,15 @@ pub trait DebugBackend {
         false
     }
 
+    /// Whether Windows' own exception handlers take the debug exceptions
+    /// this backend's single steps and breakpoints raise: KD sets the trap
+    /// flag and plants `int3` through the kernel, which dispatches each trap
+    /// to its debugger. A hypervisor's stub (GDB) steps and breaks below
+    /// the guest, which never sees the exception.
+    fn debug_traps_reach_target(&self) -> bool {
+        false
+    }
+
     /// Resume only the selected thread, with every other one held.
     fn continue_current_thread(&mut self) -> Result<()> {
         Err(Error::NotSupported)

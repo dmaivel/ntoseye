@@ -28,6 +28,8 @@ To add the directory that contains the PDB, use {command}`.sympath+`. The `+` ke
 
 To have the directory in the path from the start, for example a driver's build output, give it with `--sympath-append <directory>` instead. You can give `--sympath-append` more than once.
 
+In a local directory, ntoseye looks for the PDB at the root, then in symbol-store layout, then in any subdirectory up to eight levels down, so the root of a tree such as the virtio-win ISO, which keeps each driver's PDB in `<driver>/<Windows version>/<architecture>/`, is enough. It does not follow a symbolic link to a directory there. It reads each directory once; after you put PDBs in it, run {command}`.reload`.
+
 {command}`.srcpath` sets the host directory that contains the source tree:
 
 ```text

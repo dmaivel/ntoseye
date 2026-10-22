@@ -10,12 +10,13 @@ use crate::base::output;
 use dashmap::DashMap;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use spin::Mutex;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::File,
     path::{Path, PathBuf},
     sync::{
-        Arc, LazyLock,
+        Arc, LazyLock, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -214,10 +215,81 @@ pub(super) fn local_source_candidates(
     server_name: &str,
     identity: PdbIdentity,
 ) -> Vec<PathBuf> {
-    vec![
-        root.join(server_name),
+    let bare = root.join(server_name);
+    let mut candidates = vec![
+        bare.clone(),
         store_path(root, server_name, &identity.symbol_store_key()),
-    ]
+    ];
+    // Then every PDB of that name further down, as a virtio-win ISO keeps
+    // them (`viostor/w11/amd64/viostor.pdb`), except the other builds that
+    // the symbol-store layout keeps under the bare name.
+    candidates.extend(
+        nested_pdbs(root, server_name)
+            .into_iter()
+            .filter(|path| !path.starts_with(&bare)),
+    );
+    candidates
+}
+
+/// How many directory levels [`index_nested_pdbs`] reads under a local
+/// directory on the symbol path.
+const NESTED_PDB_DEPTH: usize = 8;
+
+/// The PDB files under a local directory on the symbol path, by lowercased
+/// file name.
+type NestedPdbs = HashMap<String, Vec<PathBuf>>;
+
+/// Each local directory's [`NestedPdbs`], indexed on the first lookup there
+/// and kept until [`forget_nested_pdbs`]: the modules of a kernel look up
+/// their PDBs together, and a walk for each would read the whole tree as
+/// many times.
+static NESTED_PDBS: LazyLock<Mutex<HashMap<PathBuf, Arc<OnceLock<NestedPdbs>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Index each local directory again on its next lookup, to find the PDBs
+/// put there since.
+pub fn forget_nested_pdbs() {
+    NESTED_PDBS.lock().clear();
+}
+
+/// The PDB files named `name` (in any case) under `root`.
+fn nested_pdbs(root: &Path, name: &str) -> Vec<PathBuf> {
+    // Lookups in other directories go on while this one is indexed.
+    let index = Arc::clone(NESTED_PDBS.lock().entry(root.to_path_buf()).or_default());
+    index
+        .get_or_init(|| index_nested_pdbs(root))
+        .get(&name.to_ascii_lowercase())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Walk `root` for PDB files, [`NESTED_PDB_DEPTH`] levels down. A symbolic
+/// link to a directory is not followed: it can lead back up the tree.
+fn index_nested_pdbs(root: &Path) -> NestedPdbs {
+    let mut pdbs = NestedPdbs::new();
+    let mut directories = vec![(root.to_path_buf(), 1)];
+    while let Some((directory, depth)) = directories.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                if depth < NESTED_PDB_DEPTH {
+                    directories.push((path, depth + 1));
+                }
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("pdb"))
+                && let Some(name) = entry.file_name().to_str()
+            {
+                pdbs.entry(name.to_ascii_lowercase())
+                    .or_default()
+                    .push(path);
+            }
+        }
+    }
+    pdbs
 }
 
 /// Copy `source` to `destination` in the cache, through a temporary file
