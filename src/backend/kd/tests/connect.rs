@@ -16,12 +16,9 @@ use crate::backend::kd::registers::ARM64_WINDBG_TTBR1_EL1;
 #[test]
 fn explicit_kdnet_handshake_timeout_is_used_for_the_initial_wait() {
     let mut progress = Vec::new();
-    let error = KdBackend::connect_net_with_handshake_timeout(
-        "127.0.0.1:0",
-        "1.2.3.4",
-        Some(1),
-        &mut |line| progress.push(line.to_string()),
-    )
+    let error = KdBackend::connect_net("127.0.0.1:0", "1.2.3.4", Some(1), &mut |line| {
+        progress.push(line.to_string())
+    })
     .err()
     .unwrap();
     assert!(progress.iter().any(|line| line.ends_with("(timeout 1s)")));
@@ -32,11 +29,11 @@ fn explicit_kdnet_handshake_timeout_is_used_for_the_initial_wait() {
 fn kd_connections_reject_invalid_handshake_timeouts_before_opening_a_transport() {
     for seconds in [0, u64::MAX] {
         assert!(matches!(
-            KdBackend::connect_with_handshake_timeout("", Some(seconds), &mut |_| {}),
+            KdBackend::connect("", Some(seconds), &mut |_| {}),
             Err(Error::InvalidArgument(_))
         ));
         assert!(matches!(
-            KdBackend::connect_net_with_handshake_timeout("", "", Some(seconds), &mut |_| {}),
+            KdBackend::connect_net("", "", Some(seconds), &mut |_| {}),
             Err(Error::InvalidArgument(_))
         ));
     }

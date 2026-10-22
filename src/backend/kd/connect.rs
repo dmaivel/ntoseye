@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::backend::dbg_backend::DebugLog;
 use crate::backend::debugger_data::{DebuggerDataCandidate, MetadataSource};
@@ -58,14 +59,10 @@ pub(super) fn normalize_kernel_dtb(arch: Arch, register_value: u64) -> Dtb {
 impl KdBackend {
     /// Connect to a KDCOM serial pipe and stop at the initial state-change.
     /// Connection progress (the wait for a target can run for a minute) is
-    /// reported one line at a time through `progress`.
-    pub fn connect(socket_path: &str, progress: &mut dyn FnMut(&str)) -> Result<Self> {
-        Self::connect_with_handshake_timeout(socket_path, None, progress)
-    }
-
-    /// Connect over serial with an initial handshake timeout in positive integer
-    /// seconds. `None` uses `NTOSEYE_KD_TIMEOUT`, or 8 seconds when it is unset.
-    pub fn connect_with_handshake_timeout(
+    /// reported one line at a time through `progress`. `timeout` is the wait
+    /// for the initial handshake in positive seconds; `None` uses
+    /// `NTOSEYE_KD_TIMEOUT`, or 8 seconds when it is unset.
+    pub fn connect(
         socket_path: &str,
         timeout: Option<u64>,
         progress: &mut dyn FnMut(&str),
@@ -83,18 +80,9 @@ impl KdBackend {
         )
     }
 
-    /// Listen for a KDNET target and stop at the initial state-change.
+    /// Listen for a KDNET target and stop at the initial state-change, with
+    /// `timeout` as [`KdBackend::connect`] takes it.
     pub fn connect_net(
-        listen_addr: &str,
-        key: &str,
-        progress: &mut dyn FnMut(&str),
-    ) -> Result<Self> {
-        Self::connect_net_with_handshake_timeout(listen_addr, key, None, progress)
-    }
-
-    /// Listen for a KDNET target with an initial handshake timeout in positive
-    /// integer seconds. `None` uses `NTOSEYE_KD_TIMEOUT`, or 8 seconds when unset.
-    pub fn connect_net_with_handshake_timeout(
         listen_addr: &str,
         key: &str,
         timeout: Option<u64>,
@@ -116,7 +104,7 @@ impl KdBackend {
         transport: KdTransport,
         waiting_message: &str,
         backend_name: &'static str,
-        timeout: Option<std::time::Duration>,
+        timeout: Option<Duration>,
         progress: &mut dyn FnMut(&str),
     ) -> Result<Self> {
         let network_generation = transport.network_session_generation();

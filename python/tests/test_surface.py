@@ -61,7 +61,9 @@ def test_attach_rejects_kd_handshake_timeout_for_dump(tmp_path: Path) -> None:
 
 
 def test_attach_positive_kd_handshake_timeout_reaches_connection(tmp_path: Path) -> None:
-    with pytest.raises(ntoseye.NtoseyeError, match="KD serial socket .* does not exist"):
+    # macOS refuses the long temporary path before looking for the socket,
+    # so match only that the attach got as far as connecting.
+    with pytest.raises(ntoseye.NtoseyeError, match="KD serial socket"):
         ntoseye.attach("kd", str(tmp_path / "missing.sock"), None, "auto", kd_handshake_timeout=1)
 
 

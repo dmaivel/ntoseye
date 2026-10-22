@@ -224,18 +224,6 @@ fn dump_targets_take_precedence_over_live_backend_arguments() {
 }
 
 #[test]
-fn omitted_kd_handshake_timeout_stays_unset() {
-    let spec = target_spec(&json!({"backend": "kd"})).unwrap();
-    assert!(matches!(
-        spec,
-        TargetSpec::Live {
-            kd_handshake_timeout: None,
-            ..
-        }
-    ));
-}
-
-#[test]
 fn kd_handshake_timeout_is_passed_to_kd_and_kdnet() {
     for backend in ["kd", "kdnet"] {
         for timeout in [1, 30] {

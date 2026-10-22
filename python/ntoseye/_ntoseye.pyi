@@ -23111,7 +23111,7 @@ def _cli_main() -> int:
     the full session, and custom commands get the GIL again while they run.
     """
 
-def attach(backend: Literal["kd", "kdnet", "gdb", "memory", "dmp"] = ..., connect: str |None = None, key: str |None = None, memory_source: Literal["auto", "host", "kd"] = ..., *, kd_handshake_timeout: int |None = None) -> Debugger:
+def attach(backend: Literal["kd", "kdnet", "gdb", "memory", "dmp"] = ..., connect: str |None = None, key: str |None = None, memory_source: Literal["auto", "host", "kd"] = ..., *, kd_handshake_timeout: "int | None" = None) -> Debugger:
     """
     Attach to a guest and return a `Debugger`.
     

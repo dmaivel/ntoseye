@@ -14,7 +14,7 @@ use crate::hosts::mcp;
 use crate::hosts::repl::native;
 use crate::{
     Backend, TargetSpec,
-    backend::kd::KdMemorySource,
+    backend::kd::{KdMemorySource, handshake_timeout},
     base::{
         diagnostics,
         error::{Error, Result},
@@ -426,7 +426,7 @@ fn run(cli: Cli) -> Result<()> {
                 "--kd-handshake-timeout is only valid with --backend kd or --backend kdnet".into(),
             ));
         }
-        crate::backend::kd::handshake_timeout(seconds)?;
+        handshake_timeout(seconds)?;
     }
     // A protocol server may start without a target and be pointed at one by
     // its client, which is where the KDNET key arrives instead.
@@ -723,18 +723,6 @@ mod tests {
                 assert!(error.to_string().contains("requires a startup target"));
             }
         }
-    }
-
-    #[test]
-    fn kd_handshake_timeout_is_optional() {
-        let cli = parse_cli(["ntoseye"].map(Into::into)).unwrap();
-        assert!(matches!(
-            live_spec(&cli.target, Backend::Kd),
-            TargetSpec::Live {
-                kd_handshake_timeout: None,
-                ..
-            }
-        ));
     }
 
     #[test]

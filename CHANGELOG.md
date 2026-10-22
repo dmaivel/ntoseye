@@ -17,6 +17,8 @@ Keeping this file:
 
 ### Added
 
+- `--kd-handshake-timeout <seconds>` sets how long the `kd` and `kdnet` backends wait for the target's first answer, as `NTOSEYE_KD_TIMEOUT` does, and wins over it; the default is still 8 seconds. MCP's `open` takes it as `kd_handshake_timeout`, DAP's attach arguments as `kdHandshakeTimeout`, and the SDK as `ntoseye.attach(kd_handshake_timeout=...)`.
+- The `gdb` backend sets as many hardware breakpoints (`ba`) as the GDB stub accepts, no longer four, so QEMU running with TCG, which emulates them, takes any number. Under KVM the processor still has four debug registers, and a fifth `ba` says the stub refused it.
 - A module whose PDB no symbol source has — a vendor driver never published — falls back to the export table of its image in the dump, as the Windows debugger does, so `k`, `ln` and `!analyze` name its functions (`myfault!nmf_fault_irql+0x35`) where they showed `module+offset`, and a deferred breakpoint on an export binds. So does a module whose image names no PDB at all (no CodeView record), once fetching the image does not name one either. A PDB acquired later (a source added, the process attached again) replaces the export symbols.
 
 ### Fixed
@@ -40,7 +42,6 @@ The Python SDK is now generated from the same definitions as the REPL: each comm
 
 ### Added
 
-- Set the initial KD/KDNET handshake wait with `--kd-handshake-timeout <seconds>` or `ntoseye.attach(kd_handshake_timeout=...)`, without setting an environment variable. Explicit values override `NTOSEYE_KD_TIMEOUT`; the default remains 8 seconds.
 - SDK methods for commands that had none: `dbg.inspect.hang()`, `decode_bugcheck()`, `blackbox_bsd()` and the other `blackbox_*()` reports, `session_processes()`, `vtop()`, `set_global_flags()`, `virtio_driver()`, `vring_raw()`, `etw_save()`, `etw_crash_save()` and `etw_crash_session()`; `Memory.pte()`; `Process.inspect()`, `decode_peb()` and `loader_modules()`; `Thread.decode_teb()`; `UserDump.address_report()`, what `!address` shows on a user-mode minidump; and `Breakpoints.list()` and `commands()`, what `bl` and `.bpcmds` show.
 - Every SDK handle (`Process`, `Thread`, `Module`, `Cpu`, `Heap`, `Driver`, `Device`, `Breakpoint`, `Trustlet`, `UserThread`, and the hypervisor's) has its record as `info`, each of the record's fields as a property, `to_dict()`, and `==` and `hash` by the object it names and the target it was read from: after the target reloads, an old handle is not equal to a new one for the same object. A process, thread or module handle goes stale when the target reloads, not when its object exits.
 - An SDK argument that is a kernel address also takes a debugger expression (`"nt!KiSystemCall64+0x10"`) or the handle of the object there: `dbg.memory.read(proc, 16)` reads the `EPROCESS`, and `dbg.types["nt!_ETHREAD"].at(thread)` makes a cursor on a thread's `ETHREAD`. The handle must come from the same debugger, `dbg.run(address=...)` and `dbg.step(until=...)` included.

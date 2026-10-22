@@ -185,7 +185,9 @@ pub fn parse_kd_initial_timeout(value: Option<&str>) -> Result<Duration> {
     Ok(Duration::from_secs(seconds))
 }
 
-pub(crate) fn handshake_timeout(seconds: u64) -> Result<Duration> {
+/// An initial-handshake wait of `seconds`, which must be positive and leave
+/// a deadline the clock can hold.
+pub fn handshake_timeout(seconds: u64) -> Result<Duration> {
     if seconds == 0 {
         return Err(Error::InvalidArgument(
             "kd_handshake_timeout must be positive integer seconds".into(),
@@ -300,7 +302,7 @@ pub fn poll_for_initial_break(
                                - the guest was rebooted after changing BCD settings\n\
                                - the VM is not paused or suspended\n\
                                - virt-manager/libvirt may reserve COM1 for its console serial; use debugport:2 if KD is wired as COM2\n\
-                               - set --kd-handshake-timeout <seconds> if the guest is unusually slow to reach KD\n\
+                               - raise the wait with --kd-handshake-timeout <seconds> (or NTOSEYE_KD_TIMEOUT) if the guest is unusually slow to reach KD\n\
                                - use `--backend gdb` for gdbstub guests, or `--backend memory` for passive memory introspection",
                             budget.as_secs()
                         ),

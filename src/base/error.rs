@@ -58,8 +58,9 @@ pub enum Error {
     /// The stub refused a site; optional step markers can be skipped, unlike
     /// a transport failure that leaves the state of the site unknown.
     #[error(
-        "GDB protocol failure: stub refused a hardware breakpoint at {address:#x}: {response}.\n\
-         The stub may have no hardware breakpoint slots left."
+        "breakpoint: the GDB stub refused a hardware breakpoint at {address:#x} ({response}); it may \
+         have none left, as under KVM, which has the processor's four debug registers. Clear one \
+         with `bc`."
     )]
     HardwareBreakpointRefused { address: u64, response: String },
 
