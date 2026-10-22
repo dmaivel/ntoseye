@@ -2,7 +2,8 @@
 
 use super::*;
 
-use std::io::Write;
+use std::io::{ErrorKind, Read, Write};
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::thread::{JoinHandle, spawn};
 
@@ -23,6 +24,80 @@ use crate::backend::kd::registers::{
 };
 
 const ARM64_KSPECIAL_REGISTERS_TPIDR_EL0_OFFSET: usize = 0x10;
+
+#[test]
+fn amd64_hardware_slots_remain_four_shared_slots() {
+    let (_kernel, host) = UnixStream::pair().unwrap();
+    let mut backend = kd_backend_with_framing(host);
+    backend.exit_prepared = true;
+
+    assert_eq!(backend.hardware_breakpoint_slots(), 4);
+    for access in [
+        HwBreakpointAccess::Write,
+        HwBreakpointAccess::ReadWrite,
+        HwBreakpointAccess::Execute,
+    ] {
+        assert_eq!(backend.hardware_slot_range(access), 0..4);
+    }
+}
+
+#[test]
+fn arm64_hardware_slots_remain_two_data_and_eight_execute_slots() {
+    let (_kernel, host) = UnixStream::pair().unwrap();
+    let mut backend = kd_backend_with_framing(host);
+    backend.arch = Arch::Arm64;
+    backend.register_map = arm64::build_register_map();
+    backend.exit_prepared = true;
+
+    assert_eq!(backend.hardware_breakpoint_slots(), 10);
+    assert_eq!(backend.hardware_slot_range(HwBreakpointAccess::Write), 0..2);
+    assert_eq!(
+        backend.hardware_slot_range(HwBreakpointAccess::ReadWrite),
+        0..2
+    );
+    assert_eq!(
+        backend.hardware_slot_range(HwBreakpointAccess::Execute),
+        2..10
+    );
+}
+
+#[test]
+fn oversized_hardware_slot_ids_are_rejected_without_packets() {
+    for arch in [Arch::Amd64, Arch::Arm64] {
+        let (mut kernel, host) = UnixStream::pair().unwrap();
+        // An accidental physical-slot request must fail promptly, not wait for a reply.
+        kernel.shutdown(Shutdown::Write).unwrap();
+        kernel.set_nonblocking(true).unwrap();
+        let mut backend = kd_backend_with_framing(host);
+        backend.arch = arch;
+        backend.link.halt();
+        backend.exit_prepared = true;
+
+        for slot in [256, usize::MAX] {
+            let error = backend
+                .set_hardware_breakpoint(slot, 0x4000, HwBreakpointAccess::Execute, 1)
+                .unwrap_err();
+            assert!(
+                matches!(error, Error::Kd(ref message)
+                    if message == &format!("invalid hardware breakpoint slot {slot}")),
+                "{arch:?} set slot {slot}: {error}"
+            );
+            let error = backend.clear_hardware_breakpoint(slot).unwrap_err();
+            assert!(
+                matches!(error, Error::Kd(ref message)
+                    if message == &format!("invalid hardware breakpoint slot {slot}")),
+                "{arch:?} clear slot {slot}: {error}"
+            );
+        }
+
+        let mut byte = [0u8; 1];
+        assert_eq!(
+            kernel.read(&mut byte).unwrap_err().kind(),
+            ErrorKind::WouldBlock,
+            "{arch:?} oversized slot IDs must not send packets"
+        );
+    }
+}
 
 #[test]
 fn context_payload_rejects_short_buffers() {

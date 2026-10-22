@@ -298,6 +298,11 @@ struct OpenArgs {
         description = "KDNET encryption key as four base-36 components. Required for kdnet only."
     )]
     key: Option<String>,
+    #[schemars(
+        range(min = 1),
+        description = "KD/KDNET handshake timeout in positive integer seconds. Only valid for kd and kdnet; overrides NTOSEYE_KD_TIMEOUT. When omitted, uses NTOSEYE_KD_TIMEOUT or the default of 8 seconds."
+    )]
+    kd_handshake_timeout: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -645,10 +650,14 @@ impl NtoseyeMcp {
             backend,
             connect,
             key,
+            kd_handshake_timeout,
         }): Parameters<OpenArgs>,
     ) -> Result<CallToolResult, McpError> {
         let spec = match backend {
             BackendArg::Dump => {
+                if kd_handshake_timeout.is_some() {
+                    return Err(invalid_params("dump does not use 'kd_handshake_timeout'"));
+                }
                 if key.is_some() {
                     return Err(invalid_params("dump does not use 'key'"));
                 }
@@ -672,6 +681,7 @@ impl NtoseyeMcp {
                     connect: connect.clone(),
                     kdnet_key: key,
                     memory_source: KdMemorySource::Auto,
+                    kd_handshake_timeout,
                 }
             }
         };
@@ -1173,6 +1183,7 @@ mod tests {
             backend: BackendArg::Kd,
             connect: Some(connect.into()),
             key: None,
+            kd_handshake_timeout: None,
         }))
     }
 
@@ -1223,6 +1234,7 @@ mod tests {
                 backend: BackendArg::KdNet,
                 connect: None,
                 key: None,
+                kd_handshake_timeout: None,
             }))
             .await
             .unwrap_err();
@@ -1233,6 +1245,7 @@ mod tests {
                 backend: BackendArg::Memory,
                 connect: Some("127.0.0.1:1234".into()),
                 key: None,
+                kd_handshake_timeout: None,
             }))
             .await
             .unwrap_err();
@@ -1243,10 +1256,47 @@ mod tests {
                 backend: BackendArg::Dump,
                 connect: None,
                 key: None,
+                kd_handshake_timeout: None,
             }))
             .await
             .unwrap_err();
         assert!(err.message.contains("requires 'connect'"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn open_rejects_invalid_kd_handshake_timeouts_before_connecting() {
+        let mcp = empty_mcp();
+        for backend in ["kd", "kdnet"] {
+            for timeout in [0, u64::MAX] {
+                let args = serde_json::from_value(json!({
+                    "backend": backend,
+                    "key": if backend == "kdnet" { Some("1.2.3.4") } else { None },
+                    "kd_handshake_timeout": timeout
+                }))
+                .unwrap();
+                let err = mcp.open(Parameters(args)).await.unwrap_err();
+                assert_eq!(err.code, invalid_params("").code, "{err:?}");
+                assert!(err.message.contains("timeout"), "{err:?}");
+            }
+        }
+        assert!(matches!(&*mcp.session.lock().unwrap(), SessionSlot::Vacant));
+    }
+
+    #[tokio::test]
+    async fn open_rejects_kd_handshake_timeout_for_other_backends() {
+        let mcp = empty_mcp();
+        for backend in ["gdb", "memory", "dump"] {
+            let args = serde_json::from_value(json!({
+                "backend": backend,
+                "connect": if backend == "dump" { Some("/tmp/crash.dmp") } else { None },
+                "kd_handshake_timeout": 30
+            }))
+            .unwrap();
+            let err = mcp.open(Parameters(args)).await.unwrap_err();
+            assert_eq!(err.code, invalid_params("").code, "{err:?}");
+            assert!(err.message.contains("timeout"), "{err:?}");
+        }
+        assert!(matches!(&*mcp.session.lock().unwrap(), SessionSlot::Vacant));
     }
 
     #[tokio::test]

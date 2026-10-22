@@ -130,7 +130,7 @@ impl KdBackend {
         mut update: impl FnMut(&mut Self) -> Result<()>,
     ) -> Result<()> {
         let slot_count = self.hardware_breakpoint_slots();
-        if slot >= slot_count {
+        if usize::from(slot) >= slot_count {
             return Err(Error::Kd(format!(
                 "invalid hardware breakpoint slot {slot} (expected 0-{})",
                 slot_count.saturating_sub(1)

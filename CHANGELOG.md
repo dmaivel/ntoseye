@@ -17,6 +17,8 @@ Keeping this file:
 
 ### Added
 
+- `--kd-handshake-timeout <seconds>` sets how long the `kd` and `kdnet` backends wait for the target's first answer, as `NTOSEYE_KD_TIMEOUT` does, and wins over it; the default is still 8 seconds. MCP's `open` takes it as `kd_handshake_timeout`, DAP's attach arguments as `kdHandshakeTimeout`, and the SDK as `ntoseye.attach(kd_handshake_timeout=...)`.
+- The `gdb` backend sets as many hardware breakpoints (`ba`) as the GDB stub accepts, no longer four, so QEMU running with TCG, which emulates them, takes any number. Under KVM the processor still has four debug registers, and a fifth `ba` says the stub refused it.
 - A module whose PDB no symbol source has — a vendor driver never published — falls back to the export table of its image in the dump, as the Windows debugger does, so `k`, `ln` and `!analyze` name its functions (`myfault!nmf_fault_irql+0x35`) where they showed `module+offset`, and a deferred breakpoint on an export binds. So does a module whose image names no PDB at all (no CodeView record), once fetching the image does not name one either. A PDB acquired later (a source added, the process attached again) replaces the export symbols.
 
 ### Fixed

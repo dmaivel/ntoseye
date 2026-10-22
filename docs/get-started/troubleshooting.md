@@ -22,7 +22,7 @@ Make sure that the VM is powered on. If the memory of the target is not on this 
 
 - Make sure that Windows boots with kernel debugging on: `bcdedit /debug on`, with matching `/dbgsettings`.
 - Make sure that the serial port or network settings of Windows match the host settings. The pages for each hypervisor under [Setting up](../setup/backends.md) list the settings.
-- If the guest is slow, increase the timeout with `NTOSEYE_KD_TIMEOUT=<seconds>`.
+- If the guest is slow, increase the initial handshake timeout with `--kd-handshake-timeout <seconds>`. The option overrides `NTOSEYE_KD_TIMEOUT`; when neither is set, the timeout is 8 seconds.
 
 **KDNET on QEMU never connects.** With the default Hyper-V vendor ID of QEMU, Windows selects the Hyper-V synthetic debug device, which QEMU does not supply. To fix the problem:
 

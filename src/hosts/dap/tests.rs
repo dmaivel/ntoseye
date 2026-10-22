@@ -223,6 +223,73 @@ fn dump_targets_take_precedence_over_live_backend_arguments() {
     assert!(matches!(spec, TargetSpec::Dump(path) if path.ends_with("crash.dmp")));
 }
 
+#[test]
+fn kd_handshake_timeout_is_passed_to_kd_and_kdnet() {
+    for backend in ["kd", "kdnet"] {
+        for timeout in [1, 30] {
+            let spec = target_spec(&json!({
+                "backend": backend,
+                "kdnetKey": if backend == "kdnet" { Some("1.2.3.4") } else { None },
+                "kdHandshakeTimeout": timeout
+            }))
+            .unwrap();
+            assert!(matches!(
+                spec,
+                TargetSpec::Live { kd_handshake_timeout: Some(value), .. } if value == timeout
+            ));
+        }
+    }
+}
+
+#[test]
+fn kd_handshake_timeout_rejects_invalid_json_types() {
+    for value in [
+        json!("30"),
+        json!(-1),
+        json!(1.5),
+        json!(true),
+        json!(null),
+        json!([]),
+        json!({}),
+    ] {
+        let err = target_spec(&json!({"kdHandshakeTimeout": value})).unwrap_err();
+        assert!(err.contains("kdHandshakeTimeout"), "{value}: {err}");
+    }
+}
+
+#[test]
+fn kd_handshake_timeout_rejects_zero_and_too_large_values() {
+    for timeout in [0, u64::MAX] {
+        let err = target_spec(&json!({"kdHandshakeTimeout": timeout})).unwrap_err();
+        assert!(err.contains("timeout"), "{timeout}: {err}");
+    }
+}
+
+#[test]
+fn kd_handshake_timeout_rejects_other_live_backends() {
+    for backend in ["gdb", "memory"] {
+        let err = target_spec(&json!({
+            "backend": backend, "kdHandshakeTimeout": 30
+        }))
+        .unwrap_err();
+        assert!(err.contains("timeout"), "{backend}: {err}");
+    }
+}
+
+#[test]
+fn dump_targets_reject_kd_handshake_timeout_even_with_invalid_live_arguments() {
+    for value in [json!(30), json!(null), json!("30")] {
+        let err = target_spec(&json!({
+            "dump": "/tmp/crash.dmp",
+            "backend": "invalid",
+            "memorySource": "invalid",
+            "kdHandshakeTimeout": value
+        }))
+        .unwrap_err();
+        assert_eq!(err, "dump does not use 'kdHandshakeTimeout'");
+    }
+}
+
 /// A `Write` the loop can own while the test keeps reading what it wrote.
 struct Sink(Rc<RefCell<Vec<u8>>>);
 

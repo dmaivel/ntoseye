@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::backend::dbg_backend::DebugLog;
 use crate::backend::debugger_data::{DebuggerDataCandidate, MetadataSource};
@@ -23,8 +24,8 @@ use super::registers::{ARM64_WINDBG_TTBR1_EL1, KSPECIAL_REGISTERS_CR3_OFFSET};
 use super::transport::KdTransport;
 use super::{
     DBG_KD_EXCEPTION_STATE_CHANGE, DEBUG_LOG_CAPACITY, KD_REQUEST_TIMEOUT, KdBackend,
-    KdTargetHints, Link, STATUS_BREAKPOINT, api, is_initial_resync_error, kd_initial_timeout,
-    kd_socket_connect_error, poll_for_initial_break, probe_initial_request,
+    KdTargetHints, Link, STATUS_BREAKPOINT, api, handshake_timeout, is_initial_resync_error,
+    kd_initial_timeout, kd_socket_connect_error, poll_for_initial_break, probe_initial_request,
     with_framing_read_timeout,
 };
 use crate::backend::cpu_context::{amd64, arm64};
@@ -58,8 +59,15 @@ pub(super) fn normalize_kernel_dtb(arch: Arch, register_value: u64) -> Dtb {
 impl KdBackend {
     /// Connect to a KDCOM serial pipe and stop at the initial state-change.
     /// Connection progress (the wait for a target can run for a minute) is
-    /// reported one line at a time through `progress`.
-    pub fn connect(socket_path: &str, progress: &mut dyn FnMut(&str)) -> Result<Self> {
+    /// reported one line at a time through `progress`. `timeout` is the wait
+    /// for the initial handshake in positive seconds; `None` uses
+    /// `NTOSEYE_KD_TIMEOUT`, or 8 seconds when it is unset.
+    pub fn connect(
+        socket_path: &str,
+        timeout: Option<u64>,
+        progress: &mut dyn FnMut(&str),
+    ) -> Result<Self> {
+        let timeout = timeout.map(handshake_timeout).transpose()?;
         progress(&format!("kd: using KDCOM backend on {socket_path}"));
         let stream = UnixStream::connect(socket_path)
             .map_err(|err| kd_socket_connect_error(socket_path, err))?;
@@ -67,22 +75,27 @@ impl KdBackend {
             KdTransport::Serial(stream),
             "kd: serial connected; waiting for Windows KD target",
             "kd",
+            timeout,
             progress,
         )
     }
 
-    /// Listen for a KDNET target and stop at the initial state-change.
+    /// Listen for a KDNET target and stop at the initial state-change, with
+    /// `timeout` as [`KdBackend::connect`] takes it.
     pub fn connect_net(
         listen_addr: &str,
         key: &str,
+        timeout: Option<u64>,
         progress: &mut dyn FnMut(&str),
     ) -> Result<Self> {
+        let timeout = timeout.map(handshake_timeout).transpose()?;
         progress(&format!("kdnet: listening on {listen_addr}"));
         let stream = KdNetStream::bind(listen_addr, key)?;
         Self::connect_transport(
             KdTransport::Network(stream),
             "kdnet: listener ready; waiting for Windows KDNET target",
             "kdnet",
+            timeout,
             progress,
         )
     }
@@ -91,6 +104,7 @@ impl KdBackend {
         transport: KdTransport,
         waiting_message: &str,
         backend_name: &'static str,
+        timeout: Option<Duration>,
         progress: &mut dyn FnMut(&str),
     ) -> Result<Self> {
         let network_generation = transport.network_session_generation();
@@ -98,7 +112,10 @@ impl KdBackend {
         if let Some(generation) = network_generation {
             framing.use_kdnet_packet_ids(generation);
         }
-        let initial_timeout = kd_initial_timeout()?;
+        let initial_timeout = match timeout {
+            Some(timeout) => timeout,
+            None => kd_initial_timeout()?,
+        };
 
         progress(&format!(
             "{waiting_message} (timeout {}s)",

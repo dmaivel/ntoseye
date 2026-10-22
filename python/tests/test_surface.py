@@ -31,6 +31,42 @@ def test_attach_rejects_bad_arguments_before_connecting(kwargs: dict[str, str]) 
         ntoseye.attach(**kwargs)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("seconds", [0, 2**64 - 1])
+def test_attach_rejects_invalid_kd_handshake_timeout(seconds: int) -> None:
+    with pytest.raises(ValueError):
+        ntoseye.attach("kd", kd_handshake_timeout=seconds)
+
+
+@pytest.mark.parametrize("seconds", [-1, 2**64])
+def test_attach_rejects_kd_handshake_timeout_outside_u64(seconds: int) -> None:
+    with pytest.raises(OverflowError):
+        ntoseye.attach("kd", kd_handshake_timeout=seconds)
+
+
+@pytest.mark.parametrize("seconds", [1.5, True, False])
+def test_attach_rejects_non_integer_kd_handshake_timeout(seconds: object) -> None:
+    with pytest.raises(TypeError):
+        ntoseye.attach("kd", kd_handshake_timeout=seconds)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("backend", ["gdb", "memory"])
+def test_attach_rejects_kd_handshake_timeout_for_other_backends(backend: str) -> None:
+    with pytest.raises(ValueError):
+        ntoseye.attach(backend, kd_handshake_timeout=1)  # type: ignore[arg-type]
+
+
+def test_attach_rejects_kd_handshake_timeout_for_dump(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="kd_handshake_timeout"):
+        ntoseye.attach("dmp", str(tmp_path / "missing.dmp"), kd_handshake_timeout=1)
+
+
+def test_attach_positive_kd_handshake_timeout_reaches_connection(tmp_path: Path) -> None:
+    # macOS refuses the long temporary path before looking for the socket,
+    # so match only that the attach got as far as connecting.
+    with pytest.raises(ntoseye.NtoseyeError, match="KD serial socket"):
+        ntoseye.attach("kd", str(tmp_path / "missing.sock"), None, "auto", kd_handshake_timeout=1)
+
+
 def test_decode_error_needs_no_target() -> None:
     record = ntoseye.decode_error(0xC0000005)
     assert record.name == "STATUS_ACCESS_VIOLATION"

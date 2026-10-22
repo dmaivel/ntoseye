@@ -1515,7 +1515,7 @@ fn run_past_site(
     )
 }
 
-/// The debug-register slot that keeps the lifted site of a run past it
+/// The backend hardware slot that keeps the lifted site of a run past it
 /// marked: the one [`TemporarySites::Hardware`] holds for the instruction
 /// itself, or for software sites any slot no breakpoint holds. `None`
 /// without one; the site then goes unmarked while its vCPU runs alone.
@@ -1529,7 +1529,7 @@ fn keeper_slot(
     breakpoints: &BreakpointManager,
     sites: &TemporarySites,
     successors: usize,
-) -> Option<u8> {
+) -> Option<usize> {
     match sites {
         TemporarySites::Software => breakpoints.free_execute_slots(backend).first().copied(),
         TemporarySites::Hardware(slots) => slots.get(successors).copied(),
@@ -1634,7 +1634,7 @@ enum TemporarySites {
     /// Debug-register sites in these free slots, one per successor; one
     /// more, when free, marks the instruction itself while the held vCPUs
     /// run.
-    Hardware(Vec<u8>),
+    Hardware(Vec<usize>),
 }
 
 impl TemporarySites {
@@ -1653,7 +1653,7 @@ impl TemporarySites {
         backend: &mut dyn DebugBackend,
         index: usize,
         address: u64,
-    ) -> Result<Option<u8>> {
+    ) -> Result<Option<usize>> {
         match self {
             Self::Software => {
                 backend.set_breakpoint(address)?;
@@ -1669,7 +1669,7 @@ impl TemporarySites {
 }
 
 /// Lift a site [`TemporarySites::plant`] planted.
-fn lift_site(backend: &mut dyn DebugBackend, address: u64, slot: Option<u8>) -> Result<()> {
+fn lift_site(backend: &mut dyn DebugBackend, address: u64, slot: Option<usize>) -> Result<()> {
     match slot {
         Some(slot) => backend.clear_hardware_breakpoint(slot),
         None => backend.remove_breakpoint(address),
@@ -1688,7 +1688,7 @@ fn run_past(
     regs: &[u8],
     successors: &[u64],
     sites: &TemporarySites,
-    keeper: Option<u8>,
+    keeper: Option<usize>,
 ) -> Result<RunPast> {
     let mut planted = Vec::with_capacity(successors.len());
     let result = run_to_successors(
@@ -1721,8 +1721,8 @@ fn run_to_successors(
     regs: &[u8],
     successors: &[u64],
     sites: &TemporarySites,
-    keeper: Option<u8>,
-    planted: &mut Vec<(u64, Option<u8>)>,
+    keeper: Option<usize>,
+    planted: &mut Vec<(u64, Option<usize>)>,
 ) -> Result<RunPast> {
     let rip = register_map.read_u64("rip", regs)?;
     for (index, &address) in successors.iter().enumerate() {
@@ -2082,7 +2082,15 @@ impl Release {
         let site = if kept || successors.contains(&self.rip) || !sites.has_room(successors.len()) {
             None
         } else {
-            Some(sites.plant(backend, successors.len(), self.rip)?)
+            match sites.plant(backend, successors.len(), self.rip) {
+                Ok(slot) => Some(slot),
+                Err(Error::HardwareBreakpointRefused { .. } | Error::NotSupported)
+                    if matches!(sites, TemporarySites::Hardware(_)) =>
+                {
+                    None
+                }
+                Err(error) => return Err(error),
+            }
         };
         // Whichever vCPU stops first ends the run, or a break-in does.
         self.runs += 1;

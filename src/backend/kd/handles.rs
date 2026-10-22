@@ -149,17 +149,17 @@ impl DebugBackend for KdBackendHandle {
         self.lock().supports_watchpoints()
     }
 
-    fn hardware_breakpoint_slots(&self) -> u8 {
+    fn hardware_breakpoint_slots(&self) -> usize {
         self.lock().hardware_breakpoint_slots()
     }
 
-    fn hardware_slot_range(&self, access: HwBreakpointAccess) -> std::ops::Range<u8> {
+    fn hardware_slot_range(&self, access: HwBreakpointAccess) -> std::ops::Range<usize> {
         self.lock().hardware_slot_range(access)
     }
 
     fn set_hardware_breakpoint(
         &mut self,
-        slot: u8,
+        slot: usize,
         addr: u64,
         access: HwBreakpointAccess,
         len: u8,
@@ -167,7 +167,7 @@ impl DebugBackend for KdBackendHandle {
         self.lock().set_hardware_breakpoint(slot, addr, access, len)
     }
 
-    fn clear_hardware_breakpoint(&mut self, slot: u8) -> Result<()> {
+    fn clear_hardware_breakpoint(&mut self, slot: usize) -> Result<()> {
         self.lock().clear_hardware_breakpoint(slot)
     }
 

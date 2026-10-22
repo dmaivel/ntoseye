@@ -131,7 +131,7 @@ impl BreakpointManager {
         Ok(id)
     }
 
-    /// The lowest physical slot not already claimed by a hardware breakpoint.
+    /// The lowest backend slot not already claimed by a hardware breakpoint.
     /// ARM64 uses one global ID space with separate WVR/WCR data and BVR/BCR
     /// execute ranges supplied by the backend. Disabled hardware breakpoints
     /// keep their slot reserved, matching WinDbg's fixed architectural slots.
@@ -139,7 +139,7 @@ impl BreakpointManager {
         &self,
         client: &dyn DebugBackend,
         access: HwBreakpointAccess,
-    ) -> Result<u8> {
+    ) -> Result<usize> {
         let mut slots = client.hardware_slot_range(access);
         let kind = if matches!(access, HwBreakpointAccess::Execute) {
             "execute"
@@ -167,7 +167,7 @@ impl BreakpointManager {
 
     /// Execute slots no breakpoint holds (disabled ones keep theirs), for
     /// sites the debugger plants and lifts within one operation.
-    pub fn free_execute_slots(&self, client: &dyn DebugBackend) -> Vec<u8> {
+    pub fn free_execute_slots(&self, client: &dyn DebugBackend) -> Vec<usize> {
         client
             .hardware_slot_range(HwBreakpointAccess::Execute)
             .filter(|slot| {
@@ -179,15 +179,15 @@ impl BreakpointManager {
             .collect()
     }
 
-    /// Map a DR6 status bit to the enabled breakpoint in DR slot `slot`.
-    pub fn hardware_breakpoint_for_slot(&self, slot: u8) -> Option<BreakpointInfo> {
+    /// Find the enabled breakpoint in backend slot `slot`.
+    pub fn hardware_breakpoint_for_slot(&self, slot: usize) -> Option<BreakpointInfo> {
         self.breakpoints
             .values()
             .find(|bp| bp.enabled && bp.hardware.is_some_and(|hw| hw.slot == slot))
             .cloned()
     }
 
-    /// Best-effort release of every DR slot held by a hardware breakpoint
+    /// Best-effort release of every backend slot held by a hardware breakpoint
     /// (enabled or not), so a target reload leaves no orphaned watches.
     pub fn clear_hardware_slots(&self, client: &mut dyn DebugBackend) {
         for bp in self.breakpoints.values() {

@@ -1,7 +1,7 @@
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("This application only runs on Linux and macOS hosts.");
 
-use crate::backend::kd::KdMemorySource;
+use crate::backend::kd::{self, KdMemorySource};
 use crate::base::error::{Error, Result};
 
 pub const DEFAULT_GDB_ADDR: &str = "127.0.0.1:1234";
@@ -76,6 +76,9 @@ pub enum TargetSpec {
         connect: Option<String>,
         /// KDNET encryption key (four base-36 components).
         kdnet_key: Option<String>,
+        /// Initial KD/KDNET handshake timeout in positive integer seconds.
+        /// `None` uses `NTOSEYE_KD_TIMEOUT`, or 8 seconds when it is unset.
+        kd_handshake_timeout: Option<u64>,
         memory_source: KdMemorySource,
     },
 }
@@ -89,6 +92,7 @@ impl TargetSpec {
             backend,
             connect,
             kdnet_key,
+            kd_handshake_timeout,
             memory_source,
         } = self
         else {
@@ -112,6 +116,14 @@ impl TargetSpec {
             return Err(invalid(
                 "memory_source is only valid for kd and kdnet backends",
             ));
+        }
+        if let Some(seconds) = kd_handshake_timeout {
+            if !matches!(backend, Backend::Kd | Backend::KdNet) {
+                return Err(invalid(
+                    "kd_handshake_timeout is only valid for kd and kdnet backends",
+                ));
+            }
+            kd::handshake_timeout(*seconds)?;
         }
         Ok(())
     }
@@ -151,3 +163,39 @@ pub mod analysis;
 
 /// The front ends: the REPL, the Python SDK, MCP, DAP, gdbserver and the CLI.
 pub mod hosts;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kd_handshake_timeout_is_valid_only_for_kd_backends() {
+        for backend in [Backend::Kd, Backend::KdNet, Backend::Gdb, Backend::Memory] {
+            let spec = TargetSpec::Live {
+                backend,
+                connect: None,
+                kdnet_key: (backend == Backend::KdNet).then(|| "1.2.3.4".into()),
+                kd_handshake_timeout: Some(20),
+                memory_source: KdMemorySource::Auto,
+            };
+            assert_eq!(
+                spec.validate().is_ok(),
+                matches!(backend, Backend::Kd | Backend::KdNet)
+            );
+        }
+    }
+
+    #[test]
+    fn kd_handshake_timeout_rejects_zero_and_deadline_overflow_before_connecting() {
+        for seconds in [0, u64::MAX] {
+            let spec = TargetSpec::Live {
+                backend: Backend::Kd,
+                connect: None,
+                kdnet_key: None,
+                kd_handshake_timeout: Some(seconds),
+                memory_source: KdMemorySource::Auto,
+            };
+            assert!(matches!(spec.validate(), Err(Error::InvalidArgument(_))));
+        }
+    }
+}

@@ -828,8 +828,19 @@ fn share_cancel(session: &mut Session, cancel: &Arc<AtomicBool>) {
 /// no process to launch, so both requests mean the same thing.
 fn target_spec(args: &Value) -> result::Result<TargetSpec, String> {
     if let Some(dump) = arg_str(args, "dump") {
+        if args.get("kdHandshakeTimeout").is_some() {
+            return Err("dump does not use 'kdHandshakeTimeout'".to_string());
+        }
         return Ok(TargetSpec::Dump(PathBuf::from(dump)));
     }
+    let kd_handshake_timeout = args
+        .get("kdHandshakeTimeout")
+        .map(|value| {
+            value.as_u64().ok_or_else(|| {
+                "kdHandshakeTimeout must be a positive integer number of seconds".to_string()
+            })
+        })
+        .transpose()?;
     let backend = match arg_str(args, "backend") {
         Some(name) => name.parse::<Backend>().map_err(|error| error.to_string())?,
         None => Backend::Kd,
@@ -843,6 +854,7 @@ fn target_spec(args: &Value) -> result::Result<TargetSpec, String> {
         connect: arg_str(args, "connect"),
         kdnet_key: arg_str(args, "kdnetKey"),
         memory_source,
+        kd_handshake_timeout,
     };
     spec.validate().map_err(|error| match error {
         Error::InvalidArgument(message) => message,
