@@ -53,6 +53,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - A WHEA_UNCORRECTABLE_ERROR (0x124) and a KERNEL_SECURITY_CHECK_FAILURE (0x139) are described in a full sentence, in the bugcheck stop, `!analyze -show` and the SDK's `BugcheckAnalysis.description`, instead of starting mid-sentence with "and indicates that".
 - With `NO_COLOR` set, the prompt and its completion menu are plain too, as the rest of the output already was.
 - With `TERM=dumb`, as in Emacs's `M-x shell`, ntoseye reads commands line by line as with `--plain-repl` and prints no color or other escape sequences, which such a terminal showed as stray characters.
+- `!handle`'s Object column, and the SDK's `HandleEntry.object`, hold the object, as WinDbg's does and as `!object` and `!fileobj` take it. They held its header, 0x30 bytes before it.
 
 ### Removed
 

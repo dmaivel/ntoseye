@@ -1176,6 +1176,16 @@ impl Target {
             .unwrap_or_else(|| Err(Error::FieldNotFound("ObAttributes".to_string())))
             .map(|value| value as u32);
 
+        // The entry holds the object's header; the body follows it, and is
+        // what the record names and what `!object` and `!fileobj` take.
+        let object = object.and_then(|header| {
+            if header.is_zero() {
+                return Ok(header);
+            }
+            let types = self.guest()?.ntoskrnl.types();
+            let body = types.layout("_OBJECT_HEADER")?.field_offset("Body")?;
+            Ok(header + body)
+        });
         let header = object
             .as_ref()
             .map_err(|error| Error::DebugInfo(error.to_string()))
@@ -1183,11 +1193,9 @@ impl Target {
                 if object.is_zero() {
                     Err(Error::DebugInfo("handle entry is free".to_string()))
                 } else {
-                    // The entry holds the header; looking it up by its body
-                    // keeps the bytes before it from passing for one.
-                    let types = self.guest()?.ntoskrnl.types();
-                    let body = types.layout("_OBJECT_HEADER")?.field_offset("Body")?;
-                    self.inspect_object_header(*object + body)
+                    // Looked up by its body, so the bytes before a header
+                    // can't pass for one.
+                    self.inspect_object_header(*object)
                 }
             });
         let type_name = match &header {

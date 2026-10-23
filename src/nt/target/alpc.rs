@@ -674,16 +674,14 @@ impl Target {
     pub fn alpc_process_ports(&self, process: ProcessInfo) -> Result<AlpcProcessPorts> {
         let handles = self.enumerate_process_handles(process, MAX_PROCESS_HANDLES)?;
         let types = self.guest()?.ntoskrnl.types();
-        let body_offset = types.layout("_OBJECT_HEADER")?.field_offset("Body")?;
         let mut owners = OwnerNames::default();
         let mut seen = HashSet::new();
         let mut created = Vec::new();
         let mut connected = Vec::new();
         let mut server_ports = 0;
         for entry in &handles.entries {
-            // The walk decoded each entry's object header (`entry.object`).
             let (
-                DiagnosticValue::Available(header),
+                DiagnosticValue::Available(port),
                 DiagnosticValue::Available(Some(type_name)),
                 DiagnosticValue::Available(name),
             ) = (&entry.object, &entry.type_name, &entry.name)
@@ -693,7 +691,7 @@ impl Target {
             if type_name != ALPC_PORT_TYPE {
                 continue;
             }
-            let port = *header + body_offset;
+            let port = *port;
             if !seen.insert(port) {
                 continue;
             }

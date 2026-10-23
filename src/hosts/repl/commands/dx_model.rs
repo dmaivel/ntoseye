@@ -320,8 +320,9 @@ pub fn property(target: &Target, value: &ModelValue, name: &str) -> Result<Model
         (ModelValue::Handle(handle), "GrantedAccess") => {
             ModelValue::unsigned(u64::from(handle_field(&handle.granted_access)?))
         }
+        // As WinDbg's, a handle's `Object` is the object's header.
         (ModelValue::Handle(handle), "Object") => ModelValue::ObjectHeader {
-            header: handle_field(&handle.object)?,
+            header: handle_field(&handle.object)? - VirtAddr(object_body_offset(target)?),
             kind: handle_field(&handle.type_name).ok().flatten(),
         },
         // As in WinDbg, only a named object has an `ObjectName`.
