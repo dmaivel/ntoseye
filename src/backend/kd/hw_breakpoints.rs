@@ -4,28 +4,18 @@
 
 use crate::arch::Arch;
 use crate::backend::dbg_backend::{DebugBackend, HwBreakpointAccess, debug_registers};
-use crate::base::bytes;
 use crate::base::error::{Error, Result};
 
 use super::KdBackend;
-use super::registers::{
-    ARM64_KSPECIAL_REGISTERS_BCR0_OFFSET, ARM64_KSPECIAL_REGISTERS_BVR0_OFFSET,
-    ARM64_KSPECIAL_REGISTERS_WCR0_OFFSET, ARM64_KSPECIAL_REGISTERS_WVR0_OFFSET,
-    KSPECIAL_REGISTERS_DR0_OFFSET, KSPECIAL_REGISTERS_DR7_OFFSET,
-};
 
-fn arm64_slot_offsets(slot: u8) -> Result<(usize, usize)> {
+/// The address and control registers of ARM64 slot `slot`: a watchpoint's
+/// WVR and WCR, a breakpoint's BVR and BCR.
+fn arm64_slot_registers(slot: u8) -> Result<(String, String)> {
     if debug_registers::ARM64_WATCHPOINT_SLOTS.contains(&slot) {
-        Ok((
-            ARM64_KSPECIAL_REGISTERS_WVR0_OFFSET + slot as usize * 8,
-            ARM64_KSPECIAL_REGISTERS_WCR0_OFFSET + slot as usize * 4,
-        ))
+        Ok((format!("wvr{slot}"), format!("wcr{slot}")))
     } else if debug_registers::ARM64_BREAKPOINT_SLOTS.contains(&slot) {
-        let index = (slot - debug_registers::ARM64_BREAKPOINT_SLOTS.start) as usize;
-        Ok((
-            ARM64_KSPECIAL_REGISTERS_BVR0_OFFSET + index * 8,
-            ARM64_KSPECIAL_REGISTERS_BCR0_OFFSET + index * 4,
-        ))
+        let index = slot - debug_registers::ARM64_BREAKPOINT_SLOTS.start;
+        Ok((format!("bvr{index}"), format!("bcr{index}")))
     } else {
         Err(Error::Kd(format!(
             "invalid ARM64 hardware breakpoint slot {slot} (expected 0-{})",
@@ -34,10 +24,13 @@ fn arm64_slot_offsets(slot: u8) -> Result<(usize, usize)> {
     }
 }
 
-fn arm64_slot_offsets_for_access(slot: u8, access: HwBreakpointAccess) -> Result<(usize, usize)> {
+fn arm64_slot_registers_for_access(
+    slot: u8,
+    access: HwBreakpointAccess,
+) -> Result<(String, String)> {
     let slots = debug_registers::arm64_slot_range(access);
     if slots.contains(&slot) {
-        return arm64_slot_offsets(slot);
+        return arm64_slot_registers(slot);
     }
     let kind = if matches!(access, HwBreakpointAccess::Execute) {
         "execute"
@@ -49,6 +42,11 @@ fn arm64_slot_offsets_for_access(slot: u8, access: HwBreakpointAccess) -> Result
         slots.start,
         slots.end - 1
     )))
+}
+
+/// The AMD64 debug register holding slot `slot`'s address.
+fn dr_register(slot: u8) -> String {
+    format!("dr{slot}")
 }
 
 #[derive(Clone, Copy)]
@@ -66,33 +64,37 @@ struct Arm64DebugRegisterSlotState {
 impl KdBackend {
     fn read_dr_slot_state(&mut self, slot: u8) -> Result<DebugRegisterSlotState> {
         let special = self.read_special_registers_uncached(self.current_processor)?;
+        let map = self.arch.special_register_map();
         Ok(DebugRegisterSlotState {
-            address: bytes::read_u64(&special, Self::kspecial_dr_offset(slot)),
-            dr7: bytes::read_u64(&special, KSPECIAL_REGISTERS_DR7_OFFSET),
+            address: map.read_u64(dr_register(slot), &special)?,
+            dr7: map.read_u64("dr7", &special)?,
         })
     }
 
     fn apply_dr_restore(&mut self, slot: u8, state: DebugRegisterSlotState) -> Result<()> {
         let mut special = self.read_special_registers_uncached(self.current_processor)?;
-        bytes::write_u64(&mut special, Self::kspecial_dr_offset(slot), state.address);
-        bytes::write_u64(&mut special, KSPECIAL_REGISTERS_DR7_OFFSET, state.dr7);
+        let map = self.arch.special_register_map();
+        map.write_u64(dr_register(slot), &mut special, state.address)?;
+        map.write_u64("dr7", &mut special, state.dr7)?;
         self.write_special_registers(special)
     }
 
     fn read_arm64_slot_state(&mut self, slot: u8) -> Result<Arm64DebugRegisterSlotState> {
         let special = self.read_special_registers_uncached(self.current_processor)?;
-        let (address_offset, control_offset) = arm64_slot_offsets(slot)?;
+        let (address, control) = arm64_slot_registers(slot)?;
+        let map = self.arch.special_register_map();
         Ok(Arm64DebugRegisterSlotState {
-            address: bytes::read_u64(&special, address_offset),
-            control: bytes::read_u32(&special, control_offset),
+            address: map.read_u64(address, &special)?,
+            control: map.read_u64(control, &special)? as u32,
         })
     }
 
     fn apply_arm64_restore(&mut self, slot: u8, state: Arm64DebugRegisterSlotState) -> Result<()> {
         let mut special = self.read_special_registers_uncached(self.current_processor)?;
-        let (address_offset, control_offset) = arm64_slot_offsets(slot)?;
-        bytes::write_u64(&mut special, address_offset, state.address);
-        bytes::write_u32(&mut special, control_offset, state.control);
+        let (address, control) = arm64_slot_registers(slot)?;
+        let map = self.arch.special_register_map();
+        map.write_u64(address, &mut special, state.address)?;
+        map.write_u64(control, &mut special, u64::from(state.control))?;
         self.write_special_registers(special)
     }
 
@@ -178,7 +180,7 @@ impl KdBackend {
         access: HwBreakpointAccess,
         len: u8,
     ) -> Result<()> {
-        let (address_offset, control_offset) = arm64_slot_offsets_for_access(slot, access)?;
+        let (address, control) = arm64_slot_registers_for_access(slot, access)?;
         if matches!(access, HwBreakpointAccess::Execute) && (len != 1 || !addr.is_multiple_of(4)) {
             return Err(Error::InvalidArgument(
                 "ARM64 execute hardware breakpoints require a 4-byte-aligned address and length 1"
@@ -186,39 +188,28 @@ impl KdBackend {
             ));
         }
 
-        let mut special = self.read_special_registers_uncached(self.current_processor)?;
-        if matches!(access, HwBreakpointAccess::Execute) {
-            bytes::write_u64(&mut special, address_offset, addr);
-            bytes::write_u32(
-                &mut special,
-                control_offset,
-                debug_registers::arm64_bcr_value(addr),
-            );
+        let (address_value, control_value) = if matches!(access, HwBreakpointAccess::Execute) {
+            (addr, debug_registers::arm64_bcr_value(addr))
         } else {
-            bytes::write_u64(
-                &mut special,
-                address_offset,
+            (
                 debug_registers::arm64_wvr_address(addr),
-            );
-            bytes::write_u32(
-                &mut special,
-                control_offset,
                 debug_registers::arm64_wcr_value(addr, access, len),
-            );
-        }
+            )
+        };
+        let mut special = self.read_special_registers_uncached(self.current_processor)?;
+        let map = self.arch.special_register_map();
+        map.write_u64(address, &mut special, address_value)?;
+        map.write_u64(control, &mut special, u64::from(control_value))?;
         self.write_special_registers(special)
     }
 
     fn apply_arm64_clear(&mut self, slot: u8) -> Result<()> {
-        let (address_offset, control_offset) = arm64_slot_offsets(slot)?;
+        let (address, control) = arm64_slot_registers(slot)?;
         let mut special = self.read_special_registers_uncached(self.current_processor)?;
-        bytes::write_u64(&mut special, address_offset, 0);
-        bytes::write_u32(&mut special, control_offset, 0);
+        let map = self.arch.special_register_map();
+        map.write_u64(address, &mut special, 0)?;
+        map.write_u64(control, &mut special, 0)?;
         self.write_special_registers(special)
-    }
-
-    fn kspecial_dr_offset(slot: u8) -> usize {
-        KSPECIAL_REGISTERS_DR0_OFFSET + slot as usize * 8
     }
 
     /// Program the currently selected processor's kernel debug-register state
@@ -231,10 +222,11 @@ impl KdBackend {
         len: u8,
     ) -> Result<()> {
         let mut special = self.read_special_registers_uncached(self.current_processor)?;
-        bytes::write_u64(&mut special, Self::kspecial_dr_offset(slot), addr);
-        let dr7 = bytes::read_u64(&special, KSPECIAL_REGISTERS_DR7_OFFSET);
+        let map = self.arch.special_register_map();
+        map.write_u64(dr_register(slot), &mut special, addr)?;
+        let dr7 = map.read_u64("dr7", &special)?;
         let dr7 = debug_registers::dr7_set_slot(dr7, slot, access, len);
-        bytes::write_u64(&mut special, KSPECIAL_REGISTERS_DR7_OFFSET, dr7);
+        map.write_u64("dr7", &mut special, dr7)?;
         self.write_special_registers(special)
     }
 
@@ -242,10 +234,11 @@ impl KdBackend {
     /// address register.
     fn apply_dr_clear(&mut self, slot: u8) -> Result<()> {
         let mut special = self.read_special_registers_uncached(self.current_processor)?;
-        let dr7 = bytes::read_u64(&special, KSPECIAL_REGISTERS_DR7_OFFSET);
+        let map = self.arch.special_register_map();
+        let dr7 = map.read_u64("dr7", &special)?;
         let dr7 = debug_registers::dr7_clear_slot(dr7, slot);
-        bytes::write_u64(&mut special, KSPECIAL_REGISTERS_DR7_OFFSET, dr7);
-        bytes::write_u64(&mut special, Self::kspecial_dr_offset(slot), 0);
+        map.write_u64("dr7", &mut special, dr7)?;
+        map.write_u64(dr_register(slot), &mut special, 0)?;
         self.write_special_registers(special)
     }
 
@@ -274,7 +267,7 @@ impl KdBackend {
                 )
             }
             Arch::Arm64 => {
-                arm64_slot_offsets_for_access(slot, access)?;
+                arm64_slot_registers_for_access(slot, access)?;
                 self.update_slot_on_all_processors(
                     slot,
                     "install",
@@ -303,7 +296,7 @@ impl KdBackend {
                 |backend| backend.apply_dr_clear(slot),
             ),
             Arch::Arm64 => {
-                arm64_slot_offsets(slot)?;
+                arm64_slot_registers(slot)?;
                 self.update_slot_on_all_processors(
                     slot,
                     "clear",

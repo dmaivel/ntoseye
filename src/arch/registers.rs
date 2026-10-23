@@ -82,6 +82,51 @@ impl RegisterMap {
         map
     }
 
+    /// A map of `(name, offset, size)` fields, numbered in order: a
+    /// structure's layout.
+    pub fn from_layout<N: Into<String>>(
+        fields: impl IntoIterator<Item = (N, usize, usize)>,
+    ) -> Self {
+        Self::from_registers(
+            fields
+                .into_iter()
+                .enumerate()
+                .map(|(regnum, (name, offset, size))| RegisterInfo {
+                    name: name.into(),
+                    offset,
+                    size,
+                    regnum,
+                })
+                .collect(),
+        )
+    }
+
+    /// Bytes from the layout's start to the end of its last register.
+    pub fn extent(&self) -> usize {
+        self.ordered
+            .iter()
+            .map(|register| register.offset + register.size)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Copy into `data`, laid out as this map, the registers `source_data`,
+    /// laid out as `source`, holds, matching them by name. A register past
+    /// the end of `data`, or missing from `source` or past the end of
+    /// `source_data`, keeps its bytes; a narrower source value is
+    /// zero-extended.
+    pub fn copy_from(&self, data: &mut [u8], source: &RegisterMap, source_data: &[u8]) {
+        for register in &self.ordered {
+            let end = register.offset + register.size;
+            if end > data.len() {
+                continue;
+            }
+            if let Ok(value) = source.read_u128(&register.name, source_data) {
+                data[register.offset..end].copy_from_slice(&value.to_le_bytes()[..register.size]);
+            }
+        }
+    }
+
     /// Name each 128-bit register's 64-bit halves `{name}l` / `{name}h`
     /// (as KD's AMD64 map spells `xmm0l`/`xmm0h`), unless the map already
     /// defines them. They are lookups into the same bytes, not wire registers.

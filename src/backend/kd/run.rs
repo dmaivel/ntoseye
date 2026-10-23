@@ -8,13 +8,11 @@ use std::time::{Duration, Instant};
 
 use crate::arch::{Arch, RegisterMap};
 use crate::backend::dbg_backend::{ContinueDisposition, ModuleEvent, StopEvent};
-use crate::base::bytes;
 use crate::base::error::{Error, Result};
 
 use super::breakpoints::{
     breakpoint_instruction_at, reclaimed_breakpoints_notice, restore_unowned_breakpoint_handles,
 };
-use super::registers::KSPECIAL_REGISTERS_DR7_OFFSET;
 use super::{
     AwaitStateOptions, ContinueDrain, ControlReport, DBG_KD_EXCEPTION_STATE_CHANGE,
     DBG_KD_LOAD_SYMBOLS_STATE_CHANGE, KD_REQUEST_TIMEOUT, KdBackend, Link, STATUS_BREAKPOINT,
@@ -278,7 +276,9 @@ impl KdBackend {
                 let dr7 = match self.registers.special(processor) {
                     // A `ba` installed during this halt wrote the cache; it
                     // is newer than the report.
-                    Some(special) => bytes::read_u64(special, KSPECIAL_REGISTERS_DR7_OFFSET),
+                    Some(special) => Arch::Amd64
+                        .special_register_map()
+                        .read_u64("dr7", special)?,
                     None => reported_dr7.expect("read the registers when no report offered DR7"),
                 };
                 with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {

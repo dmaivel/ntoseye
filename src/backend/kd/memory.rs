@@ -5,12 +5,10 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 use crate::arch::Arch;
-use crate::base::bytes;
 use crate::base::error::{Error, Result};
 use crate::base::memory::PAGE_SIZE;
 use crate::base::types::{Dtb, PhysAddr, VirtAddr};
 
-use super::registers::KSPECIAL_REGISTERS_CR3_OFFSET;
 use super::{KD_REQUEST_TIMEOUT, KdBackend, api, with_framing_read_timeout};
 
 pub(super) const KD_REMOTE_MEMORY_CHUNK: usize = 0x800;
@@ -230,12 +228,13 @@ impl KdBackend {
     /// processor's CR3 would authorize a user-space request that the target
     /// then resolves in a different process.
     ///
-    /// AMD64 only: CR3 sits in the special registers cached per halt, while
-    /// the ARM64 user root (TTBR0) would cost a request of its own to learn.
+    /// Only where the special registers, cached per halt, hold the root
+    /// (AMD64's CR3): the ARM64 user root (TTBR0) would cost a request of
+    /// its own to learn.
     fn serving_processor_runs_on(&mut self, root: Dtb) -> bool {
-        match self.arch {
-            Arch::Amd64 => {}
-            Arch::Arm64 => return false,
+        let special_map = self.arch.special_register_map();
+        if !special_map.contains("cr3") {
+            return false;
         }
         if self.require_remote_memory_stopped().is_err() {
             return false;
@@ -250,7 +249,9 @@ impl KdBackend {
         let Some(special) = self.registers.special(processor) else {
             return false;
         };
-        let cr3 = bytes::read_u64(special, KSPECIAL_REGISTERS_CR3_OFFSET);
+        let Ok(cr3) = special_map.read_u64("cr3", special) else {
+            return false;
+        };
         let mask = self.arch.dtb_page_mask();
         cr3 & mask == root & mask
     }

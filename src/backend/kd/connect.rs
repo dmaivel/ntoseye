@@ -10,7 +10,6 @@ use crate::arch::{Arch, machine_name};
 use crate::backend::dbg_backend::DebugLog;
 use crate::backend::debugger_data::{DebuggerDataCandidate, MetadataSource};
 use crate::backend::kd::framing::KdFraming;
-use crate::base::bytes;
 use crate::base::error::{Error, Result};
 use crate::base::memory::{AddressSpace, MemoryOps, TranslationCache};
 use crate::base::types::{Dtb, PhysAddr, VirtAddr};
@@ -21,7 +20,7 @@ use super::breakpoints::{
 use super::halt::HaltRegisters;
 use super::kdnet::KdNetStream;
 use super::memory::{KD_REMOTE_MEMORY_CHUNK, LineCache};
-use super::registers::{ARM64_WINDBG_TTBR1_EL1, KSPECIAL_REGISTERS_CR3_OFFSET};
+use super::registers::ARM64_WINDBG_TTBR1_EL1;
 use super::transport::KdTransport;
 use super::{
     DBG_KD_EXCEPTION_STATE_CHANGE, DEBUG_LOG_CAPACITY, KD_REQUEST_TIMEOUT, KdBackend,
@@ -249,7 +248,7 @@ impl KdBackend {
         let register_value = match self.arch {
             Arch::Amd64 => {
                 let special = self.read_special_registers_uncached(processor)?;
-                bytes::read_u64(&special, KSPECIAL_REGISTERS_CR3_OFFSET)
+                self.arch.special_register_map().read_u64("cr3", &special)?
             }
             Arch::Arm64 => {
                 with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {

@@ -10,14 +10,12 @@
 use std::ops::Range;
 
 use super::HwBreakpointAccess;
+use crate::arch::arm64;
 
-/// Number of architectural ARM64 hardware breakpoint and watchpoint slots.
-/// These values are part of the Windows ARM64 ABI (`ARM64_NT_CONTEXT`).
-pub const ARM64_MAX_BREAKPOINTS: u8 = 8;
-pub const ARM64_MAX_WATCHPOINTS: u8 = 2;
-pub const ARM64_WATCHPOINT_SLOTS: Range<u8> = 0..ARM64_MAX_WATCHPOINTS;
+/// The ARM64 slots: the watchpoints first, then the breakpoints.
+pub const ARM64_WATCHPOINT_SLOTS: Range<u8> = 0..arm64::MAX_WATCHPOINTS as u8;
 pub const ARM64_BREAKPOINT_SLOTS: Range<u8> =
-    ARM64_MAX_WATCHPOINTS..(ARM64_MAX_WATCHPOINTS + ARM64_MAX_BREAKPOINTS);
+    ARM64_WATCHPOINT_SLOTS.end..ARM64_WATCHPOINT_SLOTS.end + arm64::MAX_BREAKPOINTS as u8;
 
 pub fn arm64_slot_range(access: HwBreakpointAccess) -> Range<u8> {
     match access {

@@ -81,6 +81,7 @@ impl Architecture for Amd64 {
             segments: CONTEXT_SEGMENTS,
             floating_point: CONTEXT_FLOATING_POINT,
             debug_registers: CONTEXT_DEBUG_REGISTERS,
+            all: CONTEXT_ALL,
         }
     }
 
@@ -94,6 +95,33 @@ impl Architecture for Amd64 {
 
     fn register_map(&self) -> &'static RegisterMap {
         static MAP: LazyLock<RegisterMap> = LazyLock::new(build_register_map);
+        &MAP
+    }
+
+    fn special_register_map(&self) -> &'static RegisterMap {
+        static MAP: LazyLock<RegisterMap> = LazyLock::new(|| {
+            RegisterMap::from_layout(
+                (0..4).map(|n| (format!("dr{n}"), 0x20 + n * 8, 8)).chain(
+                    [
+                        ("cr0", 0x00, 8),
+                        ("cr2", 0x08, 8),
+                        ("cr3", 0x10, 8),
+                        ("cr4", 0x18, 8),
+                        ("dr6", 0x40, 8),
+                        ("dr7", 0x48, 8),
+                        // A KDESCRIPTOR is Pad[3], Limit, Base.
+                        ("gdtr_limit", 0x56, 2),
+                        ("gdtr_base", 0x58, 8),
+                        ("idtr_limit", 0x66, 2),
+                        ("idtr_base", 0x68, 8),
+                        ("tr", 0x70, 2),
+                        ("ldtr", 0x72, 2),
+                        ("cr8", 0xa0, 8),
+                    ]
+                    .map(|(name, offset, size)| (name.to_string(), offset, size)),
+                ),
+            )
+        });
         &MAP
     }
 

@@ -86,6 +86,7 @@ impl Architecture for Arm64 {
             segments: 0,
             floating_point: CONTEXT_FLOATING_POINT,
             debug_registers: CONTEXT_DEBUG_REGISTERS,
+            all: CONTEXT_ALL,
         }
     }
 
@@ -101,6 +102,24 @@ impl Architecture for Arm64 {
 
     fn register_map(&self) -> &'static RegisterMap {
         static MAP: LazyLock<RegisterMap> = LazyLock::new(build_register_map);
+        &MAP
+    }
+
+    /// `KARM64_SPECIAL_REGISTERS` (160 bytes in the public WoA definition):
+    /// the kernel's copies of the hardware breakpoint and watchpoint
+    /// registers.
+    fn special_register_map(&self) -> &'static RegisterMap {
+        static MAP: LazyLock<RegisterMap> = LazyLock::new(|| {
+            let bank = |prefix: &'static str, base: usize, size: usize, count: usize| {
+                (0..count).map(move |n| (format!("{prefix}{n}"), base + n * size, size))
+            };
+            RegisterMap::from_layout(
+                bank("bvr", 0x28, 8, MAX_BREAKPOINTS)
+                    .chain(bank("bcr", 0x68, 4, MAX_BREAKPOINTS))
+                    .chain(bank("wvr", 0x88, 8, MAX_WATCHPOINTS))
+                    .chain(bank("wcr", 0x98, 4, MAX_WATCHPOINTS)),
+            )
+        });
         &MAP
     }
 
@@ -148,16 +167,16 @@ fn build_register_map() -> RegisterMap {
     }
     registers.push(next_reg("fpcr", OFFSET_FPCR, 4));
     registers.push(next_reg("fpsr", OFFSET_FPSR, 4));
-    for i in 0..8 {
+    for i in 0..MAX_BREAKPOINTS {
         registers.push(next_reg(&format!("bcr{i}"), OFFSET_BCR0 + i * 4, 4));
     }
-    for i in 0..8 {
+    for i in 0..MAX_BREAKPOINTS {
         registers.push(next_reg(&format!("bvr{i}"), OFFSET_BVR0 + i * 8, 8));
     }
-    for i in 0..2 {
+    for i in 0..MAX_WATCHPOINTS {
         registers.push(next_reg(&format!("wcr{i}"), OFFSET_WCR0 + i * 4, 4));
     }
-    for i in 0..2 {
+    for i in 0..MAX_WATCHPOINTS {
         registers.push(next_reg(&format!("wvr{i}"), OFFSET_WVR0 + i * 8, 8));
     }
     // Synthetic: kernel DTB (TTBR1_EL1), filled by the backend.

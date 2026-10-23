@@ -8,7 +8,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::transport::KdTransport;
-use crate::arch::{Arch, RegisterMap, amd64, arm64};
+use crate::arch::{Arch, RegisterMap};
 use crate::backend::dbg_backend::DebugLog;
 use crate::backend::kd::api;
 use crate::backend::kd::framing::{
@@ -20,9 +20,7 @@ use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
 
 use super::breakpoints::breakpoint_instruction_at;
-use super::registers::{
-    AMD64_DEBUG_CONTROL_SPACE_KSPECIAL, KSPECIAL_REGISTERS_DR7_OFFSET, KSPECIAL_REGISTERS_MIN_SIZE,
-};
+use super::registers::CONTROL_SPACE_KSPECIAL;
 use super::{
     BugcheckCapture, CONTROL_REPORT_OFFSET, ControlReport, DBG_KD_COMMAND_STRING_STATE_CHANGE,
     DBG_KD_EXCEPTION_STATE_CHANGE, DBG_KD_LOAD_SYMBOLS_STATE_CHANGE, KD_INITIAL_PROBE_TIMEOUT,
@@ -439,19 +437,19 @@ fn continue_preserving_dr7(
     continue_status: u32,
     trace: bool,
 ) -> Result<()> {
+    let special_map = Arch::Amd64.special_register_map();
     let special = api::read_control_space(
         framing,
         processor,
-        AMD64_DEBUG_CONTROL_SPACE_KSPECIAL,
-        KSPECIAL_REGISTERS_MIN_SIZE as u32,
+        CONTROL_SPACE_KSPECIAL,
+        special_map.extent() as u32,
     )?;
-    if special.len() < KSPECIAL_REGISTERS_DR7_OFFSET + 8 {
-        return Err(Error::Kd(format!(
+    let dr7 = special_map.read_u64("dr7", &special).map_err(|_| {
+        Error::Kd(format!(
             "KSPECIAL_REGISTERS buffer too short for KernelDr7: {} bytes",
             special.len()
-        )));
-    }
-    let dr7 = read_u64(&special, KSPECIAL_REGISTERS_DR7_OFFSET);
+        ))
+    })?;
     api::continue_api2(framing, processor, continue_status, trace, dr7)
 }
 
@@ -632,16 +630,9 @@ pub fn read_program_counter(
     processor: u16,
 ) -> Result<u64> {
     let context = with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
-        api::get_context(framing, processor, context_flags_for(arch))
+        api::get_context(framing, processor, arch.context_flags().all)
     })?;
     register_map.read_u64(arch.pc_register(), &context)
-}
-
-fn context_flags_for(arch: Arch) -> u32 {
-    match arch {
-        Arch::Amd64 => amd64::CONTEXT_ALL,
-        Arch::Arm64 => arm64::CONTEXT_ALL,
-    }
 }
 
 /// KD reports software-breakpoint stops with the program counter still
@@ -657,7 +648,7 @@ pub fn advance_pc_past_breakpoint(
     processor: u16,
     expected_pc: u64,
 ) -> Result<()> {
-    let context_flags = context_flags_for(arch);
+    let context_flags = arch.context_flags().all;
     let mut context = with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
         api::get_context(framing, processor, context_flags)
     })?;
@@ -934,6 +925,7 @@ mod tests {
     use std::os::unix::net::UnixStream;
 
     use super::*;
+    use crate::arch::amd64;
     use crate::backend::kd::api::test_wire::{ack_then_reply, build_reply, first_outbound_id};
     use crate::backend::kd::framing::INITIAL_PACKET_ID;
 

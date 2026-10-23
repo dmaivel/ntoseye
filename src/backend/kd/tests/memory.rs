@@ -11,7 +11,6 @@ use crate::backend::kd::framing::{
     data_packet,
 };
 use crate::backend::kd::memory::KD_VIRTUAL_LINE;
-use crate::backend::kd::registers::{KSPECIAL_REGISTERS_CR3_OFFSET, KSPECIAL_REGISTERS_MIN_SIZE};
 use crate::backend::phys::PhysMem;
 use crate::base::memory::{AddressSpace, MemoryOps, PAGE_SIZE};
 use crate::nt::guest::{Guest, Image};
@@ -443,13 +442,12 @@ fn user_space_of_the_current_process_is_read_in_one_request() {
     let (guest, backend, worker) = synthetic_guest(regions, Vec::new(), &[]);
     {
         let mut backend = backend.lock().unwrap();
-        let mut special = vec![0u8; KSPECIAL_REGISTERS_MIN_SIZE];
+        let special_map = Arch::Amd64.special_register_map();
+        let mut special = vec![0u8; special_map.extent()];
         // PCID bits in CR3 do not distinguish roots.
-        put_u64(
-            &mut special,
-            KSPECIAL_REGISTERS_CR3_OFFSET,
-            CURRENT_CR3 | 0x1,
-        );
+        special_map
+            .write_u64("cr3", &mut special, CURRENT_CR3 | 0x1)
+            .unwrap();
         let processor = backend.current_processor;
         backend.registers.set_special(processor, special);
 

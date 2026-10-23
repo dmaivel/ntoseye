@@ -19,6 +19,12 @@
 
 pub const CONTEXT_SIZE: usize = 0x390; // 912
 
+/// The hardware breakpoint and watchpoint register pairs a `CONTEXT`
+/// carries (`ARM64_MAX_BREAKPOINTS`, `ARM64_MAX_WATCHPOINTS`), part of the
+/// Windows ARM64 ABI.
+pub const MAX_BREAKPOINTS: usize = 8;
+pub const MAX_WATCHPOINTS: usize = 2;
+
 /// CONTEXT plus synthetic kernel-DTB, process-DTB, ESR, and FAR slots.
 pub const REGISTER_BUFFER_SIZE: usize = CONTEXT_SIZE + 32;
 

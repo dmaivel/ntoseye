@@ -42,17 +42,10 @@ static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// AMD64) that every stub reports.
 pub fn context_from_registers(arch: Arch, source: &RegisterMap, registers: &[u8]) -> Vec<u8> {
     let mut context = vec![0u8; arch.context_size()];
-    for register in arch.register_map().registers() {
-        let end = register.offset + register.size;
-        // The layout's synthetic slots (control registers, descriptor
-        // tables) sit past the CONTEXT proper.
-        if end > context.len() {
-            continue;
-        }
-        if let Ok(value) = source.read_u128(&register.name, registers) {
-            context[register.offset..end].copy_from_slice(&value.to_le_bytes()[..register.size]);
-        }
-    }
+    // The layout's synthetic slots (control registers, descriptor tables)
+    // sit past the CONTEXT proper, so the copy leaves them out.
+    arch.register_map()
+        .copy_from(&mut context, source, registers);
     let flags = arch.context_flags();
     write_u32(
         &mut context,

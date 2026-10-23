@@ -173,6 +173,11 @@ pub trait Architecture: Sync {
     /// The register map over the register buffer.
     fn register_map(&self) -> &'static RegisterMap;
 
+    /// The processor state Windows keeps beside the `CONTEXT`, in
+    /// `KSPECIAL_REGISTERS` (control, descriptor-table and debug
+    /// registers): its layout, under the register map's names.
+    fn special_register_map(&self) -> &'static RegisterMap;
+
     /// The `ContextFlags` group a `CONTEXT` record must mark present for
     /// `register` to hold a value; `None` for the control and integer state
     /// every record carries.
@@ -192,6 +197,8 @@ pub struct ContextFlags {
     pub segments: u32,
     pub floating_point: u32,
     pub debug_registers: u32,
+    /// Every group a debugger reads.
+    pub all: u32,
 }
 
 pub const IMAGE_FILE_MACHINE_I386: u16 = 0x014c;
