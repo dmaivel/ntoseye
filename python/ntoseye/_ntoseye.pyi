@@ -4572,7 +4572,7 @@ class ErrorCode(BaseRecord):
     @property
     def name(self, /) -> str:
         """
-        The symbolic name of the code.
+        The symbolic name of the code; empty when no name is known.
         """
     @property
     def severity(self, /) -> Literal["success", "informational", "warning", "error"] |None:

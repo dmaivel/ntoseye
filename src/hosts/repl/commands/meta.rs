@@ -971,24 +971,25 @@ fn format_printf(
 }
 
 fn print_error_code(detail: &ErrorCode) {
+    // A code without a known name has an empty one.
+    let name = if detail.name.is_empty() {
+        "-"
+    } else {
+        detail.name.as_str()
+    };
     match detail.kind {
         ErrorCodeKind::Ntstatus => {
-            outln!("NTSTATUS {:#010x}: {}", detail.code, detail.name);
+            outln!("NTSTATUS {:#010x}: {name}", detail.code);
             outln!("  {}", detail.description);
         }
         ErrorCodeKind::Hresult => {
-            outln!("HRESULT {:#010x}: {}", detail.code, detail.name);
+            outln!("HRESULT {:#010x}: {name}", detail.code);
             outln!("  {}", detail.description);
             if let Some(win32) = detail.win32_code {
                 outln!("  Win32 code: {win32} ({win32:#x})");
             }
         }
-        ErrorCodeKind::Win32 => outln!(
-            "Win32 error {} ({:#x}): {}",
-            detail.code,
-            detail.code,
-            detail.name
-        ),
+        ErrorCodeKind::Win32 => outln!("Win32 error {} ({:#x}): {name}", detail.code, detail.code),
         ErrorCodeKind::Unknown => outln!(
             "Unknown error code {} ({:#x}): {}",
             detail.code,

@@ -1249,7 +1249,7 @@ pub struct ErrorCode {
     #[record(hex)]
     pub code: u64,
     pub kind: ErrorCodeKind,
-    /// The symbolic name of the code.
+    /// The symbolic name of the code; empty when no name is known.
     pub name: String,
     pub description: String,
     /// `success`, `informational`, `warning`, or `error`. `None` for a
@@ -1272,7 +1272,7 @@ fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCode {
         return ErrorCode {
             code,
             kind: ErrorCodeKind::Unknown,
-            name: "UNKNOWN".to_string(),
+            name: String::new(),
             description: "error code exceeds 32 bits".to_string(),
             severity: None,
             facility: None,
@@ -1295,7 +1295,7 @@ fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCode {
         return ErrorCode {
             code,
             kind: ErrorCodeKind::Ntstatus,
-            name: ntstatus_name(raw).unwrap_or("STATUS_UNKNOWN").to_string(),
+            name: ntstatus_name(raw).unwrap_or_default().to_string(),
             description: format!(
                 "severity: {severity}; facility: {facility:#x}; customer: {}",
                 if customer { "yes" } else { "no" }
@@ -1316,10 +1316,7 @@ fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCode {
         return ErrorCode {
             code,
             kind: ErrorCodeKind::Hresult,
-            name: win32_name
-                .as_deref()
-                .unwrap_or("HRESULT_UNKNOWN")
-                .to_string(),
+            name: win32_name.clone().unwrap_or_default(),
             description: format!(
                 "severity: error; facility: {facility:#x}; customer: {}",
                 if customer { "yes" } else { "no" }
@@ -1332,11 +1329,27 @@ fn decode_error_code_inner(code: u64, force_ntstatus: bool) -> ErrorCode {
         };
     }
 
+    // Win32 error codes are 16 bits wide; a larger value with neither the
+    // NTSTATUS nor the HRESULT severity bits set is none of the three.
+    if raw > 0xffff {
+        return ErrorCode {
+            code,
+            kind: ErrorCodeKind::Unknown,
+            name: String::new(),
+            description: "not an NTSTATUS, HRESULT, or Win32 error code".to_string(),
+            severity: None,
+            facility: None,
+            customer: None,
+            win32_code: None,
+            win32_name: None,
+        };
+    }
+
     ErrorCode {
         code,
         kind: ErrorCodeKind::Win32,
-        name: win32_error_name(raw).unwrap_or("ERROR_UNKNOWN").to_string(),
-        description: format!("Win32 error {raw} ({raw:#x})"),
+        name: win32_error_name(raw).unwrap_or_default().to_string(),
+        description: format!("Win32 error {raw:#x}"),
         severity: None,
         facility: None,
         customer: None,
