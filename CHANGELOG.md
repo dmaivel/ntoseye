@@ -21,6 +21,10 @@ Keeping this file:
 - The `gdb` backend sets as many hardware breakpoints (`ba`) as the GDB stub accepts, no longer four, so QEMU running with TCG, which emulates them, takes any number. Under KVM the processor still has four debug registers, and a fifth `ba` says the stub refused it.
 - A module whose PDB no symbol source has — a vendor driver never published — falls back to the export table of its image in the dump, as the Windows debugger does, so `k`, `ln` and `!analyze` name its functions (`myfault!nmf_fault_irql+0x35`) where they showed `module+offset`, and a deferred breakpoint on an export binds. So does a module whose image names no PDB at all (no CodeView record), once fetching the image does not name one either. A PDB acquired later (a source added, the process attached again) replaces the export symbols.
 
+### Changed
+
+- On an ARM64 target, `rip` and `rsp` no longer name `pc` and `sp`: `r`, expressions and breakpoint conditions take the ARM64 names (`@pc`, `@sp`, or `$ip` and `$csp` on any architecture), as WinDbg does. `fp`, `lr` and `pstate` still name `x29`, `x30` and `cpsr`.
+
 ### Fixed
 
 - Modules are named after their image file, as WinDbg's `lm` names them, not the loader's alias for it: `kd.dll` rather than `kdcom.dll`, `mcupdate_GenuineIntel.dll` rather than `mcupdate.dll`, in a WOW64 process's 32-bit module list too. Their `module!` prefixes follow (`kd!`, `mcupdate_genuineintel!`).
