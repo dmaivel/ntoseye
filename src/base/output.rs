@@ -9,8 +9,9 @@
 //! Transcript logging is process-wide so a `.logopen` command also records
 //! diagnostics emitted by the backend or another command context.
 //!
-//! Styling reaches stdout and stderr only when the stream is a terminal and
-//! `NO_COLOR` is unset or empty; a redirected stream gets plain text.
+//! Styling reaches stdout and stderr only when the stream is a terminal,
+//! `NO_COLOR` is unset or empty, and `TERM` is not `dumb`; a redirected
+//! stream gets plain text.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -39,8 +40,19 @@ static LOG_SINK: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| Mutex
 
 static NO_COLOR: LazyLock<bool> =
     LazyLock::new(|| std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()));
-static STDOUT_STYLED: LazyLock<bool> = LazyLock::new(|| !*NO_COLOR && io::stdout().is_terminal());
-static STDERR_STYLED: LazyLock<bool> = LazyLock::new(|| !*NO_COLOR && io::stderr().is_terminal());
+static DUMB_TERMINAL: LazyLock<bool> =
+    LazyLock::new(|| std::env::var_os("TERM").is_some_and(|term| term == "dumb"));
+static STDOUT_STYLED: LazyLock<bool> =
+    LazyLock::new(|| !*NO_COLOR && !*DUMB_TERMINAL && io::stdout().is_terminal());
+static STDERR_STYLED: LazyLock<bool> =
+    LazyLock::new(|| !*NO_COLOR && !*DUMB_TERMINAL && io::stderr().is_terminal());
+
+/// Whether `TERM` is `dumb`: a terminal, such as Emacs's `M-x shell`, that
+/// shows text but acts on no escape sequence, so it gets no styling and the
+/// plain prompt.
+pub fn dumb_terminal() -> bool {
+    *DUMB_TERMINAL
+}
 
 /// How the REPL draws a long task's progress itself (Tern's native bar),
 /// given a handle on the bar to poll and its label.
@@ -236,8 +248,8 @@ pub fn write_fmt(args: fmt::Arguments<'_>) {
     }
 }
 
-/// Whether stdout gets styling: it is a terminal, and `NO_COLOR` is unset
-/// or empty.
+/// Whether stdout gets styling: it is a terminal, `NO_COLOR` is unset or
+/// empty, and `TERM` is not `dumb`.
 pub fn stdout_styled() -> bool {
     *STDOUT_STYLED
 }

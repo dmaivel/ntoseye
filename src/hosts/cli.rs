@@ -18,6 +18,7 @@ use crate::{
     base::{
         diagnostics,
         error::{Error, Result},
+        output,
     },
     hosts::{
         configure,
@@ -528,13 +529,16 @@ fn run(cli: Cli) -> Result<()> {
         Some(dump) => TargetSpec::Dump(dump.clone()),
         None => live_spec(&args, backend),
     };
+    // The line editor draws by moving the cursor, which a dumb terminal
+    // does not do.
+    let plain_repl = plain_repl || output::dumb_terminal();
     // Before the attach, which already indexes symbols behind a progress
     // bar that Tern draws natively, and before anything reads stdin.
     if !plain_repl {
         native::detect();
     }
     let mut ctx = open_session(&spec, &mut |line| {
-        crate::base::output::write_stderr_fmt(format_args!("{}\n", line.bright_black()));
+        output::write_stderr_fmt(format_args!("{}\n", line.bright_black()));
     })?;
     let result = if plain_repl {
         start_plain_repl(&mut ctx)

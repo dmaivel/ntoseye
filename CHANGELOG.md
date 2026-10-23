@@ -51,6 +51,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - A guest's debug output (`DbgPrint`), printed as the target runs and by `!dbgprint`, shows control characters as visible symbols, such as `␛` for an escape, instead of passing them to the terminal, so a driver's output can no longer move the cursor, recolor or clear the screen, retitle the window, or plant a link. The SDK's `debug_log()` still returns the text as the guest printed it.
 - A WHEA_UNCORRECTABLE_ERROR (0x124) and a KERNEL_SECURITY_CHECK_FAILURE (0x139) are described in a full sentence, in the bugcheck stop, `!analyze -show` and the SDK's `BugcheckAnalysis.description`, instead of starting mid-sentence with "and indicates that".
 - With `NO_COLOR` set, the prompt and its completion menu are plain too, as the rest of the output already was.
+- With `TERM=dumb`, as in Emacs's `M-x shell`, ntoseye reads commands line by line as with `--plain-repl` and prints no color or other escape sequences, which such a terminal showed as stray characters.
 
 ### Removed
 

@@ -17,7 +17,7 @@ As you type, the rest of the most recent earlier line that starts with what you'
 
 With `--plain-repl`, ntoseye reads commands line by line without completion or history, so you can pipe a command file into it.
 
-ntoseye shows color only when the output goes to a terminal. If you redirect the output, or if `NO_COLOR` is set, the output is plain text, and so are the prompt and its completion menu.
+ntoseye shows color only when the output goes to a terminal. If you redirect the output, or if `NO_COLOR` is set, the output is plain text, and so are the prompt and its completion menu. With `TERM=dumb`, as in Emacs's `M-x shell`, ntoseye also reads commands as `--plain-repl` does, since that terminal can't move the cursor for the line editor.
 
 The prompt marks where each command and its output start and end, as a shell does for its terminal (OSC 133). A terminal that reads these marks, such as Ghostty, kitty, WezTerm, iTerm2, Windows Terminal, the VS Code terminal or Tern, can then jump from one command to the next, select a command's output, or flag one that reported an error.
 
