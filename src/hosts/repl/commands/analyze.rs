@@ -4,6 +4,7 @@ use crate::analysis::triage_report::{
     TRIAGE_BACKTRACE_LIMIT, TriageReport, UserDumpTriage, UserExceptionFinding, UserProcessSummary,
     UserStackSource, UserStackThread, WheaRecordState, power_failure_finding,
 };
+use crate::arch::Arch;
 use crate::backend::dbg_backend::BugcheckInfo;
 use crate::base::error::{Error, Result};
 use crate::base::ntstatus::exception_code_name;
@@ -153,7 +154,7 @@ fn print_bugcheck_header(analysis: &BugcheckAnalysis) {
     }
 }
 
-fn print_hang_report(report: &HangReport) {
+fn print_hang_report(arch: Arch, report: &HangReport) {
     print_section("hang analysis");
     if report.processors.is_empty() {
         outln!("  {}", ui::muted("processor count unavailable"));
@@ -177,7 +178,7 @@ fn print_hang_report(report: &HangReport) {
                     thread.process_name.as_deref().unwrap_or("unknown")
                 );
                 match stack {
-                    Ok(trace) => print_stacktrace_data(trace, ANALYZE_HANG_STACK_LIMIT, true),
+                    Ok(trace) => print_stacktrace_data(arch, trace, ANALYZE_HANG_STACK_LIMIT, true),
                     Err(error) => {
                         outln!("    {}", ui::muted(&format!("stack unavailable: {error}")))
                     }
@@ -221,9 +222,9 @@ fn print_hang_report(report: &HangReport) {
     }
 }
 
-fn print_triage_report(report: &TriageReport, verbose: bool) {
+fn print_triage_report(arch: Arch, report: &TriageReport, verbose: bool) {
     if let Some(user) = &report.user {
-        print_user_triage_report(report, user, verbose);
+        print_user_triage_report(arch, report, user, verbose);
         return;
     }
     outln!("{}", ui::label("crash analysis"));
@@ -370,6 +371,7 @@ fn print_triage_report(report: &TriageReport, verbose: bool) {
 
         match &report.backtrace {
             Some(trace) => print_stacktrace_data(
+                arch,
                 trace,
                 if verbose {
                     TRIAGE_BACKTRACE_LIMIT
@@ -395,12 +397,12 @@ fn print_triage_report(report: &TriageReport, verbose: bool) {
         }
     }
 
-    print_crash_intelligence(report);
+    print_crash_intelligence(arch, report);
     print_report_modules(report, verbose);
     print_dump_metadata(report);
 }
 
-fn print_crash_intelligence(report: &TriageReport) {
+fn print_crash_intelligence(arch: Arch, report: &TriageReport) {
     if let Some(signature) = &report.failure_signature {
         print_section("failure signature");
         outln!("  {}", signature.bucket);
@@ -522,12 +524,12 @@ fn print_crash_intelligence(report: &TriageReport) {
     }
 
     if let Some(power) = &report.power {
-        print_power_failure(power);
+        print_power_failure(arch, power);
     }
 }
 
 /// The 0x9F section of `!analyze`: what is stuck, and the threads involved.
-fn print_power_failure(finding: &PowerFailureFinding) {
+fn print_power_failure(arch: Arch, finding: &PowerFailureFinding) {
     let failure = &finding.failure;
     print_section("power failure");
     outln!("  subtype {:#x}: {}", failure.subtype, failure.description);
@@ -648,7 +650,7 @@ fn print_power_failure(finding: &PowerFailureFinding) {
         };
         outln!("  thread {}  {}", ui::addr(thread.thread.0), role);
         match &thread.stack {
-            Ok(trace) => print_stacktrace_data(trace, POWER_THREAD_STACK_LIMIT, false),
+            Ok(trace) => print_stacktrace_data(arch, trace, POWER_THREAD_STACK_LIMIT, false),
             Err(error) => outln!("  {}", ui::muted(&format!("stack unavailable: {error}"))),
         }
     }
@@ -935,7 +937,12 @@ pub fn user_process_label(process: &UserProcessSummary) -> String {
 /// kernel to read it from.
 pub const USER_DUMP_NOT_APPLICABLE: &str = "not in a user-mode minidump: bugcheck, trap frame, processor, verifier, WHEA, power, blackbox, and KMDF findings (they need a kernel)";
 
-fn print_user_triage_report(report: &TriageReport, user: &UserDumpTriage, verbose: bool) {
+fn print_user_triage_report(
+    arch: Arch,
+    report: &TriageReport,
+    user: &UserDumpTriage,
+    verbose: bool,
+) {
     outln!("{}", ui::label("crash analysis"));
     match &user.exception {
         Some(exception) => print_user_exception(report, exception, verbose),
@@ -997,7 +1004,7 @@ fn print_user_triage_report(report: &TriageReport, user: &UserDumpTriage, verbos
         }
     }
 
-    print_crash_intelligence(report);
+    print_crash_intelligence(arch, report);
     if let Some(exception) = &user.exception
         && report.culprit.is_none()
     {
@@ -1395,20 +1402,21 @@ enum AnalysisBody {
 }
 
 impl Render for Analysis {
-    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+    fn render(&self, state: &mut ReplState<'_>, (): ()) {
+        let arch = state.ctx.target.arch();
         if let Some(show) = &self.show {
             print_bugcheck_analysis(&show.analysis);
             if let Some(finding) = &show.power {
-                print_power_failure(finding);
+                print_power_failure(arch, finding);
             }
         }
         match &self.body {
             Some(AnalysisBody::Hang(report)) => {
-                print_hang_report(report);
+                print_hang_report(arch, report);
             }
             Some(AnalysisBody::Report(report)) => {
                 let verbose = self.verbose;
-                print_triage_report(report, verbose);
+                print_triage_report(arch, report, verbose);
             }
             None => {}
         }

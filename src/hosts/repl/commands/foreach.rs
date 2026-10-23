@@ -347,6 +347,7 @@ fn for_each_frame(
     if command.is_empty() {
         let selected = previous.as_ref().map(|frame| frame.index);
         print_indexed_stacktrace(
+            state.ctx.target.arch(),
             &trace,
             FOR_EACH_FRAME_LIMIT,
             0,

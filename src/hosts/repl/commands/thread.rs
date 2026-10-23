@@ -216,7 +216,12 @@ impl ReplState<'_> {
         match self.ctx.backtrace_thread(thread, running_on, limit) {
             Ok(trace) => {
                 outln!("k-stack ({}):", trace.source.as_str());
-                print_stacktrace_data_with_provenance(&trace.stacktrace, limit, false);
+                print_stacktrace_data_with_provenance(
+                    self.ctx.target.arch(),
+                    &trace.stacktrace,
+                    limit,
+                    false,
+                );
             }
             Err(error) => error!("failed to unwind thread stack: {}", error),
         }
@@ -226,7 +231,7 @@ impl ReplState<'_> {
         match self.ctx.backtrace(limit) {
             Ok(trace) => {
                 outln!("k-stack ({source}):");
-                print_stacktrace_data(&trace, limit, false);
+                print_stacktrace_data(self.ctx.target.arch(), &trace, limit, false);
             }
             Err(error) => error!("failed to unwind thread stack: {}", error),
         }
@@ -298,9 +303,12 @@ impl ReplState<'_> {
             } else {
                 match word {
                     Some("k") => match self.ctx.backtrace(frame_limit) {
-                        Ok(stacktrace) => {
-                            print_stacktrace_data_with_provenance(&stacktrace, frame_limit, false)
-                        }
+                        Ok(stacktrace) => print_stacktrace_data_with_provenance(
+                            self.ctx.target.arch(),
+                            &stacktrace,
+                            frame_limit,
+                            false,
+                        ),
                         Err(error) => error!("failed to unwind parked thread stack: {}", error),
                     },
                     Some("r" | "registers") => error!(
@@ -342,7 +350,9 @@ impl ReplState<'_> {
         } else {
             match word {
                 Some("k") => match self.ctx.backtrace(frame_limit) {
-                    Ok(trace) => print_stacktrace_data(&trace, frame_limit, false),
+                    Ok(trace) => {
+                        print_stacktrace_data(self.ctx.target.arch(), &trace, frame_limit, false)
+                    }
                     Err(error) => error!("failed to unwind thread stack: {}", error),
                 },
                 Some("r" | "registers") => {

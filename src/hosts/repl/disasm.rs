@@ -8,6 +8,7 @@ use crate::base::memory::MemoryOps;
 use crate::base::types::{CodeMachine, VirtAddr};
 use crate::hosts::repl::listing::{self, Listing};
 use crate::hosts::ui;
+use crate::nt::bugchecks::looks_like_kernel_pointer;
 use crate::nt::symbols::{LocalSourceState, SourceLocation};
 use crate::nt::target::Target;
 use crate::nt::unwind::{
@@ -566,7 +567,7 @@ pub fn print_stacktrace(
     embedded: bool,
 ) {
     let stacktrace = thread_stacktrace(debugger, register_map, regs, build_limit);
-    print_stacktrace_data(&stacktrace, display_limit, embedded);
+    print_stacktrace_data(debugger.arch(), &stacktrace, display_limit, embedded);
 }
 
 /// The stack of the selected thread from `regs`, walked `build_limit`
@@ -588,11 +589,23 @@ pub fn thread_stacktrace(
 }
 
 /// Render an already-collected stack trace in the same layout as [`print_stacktrace`].
-pub fn print_stacktrace_data(stacktrace: &StackTrace, display_limit: usize, embedded: bool) {
-    print_stacktrace_data_with(stacktrace, display_limit, embedded, StackColumns::default());
+pub fn print_stacktrace_data(
+    arch: Arch,
+    stacktrace: &StackTrace,
+    display_limit: usize,
+    embedded: bool,
+) {
+    print_stacktrace_data_with(
+        arch,
+        stacktrace,
+        display_limit,
+        embedded,
+        StackColumns::default(),
+    );
 }
 
 pub fn print_stacktrace_data_with_provenance(
+    arch: Arch,
     stacktrace: &StackTrace,
     display_limit: usize,
     embedded: bool,
@@ -601,7 +614,7 @@ pub fn print_stacktrace_data_with_provenance(
         provenance: true,
         ..StackColumns::default()
     };
-    print_stacktrace_data_with(stacktrace, display_limit, embedded, columns);
+    print_stacktrace_data_with(arch, stacktrace, display_limit, embedded, columns);
 }
 
 /// The optional columns of the `k` family: `kv`'s provenance and `kf`'s
@@ -648,12 +661,11 @@ pub fn format_source_location(location: &SourceLocation) -> String {
     }
 }
 
-/// What a stack walk crossed between a frame and its caller: `user mode`
-/// where the kernel was entered from user code, `trap` where a trap or
-/// interrupt stopped the caller within the same mode.
-pub fn crossing(callee: &StackFrame, caller: &StackFrame) -> Option<&'static str> {
-    // Kernel addresses have the top bit set on both AMD64 and ARM64.
-    let kernel = |frame: &StackFrame| frame.ip >> 63 == 1;
+/// What a stack walk on `arch` crossed between a frame and its caller:
+/// `user mode` where the kernel was entered from user code, `trap` where a
+/// trap or interrupt stopped the caller within the same mode.
+pub fn crossing(arch: Arch, callee: &StackFrame, caller: &StackFrame) -> Option<&'static str> {
+    let kernel = |frame: &StackFrame| looks_like_kernel_pointer(arch, frame.ip);
     if kernel(callee) && !kernel(caller) {
         Some("user mode")
     } else if caller.machine_frame.is_some() {
@@ -672,19 +684,21 @@ pub fn crossing_line(label: &str, indent: usize) -> String {
 }
 
 pub fn print_stacktrace_data_with(
+    arch: Arch,
     stacktrace: &StackTrace,
     display_limit: usize,
     embedded: bool,
     columns: StackColumns,
 ) {
-    print_stack_frames(stacktrace, 0, display_limit, embedded, columns);
+    print_stack_frames(arch, stacktrace, 0, display_limit, embedded, columns);
 }
 
 /// A stop's stack from frame `from`, the frames above it folded into one
 /// line: at a bugcheck, the bugcheck's own frames above the frame that
 /// faulted. Every frame keeps its number, as `.frame` takes it.
-pub fn print_stop_stack(stacktrace: &StackTrace, from: usize, display_limit: usize) {
+pub fn print_stop_stack(arch: Arch, stacktrace: &StackTrace, from: usize, display_limit: usize) {
     print_stack_frames(
+        arch,
         stacktrace,
         from,
         display_limit,
@@ -694,6 +708,7 @@ pub fn print_stop_stack(stacktrace: &StackTrace, from: usize, display_limit: usi
 }
 
 fn print_stack_frames(
+    arch: Arch,
     stacktrace: &StackTrace,
     from: usize,
     display_limit: usize,
@@ -725,7 +740,7 @@ fn print_stack_frames(
     let mut previous_sp = None;
     for (num, frame) in stacktrace.frames.iter().enumerate().take(end).skip(from) {
         if num > 0
-            && let Some(label) = crossing(&stacktrace.frames[num - 1], frame)
+            && let Some(label) = crossing(arch, &stacktrace.frames[num - 1], frame)
         {
             outln!("{}", crossing_line(label, indent.len() + 4));
         }

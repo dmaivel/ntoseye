@@ -765,12 +765,18 @@ fn stack(
             }
         };
         if name.eq_ignore_ascii_case("kp") {
-            print_stacktrace_data_with(&trace, frame_limit, false, columns);
+            print_stacktrace_data_with(
+                state.ctx.target.arch(),
+                &trace,
+                frame_limit,
+                false,
+                columns,
+            );
             state.print_stack_parameters(&trace, 0)?;
             outln!();
             return Ok(());
         }
-        print_stacktrace_data_with(&trace, frame_limit, false, columns);
+        print_stacktrace_data_with(state.ctx.target.arch(), &trace, frame_limit, false, columns);
         outln!();
         return Ok(());
     }
@@ -838,11 +844,25 @@ fn stack(
         .unwrap_or(0);
     let selected = state.ctx.target.selected_frame.as_ref().map(|_| offset);
     if !name.eq_ignore_ascii_case("kp") {
-        print_indexed_stacktrace(&trace, frame_limit, offset, columns, selected);
+        print_indexed_stacktrace(
+            state.ctx.target.arch(),
+            &trace,
+            frame_limit,
+            offset,
+            columns,
+            selected,
+        );
         outln!();
         return Ok(());
     }
-    print_indexed_stacktrace(&trace, frame_limit, offset, columns, selected);
+    print_indexed_stacktrace(
+        state.ctx.target.arch(),
+        &trace,
+        frame_limit,
+        offset,
+        columns,
+        selected,
+    );
     let plain = StackTrace {
         frames: trace
             .frames
@@ -1215,6 +1235,7 @@ fn print_register_grid(register_map: &RegisterMap, regs: &[u8], arch: Arch, cont
 }
 
 pub fn print_indexed_stacktrace(
+    arch: Arch,
     trace: &RecoveredStackTrace,
     display_limit: usize,
     frame_offset: usize,
@@ -1226,7 +1247,7 @@ pub fn print_indexed_stacktrace(
         let frame = &recovered.frame;
         let global_index = frame_offset + index;
         if index > 0
-            && let Some(label) = crossing(&trace.frames[index - 1].frame, frame)
+            && let Some(label) = crossing(arch, &trace.frames[index - 1].frame, frame)
         {
             outln!("{}", crossing_line(label, 4));
         }

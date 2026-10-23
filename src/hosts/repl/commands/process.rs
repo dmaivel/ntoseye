@@ -565,6 +565,7 @@ impl ReplState<'_> {
                     Ok(trace) => {
                         outln!("  k-stack ({}):", trace.source.as_str());
                         print_stacktrace_data_with_provenance(
+                            self.ctx.target.arch(),
                             &trace.stacktrace,
                             THREAD_STACK_LIMIT,
                             true,

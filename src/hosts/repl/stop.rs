@@ -280,7 +280,12 @@ fn print_saved_vtl0_context(session: &Session, saved: &HashMap<String, u64>) {
     print_sparse_registers(saved, session.target.arch(), None, 2);
     let (trace, rip, stack) = saved_vtl0_code(session, saved);
     print_disasm_context(session, &trace, rip, NextStep::default());
-    print_stacktrace_data(&stack, BREAK_STACKTRACE_DISPLAY_LIMIT, true);
+    print_stacktrace_data(
+        session.target.arch(),
+        &stack,
+        BREAK_STACKTRACE_DISPLAY_LIMIT,
+        true,
+    );
 }
 
 /// Where the saved VTL0 state left off: its trace context, its `rip` and
@@ -504,6 +509,7 @@ fn print_stop_text(session: &Session, stop: &StopContext) {
         },
     );
     print_stop_stack(
+        session.target.arch(),
         &stack,
         fault_index.unwrap_or(0),
         BREAK_STACKTRACE_DISPLAY_LIMIT,
