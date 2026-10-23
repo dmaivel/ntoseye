@@ -14,7 +14,7 @@ use super::{
     UserDumpInfo, UserException, UserHandle, UserModule, UserSystemInfo, UserThreadInfo,
     UserThreadTimes, UserTimeZone,
 };
-use crate::arch::{Arch, amd64, arm64};
+use crate::arch::Arch;
 use crate::base::bytes::{utf16le_lossy, utf16le_nul_terminated};
 use crate::base::error::{Error, Result};
 use crate::nt::pe::headers::{MAX_CODEVIEW_BYTES, decode_codeview};
@@ -756,20 +756,8 @@ fn read_context(
     location: Location,
     arch: Arch,
 ) -> std::result::Result<Vec<u8>, String> {
-    let (size, flags_offset, arch_flag, required) = match arch {
-        Arch::Amd64 => (
-            amd64::CONTEXT_SIZE,
-            amd64::OFFSET_CONTEXT_FLAGS,
-            amd64::CONTEXT_AMD64,
-            amd64::CONTEXT_CONTROL | amd64::CONTEXT_INTEGER,
-        ),
-        Arch::Arm64 => (
-            arm64::CONTEXT_SIZE,
-            arm64::OFFSET_CONTEXT_FLAGS,
-            arm64::CONTEXT_ARM64,
-            arm64::CONTEXT_CONTROL | arm64::CONTEXT_INTEGER,
-        ),
-    };
+    let size = arch.context_size();
+    let context_flags = arch.context_flags();
     let (rva, data_size) = (location.rva, location.data_size);
     if data_size == 0 && rva == 0 {
         return Err("the dump records no context".into());
@@ -782,13 +770,14 @@ fn read_context(
     }
     let bytes = located(data, u64::from(rva), size as u64)
         .ok_or_else(|| format!("the context at {rva:#x} leaves the file"))?;
-    let flags = read_at::<u32>(bytes, flags_offset as u64).unwrap_or(0);
-    if flags & arch_flag == 0 {
+    let flags = read_at::<u32>(bytes, context_flags.offset as u64).unwrap_or(0);
+    if flags & context_flags.architecture == 0 {
         return Err(format!(
             "the context flags {flags:#x} do not mark an {} CONTEXT",
             arch.label()
         ));
     }
+    let required = context_flags.control | context_flags.integer;
     if flags & required != required {
         return Err(format!(
             "the context flags {flags:#x} lack the control or integer registers"

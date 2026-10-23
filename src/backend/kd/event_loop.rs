@@ -953,7 +953,7 @@ mod tests {
 
         let error = advance_pc_past_breakpoint(
             &mut framing,
-            &register_map,
+            register_map,
             Arch::Amd64,
             0,
             0xffff_f800_0011_0000,

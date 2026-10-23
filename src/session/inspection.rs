@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::arch::{Arch, amd64, arm64};
+use crate::arch::Arch;
 use crate::backend::dbg_backend::{ContinueDisposition, processor_index_from_backend_thread_id};
 use crate::base::bytes;
 use crate::base::disasm::{
@@ -90,13 +90,10 @@ impl Session {
     /// Decode the `CONTEXT` record at `address` into a register map, without
     /// changing the selected backend context (`.cxr`).
     pub fn read_context_record(&self, address: VirtAddr) -> Result<HashMap<String, u64>> {
-        let (size, map) = match self.target.arch() {
-            Arch::Amd64 => (amd64::CONTEXT_SIZE, Arch::Amd64.register_map()),
-            Arch::Arm64 => (arm64::CONTEXT_SIZE, Arch::Arm64.register_map()),
-        };
-        let mut bytes = vec![0u8; size];
+        let arch = self.target.arch();
+        let mut bytes = vec![0u8; arch.context_size()];
         self.read_record_bytes(address, &mut bytes)?;
-        Ok(map.to_hashmap(&bytes))
+        Ok(arch.register_map().to_hashmap(&bytes))
     }
 
     /// The current `.exr -1` view, when the last event contains exception
@@ -150,7 +147,7 @@ impl Session {
             .as_ref()
             .ok_or_else(|| Error::DebugInfo("the minidump records no exception".into()))?;
         let thread = info.backend_thread_id(exception.thread_id);
-        let registers = self.target.user_exception_registers(&self.register_map)?;
+        let registers = self.target.user_exception_registers()?;
         if self.current_thread != thread {
             self.set_current_thread(&thread)?;
         }

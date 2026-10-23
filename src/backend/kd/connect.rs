@@ -131,10 +131,7 @@ impl KdBackend {
             }
         };
         let arch = detect_arch(version.machine_type)?;
-        let register_map = match arch {
-            Arch::Amd64 => Arch::Amd64.register_map(),
-            Arch::Arm64 => Arch::Arm64.register_map(),
-        };
+        let register_map = arch.register_map().clone();
         // The first state-change often arrives with KD's SYNC bit set. That is
         // the baseline connection, not a target reload for the REPL to surface.
         framing.take_peer_reset_seen();

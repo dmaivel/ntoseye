@@ -2,9 +2,12 @@
 //! check the parser's bounds, both memory list encodings, the module and
 //! thread records, and the refusals.
 
+use std::collections::HashMap;
+
 use memmap2::MmapMut;
 
 use super::*;
+use crate::arch::{amd64, arm64};
 use crate::backend::dbg_backend::DebugBackend;
 use crate::base::error::Error;
 use crate::base::memory::read_page_chunks;
@@ -358,7 +361,7 @@ fn amd64_contexts_are_checked_and_thread_streams_merge_by_thread_id() {
     let threads = &dump.info().threads;
 
     let map = Arch::Amd64.register_map();
-    let registers = register_buffer(Arch::Amd64, threads[0].context.as_ref().unwrap());
+    let registers = Arch::Amd64.register_buffer(threads[0].context.as_ref().unwrap());
     assert_eq!(map.read_u64("rip", &registers).unwrap(), 0x7ff9_4651_1344);
     assert_eq!(map.read_u64("rsp", &registers).unwrap(), 0xf3_5cfa_f788);
     assert_eq!(map.read_u64("cr3", &registers).unwrap(), 0);
@@ -372,7 +375,7 @@ fn amd64_contexts_are_checked_and_thread_streams_merge_by_thread_id() {
     assert_eq!(threads[1].name.as_deref(), Some("worker"));
 
     // Only the groups the flags mark are registers of the context.
-    let values = context_registers(Arch::Amd64, &map, threads[0].context.as_ref().unwrap());
+    let values = Arch::Amd64.context_registers(threads[0].context.as_ref().unwrap());
     assert_eq!(values.get("rip"), Some(&0x7ff9_4651_1344));
     assert!(!values.contains_key("dr7"));
     assert!(!values.contains_key("xmm0l"));
@@ -412,14 +415,14 @@ fn arm64_threads_and_the_exception_stream_carry_their_contexts() {
 
     assert_eq!(info.arch, Arch::Arm64);
     let map = Arch::Arm64.register_map();
-    let thread = register_buffer(Arch::Arm64, info.threads[0].context.as_ref().unwrap());
+    let thread = Arch::Arm64.register_buffer(info.threads[0].context.as_ref().unwrap());
     assert_eq!(map.read_u64("pc", &thread).unwrap(), 0x7ffa_0000_1000);
 
     let exception = info.exception.as_ref().unwrap();
     assert_eq!(exception.thread_id, 0x200);
     assert_eq!(exception.code, 0xe0d7_e5e1);
     assert_eq!(exception.parameters, vec![7, 9]);
-    let registers = context_registers(Arch::Arm64, &map, exception.context.as_ref().unwrap());
+    let registers = Arch::Arm64.context_registers(exception.context.as_ref().unwrap());
     assert_eq!(registers.get("pc"), Some(&0x7ffa_0000_2000));
 
     // The backend starts on the exception's thread.
@@ -713,7 +716,7 @@ fn an_arm64_stack_unwinds_through_jit_code_and_recursion() {
         ("lr".to_string(), RETURN),
     ]);
     let trace =
-        build_stacktrace_with_register_values(&target, &Arch::Arm64.register_map(), &values, 8);
+        build_stacktrace_with_register_values(&target, Arch::Arm64.register_map(), &values, 8);
     let frames: Vec<_> = trace
         .frames
         .iter()

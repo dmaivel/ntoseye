@@ -4,8 +4,8 @@
 
 use std::time::Duration;
 
-use super::{UserDumpInfo, register_buffer};
-use crate::arch::{Arch, RegisterMap};
+use super::UserDumpInfo;
+use crate::arch::RegisterMap;
 use crate::backend::dbg_backend::{BackendCapability, DebugBackend, DebugCapability, StopEvent};
 use crate::base::error::{Error, Result};
 use crate::base::notice::Notice;
@@ -30,10 +30,7 @@ impl UserDumpBackend {
     /// A backend over `info`'s threads, starting on the exception's thread
     /// when the dump records one, else on the first thread.
     pub fn new(info: &UserDumpInfo) -> Self {
-        let register_map = match info.arch {
-            Arch::Amd64 => Arch::Amd64.register_map(),
-            Arch::Arm64 => Arch::Arm64.register_map(),
-        };
+        let register_map = info.arch.register_map().clone();
         let threads: Vec<DumpThread> = info
             .threads
             .iter()
@@ -43,7 +40,7 @@ impl UserDumpBackend {
                 registers: thread
                     .context
                     .as_ref()
-                    .map(|raw| register_buffer(info.arch, raw))
+                    .map(|raw| info.arch.register_buffer(raw))
                     .map_err(Clone::clone),
             })
             .collect();

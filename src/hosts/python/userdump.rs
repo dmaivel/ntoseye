@@ -128,10 +128,7 @@ impl UserDump {
     fn exception_context(&self, py: Python<'_>) -> PyResult<Frame> {
         let owner = self.owner.derive(py);
         let (arch, registers) = self.owner.with(py, |session| {
-            let registers = session
-                .target
-                .user_exception_registers(&session.register_map)
-                .map_err(err)?;
+            let registers = session.target.user_exception_registers().map_err(err)?;
             Ok((session.target.arch(), registers))
         })?;
         let ip = registers.get(arch.pc_register()).copied().unwrap_or(0);

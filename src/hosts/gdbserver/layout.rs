@@ -383,8 +383,8 @@ mod tests {
         map.write_u64("xmm0l", &mut file, 0x1122_3344_5566_7788)
             .unwrap();
 
-        let layout = Layout::new(Arch::Amd64, &map);
-        let wire = layout.encode(&map, &file);
+        let layout = Layout::new(Arch::Amd64, map);
+        let wire = layout.encode(map, &file);
 
         let rip = wire_offset("rip");
         let rip_bytes: Vec<u8> = wire[rip..rip + 8].iter().map(|b| b.unwrap()).collect();
@@ -415,20 +415,20 @@ mod tests {
         let mut file = vec![0u8; REGISTER_BUFFER_SIZE];
         map.write_u64("rsp", &mut file, 0xffff_8000_0000_1000)
             .unwrap();
-        let layout = Layout::new(Arch::Amd64, &map);
+        let layout = Layout::new(Arch::Amd64, map);
 
         let mut wire: Vec<u8> = layout
-            .encode(&map, &file)
+            .encode(map, &file)
             .into_iter()
             .map(|byte| byte.unwrap_or(0xAA))
             .collect();
         let rip = wire_offset("rip");
         wire[rip..rip + 8].copy_from_slice(&0xffff_f800_0000_4000u64.to_le_bytes());
-        layout.decode(&map, &mut file, &wire).unwrap();
+        layout.decode(map, &mut file, &wire).unwrap();
 
         assert_eq!(map.read_u64("rip", &file).unwrap(), 0xffff_f800_0000_4000);
         assert_eq!(map.read_u64("rsp", &file).unwrap(), 0xffff_8000_0000_1000);
-        assert!(layout.decode(&map, &mut file, &wire[1..]).is_err());
+        assert!(layout.decode(map, &mut file, &wire[1..]).is_err());
     }
 
     /// gdb files the segment bases and system registers under `general`, which
@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn optional_registers_the_transport_lacks_are_not_described() {
         let map = Arch::Amd64.register_map();
-        let xml = Layout::new(Arch::Amd64, &map).target_xml().to_string();
+        let xml = Layout::new(Arch::Amd64, map).target_xml().to_string();
         for absent in ["\"fs_base\"", "\"gs_base\"", "\"k_gs_base\""] {
             assert!(!xml.contains(absent), "{absent} described");
         }

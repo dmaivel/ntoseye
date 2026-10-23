@@ -4,15 +4,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use memmap2::Mmap;
-use zerocopy::FromBytes;
 
-use crate::arch::{Arch, RegisterMap, amd64, arm64, machine_name};
+use crate::arch::{Arch, RegisterFile, RegisterMap, machine_name};
 use crate::backend::dbg_backend::{
     BackendCapability, DebugBackend, DebugCapability, StopEvent,
     processor_index_from_backend_thread_id,
 };
 use crate::backend::debugger_data::{DebuggerDataCandidate, MetadataSource};
-use crate::base::bytes::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
 use crate::base::error::{Error, Result};
 use crate::base::memory::{MemoryOps, PAGE_SIZE};
 use crate::base::notice::Notice;
@@ -26,7 +24,6 @@ pub mod tagged;
 pub mod triage;
 
 use parse::ParsedDump;
-use structs::Context;
 use tagged::{TaggedBlock, tagged_blocks_at};
 use triage::{
     TriageBlock, TriageDriver, TriagePrcbInfo, is_triage_dump, parse_drivers, parse_triage,
@@ -42,69 +39,6 @@ pub fn dump_arch(machine_type: u32) -> Result<Arch> {
             machine.map_or("Unknown", machine_name)
         ))
     })
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct DmpArm64Context {
-    pub x: [u64; 31],
-    pub cpsr: u32,
-    pub sp: u64,
-    pub pc: u64,
-    pub v: [u128; 32],
-    pub fpcr: u32,
-    pub fpsr: u32,
-    pub bcr: [u32; 8],
-    pub bvr: [u64; 8],
-    pub wcr: [u32; 2],
-    pub wvr: [u64; 2],
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct DmpAmd64Context {
-    pub rax: u64,
-    pub rbx: u64,
-    pub rcx: u64,
-    pub rdx: u64,
-    pub rsi: u64,
-    pub rdi: u64,
-    pub rbp: u64,
-    pub rsp: u64,
-    pub r8: u64,
-    pub r9: u64,
-    pub r10: u64,
-    pub r11: u64,
-    pub r12: u64,
-    pub r13: u64,
-    pub r14: u64,
-    pub r15: u64,
-    pub rip: u64,
-    pub eflags: u32,
-    pub cs: u16,
-    pub ds: u16,
-    pub es: u16,
-    pub fs: u16,
-    pub gs: u16,
-    pub ss: u16,
-    pub dr0: u64,
-    pub dr1: u64,
-    pub dr2: u64,
-    pub dr3: u64,
-    pub dr6: u64,
-    pub dr7: u64,
-    pub mxcsr: u32,
-    pub xmm: [u128; 16],
-    pub debug_control: u64,
-    pub last_branch_to_rip: u64,
-    pub last_branch_from_rip: u64,
-    pub last_exception_to_rip: u64,
-    pub last_exception_from_rip: u64,
-}
-
-/// A crash dump's CONTEXT record, per architecture.
-#[derive(Debug, Clone)]
-pub enum DmpContext {
-    Amd64(DmpAmd64Context),
-    Arm64(DmpArm64Context),
 }
 
 /// The exception a crash dump recorded.
@@ -203,274 +137,6 @@ pub struct UnloadedDriver {
     pub end_address: u64,
 }
 
-impl DmpContext {
-    pub fn from_bytes(buf: &[u8]) -> Self {
-        let mut xmm = [0u128; 16];
-        if buf.len() >= amd64::OFFSET_XMM0 + 16 * 16 {
-            for (i, slot) in xmm.iter_mut().enumerate() {
-                let off = amd64::OFFSET_XMM0 + i * 16;
-                let mut bytes = [0u8; 16];
-                bytes.copy_from_slice(&buf[off..off + 16]);
-                *slot = u128::from_le_bytes(bytes);
-            }
-        }
-
-        let has_lbr = buf.len() >= amd64::OFFSET_LAST_EXCEPTION_FROM_RIP + 8;
-
-        Self::Amd64(DmpAmd64Context {
-            rax: read_u64(buf, amd64::OFFSET_RAX),
-            rbx: read_u64(buf, amd64::OFFSET_RBX),
-            rcx: read_u64(buf, amd64::OFFSET_RCX),
-            rdx: read_u64(buf, amd64::OFFSET_RDX),
-            rsi: read_u64(buf, amd64::OFFSET_RSI),
-            rdi: read_u64(buf, amd64::OFFSET_RDI),
-            rbp: read_u64(buf, amd64::OFFSET_RBP),
-            rsp: read_u64(buf, amd64::OFFSET_RSP),
-            r8: read_u64(buf, amd64::OFFSET_R8),
-            r9: read_u64(buf, amd64::OFFSET_R9),
-            r10: read_u64(buf, amd64::OFFSET_R10),
-            r11: read_u64(buf, amd64::OFFSET_R11),
-            r12: read_u64(buf, amd64::OFFSET_R12),
-            r13: read_u64(buf, amd64::OFFSET_R13),
-            r14: read_u64(buf, amd64::OFFSET_R14),
-            r15: read_u64(buf, amd64::OFFSET_R15),
-            rip: read_u64(buf, amd64::OFFSET_RIP),
-            eflags: read_u32(buf, amd64::OFFSET_EFLAGS),
-            cs: read_u16(buf, amd64::OFFSET_SEG_CS),
-            ds: read_u16(buf, amd64::OFFSET_SEG_DS),
-            es: read_u16(buf, amd64::OFFSET_SEG_ES),
-            fs: read_u16(buf, amd64::OFFSET_SEG_FS),
-            gs: read_u16(buf, amd64::OFFSET_SEG_GS),
-            ss: read_u16(buf, amd64::OFFSET_SEG_SS),
-            dr0: read_u64(buf, amd64::OFFSET_DR0),
-            dr1: read_u64(buf, amd64::OFFSET_DR1),
-            dr2: read_u64(buf, amd64::OFFSET_DR2),
-            dr3: read_u64(buf, amd64::OFFSET_DR3),
-            dr6: read_u64(buf, amd64::OFFSET_DR6),
-            dr7: read_u64(buf, amd64::OFFSET_DR7),
-            mxcsr: read_u32(buf, amd64::OFFSET_MX_CSR),
-            xmm,
-            debug_control: if has_lbr {
-                read_u64(buf, amd64::OFFSET_DEBUG_CONTROL)
-            } else {
-                0
-            },
-            last_branch_to_rip: if has_lbr {
-                read_u64(buf, amd64::OFFSET_LAST_BRANCH_TO_RIP)
-            } else {
-                0
-            },
-            last_branch_from_rip: if has_lbr {
-                read_u64(buf, amd64::OFFSET_LAST_BRANCH_FROM_RIP)
-            } else {
-                0
-            },
-            last_exception_to_rip: if has_lbr {
-                read_u64(buf, amd64::OFFSET_LAST_EXCEPTION_TO_RIP)
-            } else {
-                0
-            },
-            last_exception_from_rip: if has_lbr {
-                read_u64(buf, amd64::OFFSET_LAST_EXCEPTION_FROM_RIP)
-            } else {
-                0
-            },
-        })
-    }
-
-    /// Parse the public Windows ARM64_NT_CONTEXT layout. The helper is
-    /// deliberately bounds-checked so a truncated dump yields zero for the
-    /// unavailable field instead of panicking while parsing an untrusted file.
-    pub fn from_arm64_bytes(buf: &[u8]) -> Self {
-        if buf.len() < arm64::CONTEXT_SIZE {
-            return Self::Arm64(DmpArm64Context::default());
-        }
-        let mut x = [0u64; 31];
-        for (i, slot) in x.iter_mut().enumerate() {
-            *slot = read_u64(buf, arm64::OFFSET_X0 + i * 8);
-        }
-        let mut v = [0u128; 32];
-        for (i, slot) in v.iter_mut().enumerate() {
-            let off = arm64::OFFSET_V0 + i * 16;
-            let mut bytes = [0u8; 16];
-            bytes.copy_from_slice(&buf[off..off + 16]);
-            *slot = u128::from_le_bytes(bytes);
-        }
-        let mut bcr = [0u32; 8];
-        for (i, slot) in bcr.iter_mut().enumerate() {
-            *slot = read_u32(buf, arm64::OFFSET_BCR0 + i * 4);
-        }
-        let mut bvr = [0u64; 8];
-        for (i, slot) in bvr.iter_mut().enumerate() {
-            *slot = read_u64(buf, arm64::OFFSET_BVR0 + i * 8);
-        }
-        let mut wcr = [0u32; 2];
-        for (i, slot) in wcr.iter_mut().enumerate() {
-            *slot = read_u32(buf, arm64::OFFSET_WCR0 + i * 4);
-        }
-        let mut wvr = [0u64; 2];
-        for (i, slot) in wvr.iter_mut().enumerate() {
-            *slot = read_u64(buf, arm64::OFFSET_WVR0 + i * 8);
-        }
-
-        let cpsr = read_u32(buf, arm64::OFFSET_CPSR);
-        let sp = read_u64(buf, arm64::OFFSET_SP);
-        let pc = read_u64(buf, arm64::OFFSET_PC);
-        let fpcr = read_u32(buf, arm64::OFFSET_FPCR);
-        let fpsr = read_u32(buf, arm64::OFFSET_FPSR);
-        Self::Arm64(DmpArm64Context {
-            x,
-            cpsr,
-            sp,
-            pc,
-            v,
-            fpcr,
-            fpsr,
-            bcr,
-            bvr,
-            wcr,
-            wvr,
-        })
-    }
-
-    /// The context's architecture.
-    pub fn arch(&self) -> Arch {
-        match self {
-            Self::Amd64(_) => Arch::Amd64,
-            Self::Arm64(_) => Arch::Arm64,
-        }
-    }
-
-    pub fn instruction_pointer(&self) -> u64 {
-        match self {
-            Self::Amd64(ctx) => ctx.rip,
-            Self::Arm64(ctx) => ctx.pc,
-        }
-    }
-
-    pub fn stack_pointer(&self) -> u64 {
-        match self {
-            Self::Amd64(ctx) => ctx.rsp,
-            Self::Arm64(ctx) => ctx.sp,
-        }
-    }
-
-    pub fn to_register_buffer(&self, directory_table_base: u64) -> Vec<u8> {
-        match self {
-            Self::Amd64(ctx) => ctx.to_register_buffer(directory_table_base),
-            Self::Arm64(ctx) => ctx.to_register_buffer(directory_table_base),
-        }
-    }
-}
-
-impl DmpArm64Context {
-    pub fn to_register_buffer(&self, directory_table_base: u64) -> Vec<u8> {
-        let mut data = vec![0u8; arm64::REGISTER_BUFFER_SIZE];
-        data[arm64::OFFSET_CONTEXT_FLAGS..arm64::OFFSET_CONTEXT_FLAGS + 4]
-            .copy_from_slice(&arm64::CONTEXT_ALL.to_le_bytes());
-        data[arm64::OFFSET_CPSR..arm64::OFFSET_CPSR + 4].copy_from_slice(&self.cpsr.to_le_bytes());
-        for (i, &value) in self.x.iter().enumerate() {
-            let off = arm64::OFFSET_X0 + i * 8;
-            data[off..off + 8].copy_from_slice(&value.to_le_bytes());
-        }
-        data[arm64::OFFSET_SP..arm64::OFFSET_SP + 8].copy_from_slice(&self.sp.to_le_bytes());
-        data[arm64::OFFSET_PC..arm64::OFFSET_PC + 8].copy_from_slice(&self.pc.to_le_bytes());
-        for (i, &value) in self.v.iter().enumerate() {
-            let off = arm64::OFFSET_V0 + i * 16;
-            data[off..off + 16].copy_from_slice(&value.to_le_bytes());
-        }
-        data[arm64::OFFSET_FPCR..arm64::OFFSET_FPCR + 4].copy_from_slice(&self.fpcr.to_le_bytes());
-        data[arm64::OFFSET_FPSR..arm64::OFFSET_FPSR + 4].copy_from_slice(&self.fpsr.to_le_bytes());
-        for (i, &value) in self.bcr.iter().enumerate() {
-            let off = arm64::OFFSET_BCR0 + i * 4;
-            data[off..off + 4].copy_from_slice(&value.to_le_bytes());
-        }
-        for (i, &value) in self.bvr.iter().enumerate() {
-            let off = arm64::OFFSET_BVR0 + i * 8;
-            data[off..off + 8].copy_from_slice(&value.to_le_bytes());
-        }
-        for (i, &value) in self.wcr.iter().enumerate() {
-            let off = arm64::OFFSET_WCR0 + i * 4;
-            data[off..off + 4].copy_from_slice(&value.to_le_bytes());
-        }
-        for (i, &value) in self.wvr.iter().enumerate() {
-            let off = arm64::OFFSET_WVR0 + i * 8;
-            data[off..off + 8].copy_from_slice(&value.to_le_bytes());
-        }
-        data[arm64::OFFSET_CR3..arm64::OFFSET_CR3 + 8]
-            .copy_from_slice(&directory_table_base.to_le_bytes());
-        data
-    }
-}
-
-impl DmpAmd64Context {
-    pub fn to_register_buffer(&self, directory_table_base: u64) -> Vec<u8> {
-        let mut data = vec![0u8; amd64::REGISTER_BUFFER_SIZE];
-
-        write_u64(&mut data, amd64::OFFSET_RAX, self.rax);
-        write_u64(&mut data, amd64::OFFSET_RBX, self.rbx);
-        write_u64(&mut data, amd64::OFFSET_RCX, self.rcx);
-        write_u64(&mut data, amd64::OFFSET_RDX, self.rdx);
-        write_u64(&mut data, amd64::OFFSET_RSI, self.rsi);
-        write_u64(&mut data, amd64::OFFSET_RDI, self.rdi);
-        write_u64(&mut data, amd64::OFFSET_RBP, self.rbp);
-        write_u64(&mut data, amd64::OFFSET_RSP, self.rsp);
-        write_u64(&mut data, amd64::OFFSET_R8, self.r8);
-        write_u64(&mut data, amd64::OFFSET_R9, self.r9);
-        write_u64(&mut data, amd64::OFFSET_R10, self.r10);
-        write_u64(&mut data, amd64::OFFSET_R11, self.r11);
-        write_u64(&mut data, amd64::OFFSET_R12, self.r12);
-        write_u64(&mut data, amd64::OFFSET_R13, self.r13);
-        write_u64(&mut data, amd64::OFFSET_R14, self.r14);
-        write_u64(&mut data, amd64::OFFSET_R15, self.r15);
-        write_u64(&mut data, amd64::OFFSET_RIP, self.rip);
-        write_u32(&mut data, amd64::OFFSET_EFLAGS, self.eflags);
-        write_u16(&mut data, amd64::OFFSET_SEG_CS, self.cs);
-        write_u16(&mut data, amd64::OFFSET_SEG_DS, self.ds);
-        write_u16(&mut data, amd64::OFFSET_SEG_ES, self.es);
-        write_u16(&mut data, amd64::OFFSET_SEG_FS, self.fs);
-        write_u16(&mut data, amd64::OFFSET_SEG_GS, self.gs);
-        write_u16(&mut data, amd64::OFFSET_SEG_SS, self.ss);
-        write_u64(&mut data, amd64::OFFSET_DR0, self.dr0);
-        write_u64(&mut data, amd64::OFFSET_DR1, self.dr1);
-        write_u64(&mut data, amd64::OFFSET_DR2, self.dr2);
-        write_u64(&mut data, amd64::OFFSET_DR3, self.dr3);
-        write_u64(&mut data, amd64::OFFSET_DR6, self.dr6);
-        write_u64(&mut data, amd64::OFFSET_DR7, self.dr7);
-        write_u64(&mut data, amd64::OFFSET_CR3, directory_table_base);
-        write_u32(&mut data, amd64::OFFSET_MX_CSR, self.mxcsr);
-        for (i, &val) in self.xmm.iter().enumerate() {
-            let off = amd64::OFFSET_XMM0 + i * 16;
-            data[off..off + 16].copy_from_slice(&val.to_le_bytes());
-        }
-        // Keep the buffer symmetric with from_bytes: PRCB-sourced raw CONTEXT
-        // copies carry these, so the header-context buffer must too.
-        write_u64(&mut data, amd64::OFFSET_DEBUG_CONTROL, self.debug_control);
-        write_u64(
-            &mut data,
-            amd64::OFFSET_LAST_BRANCH_TO_RIP,
-            self.last_branch_to_rip,
-        );
-        write_u64(
-            &mut data,
-            amd64::OFFSET_LAST_BRANCH_FROM_RIP,
-            self.last_branch_from_rip,
-        );
-        write_u64(
-            &mut data,
-            amd64::OFFSET_LAST_EXCEPTION_TO_RIP,
-            self.last_exception_to_rip,
-        );
-        write_u64(
-            &mut data,
-            amd64::OFFSET_LAST_EXCEPTION_FROM_RIP,
-            self.last_exception_from_rip,
-        );
-
-        data
-    }
-}
-
 /// Clamp the untrusted header's processor count so a malformed dump can't
 /// drive an unbounded per-CPU register-buffer allocation.
 pub fn clamp_processors(n: u32) -> u32 {
@@ -482,7 +148,7 @@ pub struct DmpInfo {
     pub directory_table_base: u64,
     pub bug_check_code: u32,
     pub bug_check_parameters: [u64; 4],
-    pub context: DmpContext,
+    pub context: RegisterFile,
     pub offset_prcb_context: Option<u16>,
     pub number_processors: u32,
     pub is_triage: bool,
@@ -555,52 +221,7 @@ impl DmpMem {
             .map(|last| tagged_blocks_at(&mmap, last + PAGE_SIZE))
             .unwrap_or_default();
 
-        let context = match arch {
-            Arch::Arm64 => DmpContext::from_arm64_bytes(&hdr.context_record_buffer),
-            Arch::Amd64 => {
-                let (ctx, _) = Context::read_from_prefix(&hdr.context_record_buffer)
-                    .map_err(|_| Error::InvalidDump("context record is truncated".to_string()))?;
-                DmpContext::Amd64(DmpAmd64Context {
-                    rax: ctx.rax,
-                    rbx: ctx.rbx,
-                    rcx: ctx.rcx,
-                    rdx: ctx.rdx,
-                    rsi: ctx.rsi,
-                    rdi: ctx.rdi,
-                    rbp: ctx.rbp,
-                    rsp: ctx.rsp,
-                    r8: ctx.r8,
-                    r9: ctx.r9,
-                    r10: ctx.r10,
-                    r11: ctx.r11,
-                    r12: ctx.r12,
-                    r13: ctx.r13,
-                    r14: ctx.r14,
-                    r15: ctx.r15,
-                    rip: ctx.rip,
-                    eflags: ctx.eflags,
-                    cs: ctx.seg_cs,
-                    ds: ctx.seg_ds,
-                    es: ctx.seg_es,
-                    fs: ctx.seg_fs,
-                    gs: ctx.seg_gs,
-                    ss: ctx.seg_ss,
-                    dr0: ctx.dr0,
-                    dr1: ctx.dr1,
-                    dr2: ctx.dr2,
-                    dr3: ctx.dr3,
-                    dr6: ctx.dr6,
-                    dr7: ctx.dr7,
-                    mxcsr: ctx.mxcsr,
-                    xmm: ctx.xmm_registers,
-                    debug_control: ctx.debug_control,
-                    last_branch_to_rip: ctx.last_branch_to_rip,
-                    last_branch_from_rip: ctx.last_branch_from_rip,
-                    last_exception_to_rip: ctx.last_exception_to_rip,
-                    last_exception_from_rip: ctx.last_exception_from_rip,
-                })
-            }
-        };
+        let context = RegisterFile::from_context(arch, &hdr.context_record_buffer);
 
         let exc = &hdr.exception;
         let n_params = (exc.number_parameters as usize).min(15);
@@ -773,7 +394,7 @@ pub struct DmpBackend {
     // The dump header's CONTEXT record (the crashing CPU's) and DTB, kept so
     // the crash context can be re-seated after the PRCB pass (see
     // `select_crash_processor`)
-    header_context: DmpContext,
+    header_context: RegisterFile,
     directory_table_base: u64,
     debugger_data_hint: Option<DebuggerDataCandidate>,
     /// Dump-integrity and per-CPU context warnings raised while opening,
@@ -784,24 +405,13 @@ pub struct DmpBackend {
 impl DmpBackend {
     pub fn new(info: &DmpInfo) -> Self {
         let arch = info.context.arch();
-        let register_map = match arch {
-            Arch::Arm64 => Arch::Arm64.register_map(),
-            Arch::Amd64 => Arch::Amd64.register_map(),
-        };
+        let register_map = arch.register_map().clone();
         let n = info.number_processors.max(1) as usize;
 
-        let cpu0_data = Self::build_register_buffer(&info.context, info.directory_table_base);
-
         let mut per_cpu = Vec::with_capacity(n);
-        per_cpu.push(cpu0_data);
+        per_cpu.push(info.context.with_kernel_dtb(info.directory_table_base));
         for _ in 1..n {
-            let (mut data, dtb_offset) = match arch {
-                Arch::Arm64 => (vec![0u8; arm64::REGISTER_BUFFER_SIZE], arm64::OFFSET_CR3),
-                Arch::Amd64 => (vec![0u8; amd64::REGISTER_BUFFER_SIZE], amd64::OFFSET_CR3),
-            };
-            data[dtb_offset..dtb_offset + 8]
-                .copy_from_slice(&info.directory_table_base.to_le_bytes());
-            per_cpu.push(data);
+            per_cpu.push(RegisterFile::empty(arch).with_kernel_dtb(info.directory_table_base));
         }
 
         Self {
@@ -829,10 +439,6 @@ impl DmpBackend {
         }
     }
 
-    fn build_register_buffer(ctx: &DmpContext, directory_table_base: u64) -> Vec<u8> {
-        ctx.to_register_buffer(directory_table_base)
-    }
-
     /// Select the bugchecking CPU by matching the header CONTEXT against the
     /// per-CPU PRCB contexts; with no match, re-seat the header context on CPU 0.
     fn select_crash_processor(&mut self) {
@@ -841,19 +447,18 @@ impl DmpBackend {
             return;
         }
 
+        let arch = self.header_context.arch();
+        let read = |regs: &[u8], name| arch.register_map().read_u64(name, regs).ok();
         let matches_header = |regs: &Vec<u8>| {
-            let (pc_offset, sp_offset) = match self.header_context.arch() {
-                Arch::Arm64 => (arm64::OFFSET_PC, arm64::OFFSET_SP),
-                Arch::Amd64 => (amd64::OFFSET_RIP, amd64::OFFSET_RSP),
-            };
-            read_u64(regs, pc_offset) == self.header_context.instruction_pointer()
-                && read_u64(regs, sp_offset) == self.header_context.stack_pointer()
+            read(regs, arch.pc_register()) == Some(self.header_context.instruction_pointer())
+                && read(regs, arch.sp_register()) == Some(self.header_context.stack_pointer())
         };
         match self.per_cpu_registers.iter().position(matches_header) {
             Some(i) => self.current_processor = i,
             None => {
-                self.per_cpu_registers[0] =
-                    Self::build_register_buffer(&self.header_context, self.directory_table_base);
+                self.per_cpu_registers[0] = self
+                    .header_context
+                    .with_kernel_dtb(self.directory_table_base);
                 self.current_processor = 0;
             }
         }
@@ -1029,6 +634,7 @@ mod tests {
     use crate::arch::{
         IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64, IMAGE_FILE_MACHINE_I386,
     };
+    use crate::arch::{amd64, arm64};
 
     #[test]
     fn dump_open_rejects_unsupported_machine_types() {
@@ -1058,24 +664,24 @@ mod tests {
         raw[arm64::OFFSET_BCR0..arm64::OFFSET_BCR0 + 4]
             .copy_from_slice(&0x0000_e9e1u32.to_le_bytes());
         raw[arm64::OFFSET_WVR0..arm64::OFFSET_WVR0 + 8].copy_from_slice(&0x4000u64.to_le_bytes());
-        let context = DmpContext::from_arm64_bytes(&raw);
-        let DmpContext::Arm64(arm) = &context else {
-            panic!("expected an ARM64 context");
-        };
-        assert_eq!(arm.x[0], 0x1122_3344_5566_7788);
-        assert_eq!(arm.sp, 0xffff_0000_1234_5000);
-        assert_eq!(arm.pc, 0xffff_0000_0000_1000);
-        assert_eq!(arm.bcr[0], 0x0000_e9e1);
-        assert_eq!(arm.wvr[0], 0x4000);
-
+        let data = RegisterFile::from_context(Arch::Arm64, &raw).with_kernel_dtb(0x1234_5000);
         let map = Arch::Arm64.register_map();
-        let data = context.to_register_buffer(0x1234_5000);
-        assert_eq!(map.read_u64("x0", &data).unwrap(), arm.x[0]);
-        assert_eq!(map.read_u64("pc", &data).unwrap(), arm.pc);
-        assert_eq!(map.read_u64("sp", &data).unwrap(), arm.sp);
-        assert_eq!(map.read_u64("bcr0", &data).unwrap(), arm.bcr[0] as u64);
-        assert_eq!(map.read_u64("wvr0", &data).unwrap(), arm.wvr[0]);
+        assert_eq!(map.read_u64("x0", &data).unwrap(), 0x1122_3344_5566_7788);
+        assert_eq!(map.read_u64("pc", &data).unwrap(), 0xffff_0000_0000_1000);
+        assert_eq!(map.read_u64("sp", &data).unwrap(), 0xffff_0000_1234_5000);
+        assert_eq!(map.read_u64("bcr0", &data).unwrap(), 0x0000_e9e1);
+        assert_eq!(map.read_u64("wvr0", &data).unwrap(), 0x4000);
         assert_eq!(map.read_u64("cr3", &data).unwrap(), 0x1234_5000);
+    }
+
+    /// An AMD64 register file holding `values`, by name.
+    fn amd64_registers(values: &[(&str, u64)]) -> RegisterFile {
+        let map = Arch::Amd64.register_map();
+        let mut record = vec![0u8; amd64::CONTEXT_SIZE];
+        for &(name, value) in values {
+            map.write_u64(name, &mut record, value).unwrap();
+        }
+        RegisterFile::from_context(Arch::Amd64, &record)
     }
 
     fn make_test_info() -> DmpInfo {
@@ -1100,45 +706,32 @@ mod tests {
             triage_overflowed: false,
             triage_signature_valid: true,
             kern_base: None,
-            context: DmpContext::Amd64(DmpAmd64Context {
-                rax: 0x1111111111111111,
-                rbx: 0x2222222222222222,
-                rcx: 0x3333333333333333,
-                rdx: 0x4444444444444444,
-                rsi: 0x5555555555555555,
-                rdi: 0x6666666666666666,
-                rbp: 0x7777777777777777,
-                rsp: 0x8888888888888888,
-                r8: 0x0808080808080808,
-                r9: 0x0909090909090909,
-                r10: 0x1010101010101010,
-                r11: 0x1111111111111111,
-                r12: 0x1212121212121212,
-                r13: 0x1313131313131313,
-                r14: 0x1414141414141414,
-                r15: 0x1515151515151515,
-                rip: 0xfffff80012345678,
-                eflags: 0x246,
-                cs: 0x10,
-                ds: 0x2b,
-                es: 0x2b,
-                fs: 0x53,
-                gs: 0x2b,
-                ss: 0x18,
-                dr0: 0,
-                dr1: 0,
-                dr2: 0,
-                dr3: 0,
-                dr6: 0,
-                dr7: 0,
-                mxcsr: 0,
-                xmm: [0; 16],
-                debug_control: 0,
-                last_branch_to_rip: 0,
-                last_branch_from_rip: 0,
-                last_exception_to_rip: 0,
-                last_exception_from_rip: 0,
-            }),
+            context: amd64_registers(&[
+                ("rax", 0x1111111111111111),
+                ("rbx", 0x2222222222222222),
+                ("rcx", 0x3333333333333333),
+                ("rdx", 0x4444444444444444),
+                ("rsi", 0x5555555555555555),
+                ("rdi", 0x6666666666666666),
+                ("rbp", 0x7777777777777777),
+                ("rsp", 0x8888888888888888),
+                ("r8", 0x0808080808080808),
+                ("r9", 0x0909090909090909),
+                ("r10", 0x1010101010101010),
+                ("r11", 0x1111111111111111),
+                ("r12", 0x1212121212121212),
+                ("r13", 0x1313131313131313),
+                ("r14", 0x1414141414141414),
+                ("r15", 0x1515151515151515),
+                ("rip", 0xfffff80012345678),
+                ("eflags", 0x246),
+                ("cs", 0x10),
+                ("ds", 0x2b),
+                ("es", 0x2b),
+                ("fs", 0x53),
+                ("gs", 0x2b),
+                ("ss", 0x18),
+            ]),
         }
     }
 
@@ -1276,11 +869,11 @@ mod tests {
         assert!(!backend.header_context_is_empty());
         let data = backend.read_registers().unwrap();
         let map = backend.register_map().clone();
-        let DmpContext::Amd64(context) = &info.context else {
-            panic!("expected an AMD64 context");
-        };
-        assert_eq!(map.read_u64("rip", &data).unwrap(), context.rip);
-        assert_eq!(map.read_u64("rax", &data).unwrap(), context.rax);
+        assert_eq!(
+            map.read_u64("rip", &data).unwrap(),
+            info.context.instruction_pointer()
+        );
+        assert_eq!(map.read_u64("rax", &data).ok(), info.context.read("rax"));
         assert_eq!(
             map.read_u64("cr3", &data).unwrap(),
             info.directory_table_base

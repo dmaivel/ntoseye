@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ntoseye_macros::record;
 
-use crate::arch::{Arch, RegisterMap, amd64, arm64};
+use crate::arch::{Arch, RegisterMap};
 use crate::base::bytes::{write_u32, write_u64};
 use crate::base::error::{Error, Result};
 use crate::base::memory::{MemoryOps, PAGE_SIZE};
@@ -41,20 +41,8 @@ static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// `ContextFlags` claims the control and integer state (and segments on
 /// AMD64) that every stub reports.
 pub fn context_from_registers(arch: Arch, source: &RegisterMap, registers: &[u8]) -> Vec<u8> {
-    let (layout, flags_offset, flags) = match arch {
-        Arch::Amd64 => (
-            Arch::Amd64.register_map(),
-            amd64::OFFSET_CONTEXT_FLAGS,
-            amd64::CONTEXT_CONTROL | amd64::CONTEXT_INTEGER | amd64::CONTEXT_SEGMENTS,
-        ),
-        Arch::Arm64 => (
-            Arch::Arm64.register_map(),
-            arm64::OFFSET_CONTEXT_FLAGS,
-            arm64::CONTEXT_CONTROL | arm64::CONTEXT_INTEGER,
-        ),
-    };
-    let mut context = vec![0u8; context_size(arch)];
-    for register in layout.registers() {
+    let mut context = vec![0u8; arch.context_size()];
+    for register in arch.register_map().registers() {
         let end = register.offset + register.size;
         // The layout's synthetic slots (control registers, descriptor
         // tables) sit past the CONTEXT proper.
@@ -65,15 +53,13 @@ pub fn context_from_registers(arch: Arch, source: &RegisterMap, registers: &[u8]
             context[register.offset..end].copy_from_slice(&value.to_le_bytes()[..register.size]);
         }
     }
-    write_u32(&mut context, flags_offset, flags);
+    let flags = arch.context_flags();
+    write_u32(
+        &mut context,
+        flags.offset,
+        flags.control | flags.integer | flags.segments,
+    );
     context
-}
-
-fn context_size(arch: Arch) -> usize {
-    match arch {
-        Arch::Amd64 => amd64::CONTEXT_SIZE,
-        Arch::Arm64 => arm64::CONTEXT_SIZE,
-    }
 }
 
 #[repr(C)]
@@ -154,7 +140,7 @@ impl DumpMetadata {
                 MAX_PHYSICAL_MEMORY_RUNS
             )));
         }
-        let context_size = context_size(self.arch);
+        let context_size = self.arch.context_size();
         if self.context.len() < context_size {
             return Err(Error::DebugInfo(format!(
                 "KD CONTEXT is too short: {} bytes, expected at least {context_size}",
@@ -345,7 +331,7 @@ fn build_header(metadata: &DumpMetadata, pages: u64) -> Result<Vec<u8>> {
     }
 
     let context_offset = offset_of!(Header64, context_record_buffer);
-    let context_size = context_size(metadata.arch);
+    let context_size = metadata.arch.context_size();
     header[context_offset..context_offset + context_size]
         .copy_from_slice(&metadata.context[..context_size]);
 
@@ -647,9 +633,9 @@ pub fn physical_runs(target: &Target) -> Result<Vec<(u64, u64)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arch::RegisterInfo;
+    use crate::arch::{RegisterInfo, amd64, arm64};
     use crate::base::bytes::write_u64;
-    use crate::nt::dmp::{DmpContext, DmpMem};
+    use crate::nt::dmp::DmpMem;
     use std::cell::Cell;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -908,12 +894,10 @@ mod tests {
 
         let dump = DmpMem::open(&path).unwrap();
         let info = dump.info();
-        let DmpContext::Arm64(arm) = &info.context else {
-            panic!("reopened ARM64 dump must decode an ARM64 context");
-        };
-        assert_eq!(arm.pc, 0xffff_8000_dead_0000);
-        assert_eq!(arm.sp, 0xffff_8000_beef_1000);
-        assert_eq!(arm.x[0], 0x5a5a_5a5a);
+        assert_eq!(info.context.arch(), Arch::Arm64);
+        assert_eq!(info.context.instruction_pointer(), 0xffff_8000_dead_0000);
+        assert_eq!(info.context.stack_pointer(), 0xffff_8000_beef_1000);
+        assert_eq!(info.context.read("x0"), Some(0x5a5a_5a5a));
         assert_eq!(info.directory_table_base, 0x4321_0000);
 
         let mut actual = [0u8; PAGE_SIZE];

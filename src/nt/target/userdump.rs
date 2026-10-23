@@ -18,7 +18,7 @@ use crate::{
     nt::{
         guest::ModuleInfo,
         unwind::{format_symbol, resolve_thread_trace_context, try_format_symbol},
-        userdump::{UserDump, UserDumpInfo, UserException, UserThreadInfo, context_registers},
+        userdump::{UserDump, UserDumpInfo, UserException, UserThreadInfo},
     },
 };
 
@@ -137,10 +137,7 @@ impl Target {
 
     /// The register values of the exception's CONTEXT, which the dump stores
     /// beside the exception record (not in process memory).
-    pub fn user_exception_registers(
-        &self,
-        register_map: &RegisterMap,
-    ) -> Result<HashMap<String, u64>> {
+    pub fn user_exception_registers(&self) -> Result<HashMap<String, u64>> {
         let info = self
             .user_dump_info()
             .ok_or_else(|| Error::DebugInfo("this target is not a user-mode minidump".into()))?;
@@ -151,7 +148,7 @@ impl Target {
         let raw = exception.context.as_ref().map_err(|reason| {
             Error::DebugInfo(format!("the exception's context is unusable: {reason}"))
         })?;
-        Ok(context_registers(info.arch, register_map, raw))
+        Ok(info.arch.context_registers(raw))
     }
 
     /// A user-dump pseudo-register: the selected thread's `$teb`, `$tid`, and
@@ -201,7 +198,7 @@ impl Target {
         registers: &[u8],
     ) -> HashMap<String, u64> {
         match self.user_dump_info() {
-            Some(info) => context_registers(info.arch, register_map, registers),
+            Some(info) => info.arch.context_registers(registers),
             None => register_map.to_hashmap(registers),
         }
     }

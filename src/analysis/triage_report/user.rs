@@ -791,10 +791,7 @@ pub fn build(session: &mut Session) -> Option<TriageReport> {
                     .and_then(|thread| thread.name.clone()),
                 source: UserStackSource::ExceptionContext,
             };
-            let trace = match session
-                .target
-                .user_exception_registers(&session.register_map)
-            {
+            let trace = match session.target.user_exception_registers() {
                 Ok(registers) => {
                     exception_registers = general_registers(info.arch, &registers);
                     Some(

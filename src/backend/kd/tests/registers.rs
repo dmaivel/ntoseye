@@ -46,7 +46,7 @@ fn arm64_hardware_slots_remain_two_data_and_eight_execute_slots() {
     let (_kernel, host) = UnixStream::pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.arch = Arch::Arm64;
-    backend.register_map = Arch::Arm64.register_map();
+    backend.register_map = Arch::Arm64.register_map().clone();
     backend.exit_prepared = true;
 
     assert_eq!(backend.hardware_breakpoint_slots(), 10);
@@ -261,7 +261,7 @@ fn arm64_registers_survive_refused_control_space() {
     let (kernel, host) = UnixStream::pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.arch = Arch::Arm64;
-    backend.register_map = Arch::Arm64.register_map();
+    backend.register_map = Arch::Arm64.register_map().clone();
     backend.link.halt();
     backend.exit_prepared = true;
 

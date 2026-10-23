@@ -9,7 +9,7 @@ The crate is six layers. `src/lib.rs` declares them bottom to top, and each is a
 | Layer | Modules | What it is |
 | --- | --- | --- |
 | `base` | `bytes`, `error`, `notice`, `output`, `diagnostics`, `types`, `ntstatus`, `time`, `memory`, `disasm` | Byte and text helpers, errors, notices and output, the core types, memory access, the disassembler |
-| `base` (`arch`) | `arch`, with `amd64`, `arm64` and `registers` inside it | What ntoseye knows about each CPU architecture, behind the `Architecture` trait; the register map |
+| `base` (`arch`) | `arch`, with `amd64`, `arm64` and `registers` inside it | What ntoseye knows about each CPU architecture, behind the `Architecture` trait; the register map, and the `CONTEXT` record (its layout, its `ContextFlags`, and `RegisterFile`, the registers one holds) |
 | `backend` | `dbg_backend`, `kd`, `gdb`, `host`, `phys`, `memory_backend`, `partition_backend`, `debugger_data` | The debug transports and memory sources, and the debugger-data format they speak |
 | `nt` | `target`, `guest`, `layout`, `symbols`, `pe`, `unwind`, `trapframe`, `cpu_state`, `kuser_shared`, `wpp`, `dmp`, `userdump`, `dump_writer`, `breakpoints`, `bugchecks`, `expr` | The Windows model over a backend, with its dump formats, breakpoints and expressions |
 | `session` | `session`, with `exception_policy`, `typeview` and `dump` inside it | A debugging session: run control, stops, inspection |

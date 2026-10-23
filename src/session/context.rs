@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use crate::arch::RegisterMap;
+use crate::arch::{RegisterFile, RegisterMap};
 use crate::backend::dbg_backend::{DebugCapability, processor_index_from_backend_thread_id};
 use crate::base::error::{Error, Result};
 use crate::base::memory::DTB_IDENTITY;
@@ -14,7 +14,6 @@ use crate::nt::unwind::{
     UNKNOWN_CONTEXT, guest_vp_running, halted_in_windows_hypervisor, resolve_thread_trace_context,
     resolve_thread_trace_context_at, saved_vtls, try_format_symbol,
 };
-use crate::nt::userdump::register_buffer;
 use crate::session::{Selection, Session, ThreadContext, UserThreadSummary, VcpuInfo};
 
 pub(super) fn update_target_context_from_registers(
@@ -510,7 +509,6 @@ impl Session {
     pub fn user_threads(&self) -> Option<Vec<UserThreadSummary>> {
         let info = self.target.user_dump_info()?;
         let exception_thread = info.exception.as_ref().map(|exception| exception.thread_id);
-        let ip = self.target.arch().pc_register();
         let trace = resolve_thread_trace_context(&self.target, 0);
         Some(
             info.threads
@@ -518,10 +516,8 @@ impl Session {
                 .enumerate()
                 .map(|(index, thread)| {
                     let id = info.backend_thread_id(thread.tid);
-                    let rip = thread.context.as_ref().ok().and_then(|raw| {
-                        self.register_map
-                            .read_u64(ip, &register_buffer(info.arch, raw))
-                            .ok()
+                    let rip = thread.context.as_ref().ok().map(|raw| {
+                        RegisterFile::from_context(info.arch, raw).instruction_pointer()
                     });
                     UserThreadSummary {
                         index,

@@ -4,8 +4,10 @@ mod context;
 
 pub use context::*;
 
-use super::registers::push_synonyms;
-use super::{Architecture, IMAGE_FILE_MACHINE_ARM64, RegisterInfo, RegisterMap};
+use std::sync::LazyLock;
+
+use super::registers::{numbered, push_synonyms};
+use super::{Architecture, ContextFlags, IMAGE_FILE_MACHINE_ARM64, RegisterInfo, RegisterMap};
 
 pub struct Arm64;
 
@@ -71,8 +73,48 @@ impl Architecture for Arm64 {
         &REGISTER_SYNONYMS
     }
 
-    fn register_map(&self) -> RegisterMap {
-        build_register_map()
+    fn context_size(&self) -> usize {
+        CONTEXT_SIZE
+    }
+
+    fn context_flags(&self) -> ContextFlags {
+        ContextFlags {
+            offset: OFFSET_CONTEXT_FLAGS,
+            architecture: CONTEXT_ARM64,
+            control: CONTEXT_CONTROL,
+            integer: CONTEXT_INTEGER,
+            segments: 0,
+            floating_point: CONTEXT_FLOATING_POINT,
+            debug_registers: CONTEXT_DEBUG_REGISTERS,
+        }
+    }
+
+    fn register_buffer_size(&self) -> usize {
+        REGISTER_BUFFER_SIZE
+    }
+
+    /// The synthetic slot KD and dumps fill with TTBR1_EL1, named `cr3` as
+    /// on AMD64.
+    fn kernel_dtb_register(&self) -> &'static str {
+        "cr3"
+    }
+
+    fn register_map(&self) -> &'static RegisterMap {
+        static MAP: LazyLock<RegisterMap> = LazyLock::new(build_register_map);
+        &MAP
+    }
+
+    fn context_group(&self, register: &str) -> Option<u32> {
+        if numbered(register, "v") || register == "fpcr" || register == "fpsr" {
+            Some(CONTEXT_FLOATING_POINT)
+        } else if ["bcr", "bvr", "wcr", "wvr"]
+            .iter()
+            .any(|prefix| numbered(register, prefix))
+        {
+            Some(CONTEXT_DEBUG_REGISTERS)
+        } else {
+            None
+        }
     }
 }
 

@@ -4,7 +4,10 @@ mod context;
 
 pub use context::*;
 
-use super::{Architecture, IMAGE_FILE_MACHINE_AMD64, RegisterInfo, RegisterMap};
+use std::sync::LazyLock;
+
+use super::registers::numbered;
+use super::{Architecture, ContextFlags, IMAGE_FILE_MACHINE_AMD64, RegisterInfo, RegisterMap};
 
 pub struct Amd64;
 
@@ -65,8 +68,45 @@ impl Architecture for Amd64 {
         &[]
     }
 
-    fn register_map(&self) -> RegisterMap {
-        build_register_map()
+    fn context_size(&self) -> usize {
+        CONTEXT_SIZE
+    }
+
+    fn context_flags(&self) -> ContextFlags {
+        ContextFlags {
+            offset: OFFSET_CONTEXT_FLAGS,
+            architecture: CONTEXT_AMD64,
+            control: CONTEXT_CONTROL,
+            integer: CONTEXT_INTEGER,
+            segments: CONTEXT_SEGMENTS,
+            floating_point: CONTEXT_FLOATING_POINT,
+            debug_registers: CONTEXT_DEBUG_REGISTERS,
+        }
+    }
+
+    fn register_buffer_size(&self) -> usize {
+        REGISTER_BUFFER_SIZE
+    }
+
+    fn kernel_dtb_register(&self) -> &'static str {
+        "cr3"
+    }
+
+    fn register_map(&self) -> &'static RegisterMap {
+        static MAP: LazyLock<RegisterMap> = LazyLock::new(build_register_map);
+        &MAP
+    }
+
+    fn context_group(&self, register: &str) -> Option<u32> {
+        if ["ds", "es", "fs", "gs"].contains(&register) {
+            Some(CONTEXT_SEGMENTS)
+        } else if numbered(register, "dr") {
+            Some(CONTEXT_DEBUG_REGISTERS)
+        } else if numbered(register, "xmm") || register == "mxcsr" {
+            Some(CONTEXT_FLOATING_POINT)
+        } else {
+            None
+        }
     }
 }
 

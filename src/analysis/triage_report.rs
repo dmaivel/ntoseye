@@ -673,10 +673,10 @@ fn names_match(left: &str, right: &str) -> bool {
 mod tests {
     use super::user::UserExceptionKind;
     use super::*;
-    use crate::arch::{Arch, amd64::REGISTER_BUFFER_SIZE};
+    use crate::arch::Arch;
+    use crate::arch::RegisterFile;
     use crate::base::types::VirtAddr;
     use crate::nt::bugchecks::{BugcheckArg, BugcheckFault};
-    use crate::nt::dmp::DmpContext;
     use crate::nt::dmp::triage::TriageDriver;
     use crate::nt::guest::ProcessInfo;
     use crate::nt::symbols::CodeFrame;
@@ -740,7 +740,7 @@ mod tests {
             directory_table_base: 0x1ad000,
             bug_check_code: 0x50,
             bug_check_parameters: [1, 2, 3, 4],
-            context: DmpContext::from_bytes(&vec![0; REGISTER_BUFFER_SIZE]),
+            context: RegisterFile::empty(Arch::Amd64),
             offset_prcb_context: None,
             number_processors: 2,
             is_triage: true,

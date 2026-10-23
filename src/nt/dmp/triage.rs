@@ -1,6 +1,6 @@
-use crate::arch::{Arch, amd64, arm64};
+use crate::arch::RegisterFile;
 #[cfg(test)]
-use crate::arch::{IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64};
+use crate::arch::{IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64, amd64, arm64};
 use crate::backend::debugger_data::KdDebuggerData64;
 use crate::base::bytes::utf16le_nul_terminated;
 use crate::base::bytes::{c_string_lossy, read_u16, read_u32, read_u64};
@@ -9,7 +9,7 @@ use crate::base::types::VirtAddr;
 use crate::nt::dmp::structs::{ExceptionRecord64, Header64};
 use crate::nt::dmp::tagged::tagged_blocks_at;
 use crate::nt::dmp::{
-    DmpContext, DmpException, DmpInfo, DmpSystemInfo, UnloadedDriver, clamp_processors, dump_arch,
+    DmpException, DmpInfo, DmpSystemInfo, UnloadedDriver, clamp_processors, dump_arch,
 };
 use crate::nt::guest::ModuleInfo;
 use std::mem::{offset_of, size_of};
@@ -173,28 +173,26 @@ pub fn parse_triage(mmap: &[u8]) -> Result<(DmpInfo, Vec<TriageBlock>)> {
     // position — in practice they point to the same data, but the triage
     // offset is authoritative for minidumps.
     let ctx_offset = read_u32(triage_hdr, TRIAGE_CONTEXT_OFFSET) as usize;
-    let pc_offset = match arch {
-        Arch::Arm64 => arm64::OFFSET_PC,
-        Arch::Amd64 => amd64::OFFSET_RIP,
-    };
+    // The context must reach at least as far as its program counter.
+    let pc_end = arch
+        .register_map()
+        .info(arch.pc_register())
+        .map_or(0, |pc| pc.offset + pc.size);
     let ctx_offset = if ctx_offset > 0
         && ctx_offset
-            .checked_add(pc_offset + 8)
+            .checked_add(pc_end)
             .is_some_and(|end| end <= mmap.len())
     {
         ctx_offset
     } else {
         OFF_CONTEXT_RECORD
     };
-    if mmap.len() < ctx_offset.saturating_add(pc_offset + 8) {
+    if mmap.len() < ctx_offset.saturating_add(pc_end) {
         return Err(Error::InvalidDump(
             "dump too small for context record".into(),
         ));
     }
-    let context = match arch {
-        Arch::Arm64 => DmpContext::from_arm64_bytes(&mmap[ctx_offset..]),
-        Arch::Amd64 => DmpContext::from_bytes(&mmap[ctx_offset..]),
-    };
+    let context = RegisterFile::from_context(arch, &mmap[ctx_offset..]);
 
     let call_stack_offset = read_u32(triage_hdr, TRIAGE_CALL_STACK_OFFSET) as u64;
     let size_of_call_stack = read_u32(triage_hdr, TRIAGE_SIZE_OF_CALL_STACK);
@@ -799,12 +797,9 @@ mod tests {
             .copy_from_slice(&0x0000_e9e1u32.to_le_bytes());
 
         let (info, _) = parse_triage(&dump).unwrap();
-        let DmpContext::Arm64(arm) = &info.context else {
-            panic!("expected an ARM64 context");
-        };
-        assert_eq!(arm.pc, 0xffff_0000_0000_1000);
-        assert_eq!(arm.sp, 0xffff_0000_1234_5000);
-        assert_eq!(arm.bcr[0], 0x0000_e9e1);
+        assert_eq!(info.context.read("pc"), Some(0xffff_0000_0000_1000));
+        assert_eq!(info.context.read("sp"), Some(0xffff_0000_1234_5000));
+        assert_eq!(info.context.read("bcr0"), Some(0x0000_e9e1));
     }
 
     #[test]

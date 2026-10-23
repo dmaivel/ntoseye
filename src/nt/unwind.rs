@@ -1761,7 +1761,7 @@ mod tests {
                 VirtAddr(IMAGE),
                 IMAGE_SIZE as u32,
             )]);
-        session.register_map = Arch::Amd64.register_map();
+        session.register_map = Arch::Amd64.register_map().clone();
         session
     }
 
@@ -2055,7 +2055,7 @@ mod tests {
                 VirtAddr(IMAGE),
                 IMAGE_SIZE as u32,
             )]);
-        session.register_map = Arch::Amd64.register_map();
+        session.register_map = Arch::Amd64.register_map().clone();
         let dtb = session.target.kernel_dtb();
         session
             .target

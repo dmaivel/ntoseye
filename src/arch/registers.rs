@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::result;
 
+use super::Arch;
 use crate::base::error::{Error, Result};
 
 /// Whether `name`, in a recovered register set, is the second name of one of
@@ -263,6 +264,68 @@ impl RegisterMap {
     pub fn info(&self, name: &str) -> Option<&RegisterInfo> {
         self.by_name.get(name)
     }
+}
+
+/// One processor's registers: its architecture's register buffer, the
+/// `CONTEXT` record then the synthetic slots behind it.
+#[derive(Debug, Clone)]
+pub struct RegisterFile {
+    arch: Arch,
+    bytes: Vec<u8>,
+}
+
+impl RegisterFile {
+    /// The registers a raw `CONTEXT` record holds.
+    pub fn from_context(arch: Arch, record: &[u8]) -> Self {
+        Self {
+            arch,
+            bytes: arch.register_buffer(record),
+        }
+    }
+
+    /// A processor with no registers recorded: every one reads zero.
+    pub fn empty(arch: Arch) -> Self {
+        Self::from_context(arch, &[])
+    }
+
+    pub fn arch(&self) -> Arch {
+        self.arch
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The register `name`, when the architecture has one.
+    pub fn read(&self, name: &str) -> Option<u64> {
+        self.arch.register_map().read_u64(name, &self.bytes).ok()
+    }
+
+    pub fn instruction_pointer(&self) -> u64 {
+        self.read(self.arch.pc_register()).unwrap_or(0)
+    }
+
+    pub fn stack_pointer(&self) -> u64 {
+        self.read(self.arch.sp_register()).unwrap_or(0)
+    }
+
+    /// The buffer with the kernel page-table root set to `dtb`, as a
+    /// backend serves it.
+    pub fn with_kernel_dtb(&self, dtb: u64) -> Vec<u8> {
+        let mut bytes = self.bytes.clone();
+        self.arch
+            .register_map()
+            .write_u64(self.arch.kernel_dtb_register(), &mut bytes, dtb)
+            .expect("every register buffer has a kernel page-table root slot");
+        bytes
+    }
+}
+
+/// Whether `name` is `prefix` followed by a number: `xmm3` for `xmm`.
+pub fn numbered(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix)
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|ch| ch.is_ascii_digit())
 }
 
 #[cfg(test)]
