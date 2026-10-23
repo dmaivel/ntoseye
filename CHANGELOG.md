@@ -55,6 +55,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - With `TERM=dumb`, as in Emacs's `M-x shell`, ntoseye reads commands line by line as with `--plain-repl` and prints no color or other escape sequences, which such a terminal showed as stray characters.
 - `!handle`'s Object column, and the SDK's `HandleEntry.object`, hold the object, as WinDbg's does and as `!object` and `!fileobj` take it. They held its header, 0x30 bytes before it.
 - `!exqueue` lists the work queues on Windows 11 build 26200, which keeps one flat list of them per partition. It read the list as one per NUMA node and failed on every queue.
+- `!heap -x` says which heaps it could not search instead of concluding that the address is in no heap.
 
 ### Removed
 

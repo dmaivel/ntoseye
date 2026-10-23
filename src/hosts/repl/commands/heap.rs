@@ -1,5 +1,6 @@
 use tabled::builder::Builder;
 
+use crate::base::diagnostics::print_warning;
 use crate::base::error::Result;
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
@@ -569,17 +570,46 @@ impl ReplState<'_> {
     }
 
     fn heap_find(&self, detail: &HeapBlockSearch) {
-        for error in &detail.errors {
-            error!("{error}");
+        // A heap that could not be searched is reported once per reason:
+        // the search still answers from the heaps it could read.
+        let failures = group_failures(
+            detail
+                .failures
+                .iter()
+                .map(|failure| (failure.index, failure.error.as_str())),
+        );
+        for (error, heaps) in &failures {
+            print_warning(format!(
+                "{}: cannot be searched: {error}",
+                heap_indexes(heaps)
+            ));
         }
         if detail.truncated {
-            error!("heap list truncated at the decoder bound");
+            print_warning("heap list truncated at the decoder bound");
         }
         let Some(heap) = &detail.heap else {
-            outln!(
-                "{} is not inside any heap in the PEB list",
-                ui::addr(detail.address.0)
-            );
+            if detail.failures.is_empty() {
+                outln!(
+                    "{:#x} is not inside any heap in the PEB list",
+                    detail.address.0
+                );
+            } else {
+                let unsearched: Vec<usize> = detail
+                    .failures
+                    .iter()
+                    .map(|failure| failure.index)
+                    .collect();
+                let searched = if detail.searched.is_empty() {
+                    "any heap that could be read".to_string()
+                } else {
+                    heap_indexes(&detail.searched)
+                };
+                outln!(
+                    "{:#x} is not in {searched}; {} could not be searched",
+                    detail.address.0,
+                    heap_indexes(&unsearched)
+                );
+            }
             return;
         };
         outln!(
@@ -593,6 +623,32 @@ impl ReplState<'_> {
             print_block(block);
         }
     }
+}
+
+/// `heap 0` or `heaps 0, 2`: the heaps a warning is about, by PEB index.
+fn heap_indexes(indexes: &[usize]) -> String {
+    let list: Vec<String> = indexes.iter().map(usize::to_string).collect();
+    format!(
+        "{} {}",
+        if indexes.len() == 1 { "heap" } else { "heaps" },
+        list.join(", ")
+    )
+}
+
+/// Groups per-heap failures by their text, in first-seen order, so each
+/// distinct reason is reported once with every heap it hit: one missing
+/// layout field fails every heap of a kind the same way.
+fn group_failures<'a>(
+    failures: impl IntoIterator<Item = (usize, &'a str)>,
+) -> Vec<(&'a str, Vec<usize>)> {
+    let mut groups: Vec<(&str, Vec<usize>)> = Vec::new();
+    for (index, error) in failures {
+        match groups.iter_mut().find(|(text, _)| *text == error) {
+            Some((_, indexes)) => indexes.push(index),
+            None => groups.push((error, vec![index])),
+        }
+    }
+    groups
 }
 
 fn print_block(block: &BlockMatch) {

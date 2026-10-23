@@ -1734,6 +1734,24 @@ pub struct HeapBlockSearch {
     pub block: Option<BlockMatch>,
     /// The heaps that ntoseye could not search, and the reasons.
     pub errors: Vec<String>,
+    /// The heaps that ntoseye could not search, by index, so the REPL can
+    /// report one failure for every heap it hit.
+    #[record(skip)]
+    pub failures: Vec<HeapSearchFailure>,
+    /// The indexes of the heaps that ntoseye searched, in PEB order, up to
+    /// the one that contains the address.
+    #[record(skip)]
+    pub searched: Vec<usize>,
+}
+
+/// A heap that `!heap -x` could not search, and why.
+#[derive(Clone, Debug)]
+pub struct HeapSearchFailure {
+    /// Position in the PEB heap list.
+    pub index: usize,
+    pub address: VirtAddr,
+    pub kind: HeapKind,
+    pub error: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2009,7 +2027,10 @@ impl Target {
             return Ok((self.current_dtb(), VirtAddr(peb), false));
         }
         let process = self.attached_process().ok_or_else(|| {
-            Error::DebugInfo("this command requires an attached user process".into())
+            Error::DebugInfo(
+                "this command requires an attached user process; `.process /p <process>` selects one"
+                    .into(),
+            )
         })?;
         let wow64 = process.wow64_peb.is_some();
         let peb = if let Some(peb) = process.wow64_peb {
@@ -2070,8 +2091,7 @@ impl Target {
                 HeapSelector::Address(address) => address.0,
             };
             Error::DebugInfo(format!(
-                "{} is neither a heap index (0..{}) nor a heap in the PEB list",
-                VirtAddr(value),
+                "{value:#x} is neither a heap index (0..{}) nor a heap in the PEB list",
                 heaps.len()
             ))
         })?;
@@ -2116,23 +2136,34 @@ impl Target {
         let reader = HeapReader::new(self, dtb, wow64);
         let (heaps, truncated) = reader.process_heaps_with_status(peb)?;
         let mut errors = Vec::new();
+        let mut failures = Vec::new();
+        let mut searched = Vec::new();
+        let mut fail = |heap: &ProcessHeap, error: String| {
+            errors.push(format!("heap {:#x}: {error}", heap.address.0));
+            failures.push(HeapSearchFailure {
+                index: heap.index,
+                address: heap.address,
+                kind: heap.kind,
+                error,
+            });
+        };
         for heap in heaps {
-            if let Some(error) = heap.classification_error {
-                errors.push(format!("heap {}: {error}", heap.address));
+            if let Some(error) = heap.classification_error.clone() {
+                fail(&heap, error);
                 continue;
             }
             let found = match heap.kind {
                 HeapKind::Nt => match reader.nt_heap(heap.address) {
                     Ok(nt) => reader.find_in_nt(&nt, address),
                     Err(error) => {
-                        errors.push(format!("heap {}: {error}", heap.address));
+                        fail(&heap, error.to_string());
                         continue;
                     }
                 },
                 HeapKind::Segment => match reader.segment_heap(heap.address) {
                     Ok(segment) => reader.find_in_segment(&segment, address),
                     Err(error) => {
-                        errors.push(format!("heap {}: {error}", heap.address));
+                        fail(&heap, error.to_string());
                         continue;
                     }
                 },
@@ -2141,10 +2172,11 @@ impl Target {
             let block = match found {
                 Ok(block) => block,
                 Err(error) => {
-                    errors.push(format!("heap {}: {error}", heap.address));
+                    fail(&heap, error.to_string());
                     continue;
                 }
             };
+            searched.push(heap.index);
             if let Some(block) = block {
                 return Ok(HeapBlockSearch {
                     address,
@@ -2157,6 +2189,8 @@ impl Target {
                     }),
                     block: Some(block),
                     errors,
+                    failures,
+                    searched,
                 });
             }
         }
@@ -2167,6 +2201,8 @@ impl Target {
             heap: None,
             block: None,
             errors,
+            failures,
+            searched,
         })
     }
 }
