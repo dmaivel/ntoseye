@@ -3,6 +3,7 @@
 
 use std::borrow::Cow;
 use std::ops::Range;
+use std::sync::Arc;
 
 use pelite::pe64::image::{
     RUNTIME_FUNCTION, UNW_FLAG_CHAININFO, UNW_FLAG_EHANDLER, UNW_FLAG_UHANDLER, UWOP_ALLOC_LARGE,
@@ -152,20 +153,31 @@ pub fn decode_epilog(code: &[u8], code_rva: u32, function: Range<u32>) -> Option
 }
 
 impl StackTracer<'_> {
-    /// The first instruction after the prolog of the function containing
-    /// `address`.
-    pub fn function_body_amd64(&mut self, address: u64) -> Option<u64> {
+    /// `address` in its module's unwind tables, with the module's base and
+    /// the image the tables were read from. When the lookup or the unwind
+    /// data lands in a paged-out hole, the complete on-disk image is fetched
+    /// and asked instead, so a module whose `.pdata`/`.xdata` isn't resident
+    /// still unwinds. `None` when no module holds `address` or its code is
+    /// not loaded.
+    fn resolve_amd64(&mut self, address: u64) -> Option<(u64, Arc<PeImage>, Resolve)> {
         let base = self.module_containing(address)?.info.base_address.0;
-        let (mut image, mut layout) = self.module_code(address)?;
-        let mut resolved = resolve_function(&image, layout.as_deref(), base, address);
+        let (image, layout) = self.module_code(address)?;
+        let resolved = resolve_function(&image, layout.as_deref(), base, address);
         if matches!(resolved, Resolve::Holed)
             && !image.is_complete()
             && self.upgrade_module_image(address)
+            && let Some((image, layout)) = self.module_code(address)
         {
-            (image, layout) = self.module_code(address)?;
-            resolved = resolve_function(&image, layout.as_deref(), base, address);
+            let resolved = resolve_function(&image, layout.as_deref(), base, address);
+            return Some((base, image, resolved));
         }
+        Some((base, image, resolved))
+    }
 
+    /// The first instruction after the prolog of the function containing
+    /// `address`.
+    pub fn function_body_amd64(&mut self, address: u64) -> Option<u64> {
+        let (base, image, resolved) = self.resolve_amd64(address)?;
         let Resolve::Function {
             unwind_data,
             begin,
@@ -183,10 +195,7 @@ impl StackTracer<'_> {
 impl StackTracer<'_> {
     pub fn unwind_once_amd64(&mut self, context: &mut RegisterContext) -> Unwound {
         unwind_trace!("unwind: rip={:#x} rsp={:#x}", context.rip, context.rsp);
-        let Some(base_address) = self
-            .module_containing(context.rip)
-            .map(|module| module.info.base_address.0)
-        else {
+        if self.module_containing(context.rip).is_none() {
             if let Some((base, function)) = self.dynamic_function(context.rip) {
                 unwind_trace!("unwind: dynamic function table base={base:#x}");
                 let code = DynamicCode {
@@ -204,25 +213,10 @@ impl StackTracer<'_> {
             }
             unwind_trace!("unwind: no module for rip -> leaf");
             return self.unwind_leaf(context);
-        };
-        let Some((mut image, mut layout)) = self.module_code(context.rip) else {
+        }
+        let Some((base_address, image, resolved)) = self.resolve_amd64(context.rip) else {
             return Unwound::Stop;
         };
-
-        // Resolve the function entry. If the lookup or its unwind data lands in a
-        // paged-out hole, upgrade to the complete on-disk image and re-resolve so
-        // we can unwind through a module whose `.pdata`/`.xdata` isn't resident.
-        let mut resolved = resolve_function(&image, layout.as_deref(), base_address, context.rip);
-        if matches!(resolved, Resolve::Holed)
-            && !image.is_complete()
-            && self.upgrade_module_image(context.rip)
-        {
-            let Some(upgraded) = self.module_code(context.rip) else {
-                return Unwound::Stop;
-            };
-            (image, layout) = upgraded;
-            resolved = resolve_function(&image, layout.as_deref(), base_address, context.rip);
-        }
 
         let (unwind_data, begin, end) = match resolved {
             Resolve::Function {
@@ -650,10 +644,7 @@ impl StackTracer<'_> {
     /// record degrades to the recovered RSP rather than aborting the walk.
     pub fn frame_base_for_amd64(&mut self, context: &RegisterContext) -> Option<u64> {
         let fallback = (context.rsp != 0).then_some(context.rsp);
-        let Some(base_address) = self
-            .module_containing(context.rip)
-            .map(|module| module.info.base_address.0)
-        else {
+        if self.module_containing(context.rip).is_none() {
             let (base, function) = self.dynamic_function(context.rip)?;
             let code = DynamicCode {
                 memory: &self.memory,
@@ -662,12 +653,9 @@ impl StackTracer<'_> {
             return parse_unwind_info(&code, function.unwind_data)
                 .and_then(|info| frame_register_value(context, &info))
                 .or(fallback);
-        };
-        let Some((image, layout)) = self.module_code(context.rip) else {
-            return fallback;
-        };
-        let Resolve::Function { unwind_data, .. } =
-            resolve_function(&image, layout.as_deref(), base_address, context.rip)
+        }
+        let Some((_, image, Resolve::Function { unwind_data, .. })) =
+            self.resolve_amd64(context.rip)
         else {
             return fallback;
         };
