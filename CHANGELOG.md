@@ -34,6 +34,7 @@ Keeping this file:
 - Modules are named after their image file, as WinDbg's `lm` names them, not the loader's alias for it: `kd.dll` rather than `kdcom.dll`, `mcupdate_GenuineIntel.dll` rather than `mcupdate.dll`, in a WOW64 process's 32-bit module list too. Their `module!` prefixes follow (`kd!`, `mcupdate_genuineintel!`).
 - A stop after `p` or `t` marks the registers the step changed even when the thread finished the step on another processor (`p1.1` before, `p1.4` after), as it often does on a busy guest. The stop marked none then, and MCP's step result showed the whole stop instead of what changed.
 - A guest's debug output (`DbgPrint`), printed as the target runs and by `!dbgprint`, shows control characters as visible symbols, such as `␛` for an escape, instead of passing them to the terminal, so a driver's output can no longer move the cursor, recolor or clear the screen, retitle the window, or plant a link. The SDK's `debug_log()` still returns the text as the guest printed it.
+- A WHEA_UNCORRECTABLE_ERROR (0x124) and a KERNEL_SECURITY_CHECK_FAILURE (0x139) are described in a full sentence, in the bugcheck stop, `!analyze -show` and the SDK's `BugcheckAnalysis.description`, instead of starting mid-sentence with "and indicates that".
 
 ### Removed
 

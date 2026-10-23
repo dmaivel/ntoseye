@@ -2199,7 +2199,7 @@ pub fn bugcheck_descriptor(code: u32) -> Option<BugcheckDescriptor> {
         0x00000124 => Some(BugcheckDescriptor {
             name: "WHEA_UNCORRECTABLE_ERROR",
             description: Some(
-                "and indicates that a fatal hardware error has occurred. This bug check uses the error data provided by the Windows Hardware Error Architecture (WHEA).",
+                "This bug check indicates that a fatal hardware error has occurred. This bug check uses the error data provided by the Windows Hardware Error Architecture (WHEA).",
             ),
             arguments: ["", "", "", ""],
         }),
@@ -2421,7 +2421,7 @@ pub fn bugcheck_descriptor(code: u32) -> Option<BugcheckDescriptor> {
         0x00000139 => Some(BugcheckDescriptor {
             name: "KERNEL_SECURITY_CHECK_FAILURE",
             description: Some(
-                ", and indicates that the kernel detects the corruption of a critical data structure.",
+                "This bug check indicates that the kernel has detected the corruption of a critical data structure.",
             ),
             arguments: [
                 "the type of corruption. For more information, see the following table",
