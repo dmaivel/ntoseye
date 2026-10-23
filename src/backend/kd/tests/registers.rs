@@ -1,6 +1,7 @@
 //! Tests for register and control-space access.
 
 use super::*;
+use crate::base::bytes;
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::Shutdown;

@@ -1,6 +1,7 @@
 //! Tests for software breakpoints in the target's breakpoint table.
 
 use super::*;
+use crate::base::bytes;
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;

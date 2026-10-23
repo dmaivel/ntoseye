@@ -1,6 +1,7 @@
 //! Tests for run control and stop recording.
 
 use super::*;
+use crate::base::bytes;
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -8,6 +9,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::thread::{JoinHandle, spawn};
 
+use crate::backend::kd::amd64::{
+    CONTROL_DR6_OFFSET, CONTROL_DR7_OFFSET, CONTROL_EFLAGS_OFFSET, CONTROL_REPORT_SIZE,
+};
 use crate::backend::kd::breakpoints::KD_BREAKPOINT_TABLE_SIZE;
 use crate::backend::kd::framing::PACKET_TYPE_KD_STATE_CHANGE64;
 
@@ -22,13 +26,9 @@ fn a_stop_report_answers_for_the_trap_state_until_the_target_runs() {
     let (_kernel, host) = UnixStream::pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
 
-    let mut report = vec![0u8; AMD64_CONTROL_REPORT_SIZE];
-    bytes::write_u64(&mut report, AMD64_CONTROL_DR6_OFFSET, 0xffff_0ff0 | 0x4000);
-    bytes::write_u32(
-        &mut report,
-        AMD64_CONTROL_EFLAGS_OFFSET,
-        (TF | 0x246) as u32,
-    );
+    let mut report = vec![0u8; CONTROL_REPORT_SIZE];
+    bytes::write_u64(&mut report, CONTROL_DR6_OFFSET, 0xffff_0ff0 | 0x4000);
+    bytes::write_u32(&mut report, CONTROL_EFLAGS_OFFSET, (TF | 0x246) as u32);
     let stop = StateChange {
         processor: 0,
         number_processors: 1,
@@ -232,7 +232,7 @@ fn a_breakin_answered_by_another_stop_is_absorbed_when_it_arrives_late() {
 /// An exception state change from `processor` of four at `pc`, whose
 /// control report carries `dr7`.
 fn processor_report(processor: u16, code: u32, pc: u64, dr7: u64) -> Vec<u8> {
-    let mut payload = vec![0u8; CONTROL_REPORT_OFFSET + AMD64_CONTROL_REPORT_SIZE];
+    let mut payload = vec![0u8; CONTROL_REPORT_OFFSET + CONTROL_REPORT_SIZE];
     bytes::write_u32(&mut payload, 0, DBG_KD_EXCEPTION_STATE_CHANGE);
     bytes::write_u16(&mut payload, 6, processor);
     bytes::write_u32(&mut payload, 8, 4);
@@ -240,7 +240,7 @@ fn processor_report(processor: u16, code: u32, pc: u64, dr7: u64) -> Vec<u8> {
     bytes::write_u32(&mut payload, 32, code);
     bytes::write_u64(
         &mut payload,
-        CONTROL_REPORT_OFFSET + AMD64_CONTROL_DR7_OFFSET,
+        CONTROL_REPORT_OFFSET + CONTROL_DR7_OFFSET,
         dr7,
     );
     payload

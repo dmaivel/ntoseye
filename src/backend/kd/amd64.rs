@@ -8,6 +8,7 @@ use super::registers::{CONTROL_SPACE_KSPECIAL, MSR_EFER, special_into_context};
 use super::transport::KdTransport;
 use super::{ControlReport, KD_REQUEST_TIMEOUT, KdBackend, TrapState, api};
 use crate::arch::Arch;
+use crate::base::bytes;
 use crate::base::error::{Error, Result};
 
 pub struct Amd64Kd;
@@ -22,10 +23,7 @@ impl KdMachine for Amd64Kd {
         // The stop reported DR7, so a resume that read no special registers
         // needs none: only a host write can have changed it, and that drops
         // the report along with the rest of the processor's halt state.
-        let reported_dr7 = kd
-            .registers
-            .report(processor)
-            .and_then(ControlReport::amd64_dr7);
+        let reported_dr7 = kd.registers.report(processor).and_then(reported_dr7);
         if reported_dr7.is_none() && kd.registers.special(processor).is_none() {
             let special = kd.read_special_registers_uncached(processor)?;
             kd.registers.set_special(processor, special);
@@ -72,9 +70,7 @@ impl KdMachine for Amd64Kd {
     // breakpoint hit can decide it has no single-step residue to clear
     // without fetching a `CONTEXT` it would read two fields from.
     fn stop_trap_state(&self, kd: &mut KdBackend) -> Option<TrapState> {
-        kd.registers
-            .report(kd.current_processor)?
-            .amd64_trap_state()
+        trap_state(kd.registers.report(kd.current_processor)?)
     }
 
     // The control registers from KSPECIAL_REGISTERS, and EFER, read once
@@ -110,4 +106,31 @@ impl KdMachine for Amd64Kd {
     ) -> Result<Option<Vec<u8>>> {
         kd.read_special_registers_uncached(processor).map(Some)
     }
+}
+
+/// `AMD64_DBGKD_CONTROL_REPORT`: Dr6, Dr7, EFlags, InstructionCount,
+/// ReportFlags, InstructionStream[16], SegCs, SegDs, SegEs, SegFs.
+pub const CONTROL_REPORT_SIZE: usize = 48;
+pub const CONTROL_DR6_OFFSET: usize = 0;
+pub const CONTROL_DR7_OFFSET: usize = 8;
+pub const CONTROL_EFLAGS_OFFSET: usize = 16;
+
+/// The AMD64 fields of a stop's control report.
+fn fields(report: &ControlReport) -> Option<&[u8]> {
+    report.0.get(..CONTROL_REPORT_SIZE)
+}
+
+/// DR6 and RFLAGS as the target reported them at the stop.
+pub fn trap_state(report: &ControlReport) -> Option<TrapState> {
+    let fields = fields(report)?;
+    Some(TrapState {
+        eflags: u64::from(bytes::read_u32(fields, CONTROL_EFLAGS_OFFSET)),
+        dr6: bytes::read_u64(fields, CONTROL_DR6_OFFSET),
+    })
+}
+
+/// DR7 as the target reported it at the stop, which a continue must
+/// preserve.
+pub fn reported_dr7(report: &ControlReport) -> Option<u64> {
+    Some(bytes::read_u64(fields(report)?, CONTROL_DR7_OFFSET))
 }

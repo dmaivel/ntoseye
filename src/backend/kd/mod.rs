@@ -13,7 +13,6 @@ use crate::backend::dbg_backend::{
 };
 use crate::backend::debugger_data::DebuggerDataCandidate;
 use crate::backend::kd::framing::KdFraming;
-use crate::base::bytes;
 use crate::base::error::{Error, Result};
 use crate::base::memory::TranslationCache;
 use crate::base::notice::Notice;
@@ -121,33 +120,6 @@ struct ControlReport(Vec<u8>);
 /// `DBGKD_ANY_WAIT_STATE_CHANGE` header (32) plus its exception union
 /// (`EXCEPTION_RECORD64` 0x98 + `FirstChance` ULONG, padded to 0xa0).
 const CONTROL_REPORT_OFFSET: usize = 192;
-/// `AMD64_DBGKD_CONTROL_REPORT`: Dr6, Dr7, EFlags, InstructionCount,
-/// ReportFlags, InstructionStream[16], SegCs, SegDs, SegEs, SegFs.
-const AMD64_CONTROL_REPORT_SIZE: usize = 48;
-const AMD64_CONTROL_DR6_OFFSET: usize = 0;
-const AMD64_CONTROL_DR7_OFFSET: usize = 8;
-const AMD64_CONTROL_EFLAGS_OFFSET: usize = 16;
-
-impl ControlReport {
-    fn amd64(&self) -> Option<&[u8]> {
-        self.0.get(..AMD64_CONTROL_REPORT_SIZE)
-    }
-
-    /// AMD64 DR6 and RFLAGS as the target reported them at the stop.
-    fn amd64_trap_state(&self) -> Option<TrapState> {
-        let report = self.amd64()?;
-        Some(TrapState {
-            eflags: u64::from(bytes::read_u32(report, AMD64_CONTROL_EFLAGS_OFFSET)),
-            dr6: bytes::read_u64(report, AMD64_CONTROL_DR6_OFFSET),
-        })
-    }
-
-    /// AMD64 DR7, which a continue must preserve.
-    fn amd64_dr7(&self) -> Option<u64> {
-        Some(bytes::read_u64(self.amd64()?, AMD64_CONTROL_DR7_OFFSET))
-    }
-}
-
 /// Retained guest debug-output lines (DbgPrint ring). Bounded so a chatty guest
 /// can't grow memory without limit; older lines are evicted and a reader that
 /// falls behind sees `dropped`.

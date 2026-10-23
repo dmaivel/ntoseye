@@ -1,4 +1,5 @@
 use super::*;
+use crate::base::bytes;
 
 use std::io::{Cursor, Read, Write};
 use std::os::unix::net::UnixStream;
