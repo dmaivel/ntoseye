@@ -634,7 +634,7 @@ pub fn read_program_counter(
     let context = with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
         api::get_context(framing, processor, context_flags_for(arch))
     })?;
-    register_map.read_u64("rip", &context)
+    register_map.read_u64(arch.pc_register(), &context)
 }
 
 fn context_flags_for(arch: Arch) -> u32 {
@@ -661,7 +661,7 @@ pub fn advance_pc_past_breakpoint(
     let mut context = with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
         api::get_context(framing, processor, context_flags)
     })?;
-    let pc = register_map.read_u64("rip", &context)?;
+    let pc = register_map.read_u64(arch.pc_register(), &context)?;
     if pc != expected_pc {
         return Err(Error::Kd(format!(
             "refusing to step p{} past a breakpoint: the PC moved from {expected_pc:#x} to \
@@ -670,7 +670,7 @@ pub fn advance_pc_past_breakpoint(
         )));
     }
     let next_pc = pc.wrapping_add(u64::from(arch.breakpoint_size()));
-    register_map.write_u64("rip", &mut context, next_pc)?;
+    register_map.write_u64(arch.pc_register(), &mut context, next_pc)?;
     kd_trace!(
         "kd: advance_pc: p{} read pc={:#x}, writing {}-byte CONTEXT in chunks",
         processor + 1,
@@ -685,7 +685,7 @@ pub fn advance_pc_past_breakpoint(
             with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
                 api::get_context(framing, processor, context_flags)
             })
-        && let Ok(verify_pc) = register_map.read_u64("rip", &verify_context)
+        && let Ok(verify_pc) = register_map.read_u64(arch.pc_register(), &verify_context)
     {
         kd_trace!(
             "kd: advance_pc: p{} wrote {:#x}, read back {:#x}",

@@ -977,7 +977,7 @@ fn scope_ip(target: &Target) -> Option<VirtAddr> {
         .selected_frame
         .as_ref()
         .map(|frame| frame.ip)
-        .or_else(|| target.register_value(target.instruction_pointer_register()))
+        .or_else(|| target.register_value(target.arch().pc_register()))
         .map(VirtAddr)
 }
 

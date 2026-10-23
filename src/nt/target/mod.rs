@@ -293,17 +293,9 @@ impl SelectedFrame {
 
     /// Select a context given only register values (`.cxr`, `.ecxr`, `.trap`),
     /// which carry no unwind metadata and therefore no frame base.
-    pub fn from_registers(index: usize, registers: HashMap<String, u64>) -> Self {
-        let ip = registers
-            .get("rip")
-            .copied()
-            .or_else(|| registers.get("pc").copied())
-            .unwrap_or(0);
-        let sp = registers
-            .get("rsp")
-            .copied()
-            .or_else(|| registers.get("sp").copied())
-            .unwrap_or(0);
+    pub fn from_registers(arch: Arch, index: usize, registers: HashMap<String, u64>) -> Self {
+        let ip = registers.get(arch.pc_register()).copied().unwrap_or(0);
+        let sp = registers.get(arch.sp_register()).copied().unwrap_or(0);
         let seed_registers = registers.clone();
         Self {
             index,

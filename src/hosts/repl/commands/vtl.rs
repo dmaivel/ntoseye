@@ -476,7 +476,7 @@ impl ReplState<'_> {
                 );
             }
             outln!();
-        } else if let Some(rip) = target.register_value("rip")
+        } else if let Some(rip) = target.register_value(target.arch().pc_register())
             && halted_in_windows_hypervisor(target, target.current_dtb(), rip)
         {
             // Not VTL0: the vCPU halted in the Windows hypervisor, whose root
@@ -1402,7 +1402,7 @@ fn hvcall(repl: &mut ReplState<'_>) -> Result<()> {
     let map = &repl.ctx.register_map;
     let (Ok(cr3), Ok(rip)) = (
         map.read_u64(target.arch().dtb_register(), &regs),
-        map.read_u64("rip", &regs),
+        map.read_u64(target.arch().pc_register(), &regs),
     ) else {
         error!("the vCPU's CR3 and RIP are unavailable");
         return Ok(());

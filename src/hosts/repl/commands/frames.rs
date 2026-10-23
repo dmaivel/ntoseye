@@ -232,7 +232,7 @@ fn cxr(
             return Ok(());
         }
     };
-    let selected = SelectedFrame::from_registers(0, registers);
+    let selected = SelectedFrame::from_registers(state.ctx.target.arch(), 0, registers);
     state.set_selected_frame(selected.clone());
     outln!("selected context {}", ui::addr(address.0));
     state.print_selected_frame(&selected, false);
@@ -287,7 +287,7 @@ fn ecxr(state: &mut ReplState<'_>) -> Result<()> {
         match read_ktrap_frame_at_or_current(&state.ctx.target, Some(VirtAddr(address))) {
             Ok(frame) => {
                 let registers = registers_from_trap_frame(&frame);
-                let selected = SelectedFrame::from_registers(0, registers);
+                let selected = SelectedFrame::from_registers(state.ctx.target.arch(), 0, registers);
                 state.set_selected_frame(selected.clone());
                 outln!("exception trap frame {}", ui::addr(address));
                 state.print_selected_frame(&selected, false);
@@ -306,7 +306,7 @@ fn ecxr(state: &mut ReplState<'_>) -> Result<()> {
     if let Some(address) = state.exception_context_pointer() {
         match state.ctx.read_context_record(VirtAddr(address)) {
             Ok(registers) => {
-                let selected = SelectedFrame::from_registers(0, registers);
+                let selected = SelectedFrame::from_registers(state.ctx.target.arch(), 0, registers);
                 state.set_selected_frame(selected.clone());
                 outln!("exception context {}", ui::addr(address));
                 state.print_selected_frame(&selected, false);
@@ -332,7 +332,7 @@ fn ecxr(state: &mut ReplState<'_>) -> Result<()> {
             error!("exception context is unavailable");
             return Ok(());
         };
-        let selected = SelectedFrame::from_registers(0, registers);
+        let selected = SelectedFrame::from_registers(state.ctx.target.arch(), 0, registers);
         state.set_selected_frame(selected.clone());
         outln!("exception context from current stop");
         state.print_selected_frame(&selected, false);
@@ -392,7 +392,7 @@ fn vtlcxr(state: &mut ReplState<'_>, #[arg(parse = vtl_choice)] vtl: u8) -> Resu
     let map = &state.ctx.register_map;
     let (Ok(cr3), Ok(rip)) = (
         map.read_u64(target.arch().dtb_register(), &regs),
-        map.read_u64("rip", &regs),
+        map.read_u64(target.arch().pc_register(), &regs),
     ) else {
         error!("the vCPU's CR3 and RIP are unavailable");
         return Ok(());
@@ -469,7 +469,8 @@ fn vtlcxr(state: &mut ReplState<'_>, #[arg(parse = vtl_choice)] vtl: u8) -> Resu
     {
         error!("the secure kernel's symbols: {error}");
     }
-    let selected = SelectedFrame::from_registers(0, chosen.context.registers());
+    let selected =
+        SelectedFrame::from_registers(state.ctx.target.arch(), 0, chosen.context.registers());
     state.set_selected_frame(selected.clone());
     if vtl == 1 {
         state.caches.refresh_symbol_context(&state.ctx.target);
@@ -1039,7 +1040,7 @@ impl ReplState<'_> {
     }
 
     pub fn select_register_values(&mut self, index: usize, registers: HashMap<String, u64>) -> u64 {
-        let selected = SelectedFrame::from_registers(index, registers);
+        let selected = SelectedFrame::from_registers(self.ctx.target.arch(), index, registers);
         let ip = selected.ip;
         self.set_selected_frame(selected);
         ip

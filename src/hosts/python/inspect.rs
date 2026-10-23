@@ -94,19 +94,12 @@ impl Inspect {
     /// Decode a CONTEXT record and return its register set as a `Frame` (`.cxr`).
     fn context_record(&self, py: Python<'_>, address: AddressArg) -> PyResult<Frame> {
         let address = address.resolve(py, &self.owner, &Context::default())?;
-        let registers = self.owner.with_in(py, &Context::default(), |session| {
-            session.read_context_record(address).map_err(err)
+        let (arch, registers) = self.owner.with_in(py, &Context::default(), |session| {
+            let registers = session.read_context_record(address).map_err(err)?;
+            Ok((session.target.arch(), registers))
         })?;
-        let ip = registers
-            .get("rip")
-            .or_else(|| registers.get("pc"))
-            .copied()
-            .unwrap_or(0);
-        let sp = registers
-            .get("rsp")
-            .or_else(|| registers.get("sp"))
-            .copied()
-            .unwrap_or(0);
+        let ip = registers.get(arch.pc_register()).copied().unwrap_or(0);
+        let sp = registers.get(arch.sp_register()).copied().unwrap_or(0);
         Frame::new(
             py,
             self.owner.derive(py),

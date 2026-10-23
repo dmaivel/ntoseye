@@ -242,7 +242,7 @@ impl KdBackend {
         register_map: &RegisterMap,
     ) -> Result<u64> {
         if let Some(context) = self.registers.context(processor)
-            && let Ok(pc) = register_map.read_u64("rip", context)
+            && let Ok(pc) = register_map.read_u64(self.arch.pc_register(), context)
         {
             return Ok(pc);
         }

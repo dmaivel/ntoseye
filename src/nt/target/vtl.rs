@@ -646,7 +646,7 @@ impl Target {
         else {
             return false;
         };
-        self.select_frame(SelectedFrame::from_registers(0, saved));
+        self.select_frame(SelectedFrame::from_registers(self.arch(), 0, saved));
         true
     }
 

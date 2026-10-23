@@ -200,6 +200,38 @@ impl Arch {
         }
     }
 
+    /// Register holding the address of the next instruction.
+    pub const fn pc_register(self) -> &'static str {
+        match self {
+            Self::Amd64 => "rip",
+            Self::Arm64 => "pc",
+        }
+    }
+
+    /// Register holding the stack pointer.
+    pub const fn sp_register(self) -> &'static str {
+        match self {
+            Self::Amd64 => "rsp",
+            Self::Arm64 => "sp",
+        }
+    }
+
+    /// Register a frame-pointer chain links through (`rbp`, ARM64's `fp`).
+    pub const fn frame_register(self) -> &'static str {
+        match self {
+            Self::Amd64 => "rbp",
+            Self::Arm64 => "fp",
+        }
+    }
+
+    /// Register holding the processor's status flags (`eflags`, `cpsr`).
+    pub const fn flags_register(self) -> &'static str {
+        match self {
+            Self::Amd64 => "eflags",
+            Self::Arm64 => "cpsr",
+        }
+    }
+
     /// Bits of the DTB register that select the page-table base frame (PCID,
     /// ASID, and reserved/canonical bits masked out), for comparing address
     /// spaces.

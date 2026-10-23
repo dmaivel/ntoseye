@@ -1741,7 +1741,7 @@ mod tests {
         let mut event = StopReply::parse("S05").into_event();
         event.program_counter = Some(0x112b);
         let map = RegisterMap::default();
-        let hit = hardware_breakpoint_hit(&mut client, &map, &manager, &event)
+        let hit = hardware_breakpoint_hit(&mut client, &map, &manager, &event, Arch::Amd64)
             .unwrap()
             .unwrap();
         assert_eq!(hit.hardware.unwrap().slot, 299);
@@ -1853,9 +1853,15 @@ mod tests {
         manager.enable(&mut client, &session.target, 299).unwrap();
         assert_eq!(client.hardware_sites[299].unwrap().addr, 0x112b);
         let event = StopReply::parse("T05watch:2002;").into_event();
-        let hit = hardware_breakpoint_hit(&mut client, &RegisterMap::default(), &manager, &event)
-            .unwrap()
-            .unwrap();
+        let hit = hardware_breakpoint_hit(
+            &mut client,
+            &RegisterMap::default(),
+            &manager,
+            &event,
+            Arch::Amd64,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(hit.id, id);
         manager.remove_all(&mut client, &session.target).unwrap();
         assert!(client.hardware_sites.iter().all(Option::is_none));

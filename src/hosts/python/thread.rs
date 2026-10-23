@@ -776,10 +776,9 @@ impl Cpu {
             require_halted(session, "cpu.hypercall_caller")?;
             let registers = session.read_registers().map_err(err)?;
             let map = &session.register_map;
-            let cr3 = map
-                .read_u64(session.target.arch().dtb_register(), &registers)
-                .map_err(err)?;
-            let rip = map.read_u64("rip", &registers).map_err(err)?;
+            let arch = session.target.arch();
+            let cr3 = map.read_u64(arch.dtb_register(), &registers).map_err(err)?;
+            let rip = map.read_u64(arch.pc_register(), &registers).map_err(err)?;
             Ok(halted_in_windows_hypervisor(&session.target, cr3, rip)
                 .then(|| session.target.hypercall_caller(cr3, rip, processor))
                 .flatten())

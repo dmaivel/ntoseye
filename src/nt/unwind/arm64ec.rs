@@ -14,7 +14,8 @@
 //! emulator turns into an x64 call, pushing the thunk's return address, so
 //! unwinding the x64 callee returns into the thunk.
 
-use super::{AMD64_VOLATILE, REGISTER_SLOTS, RegisterContext, StackTracer, Unwound};
+use super::{REGISTER_SLOTS, RegisterContext, StackTracer, Unwound};
+use crate::backend::cpu_context::amd64::VOLATILE_REGISTERS;
 
 /// The ARM64 register each x64 register lives in during ARM64EC code, by
 /// x64 unwind number (rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8–r15). rsp
@@ -71,7 +72,7 @@ impl StackTracer<'_> {
         }
         for (register, home) in X64_IN_ARM64.iter().enumerate() {
             if let Some(home) = home
-                && !AMD64_VOLATILE.contains(&register)
+                && !VOLATILE_REGISTERS.contains(&register)
             {
                 context.regs[*home] = x64.regs[register];
             }

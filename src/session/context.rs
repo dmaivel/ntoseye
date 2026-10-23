@@ -309,8 +309,10 @@ impl Session {
             .set_current_thread(&self.current_thread)
             .and_then(|()| self.backend.read_registers())?;
         let value = |name| self.register_map.read_u64(name, &registers).ok();
-        let (Some(cr3), Some(rip)) = (value(self.target.arch().dtb_register()), value("rip"))
-        else {
+        let (Some(cr3), Some(rip)) = (
+            value(self.target.arch().dtb_register()),
+            value(self.target.arch().pc_register()),
+        ) else {
             return Ok(false);
         };
         Ok(halted_in_windows_hypervisor(&self.target, cr3, rip))
@@ -328,8 +330,10 @@ impl Session {
             .set_current_thread(&self.current_thread)
             .and_then(|()| self.backend.read_registers())?;
         let value = |name| self.register_map.read_u64(name, &registers).ok();
-        let (Some(cr3), Some(rip)) = (value(self.target.arch().dtb_register()), value("rip"))
-        else {
+        let (Some(cr3), Some(rip)) = (
+            value(self.target.arch().dtb_register()),
+            value(self.target.arch().pc_register()),
+        ) else {
             return Ok(None);
         };
         let processor = processor_index_from_backend_thread_id(&self.current_thread);
@@ -406,8 +410,7 @@ impl Session {
             .ok()
             .and_then(|r| {
                 self.register_map
-                    .read_u64("rip", &r)
-                    .or_else(|_| self.register_map.read_u64("pc", &r))
+                    .read_u64(self.target.arch().pc_register(), &r)
                     .ok()
             })
             .unwrap_or(0)
@@ -508,7 +511,7 @@ impl Session {
     pub fn user_threads(&self) -> Option<Vec<UserThreadSummary>> {
         let info = self.target.user_dump_info()?;
         let exception_thread = info.exception.as_ref().map(|exception| exception.thread_id);
-        let ip = self.target.instruction_pointer_register();
+        let ip = self.target.arch().pc_register();
         let trace = resolve_thread_trace_context(&self.target, 0);
         Some(
             info.threads
@@ -605,7 +608,8 @@ impl Session {
     /// off.
     pub(super) fn describe_vcpu(&self, id: &str, regs: &[u8]) -> VcpuInfo {
         let (Ok(rip), Ok(dtb)) = (
-            self.register_map.read_u64("rip", regs),
+            self.register_map
+                .read_u64(self.target.arch().pc_register(), regs),
             self.register_map
                 .read_u64(self.target.arch().dtb_register(), regs),
         ) else {

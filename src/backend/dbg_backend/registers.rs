@@ -1,34 +1,20 @@
 //! Register files as byte buffers: the layout every transport describes its
-//! `read_registers` buffer with, and the ARM64 aliases shared code reads.
+//! `read_registers` buffer with, and the ARM64 ABI aliases users type.
 
 use std::collections::HashMap;
 use std::result;
 
 use crate::base::error::{Error, Result};
 
-/// ARM64 names the rest of the debugger reads, each paired with the
-/// architectural register it aliases. Shared code spells the program
-/// counter and stack pointer the x64 way; `fp`, `lr` and `pstate` are the
-/// ABI names users type.
-const ARM64_ALIASES: [(&str, &str); 5] = [
-    ("rip", "pc"),
-    ("rsp", "sp"),
-    ("fp", "x29"),
-    ("lr", "x30"),
-    ("pstate", "cpsr"),
-];
+/// ARM64 ABI names users type, each paired with the architectural register
+/// it aliases.
+const ARM64_ALIASES: [(&str, &str); 3] = [("fp", "x29"), ("lr", "x30"), ("pstate", "cpsr")];
 
 /// A name in a recovered register set that repeats another register, which
-/// a listing shows once under the name `r` uses: `rip`/`rsp` repeat `pc`/`sp`,
-/// and `x29`, `x30`, `pstate` are shown as `fp`, `lr`, `cpsr`.
+/// a listing shows once under the name `r` uses: `x29`, `x30`, `pstate` are
+/// shown as `fp`, `lr`, `cpsr`.
 pub fn repeats_another_register(name: &str, registers: &HashMap<String, u64>) -> bool {
-    const SHOWN_AS: [(&str, &str); 5] = [
-        ("rip", "pc"),
-        ("rsp", "sp"),
-        ("x29", "fp"),
-        ("x30", "lr"),
-        ("pstate", "cpsr"),
-    ];
+    const SHOWN_AS: [(&str, &str); 3] = [("x29", "fp"), ("x30", "lr"), ("pstate", "cpsr")];
     SHOWN_AS.iter().any(|(repeat, shown)| {
         *repeat == name
             && registers
@@ -215,7 +201,7 @@ impl RegisterMap {
 
     /// A sparse register context (`.cxr`, `.trap`, a saved VTL state) named
     /// the way [`Self::to_hashmap`] names it, so an alias also yields the
-    /// register it aliases (ARM64 `rip` gives `pc`). Only registers whose
+    /// register it aliases (ARM64 `fp` gives `x29`). Only registers whose
     /// every byte `values` supplies are kept: a register the context lacks
     /// stays unknown instead of reading zero. Names the map does not carry
     /// are dropped.

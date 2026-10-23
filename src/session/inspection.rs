@@ -154,7 +154,7 @@ impl Session {
         if self.current_thread != thread {
             self.set_current_thread(&thread)?;
         }
-        let selected = SelectedFrame::from_registers(0, registers);
+        let selected = SelectedFrame::from_registers(self.target.arch(), 0, registers);
         self.select_frame(selected.clone());
         Ok((selected, thread))
     }
@@ -713,8 +713,9 @@ impl Session {
             return Ok(None);
         };
         let live = self.register_map.to_hashmap(&registers);
+        let arch = self.target.arch();
         let (Some(&cr3), Some(&rip)) =
-            (live.get(self.target.arch().dtb_register()), live.get("rip"))
+            (live.get(arch.dtb_register()), live.get(arch.pc_register()))
         else {
             return Ok(None);
         };
@@ -742,7 +743,8 @@ impl Session {
             .read_vcpu_registers(vcpu)?
             .ok_or_else(|| Error::DebugInfo(format!("{vcpu}'s registers are unavailable")))?;
         let live = self.register_map.to_hashmap(&registers);
-        let in_hypervisor = match (live.get(self.target.arch().dtb_register()), live.get("rip")) {
+        let arch = self.target.arch();
+        let in_hypervisor = match (live.get(arch.dtb_register()), live.get(arch.pc_register())) {
             (Some(&cr3), Some(&rip)) => {
                 halted_in_windows_hypervisor(&self.target, cr3, rip).then_some((cr3, rip))
             }
@@ -913,9 +915,11 @@ impl Session {
         worker_break: VirtAddr,
     ) -> PageInReport {
         let registers = self.backend.read_registers().ok();
-        let pc = registers
-            .as_ref()
-            .and_then(|regs| self.register_map.read_u64("rip", regs).ok());
+        let pc = registers.as_ref().and_then(|regs| {
+            self.register_map
+                .read_u64(self.target.arch().pc_register(), regs)
+                .ok()
+        });
         let first_argument = match self.target.arch() {
             Arch::Amd64 => "rcx",
             Arch::Arm64 => "x0",
@@ -1050,7 +1054,8 @@ impl Session {
             self.backend.set_current_thread(&self.current_thread)?;
             let registers = registers?;
             let (Ok(rip), Ok(cr3)) = (
-                self.register_map.read_u64("rip", &registers),
+                self.register_map
+                    .read_u64(self.target.arch().pc_register(), &registers),
                 self.register_map
                     .read_u64(self.target.arch().dtb_register(), &registers),
             ) else {

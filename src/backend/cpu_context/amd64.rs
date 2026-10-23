@@ -76,6 +76,24 @@ pub const OFFSET_TR: usize = OFFSET_IDTR_LIMIT + 8;
 pub const OFFSET_LDTR: usize = OFFSET_TR + 8;
 pub const OFFSET_EFER: usize = OFFSET_LDTR + 8;
 
+/// The general registers in the order the register grid and a step's
+/// changed-register line show them, flags last.
+pub const GENERAL_REGISTERS: [&str; 18] = [
+    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rsp", "rbp", "rip", "r8", "r9", "r10", "r11", "r12",
+    "r13", "r14", "r15", "eflags",
+];
+
+/// The integer registers in the order the instruction set numbers them,
+/// which is how unwind codes name them.
+pub const ENCODED_REGISTERS: [&str; 16] = [
+    "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13",
+    "r14", "r15",
+];
+
+/// The registers a call clobbers (rax, rcx, rdx, r8–r11), by their
+/// [`ENCODED_REGISTERS`] number.
+pub const VOLATILE_REGISTERS: [usize; 7] = [0, 1, 2, 8, 9, 10, 11];
+
 /// The register map over a [`REGISTER_BUFFER_SIZE`] buffer: the CONTEXT's
 /// registers, then the synthetic control and descriptor-table slots behind it.
 pub fn build_register_map() -> RegisterMap {

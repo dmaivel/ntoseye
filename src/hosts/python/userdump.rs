@@ -127,22 +127,15 @@ impl UserDump {
     /// unusable.
     fn exception_context(&self, py: Python<'_>) -> PyResult<Frame> {
         let owner = self.owner.derive(py);
-        let registers = self.owner.with(py, |session| {
-            session
+        let (arch, registers) = self.owner.with(py, |session| {
+            let registers = session
                 .target
                 .user_exception_registers(&session.register_map)
-                .map_err(err)
+                .map_err(err)?;
+            Ok((session.target.arch(), registers))
         })?;
-        let ip = registers
-            .get("rip")
-            .or_else(|| registers.get("pc"))
-            .copied()
-            .unwrap_or(0);
-        let sp = registers
-            .get("rsp")
-            .or_else(|| registers.get("sp"))
-            .copied()
-            .unwrap_or(0);
+        let ip = registers.get(arch.pc_register()).copied().unwrap_or(0);
+        let sp = registers.get(arch.sp_register()).copied().unwrap_or(0);
         Frame::new(py, owner, None, 0, ip, sp, None, None, registers)
     }
 

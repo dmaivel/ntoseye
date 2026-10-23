@@ -7,7 +7,11 @@ use ntoseye_macros::record;
 use pelite::pe64::{Pe, PeView, image::IMAGE_DIRECTORY_ENTRY_EXCEPTION};
 
 use crate::{
-    backend::{dbg_backend::RegisterMap, phys::PhysMem},
+    backend::{
+        cpu_context::{self, encoded_registers},
+        dbg_backend::RegisterMap,
+        phys::PhysMem,
+    },
     base::{
         error::{Error, Result},
         memory::{AddressSpace, DTB_IDENTITY, MemoryOps},
@@ -64,23 +68,10 @@ use walk::{build_recovered_stacktrace_seeded, ensure_module_symbols};
 // hard cap on frames walked, so a stack switch (which relaxes the rsp-advances
 // guard) can't let a cyclic/corrupt stack spin forever
 const MAX_UNWIND_FRAMES: usize = 1024;
-/// x64 general registers in their encoding order, the order unwind codes
-/// number them in.
-const AMD64_REGISTER_NAMES: [&str; 16] = [
-    "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13",
-    "r14", "r15",
-];
-/// Registers a call clobbers on x64: rax, rcx, rdx, r8–r11.
-const AMD64_VOLATILE: [usize; 7] = [0, 1, 2, 8, 9, 10, 11];
-const ARM64_REGISTER_NAMES: [&str; 31] = [
-    "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14",
-    "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27",
-    "x28", "x29", "x30",
-];
 /// ABI names for ARM64 registers, which a frame answers to as well.
 const ARM64_REGISTER_ALIASES: [(&str, usize); 2] = [("fp", 29), ("lr", 30)];
 /// Register slots a walk tracks: the most any architecture numbers.
-const REGISTER_SLOTS: usize = ARM64_REGISTER_NAMES.len();
+const REGISTER_SLOTS: usize = cpu_context::arm64::ENCODED_REGISTERS.len();
 
 #[derive(Debug, Clone)]
 pub struct ThreadTraceContext {
@@ -242,7 +233,7 @@ pub struct ThreadRecoveredStack {
 }
 
 /// A frame's registers during a walk. `regs` is indexed by architectural
-/// number: x64 encoding order (see [`AMD64_REGISTER_NAMES`]) or ARM64 x0–x30.
+/// number, in [`encoded_registers`] order: x64 encoding order or ARM64 x0–x30.
 /// `rip` and `rsp` are the program counter and stack pointer on either.
 #[derive(Clone, Debug)]
 struct RegisterContext {
@@ -1244,7 +1235,7 @@ pub fn return_address_for_register_values(
     values: &HashMap<String, u64>,
 ) -> Option<u64> {
     let lookup = |name: &str| lookup_register(values, name);
-    lookup("rip").or_else(|| lookup("pc"))?;
+    lookup(debugger.arch().pc_register())?;
     let mut context = RegisterContext::from_lookup(debugger.arch(), lookup);
     let dtb = lookup(debugger.arch().dtb_register())
         .filter(|dtb| *dtb != 0)
@@ -1489,19 +1480,15 @@ impl RegisterContext {
     /// name.
     fn from_lookup(arch: Arch, lookup: impl Fn(&str) -> Option<u64>) -> Self {
         let mut context = Self::new(
-            lookup("rip").or_else(|| lookup("pc")).unwrap_or(0),
-            lookup("rsp").or_else(|| lookup("sp")).unwrap_or(0),
+            lookup(arch.pc_register()).unwrap_or(0),
+            lookup(arch.sp_register()).unwrap_or(0),
         );
+        for (slot, name) in context.regs.iter_mut().zip(encoded_registers(arch)) {
+            *slot = lookup(name);
+        }
         match arch {
-            Arch::Amd64 => {
-                for (slot, name) in context.regs.iter_mut().zip(AMD64_REGISTER_NAMES) {
-                    *slot = lookup(name);
-                }
-            }
+            Arch::Amd64 => {}
             Arch::Arm64 => {
-                for (slot, name) in context.regs.iter_mut().zip(ARM64_REGISTER_NAMES) {
-                    *slot = lookup(name);
-                }
                 for (alias, index) in ARM64_REGISTER_ALIASES {
                     if context.regs[index].is_none() {
                         context.regs[index] = lookup(alias);
@@ -1518,15 +1505,14 @@ impl RegisterContext {
         let mut values = Vec::new();
         match arch {
             Arch::Amd64 => {
-                for (register, name) in AMD64_REGISTER_NAMES.iter().enumerate() {
+                for (register, name) in cpu_context::amd64::ENCODED_REGISTERS.iter().enumerate() {
                     if let Some(value) = self.get(register as u8) {
                         values.push((*name, value));
                     }
                 }
-                values.extend([("rip", self.rip), ("rsp", self.rsp)]);
             }
             Arch::Arm64 => {
-                for (value, name) in self.regs.iter().zip(ARM64_REGISTER_NAMES) {
+                for (value, name) in self.regs.iter().zip(cpu_context::arm64::ENCODED_REGISTERS) {
                     if let Some(value) = value {
                         values.push((name, *value));
                     }
@@ -1536,14 +1522,12 @@ impl RegisterContext {
                         values.push((alias, value));
                     }
                 }
-                values.extend([
-                    ("pc", self.rip),
-                    ("sp", self.rsp),
-                    ("rip", self.rip),
-                    ("rsp", self.rsp),
-                ]);
             }
         }
+        values.extend([
+            (arch.pc_register(), self.rip),
+            (arch.sp_register(), self.rsp),
+        ]);
         values
     }
 
@@ -1558,7 +1542,11 @@ impl RegisterContext {
             return Some(context);
         }
         let mut context = Self::new(registers.rip?, registers.rsp?);
-        for (slot, name) in context.regs.iter_mut().zip(AMD64_REGISTER_NAMES) {
+        for (slot, name) in context
+            .regs
+            .iter_mut()
+            .zip(cpu_context::amd64::ENCODED_REGISTERS)
+        {
             *slot = registers.get(name);
         }
         Some(context)
@@ -1638,7 +1626,7 @@ impl StackTracer<'_> {
                     // Crossing a machine frame lands where an interrupt or
                     // trap stopped the code, not after a call.
                     context.after_call = !stack_switch;
-                    for index in AMD64_VOLATILE {
+                    for index in cpu_context::amd64::VOLATILE_REGISTERS {
                         context.regs[index] = None;
                     }
                 }

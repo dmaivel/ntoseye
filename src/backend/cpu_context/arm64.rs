@@ -56,6 +56,22 @@ pub const OFFSET_TTBR0: usize = OFFSET_CR3 + 8;
 pub const OFFSET_ESR: usize = OFFSET_TTBR0 + 8;
 pub const OFFSET_FAR: usize = OFFSET_ESR + 8;
 
+/// The general registers in the order the register grid and a step's
+/// changed-register line show them, flags last.
+pub const GENERAL_REGISTERS: [&str; 34] = [
+    "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14",
+    "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27",
+    "x28", "fp", "lr", "sp", "pc", "cpsr",
+];
+
+/// The integer registers in the order the instruction set numbers them
+/// (x0–x30), which is how unwind codes name them.
+pub const ENCODED_REGISTERS: [&str; 31] = [
+    "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14",
+    "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27",
+    "x28", "x29", "x30",
+];
+
 /// The register map over a [`REGISTER_BUFFER_SIZE`] buffer: the CONTEXT's
 /// registers with their ABI aliases, then the synthetic page-table-root,
 /// ESR, and FAR slots behind it.
@@ -118,12 +134,10 @@ mod tests {
         let want_pc: u64 = 0xfffff80012345678;
         buf[OFFSET_PC..OFFSET_PC + 8].copy_from_slice(&want_pc.to_le_bytes());
         assert_eq!(map.read_u64("pc", &buf).unwrap(), want_pc);
-        assert_eq!(map.read_u64("rip", &buf).unwrap(), want_pc);
 
         let want_sp: u64 = 0xfffffa0f6c6b3770;
         buf[OFFSET_SP..OFFSET_SP + 8].copy_from_slice(&want_sp.to_le_bytes());
         assert_eq!(map.read_u64("sp", &buf).unwrap(), want_sp);
-        assert_eq!(map.read_u64("rsp", &buf).unwrap(), want_sp);
 
         let want_x0: u64 = 0x1122334455667788;
         buf[OFFSET_X0..OFFSET_X0 + 8].copy_from_slice(&want_x0.to_le_bytes());

@@ -745,7 +745,11 @@ fn a_sparse_context_walks_with_its_missing_registers_unknown() {
         ("rsp".to_string(), 0x1080),
         ("cs".to_string(), 0x10),
     ]);
-    session.select_frame(SelectedFrame::from_registers(0, supplied));
+    session.select_frame(SelectedFrame::from_registers(
+        session.target.arch(),
+        0,
+        supplied,
+    ));
 
     let (trace, _, live) = session.recovered_backtrace(4).unwrap();
 
@@ -777,6 +781,7 @@ fn a_status_snapshot_keeps_the_selected_thread_and_frame() {
     session.target.set_parked_windows_thread(thread.clone());
     session.parked_windows_thread = Some(thread.ethread);
     session.select_frame(SelectedFrame::from_registers(
+        session.target.arch(),
         2,
         HashMap::from([("rip".to_string(), 0x1010), ("rsp".to_string(), 0x1080)]),
     ));
@@ -819,7 +824,7 @@ fn session_over_arm64_memory(base: u64, memory: &[u8]) -> Session {
 }
 
 #[test]
-fn page_in_result_reads_arm64_pc_alias_and_first_argument() {
+fn page_in_result_reads_arm64_pc_and_first_argument() {
     let mut session = session_over_arm64_memory(0x1000, &[0; 0x100]);
     assert_eq!(session.target.arch(), Arch::Arm64);
 
@@ -828,7 +833,7 @@ fn page_in_result_reads_arm64_pc_alias_and_first_argument() {
         regs: vec![0; arm64::REGISTER_BUFFER_SIZE],
         ..MockBackend::default()
     };
-    backend.set("rip", 0x2000);
+    backend.set("pc", 0x2000);
     backend.set("x0", DBG_STATUS_WORKER);
     session.register_map = backend.register_map.clone();
     session.backend = Box::new(backend);
@@ -3448,9 +3453,15 @@ fn hardware_breakpoint_hit_claims_matching_dr6_bit_and_clears_status() {
     backend.set("eflags", EFLAGS_BASE);
 
     let map = build_register_map();
-    let hit = hardware_breakpoint_hit(&mut backend, &map, &manager, &single_step_event())
-        .expect("register update must succeed")
-        .expect("slot 2 #DB must be claimed by the registered watch");
+    let hit = hardware_breakpoint_hit(
+        &mut backend,
+        &map,
+        &manager,
+        &single_step_event(),
+        Arch::Amd64,
+    )
+    .expect("register update must succeed")
+    .expect("slot 2 #DB must be claimed by the registered watch");
     assert_eq!(hit.id, 7);
     assert_eq!(hit.hardware.expect("hw params").slot, 2);
 
@@ -3472,8 +3483,14 @@ fn hardware_breakpoint_hit_sets_resume_flag_only_for_execute_watches() {
         backend.set("eflags", EFLAGS_BASE);
 
         let map = build_register_map();
-        let hit =
-            hardware_breakpoint_hit(&mut backend, &map, &manager, &single_step_event()).unwrap();
+        let hit = hardware_breakpoint_hit(
+            &mut backend,
+            &map,
+            &manager,
+            &single_step_event(),
+            Arch::Amd64,
+        )
+        .unwrap();
         assert!(hit.is_some(), "{access:?} hit must be claimed");
 
         let eflags = backend.get("eflags");
@@ -3492,7 +3509,16 @@ fn hardware_breakpoint_hit_propagates_required_register_write_failure() {
     backend.fail_writes = true;
 
     let map = build_register_map();
-    assert!(hardware_breakpoint_hit(&mut backend, &map, &manager, &single_step_event()).is_err());
+    assert!(
+        hardware_breakpoint_hit(
+            &mut backend,
+            &map,
+            &manager,
+            &single_step_event(),
+            Arch::Amd64
+        )
+        .is_err()
+    );
     assert_eq!(backend.get("dr6"), 1);
     assert_eq!(backend.get("eflags"), EFLAGS_BASE);
     assert_eq!(backend.writes, 1);
@@ -3509,14 +3535,14 @@ fn hardware_breakpoint_hit_ignores_non_single_step_stops() {
     let mut event = single_step_event();
     event.exception_code = Some(0x8000_0003);
     assert!(
-        hardware_breakpoint_hit(&mut backend, &map, &manager, &event)
+        hardware_breakpoint_hit(&mut backend, &map, &manager, &event, Arch::Amd64)
             .unwrap()
             .is_none()
     );
 
     event.exception_code = None;
     assert!(
-        hardware_breakpoint_hit(&mut backend, &map, &manager, &event)
+        hardware_breakpoint_hit(&mut backend, &map, &manager, &event, Arch::Amd64)
             .unwrap()
             .is_none()
     );
@@ -3524,7 +3550,7 @@ fn hardware_breakpoint_hit_ignores_non_single_step_stops() {
     event.exception_code = Some(STATUS_SINGLE_STEP);
     event.is_bugcheck = true;
     assert!(
-        hardware_breakpoint_hit(&mut backend, &map, &manager, &event)
+        hardware_breakpoint_hit(&mut backend, &map, &manager, &event, Arch::Amd64)
             .unwrap()
             .is_none()
     );
@@ -3551,9 +3577,15 @@ fn a_reported_watch_address_attributes_the_watchpoint_whose_range_covers_it() {
     let mut backend = MockBackend::default().without_debug_registers();
     let map = backend.register_map.clone();
 
-    let hit = hardware_breakpoint_hit(&mut backend, &map, &manager, &stub_watch_event(0x1002))
-        .unwrap()
-        .expect("a byte inside the watched range belongs to the watchpoint");
+    let hit = hardware_breakpoint_hit(
+        &mut backend,
+        &map,
+        &manager,
+        &stub_watch_event(0x1002),
+        Arch::Amd64,
+    )
+    .unwrap()
+    .expect("a byte inside the watched range belongs to the watchpoint");
 
     assert_eq!(hit.id, 7);
     // The address settled it, so nothing had to be fetched to decide.
@@ -3566,8 +3598,14 @@ fn a_reported_watch_address_past_the_watched_range_is_not_a_hit() {
     let mut backend = MockBackend::default().without_debug_registers();
     let map = backend.register_map.clone();
 
-    let hit =
-        hardware_breakpoint_hit(&mut backend, &map, &manager, &stub_watch_event(0x1004)).unwrap();
+    let hit = hardware_breakpoint_hit(
+        &mut backend,
+        &map,
+        &manager,
+        &stub_watch_event(0x1004),
+        Arch::Amd64,
+    )
+    .unwrap();
 
     assert!(hit.is_none());
 }
@@ -3588,6 +3626,7 @@ fn a_watch_address_no_watchpoint_covers_leaves_the_execute_breakpoint_at_the_pc_
         &map,
         &manager,
         &stub_watch_event(0xffff_cc0c_2cc6_7204),
+        Arch::Amd64,
     )
     .unwrap();
 
@@ -3668,7 +3707,7 @@ fn a_stub_with_no_debug_registers_attributes_an_execute_breakpoint_by_the_stoppe
     };
 
     backend.set("rip", 0x1000);
-    let hit = hardware_breakpoint_hit(&mut backend, &map, &manager, &event).unwrap();
+    let hit = hardware_breakpoint_hit(&mut backend, &map, &manager, &event, Arch::Amd64).unwrap();
     assert_eq!(hit.map(|bp| bp.id), Some(7));
     // Without RF the resume re-enters the same faulting instruction.
     assert_eq!(backend.get("eflags") & (1 << 16), 1 << 16);
@@ -3676,7 +3715,8 @@ fn a_stub_with_no_debug_registers_attributes_an_execute_breakpoint_by_the_stoppe
     // The breakpoint fires at its own address, so a stop elsewhere is not it.
     backend.set("rip", 0x2000);
     backend.set("eflags", 0);
-    let elsewhere = hardware_breakpoint_hit(&mut backend, &map, &manager, &event).unwrap();
+    let elsewhere =
+        hardware_breakpoint_hit(&mut backend, &map, &manager, &event, Arch::Amd64).unwrap();
     assert!(elsewhere.is_none());
     assert_eq!(backend.get("eflags"), 0);
 }
@@ -3690,18 +3730,30 @@ fn hardware_breakpoint_hit_requires_an_enabled_hardware_breakpoint() {
 
     let empty = BreakpointManager::new();
     assert!(
-        hardware_breakpoint_hit(&mut backend, &map, &empty, &single_step_event())
-            .unwrap()
-            .is_none()
+        hardware_breakpoint_hit(
+            &mut backend,
+            &map,
+            &empty,
+            &single_step_event(),
+            Arch::Amd64
+        )
+        .unwrap()
+        .is_none()
     );
     assert_eq!(backend.writes, 0);
     assert_eq!(backend.regs, before);
 
     let manager = manager_with_hw(0, HwBreakpointAccess::Write, false);
     assert!(
-        hardware_breakpoint_hit(&mut backend, &map, &manager, &single_step_event())
-            .unwrap()
-            .is_none()
+        hardware_breakpoint_hit(
+            &mut backend,
+            &map,
+            &manager,
+            &single_step_event(),
+            Arch::Amd64
+        )
+        .unwrap()
+        .is_none()
     );
     assert_eq!(backend.writes, 0);
     assert_eq!(backend.regs, before);
@@ -3715,9 +3767,15 @@ fn hardware_breakpoint_hit_clears_stale_dr6_bits_for_unregistered_slots() {
 
     let map = build_register_map();
     assert!(
-        hardware_breakpoint_hit(&mut backend, &map, &manager, &single_step_event())
-            .unwrap()
-            .is_none()
+        hardware_breakpoint_hit(
+            &mut backend,
+            &map,
+            &manager,
+            &single_step_event(),
+            Arch::Amd64
+        )
+        .unwrap()
+        .is_none()
     );
     assert_eq!(backend.get("dr6"), DR6_BS);
     assert_eq!(backend.writes, 1);

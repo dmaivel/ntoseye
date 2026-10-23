@@ -10,9 +10,8 @@ use pelite::pe64::image::{
     UWOP_SAVE_NONVOL_FAR, UWOP_SAVE_XMM128, UWOP_SAVE_XMM128_FAR, UWOP_SET_FPREG,
 };
 
-use super::{
-    AMD64_REGISTER_NAMES, RegisterContext, StackTracer, Unwound, image_u32, runtime_functions,
-};
+use super::{RegisterContext, StackTracer, Unwound, image_u32, runtime_functions};
+use crate::backend::cpu_context::amd64::ENCODED_REGISTERS;
 use crate::backend::phys::PhysMem;
 use crate::base::memory::{AddressSpace, MemoryOps};
 use crate::base::types::{CodeMachine, VirtAddr};
@@ -1196,7 +1195,7 @@ fn describe_unwind_info(
         prolog_size: parsed.size_of_prolog,
         code_count: u8::try_from(parsed.codes.len()).ok()?,
         frame_register: (parsed.frame_register != 0)
-            .then(|| AMD64_REGISTER_NAMES[usize::from(parsed.frame_register)]),
+            .then(|| ENCODED_REGISTERS[usize::from(parsed.frame_register)]),
         frame_offset: u32::from(parsed.frame_offset) * 16,
         codes: describe_unwind_codes(&parsed.codes),
         handler,
@@ -1209,7 +1208,7 @@ fn describe_unwind_info(
 /// whose operation is unknown or whose operand slots run past the array
 /// ends the list with a note, since the slots after it cannot be framed.
 fn describe_unwind_codes(codes: &[UnwindCodeSlot]) -> Vec<Amd64UnwindCode> {
-    let register = |number: u8| AMD64_REGISTER_NAMES[usize::from(number & 0xf)];
+    let register = |number: u8| ENCODED_REGISTERS[usize::from(number & 0xf)];
     let u32_at = |index: usize| {
         Some(u32::from(slot_u16(codes, index)?) | u32::from(slot_u16(codes, index + 1)?) << 16)
     };

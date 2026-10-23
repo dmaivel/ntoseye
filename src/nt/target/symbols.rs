@@ -425,7 +425,7 @@ impl Target {
         match self.selected_frame.as_ref() {
             Some(frame) => Some(frame.code),
             None => self
-                .register_value(self.instruction_pointer_register())
+                .register_value(self.arch().pc_register())
                 .map(|ip| CodeFrame::at(VirtAddr(ip))),
         }
     }
@@ -469,7 +469,7 @@ impl Target {
                     .as_ref()
                     .and_then(|frame| frame.frame_base)
                     .or_else(|| frame_base_for_register_values(self, registers))
-                    .or_else(|| lookup_register(registers, self.stack_pointer_register()))?;
+                    .or_else(|| lookup_register(registers, self.arch().sp_register()))?;
                 Some(frame_base.wrapping_add_signed(i64::from(*offset)))
             }
         }
@@ -485,8 +485,8 @@ impl Target {
         local: &ProcedureLocal,
     ) -> Option<u64> {
         if self
-            .register_value("rip")
-            .is_none_or(|rip| rip != address.0)
+            .register_value(self.arch().pc_register())
+            .is_none_or(|ip| ip != address.0)
         {
             return None;
         }

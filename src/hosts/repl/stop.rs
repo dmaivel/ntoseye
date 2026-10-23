@@ -552,7 +552,9 @@ pub fn print_break_context_at(
     let cr3 = register_map
         .read_u64(debugger.arch().dtb_register(), &regs)
         .unwrap_or(0);
-    let rip = register_map.read_u64("rip", &regs).unwrap_or(0);
+    let rip = register_map
+        .read_u64(debugger.arch().pc_register(), &regs)
+        .unwrap_or(0);
     let windows_thread = refresh_windows_thread_context_for_backend_thread(debugger, &thread_id);
     let trace = resolve_thread_trace_context_at(debugger, cr3, rip);
     let context_rip = display_rip.unwrap_or(rip);

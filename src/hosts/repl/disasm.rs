@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use owo_colors::OwoColorize;
 
+use crate::backend::cpu_context::general_registers;
 use crate::backend::dbg_backend::{RegisterMap, repeats_another_register};
 use crate::base::error::Error;
 use crate::base::memory::MemoryOps;
@@ -238,74 +239,55 @@ pub fn print_registers(
         print_section("registers");
     }
 
+    let row_line = |row: &[&str]| {
+        row.iter()
+            .map(|name| cell(name))
+            .collect::<Vec<_>>()
+            .join("   ")
+    };
+    let [names @ .., flags] = general_registers(arch) else {
+        return;
+    };
     match arch {
-        Arch::Amd64 => {}
-        // ARM64 register map: x0-x30 grid plus fp/lr/sp/pc and cpsr flags.
-        Arch::Arm64 => {
-            for row in [
-                ["x0", "x1", "x2", "x3"],
-                ["x4", "x5", "x6", "x7"],
-                ["x8", "x9", "x10", "x11"],
-                ["x12", "x13", "x14", "x15"],
-                ["x16", "x17", "x18", "x19"],
-                ["x20", "x21", "x22", "x23"],
-                ["x24", "x25", "x26", "x27"],
-            ] {
-                outln!(
-                    "{indent}{}   {}   {}   {}",
-                    cell(row[0]),
-                    cell(row[1]),
-                    cell(row[2]),
-                    cell(row[3])
-                );
+        // Rows of 3, the flags (as `rfl`, decoded) closing the last one.
+        Arch::Amd64 => {
+            let rows: Vec<String> = names.chunks(3).map(row_line).collect();
+            let Some((last, rows)) = rows.split_last() else {
+                return;
+            };
+            for row in rows {
+                outln!("{indent}{row}");
             }
+            let rflags = read_reg_value(flags).unwrap_or(0);
             outln!(
-                "{indent}{}   {}   {}   {}",
-                cell("x28"),
-                cell("fp"),
-                cell("lr"),
-                cell("sp")
+                "{indent}{last}   {} {}{}",
+                ui::muted("rfl"),
+                styled_value(flags),
+                format_rflags(rflags)
             );
-            let cpsr = read_reg_value("cpsr").unwrap_or(0);
+        }
+        // Rows of 4 through sp, then pc and the flags, decoded below them.
+        Arch::Arm64 => {
+            let [grid @ .., pc] = names else {
+                return;
+            };
+            for row in grid.chunks(4) {
+                outln!("{indent}{}", row_line(row));
+            }
             outln!(
                 "{indent}{}   {} {}",
-                cell("pc"),
-                ui::muted("cpsr"),
-                styled_value("cpsr")
+                cell(pc),
+                ui::muted(flags),
+                styled_value(flags)
             );
-            let flags = format_cpsr(cpsr);
-            if !flags.is_empty() {
+            let decoded = format_cpsr(read_reg_value(flags).unwrap_or(0));
+            if !decoded.is_empty() {
                 // Align under the cpsr hex value: cell("pc") (4 + 16 chars) +
                 // the "   cpsr " label, i.e. 28 columns.
-                outln!("{indent}                            {flags}");
+                outln!("{indent}                            {decoded}");
             }
-            return;
         }
     }
-
-    let rflags = read_reg_value("eflags").unwrap_or(0);
-    for row in [
-        ["rax", "rbx", "rcx"],
-        ["rdx", "rsi", "rdi"],
-        ["rsp", "rbp", "rip"],
-        ["r8", "r9", "r10"],
-        ["r11", "r12", "r13"],
-    ] {
-        outln!(
-            "{indent}{}   {}   {}",
-            cell(row[0]),
-            cell(row[1]),
-            cell(row[2])
-        );
-    }
-    outln!(
-        "{indent}{}   {}   {} {}{}",
-        cell("r14"),
-        cell("r15"),
-        ui::muted("rfl"),
-        styled_value("eflags"),
-        format_rflags(rflags)
-    );
 }
 
 /// Whether register `name`, now `value`, held something else in `before`.
@@ -315,13 +297,6 @@ pub fn changed(register_map: &RegisterMap, name: &str, value: u64, before: Optio
         .is_some_and(|was| was != value)
 }
 
-/// The general-purpose registers, in the order the grid shows them.
-const AMD64_REGISTERS: [&str; 18] = [
-    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rsp", "rbp", "rip", "r8", "r9", "r10", "r11", "r12",
-    "r13", "r14", "r15", "eflags",
-];
-const ARM64_EXTRA_REGISTERS: [&str; 5] = ["fp", "lr", "sp", "pc", "cpsr"];
-
 /// The general-purpose registers that changed since `before`, on one line
 /// as `name=value` pairs: what a compact stop shows after a step.
 pub fn print_changed_registers(
@@ -330,15 +305,9 @@ pub fn print_changed_registers(
     regs: &[u8],
     before: Option<&[u8]>,
 ) {
-    let names: Vec<String> = match arch {
-        Arch::Arm64 => (0..=28)
-            .map(|index| format!("x{index}"))
-            .chain(ARM64_EXTRA_REGISTERS.map(String::from))
-            .collect(),
-        Arch::Amd64 => AMD64_REGISTERS.map(String::from).to_vec(),
-    };
-    let pairs: Vec<String> = names
+    let pairs: Vec<String> = general_registers(arch)
         .iter()
+        .copied()
         .filter_map(|name| {
             let value = register_map.read_u64(name, regs).ok()?;
             changed(register_map, name, value, before)

@@ -232,9 +232,11 @@ impl Session {
             } else {
                 let _ = self.backend.set_current_thread(&self.current_thread);
                 let registers = self.backend.read_registers().ok();
-                let rip = registers
-                    .as_ref()
-                    .and_then(|regs| self.register_map.read_u64("rip", regs).ok());
+                let rip = registers.as_ref().and_then(|regs| {
+                    self.register_map
+                        .read_u64(self.target.arch().pc_register(), regs)
+                        .ok()
+                });
                 let cr3 = registers.as_ref().and_then(|regs| {
                     self.register_map
                         .read_u64(self.target.arch().dtb_register(), regs)
@@ -308,7 +310,7 @@ impl Session {
             .target
             .registers
             .as_ref()
-            .and_then(|registers| registers.get("rip").copied())
+            .and_then(|registers| registers.get(self.target.arch().pc_register()).copied())
             .unwrap_or(0);
         let resolution = StopResolution::Breakpoint {
             breakpoint: Box::new(breakpoint),
@@ -334,11 +336,11 @@ impl Session {
         let mut event = self.backend.wait_for_stop()?;
         set_current_thread_from_stop(self.backend.as_mut(), &event, &mut self.current_thread);
         if event.program_counter.is_none() {
-            event.program_counter = self
-                .backend
-                .read_registers()
-                .ok()
-                .and_then(|regs| self.register_map.read_u64("rip", &regs).ok());
+            event.program_counter = self.backend.read_registers().ok().and_then(|regs| {
+                self.register_map
+                    .read_u64(self.target.arch().pc_register(), &regs)
+                    .ok()
+            });
         }
         self.record_stop_event(&event);
         match resolve_watchpoint_stop(
@@ -392,11 +394,11 @@ impl Session {
         // reboot heuristic cannot tell a stop in a relocated kernel from an
         // ordinary one, so read it from the thread the stop selected.
         if event.program_counter.is_none() {
-            event.program_counter = self
-                .backend
-                .read_registers()
-                .ok()
-                .and_then(|regs| self.register_map.read_u64("rip", &regs).ok());
+            event.program_counter = self.backend.read_registers().ok().and_then(|regs| {
+                self.register_map
+                    .read_u64(self.target.arch().pc_register(), &regs)
+                    .ok()
+            });
         }
         self.record_stop_event(&event);
 
@@ -431,7 +433,10 @@ impl Session {
                     .map(|module| (kind, module))
             }) {
                 let registers = self.backend.read_registers()?;
-                let rip = self.register_map.read_u64("rip", &registers).unwrap_or(0);
+                let rip = self
+                    .register_map
+                    .read_u64(self.target.arch().pc_register(), &registers)
+                    .unwrap_or(0);
                 update_target_context_from_registers(
                     &mut self.target,
                     &self.register_map,
@@ -495,7 +500,10 @@ impl Session {
         }
 
         let registers = self.backend.read_registers()?;
-        let rip = self.register_map.read_u64("rip", &registers).unwrap_or(0);
+        let rip = self
+            .register_map
+            .read_u64(self.target.arch().pc_register(), &registers)
+            .unwrap_or(0);
         let cr3 = self
             .register_map
             .read_u64(self.target.arch().dtb_register(), &registers)
@@ -606,10 +614,7 @@ impl Session {
         rip: u64,
         cr3: u64,
     ) -> Result<StopResolution> {
-        let stack = self
-            .target
-            .register_value("rsp")
-            .or_else(|| self.target.register_value("sp"));
+        let stack = self.target.register_value(self.target.arch().sp_register());
         let repeated = self
             .module_trap_interrupted
             .take_if(|(event, interrupted)| *event == kind && Some(*interrupted) == stack)

@@ -11,6 +11,7 @@ use ntoseye_macros::record;
 use super::culprit::{is_user_system_module, user_culprit_attribution};
 use super::signature::user_failure_signature;
 use super::{TRIAGE_BACKTRACE_LIMIT, TriageReport};
+use crate::backend::cpu_context;
 use crate::base::memory::MemoryOps;
 use crate::base::ntstatus::ntstatus_name;
 use crate::base::time::unix_time_to_iso;
@@ -347,13 +348,6 @@ const FAST_FAIL_CODES: &[(u64, &str)] = &[
     (69, "FAST_FAIL_NTDLL_PATCH_FAILED"),
     (70, "FAST_FAIL_INVALID_FLS_DATA"),
 ];
-
-/// The general-purpose registers `-v` shows from the exception's context.
-const AMD64_REGISTERS: [&str; 18] = [
-    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rsp", "rbp", "rip", "r8", "r9", "r10", "r11", "r12",
-    "r13", "r14", "r15", "eflags",
-];
-const ARM64_EXTRA_REGISTERS: [&str; 5] = ["fp", "lr", "sp", "pc", "cpsr"];
 
 /// The kind of an exception code and its name, or what it is when it has
 /// no name.
@@ -720,19 +714,17 @@ fn frame_where(
         })
 }
 
+/// The general-purpose registers `-v` shows from the exception's context,
+/// in the register grid's order.
 fn general_registers(arch: Arch, values: &HashMap<String, u64>) -> Vec<RegisterValue> {
-    let names: Vec<String> = match arch {
-        Arch::Amd64 => AMD64_REGISTERS.map(String::from).to_vec(),
-        Arch::Arm64 => (0..=28)
-            .map(|index| format!("x{index}"))
-            .chain(ARM64_EXTRA_REGISTERS.map(String::from))
-            .collect(),
-    };
-    names
-        .into_iter()
+    cpu_context::general_registers(arch)
+        .iter()
         .filter_map(|name| {
-            let value = *values.get(&name)?;
-            Some(RegisterValue { name, value })
+            let value = *values.get(*name)?;
+            Some(RegisterValue {
+                name: name.to_string(),
+                value,
+            })
         })
         .collect()
 }

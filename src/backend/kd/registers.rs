@@ -472,8 +472,14 @@ impl KdBackend {
         kd_trace!("kd: read_registers: extended to {} bytes", ctx.len());
         if trace_enabled() {
             let cr3 = self.register_map.read_u64("cr3", &ctx).unwrap_or(0);
-            let pc = self.register_map.read_u64("pc", &ctx).unwrap_or(0);
-            let sp = self.register_map.read_u64("sp", &ctx).unwrap_or(0);
+            let pc = self
+                .register_map
+                .read_u64(self.arch.pc_register(), &ctx)
+                .unwrap_or(0);
+            let sp = self
+                .register_map
+                .read_u64(self.arch.sp_register(), &ctx)
+                .unwrap_or(0);
             kd_trace!("kd: read_registers: cr3={cr3:#x} pc={pc:#x} sp={sp:#x}");
         }
         self.registers.set_context(processor, ctx.clone());

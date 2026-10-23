@@ -927,7 +927,7 @@ impl Session {
                 .and_then(|registers| self.register_map.read_u64(name, registers).ok())
         };
         let cr3 = read(self.target.arch().dtb_register());
-        let register_rip = read("rip").or_else(|| read("pc"));
+        let register_rip = read(self.target.arch().pc_register());
         let mask = self.target.arch().dtb_page_mask();
         let secure = cr3.is_some_and(|cr3| self.target.recognize_secure_root(cr3 & mask));
         let user_dump = self.target.user_dump_info().is_some();

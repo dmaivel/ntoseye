@@ -4,6 +4,7 @@ use tern_sdk::View;
 use tern_sdk::ui::{self, Align, Column, Gap, Node, Span, Table, TableRow, Wrap};
 
 use super::{CHANGED, MUTED, addr, code, span, stack, symbol};
+use crate::backend::cpu_context::general_registers;
 use crate::base::disasm::DisasmRow;
 use crate::base::output::strip_ansi;
 use crate::base::types::Arch;
@@ -115,47 +116,44 @@ pub fn register_grid(
         (!names.is_empty()).then(|| span(format!("  {}", names.join(" ")), MUTED))
     };
 
+    let rows = |names: &'static [&'static str], width: usize| -> Vec<Vec<RegisterCell>> {
+        names
+            .chunks(width)
+            .map(|row| row.iter().copied().map(cell).collect())
+            .collect()
+    };
+
+    let [names @ .., flag_register] = general_registers(arch) else {
+        return register_table(&[]);
+    };
+    let flag_register = *flag_register;
     let grid: Vec<Vec<RegisterCell>> = match arch {
+        // Rows of 4 through sp, then pc and the flags.
         Arch::Arm64 => {
-            let mut rows: Vec<Vec<RegisterCell>> = [
-                ["x0", "x1", "x2", "x3"],
-                ["x4", "x5", "x6", "x7"],
-                ["x8", "x9", "x10", "x11"],
-                ["x12", "x13", "x14", "x15"],
-                ["x16", "x17", "x18", "x19"],
-                ["x20", "x21", "x22", "x23"],
-                ["x24", "x25", "x26", "x27"],
-                ["x28", "fp", "lr", "sp"],
-            ]
-            .into_iter()
-            .map(|row| row.into_iter().map(cell).collect())
-            .collect();
-            let mut cpsr = value("cpsr");
-            cpsr.extend(flags(cpsr_flags(read("cpsr").unwrap_or(0))));
-            rows.push(vec![cell("pc"), ("cpsr", cpsr)]);
+            let [names @ .., pc] = names else {
+                return register_table(&[]);
+            };
+            let mut rows = rows(names, 4);
+            let mut cpsr = value(flag_register);
+            cpsr.extend(flags(cpsr_flags(read(flag_register).unwrap_or(0))));
+            rows.push(vec![cell(pc), (flag_register, cpsr)]);
             rows
         }
+        // Rows of 3, the flags (as `rfl`) closing the last one.
         Arch::Amd64 => {
-            let mut rows: Vec<Vec<RegisterCell>> = [
-                ["rax", "rbx", "rcx"],
-                ["rdx", "rsi", "rdi"],
-                ["rsp", "rbp", "rip"],
-                ["r8", "r9", "r10"],
-                ["r11", "r12", "r13"],
-            ]
-            .into_iter()
-            .map(|row| row.into_iter().map(cell).collect())
-            .collect();
-            let rflags = format_rflags(read("eflags").unwrap_or(0));
+            let mut rows = rows(names, 3);
+            let rflags = format_rflags(read(flag_register).unwrap_or(0));
             let names: Vec<&str> = rflags
                 .trim()
                 .trim_start_matches('[')
                 .trim_end_matches(']')
                 .split_whitespace()
                 .collect();
-            let mut rfl = value("eflags");
+            let mut rfl = value(flag_register);
             rfl.extend(flags(names));
-            rows.push(vec![cell("r14"), cell("r15"), ("rfl", rfl)]);
+            if let Some(last) = rows.last_mut() {
+                last.push(("rfl", rfl));
+            }
             rows
         }
     };
@@ -212,23 +210,12 @@ pub fn displays(shown: &[display::Shown]) -> Node {
 /// The general-purpose registers `changed` since the last stop, in the
 /// grid's order.
 pub fn changed_registers(arch: Arch, changed: &dyn Fn(&str) -> bool) -> Vec<&'static str> {
-    let names: &[&'static str] = match arch {
-        Arch::Arm64 => &ARM64_GRID,
-        Arch::Amd64 => &X64_GRID,
-    };
-    names.iter().copied().filter(|name| changed(name)).collect()
+    general_registers(arch)
+        .iter()
+        .copied()
+        .filter(|name| changed(name))
+        .collect()
 }
-
-/// The registers of the grid, by architecture, in reading order.
-pub const X64_GRID: [&str; 18] = [
-    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rsp", "rbp", "rip", "r8", "r9", "r10", "r11", "r12",
-    "r13", "r14", "r15", "eflags",
-];
-pub const ARM64_GRID: [&str; 34] = [
-    "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14",
-    "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27",
-    "x28", "fp", "lr", "sp", "pc", "cpsr",
-];
 
 /// Rows of (name, value) cells as a table with no header: a name column
 /// and a value column per pair, the rightmost pair hiding first.

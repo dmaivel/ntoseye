@@ -159,10 +159,10 @@ impl Target {
             // inventing a number.
             // WinDbg's `$ip` is the whole instruction pointer, not x86's
             // 16-bit IP: `? $ip` on a kernel address must not truncate.
-            "ip" => self.register_value(self.instruction_pointer_register()),
+            "ip" => self.register_value(self.arch().pc_register()),
             // The caller of the current scope, one unwind step away.
             "ra" => self.scope_return_address(),
-            "csp" => self.register_value(self.stack_pointer_register()),
+            "csp" => self.register_value(self.arch().sp_register()),
             "retreg" => self.register_value(self.return_value_register()),
             // Both supported architectures are LP64.
             "ptrsize" => Some(8),
@@ -187,7 +187,7 @@ impl Target {
                 .selected_frame
                 .as_ref()
                 .map(|frame| frame.ip)
-                .or_else(|| self.register_value(self.instruction_pointer_register())),
+                .or_else(|| self.register_value(self.arch().pc_register())),
             "exp" => self.results.first().copied(),
             "exr_code" => self.last_exception_code.map(u64::from),
             // `nt!KiBugCheckData` holds the code and its four parameters; the
@@ -219,15 +219,6 @@ impl Target {
         };
         // A named arm with no value knows the name but not the state behind it.
         Some(target)
-    }
-
-    /// The stack-pointer register this architecture calls its own, behind
-    /// WinDbg's `$csp`.
-    pub fn stack_pointer_register(&self) -> &'static str {
-        match self.arch() {
-            Arch::Amd64 => "rsp",
-            Arch::Arm64 => "sp",
-        }
     }
 
     /// Caller of the current scope, behind WinDbg's `$ra`. A selected frame
@@ -284,15 +275,6 @@ impl Target {
         self.address_space(self.kernel_dtb())
             .read::<u64>(address + index * 8)
             .ok()
-    }
-
-    /// The instruction pointer this architecture calls its own, behind `$ip`
-    /// and `$scopeip`.
-    pub fn instruction_pointer_register(&self) -> &'static str {
-        match self.arch() {
-            Arch::Amd64 => "rip",
-            Arch::Arm64 => "pc",
-        }
     }
 
     /// The register a function's return value arrives in, behind `$retreg`.
