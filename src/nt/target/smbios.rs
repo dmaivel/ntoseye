@@ -436,10 +436,16 @@ impl Target {
         }
         let mut table = vec![0u8; length as usize];
         self.read_physical(physical_address, &mut table)
-            .map_err(|error| {
-                Error::DebugInfo(format!(
-                    "the SMBIOS table at physical {physical_address:#x}: {error}"
-                ))
+            .map_err(|error| match error {
+                // The table is firmware memory, which a kernel dump does not
+                // capture; the address is in the message once.
+                Error::BadPhysicalAddress(_) => Error::DebugInfo(format!(
+                    "the SMBIOS table at physical {physical_address:#x} is not in the target's \
+                     memory; a kernel dump does not capture firmware tables"
+                )),
+                other => Error::DebugInfo(format!(
+                    "the SMBIOS table at physical {physical_address:#x}: {other}"
+                )),
             })?;
         let (structures, stopped) = parse_structures(&table);
         Ok(SmbiosTable {

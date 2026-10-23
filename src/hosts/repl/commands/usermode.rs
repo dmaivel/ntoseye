@@ -5,15 +5,17 @@ use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::target::usermode::{
     ImageByteDiff, ImageCheck, ImageMismatchRange, ImageSectionCheck, ImageSelfPatchCounts,
-    ImageSelfPatchRange, LastError, LastError32, LoaderListHead, LoaderLists, LoaderModules, Peb,
-    Peb32, ProcessParameters, SelfPatchKind, Teb, Teb32,
+    ImageSelfPatchRange, LastError, LoaderListHead, LoaderLists, LoaderModules, Peb, Peb32,
+    ProcessParameters, SelfPatchKind, Teb, Teb32,
 };
 use crate::nt::target::{DiagnosticValue, ListTermination};
 use crate::session::Session;
 use ntoseye_macros::{command, grammar};
 use tabled::builder::Builder;
 
-use super::diagnostics::{diagnostic_addr, diagnostic_cell};
+use std::fmt::Display;
+
+use super::process::display_pointer;
 
 /// `[address]`: one optional expression; more words print the help.
 #[grammar(usage = "[{}]", complete = [Expression])]
@@ -203,306 +205,279 @@ impl Render<(bool, bool)> for ImageCheck {
     }
 }
 
-fn print_process_parameters(parameters: &ProcessParameters) {
-    outln!(
-        "    CommandLine       : {}",
-        diagnostic_cell(&parameters.command_line)
-    );
-    outln!(
-        "    ImagePathName     : {}",
-        diagnostic_cell(&parameters.image_path_name)
-    );
-    outln!(
-        "    CurrentDirectory  : {}",
-        diagnostic_cell(&parameters.current_directory)
-    );
-    outln!(
-        "    DllPath           : {}",
-        diagnostic_cell(&parameters.dll_path)
-    );
-    outln!(
-        "    WindowTitle       : {}",
-        diagnostic_cell(&parameters.window_title)
-    );
-    outln!(
-        "    Environment       : {}",
-        diagnostic_addr(&parameters.environment)
-    );
-    outln!(
-        "    EnvironmentSize   : {}",
-        diagnostic_cell(&parameters.environment_size)
-    );
-    outln!(
-        "    DesktopInfo       : {}",
-        diagnostic_cell(&parameters.desktop_info)
-    );
-    outln!(
-        "    ShellInfo         : {}",
-        diagnostic_cell(&parameters.shell_info)
-    );
-    outln!(
-        "    RuntimeData       : {}",
-        diagnostic_cell(&parameters.runtime_data)
-    );
+/// A field's text, or why it could not be read.
+type Cell = std::result::Result<String, String>;
+
+/// `value` rendered, or the reason it is unavailable.
+fn read<T>(value: &DiagnosticValue<T>, render: impl FnOnce(&T) -> String) -> Cell {
+    match value {
+        DiagnosticValue::Available(value) => Ok(render(value)),
+        DiagnosticValue::Unavailable(error) => Err(error.clone()),
+    }
 }
 
-fn print_parameters_field(
+/// A number as it reads.
+fn number<T: Display>(value: &DiagnosticValue<T>) -> Cell {
+    read(value, ToString::to_string)
+}
+
+/// Structure fields, one per line at `indent`, with the colons in one
+/// column: `dt`'s layout, which `!teb` and `!peb` follow. A field that could
+/// not be read shows `-`, and one muted note per reason after the block
+/// says why.
+fn print_fields(indent: usize, rows: &[(&str, Cell)]) {
+    let width = rows.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+    let mut unavailable: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (name, value) in rows {
+        let text = match value {
+            Ok(text) => text.as_str(),
+            Err(reason) => {
+                match unavailable.iter_mut().find(|(known, _)| *known == reason) {
+                    Some((_, names)) => names.push(name),
+                    None => unavailable.push((reason, vec![name])),
+                }
+                "-"
+            }
+        };
+        outln!("{:indent$}{name:<width$} : {text}", "");
+    }
+    for (reason, names) in unavailable {
+        outln!(
+            "{:indent$}{}",
+            "",
+            ui::muted(&format!("{} unavailable: {reason}", names.join(", ")))
+        );
+    }
+}
+
+/// A pointer field: `-` for null.
+fn pointer_cell(value: &DiagnosticValue<VirtAddr>) -> Cell {
+    read(value, |address| display_pointer(Some(*address)))
+}
+
+/// A `UNICODE_STRING` field: `-` for an empty string.
+fn text_cell(value: &DiagnosticValue<String>) -> Cell {
+    read(value, |text| {
+        if text.is_empty() {
+            "-".to_string()
+        } else {
+            text.clone()
+        }
+    })
+}
+
+/// An NTSTATUS field: eight hex digits, as WinDbg shows status values.
+fn status_cell(value: &DiagnosticValue<u32>) -> Cell {
+    read(value, |status| format!("{status:#010x}"))
+}
+
+/// A `CLIENT_ID` half: an id, so `0x`-prefixed hex.
+fn id_cell(value: &DiagnosticValue<VirtAddr>) -> Cell {
+    read(value, |id| format!("{:#x}", id.0))
+}
+
+/// The decoded `_RTL_USER_PROCESS_PARAMETERS`, as a sub-block under the
+/// PEB's fields; nothing when the pointer is null or unreadable, which the
+/// `ProcessParameters` field already shows.
+fn print_process_parameters(
     pointer: &DiagnosticValue<VirtAddr>,
     detail: &DiagnosticValue<ProcessParameters>,
 ) {
-    match pointer {
-        DiagnosticValue::Available(address) if address.is_zero() => {
-            outln!("  Process parameters : <unavailable or null>");
-        }
-        DiagnosticValue::Available(address) => {
-            outln!("  Process parameters {}", ui::addr(address.0));
-            match detail {
-                DiagnosticValue::Available(parameters) => print_process_parameters(parameters),
-                DiagnosticValue::Unavailable(error) => {
-                    outln!("    process-parameter layout: <unavailable: {error}>");
-                }
-            }
-        }
-        DiagnosticValue::Unavailable(error) => {
-            outln!("  Process parameters : <unavailable: {error}>");
-        }
+    let DiagnosticValue::Available(address) = pointer else {
+        return;
+    };
+    if address.is_zero() {
+        return;
     }
-}
-
-fn print_loader_list_head(label: &str, value: &DiagnosticValue<LoaderListHead>) {
-    match value {
-        DiagnosticValue::Available(head) => outln!(
-            "  {label:22}: {} (Flink {}, Blink {})",
-            ui::addr(head.address.0),
-            diagnostic_addr(&head.flink),
-            diagnostic_addr(&head.blink)
+    outln!("  ProcessParameters {}", ui::addr(address.0));
+    match detail {
+        DiagnosticValue::Available(parameters) => print_fields(
+            4,
+            &[
+                ("CommandLine", text_cell(&parameters.command_line)),
+                ("ImagePathName", text_cell(&parameters.image_path_name)),
+                ("CurrentDirectory", text_cell(&parameters.current_directory)),
+                ("DllPath", text_cell(&parameters.dll_path)),
+                ("WindowTitle", text_cell(&parameters.window_title)),
+                ("Environment", pointer_cell(&parameters.environment)),
+                (
+                    "EnvironmentSize",
+                    read(&parameters.environment_size, |size| format!("{size:#x}")),
+                ),
+                ("DesktopInfo", text_cell(&parameters.desktop_info)),
+                ("ShellInfo", text_cell(&parameters.shell_info)),
+                ("RuntimeData", text_cell(&parameters.runtime_data)),
+            ],
         ),
         DiagnosticValue::Unavailable(error) => {
-            outln!("  {label:22}: <unavailable: {error}>");
+            outln!("    {}", ui::muted(&format!("layout unavailable: {error}")));
         }
     }
 }
 
-fn print_loader_lists(value: &DiagnosticValue<LoaderLists>) {
+/// The three `_PEB_LDR_DATA` list heads, as `Flink . Blink` rows.
+fn loader_list_rows(value: &DiagnosticValue<LoaderLists>) -> Vec<(&'static str, Cell)> {
+    let head = |value: &DiagnosticValue<LoaderListHead>| -> Cell {
+        match value {
+            DiagnosticValue::Available(head) => Ok(format!(
+                "{} . {}",
+                pointer_cell(&head.flink)?,
+                pointer_cell(&head.blink)?
+            )),
+            DiagnosticValue::Unavailable(error) => Err(error.clone()),
+        }
+    };
+    let names = [
+        "Ldr.InLoadOrderModuleList",
+        "Ldr.InMemoryOrderModuleList",
+        "Ldr.InInitializationOrderModuleList",
+    ];
     match value {
-        DiagnosticValue::Available(heads) => {
-            print_loader_list_head("InLoadOrderModuleList", &heads.in_load_order);
-            print_loader_list_head("InMemoryOrderModuleList", &heads.in_memory_order);
-            print_loader_list_head(
-                "InInitializationOrderModuleList",
-                &heads.in_initialization_order,
-            );
-        }
-        DiagnosticValue::Unavailable(error) => {
-            outln!("  Loader list heads    : <unavailable: {error}>");
-        }
+        DiagnosticValue::Available(heads) => names
+            .into_iter()
+            .zip([
+                head(&heads.in_load_order),
+                head(&heads.in_memory_order),
+                head(&heads.in_initialization_order),
+            ])
+            .collect(),
+        DiagnosticValue::Unavailable(error) => names
+            .into_iter()
+            .map(|name| (name, Err(error.clone())))
+            .collect(),
     }
 }
 
 fn print_peb32(detail: &Peb32) {
     outln!("PEB32 {}", ui::addr(detail.address.0));
-    outln!(
-        "  ImageBaseAddress : {}",
-        diagnostic_addr(&detail.image_base_address)
-    );
-    outln!("  Ldr              : {}", diagnostic_addr(&detail.ldr));
-    outln!(
-        "  ProcessParameters : {}",
-        diagnostic_addr(&detail.process_parameters)
-    );
-    outln!(
-        "  ProcessHeap      : {}",
-        diagnostic_addr(&detail.process_heap)
-    );
-    outln!(
-        "  NumberOfHeaps    : {}",
-        diagnostic_cell(&detail.number_of_heaps)
-    );
-    outln!(
-        "  ProcessHeaps     : {}",
-        diagnostic_addr(&detail.process_heaps)
-    );
-    outln!(
-        "  BeingDebugged    : {}",
-        diagnostic_cell(&detail.being_debugged)
-    );
-    for (label, value) in [
-        ("OSMajorVersion", &detail.os_major_version),
-        ("OSMinorVersion", &detail.os_minor_version),
-        ("OSBuildNumber", &detail.os_build_number),
-        ("SessionId", &detail.session_id),
-        ("NumberOfProcessors", &detail.number_of_processors),
-    ] {
-        outln!("  {label:17}: {}", diagnostic_cell(value));
-    }
-    print_parameters_field(
+    let mut rows = vec![
+        ("ImageBaseAddress", pointer_cell(&detail.image_base_address)),
+        ("Ldr", pointer_cell(&detail.ldr)),
+    ];
+    rows.extend(loader_list_rows(&detail.loader_lists));
+    rows.extend([
+        (
+            "ProcessParameters",
+            pointer_cell(&detail.process_parameters),
+        ),
+        ("ProcessHeap", pointer_cell(&detail.process_heap)),
+        ("NumberOfHeaps", number(&detail.number_of_heaps)),
+        ("ProcessHeaps", pointer_cell(&detail.process_heaps)),
+        ("BeingDebugged", number(&detail.being_debugged)),
+        ("OSMajorVersion", number(&detail.os_major_version)),
+        ("OSMinorVersion", number(&detail.os_minor_version)),
+        ("OSBuildNumber", number(&detail.os_build_number)),
+        ("SessionId", number(&detail.session_id)),
+        ("NumberOfProcessors", number(&detail.number_of_processors)),
+    ]);
+    print_fields(2, &rows);
+    print_process_parameters(
         &detail.process_parameters,
         &detail.process_parameters_detail,
     );
-    print_loader_lists(&detail.loader_lists);
 }
 
 fn print_peb(detail: &Peb) {
     outln!("PEB {}", ui::addr(detail.address.0));
-    outln!(
-        "  ImageBaseAddress : {}",
-        diagnostic_addr(&detail.image_base_address)
-    );
-    outln!("  Ldr              : {}", diagnostic_addr(&detail.ldr));
-    outln!(
-        "  ProcessParameters : {}",
-        diagnostic_addr(&detail.process_parameters)
-    );
-    outln!(
-        "  ProcessHeap      : {}",
-        diagnostic_addr(&detail.process_heap)
-    );
-    outln!(
-        "  NumberOfHeaps    : {}",
-        diagnostic_cell(&detail.number_of_heaps)
-    );
-    outln!(
-        "  ProcessHeaps     : {}",
-        diagnostic_addr(&detail.process_heaps)
-    );
-    outln!(
-        "  BeingDebugged    : {}",
-        diagnostic_cell(&detail.being_debugged)
-    );
-    for (label, value) in [
-        ("OSMajorVersion", &detail.os_major_version),
-        ("OSMinorVersion", &detail.os_minor_version),
-        ("OSBuildNumber", &detail.os_build_number),
-        ("SessionId", &detail.session_id),
-        ("NumberOfProcessors", &detail.number_of_processors),
-    ] {
-        outln!("  {label:17}: {}", diagnostic_cell(value));
-    }
-    print_parameters_field(
+    let mut rows = vec![
+        ("ImageBaseAddress", pointer_cell(&detail.image_base_address)),
+        ("Ldr", pointer_cell(&detail.ldr)),
+    ];
+    rows.extend(loader_list_rows(&detail.loader_lists));
+    rows.extend([
+        (
+            "ProcessParameters",
+            pointer_cell(&detail.process_parameters),
+        ),
+        ("ProcessHeap", pointer_cell(&detail.process_heap)),
+        ("NumberOfHeaps", number(&detail.number_of_heaps)),
+        ("ProcessHeaps", pointer_cell(&detail.process_heaps)),
+        ("BeingDebugged", number(&detail.being_debugged)),
+        ("OSMajorVersion", number(&detail.os_major_version)),
+        ("OSMinorVersion", number(&detail.os_minor_version)),
+        ("OSBuildNumber", number(&detail.os_build_number)),
+        ("SessionId", number(&detail.session_id)),
+        ("NumberOfProcessors", number(&detail.number_of_processors)),
+        ("ApiSetMap", pointer_cell(&detail.api_set_map)),
+    ]);
+    print_fields(2, &rows);
+    print_process_parameters(
         &detail.process_parameters,
         &detail.process_parameters_detail,
     );
-    print_loader_lists(&detail.loader_lists);
-    outln!(
-        "  ApiSetMap          : {}",
-        diagnostic_addr(&detail.api_set_map)
-    );
     if let Some(peb32) = &detail.peb32 {
+        outln!();
         print_peb32(peb32);
-    }
-}
-
-fn display_activation(value: &DiagnosticValue<Option<VirtAddr>>) -> String {
-    match value {
-        DiagnosticValue::Available(Some(address)) => {
-            format!("present ({})", ui::addr(address.0))
-        }
-        DiagnosticValue::Available(None) => "absent".into(),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
     }
 }
 
 fn print_teb32(detail: &Teb32) {
     outln!("TEB32 {}", ui::addr(detail.address.0));
-    outln!(
-        "  {:30}: {}",
-        "StackBase",
-        diagnostic_addr(&detail.stack_base)
-    );
-    outln!(
-        "  {:30}: {}",
-        "StackLimit",
-        diagnostic_addr(&detail.stack_limit)
-    );
-    outln!(
-        "  {:30}: {}",
-        "TlsPointer",
-        diagnostic_addr(&detail.tls_pointer)
-    );
-    outln!(
-        "  {:30}: {}",
-        "LastErrorValue",
-        diagnostic_cell(&detail.last_error_value)
-    );
-    outln!(
-        "  {:30}: {}",
-        "LastStatusValue",
-        diagnostic_cell(&detail.last_status_value)
-    );
-    outln!(
-        "  {:30}: {}",
-        "CountOfOwnedCriticalSections",
-        diagnostic_cell(&detail.count_of_owned_critical_sections)
-    );
-    outln!("  {:30}: {}", "PEB", diagnostic_addr(&detail.peb));
-    outln!(
-        "  ClientId.UniqueProcess          : {}",
-        diagnostic_addr(&detail.client_id_unique_process)
-    );
-    outln!(
-        "  ClientId.UniqueThread           : {}",
-        diagnostic_addr(&detail.client_id_unique_thread)
+    print_fields(
+        2,
+        &[
+            ("StackBase", pointer_cell(&detail.stack_base)),
+            ("StackLimit", pointer_cell(&detail.stack_limit)),
+            ("TlsPointer", pointer_cell(&detail.tls_pointer)),
+            (
+                "ClientId.UniqueProcess",
+                id_cell(&detail.client_id_unique_process),
+            ),
+            (
+                "ClientId.UniqueThread",
+                id_cell(&detail.client_id_unique_thread),
+            ),
+            ("PEB", pointer_cell(&detail.peb)),
+            ("LastErrorValue", number(&detail.last_error_value)),
+            ("LastStatusValue", status_cell(&detail.last_status_value)),
+            (
+                "CountOfOwnedCriticalSections",
+                number(&detail.count_of_owned_critical_sections),
+            ),
+        ],
     );
 }
 
 fn print_teb(detail: &Teb) {
     outln!("TEB {}", ui::addr(detail.address.0));
-    outln!(
-        "  {:30}: {}",
-        "StackBase",
-        diagnostic_addr(&detail.stack_base)
-    );
-    outln!(
-        "  {:30}: {}",
-        "StackLimit",
-        diagnostic_addr(&detail.stack_limit)
-    );
-    outln!(
-        "  {:30}: {}",
-        "TlsPointer",
-        diagnostic_addr(&detail.tls_pointer)
-    );
-    outln!(
-        "  {:30}: {}",
-        "LastErrorValue",
-        diagnostic_cell(&detail.last_error_value)
-    );
-    outln!(
-        "  {:30}: {}",
-        "LastStatusValue",
-        diagnostic_cell(&detail.last_status_value)
-    );
-    outln!(
-        "  {:30}: {}",
-        "CountOfOwnedCriticalSections",
-        diagnostic_cell(&detail.count_of_owned_critical_sections)
-    );
-    outln!("  {:30}: {}", "PEB", diagnostic_addr(&detail.peb));
-    match &detail.wow_teb_offset {
-        DiagnosticValue::Available(value) => {
-            outln!("  {:30}: {value} ({value:#x})", "WOW64");
-        }
-        DiagnosticValue::Unavailable(_) => {
-            outln!(
-                "  {:30}: {}",
-                "WOW64",
-                diagnostic_addr(&detail.wow64_reserved)
-            );
-        }
-    }
-    outln!(
-        "  ActivationContext             : {}",
-        display_activation(&detail.activation_context)
-    );
-    outln!(
-        "  ClientId.UniqueProcess          : {}",
-        diagnostic_addr(&detail.client_id_unique_process)
-    );
-    outln!(
-        "  ClientId.UniqueThread           : {}",
-        diagnostic_addr(&detail.client_id_unique_thread)
+    // WowTebOffset when the layout has it; older layouts name the WOW64
+    // transition thunk in WOW32Reserved instead.
+    let wow64 = match &detail.wow_teb_offset {
+        DiagnosticValue::Available(offset) => ("WowTebOffset", Ok(format!("{offset:#x}"))),
+        DiagnosticValue::Unavailable(_) => ("WOW32Reserved", pointer_cell(&detail.wow64_reserved)),
+    };
+    print_fields(
+        2,
+        &[
+            ("StackBase", pointer_cell(&detail.stack_base)),
+            ("StackLimit", pointer_cell(&detail.stack_limit)),
+            ("TlsPointer", pointer_cell(&detail.tls_pointer)),
+            (
+                "ClientId.UniqueProcess",
+                id_cell(&detail.client_id_unique_process),
+            ),
+            (
+                "ClientId.UniqueThread",
+                id_cell(&detail.client_id_unique_thread),
+            ),
+            ("PEB", pointer_cell(&detail.peb)),
+            ("LastErrorValue", number(&detail.last_error_value)),
+            ("LastStatusValue", status_cell(&detail.last_status_value)),
+            (
+                "CountOfOwnedCriticalSections",
+                number(&detail.count_of_owned_critical_sections),
+            ),
+            wow64,
+            (
+                "ActivationContext",
+                read(&detail.activation_context, |address| {
+                    display_pointer(*address)
+                }),
+            ),
+        ],
     );
     if let Some(teb32) = &detail.teb32 {
+        outln!();
         print_teb32(teb32);
     }
 }
@@ -520,7 +495,11 @@ fn termination_text(termination: &ListTermination) -> String {
 }
 
 fn print_loader_module_table(detail: &LoaderModules) {
-    outln!("{} loader modules", detail.modules.len());
+    let count = detail.modules.len();
+    outln!(
+        "{count} loader {}",
+        if count == 1 { "module" } else { "modules" }
+    );
     let mut builder = Builder::default();
     builder.push_record(["Base", "Size", "Entry", "Timestamp", "Name"]);
     for module in &detail.modules {
@@ -533,7 +512,7 @@ fn print_loader_module_table(detail: &LoaderModules) {
                 .unwrap_or_else(|| "-".into()),
             module
                 .time_date_stamp
-                .map(|value| format!("{value:#x}"))
+                .map(|value| format!("{value:#010x}"))
                 .unwrap_or_else(|| "-".into()),
             module.name.clone(),
         ]);
@@ -557,58 +536,52 @@ fn print_loader_module_table(detail: &LoaderModules) {
     }
 }
 
-fn display_named_value(
+/// A value and, when it has one, its symbolic name.
+fn named_value(
     value: &DiagnosticValue<u32>,
     name: &DiagnosticValue<Option<String>>,
     format_value: impl Fn(u32) -> String,
-) -> String {
-    match value {
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
-        DiagnosticValue::Available(value) => {
-            let name = match name {
-                DiagnosticValue::Available(Some(name)) => name.as_str(),
-                DiagnosticValue::Available(None) => "unknown",
-                DiagnosticValue::Unavailable(_) => "unknown",
-            };
-            format!("{} ({name})", format_value(*value))
-        }
-    }
+) -> Cell {
+    read(value, |value| match name {
+        DiagnosticValue::Available(Some(name)) => format!("{} ({name})", format_value(*value)),
+        _ => format_value(*value),
+    })
 }
 
-fn print_last_error32(detail: &LastError32) {
-    outln!(
-        "TEB32 LastErrorValue = {}",
-        display_named_value(&detail.last_error_value, &detail.last_error_name, |value| {
-            value.to_string()
-        })
-    );
-    outln!(
-        "TEB32 LastStatusValue = {}",
-        display_named_value(
-            &detail.last_status_value,
-            &detail.last_status_name,
-            |value| format!("{value:#010x}")
-        )
+/// `!gle`'s two fields of one TEB.
+fn print_last_error_fields(
+    last_error: (&DiagnosticValue<u32>, &DiagnosticValue<Option<String>>),
+    last_status: (&DiagnosticValue<u32>, &DiagnosticValue<Option<String>>),
+) {
+    print_fields(
+        2,
+        &[
+            (
+                "LastErrorValue",
+                named_value(last_error.0, last_error.1, |value| value.to_string()),
+            ),
+            (
+                "LastStatusValue",
+                named_value(last_status.0, last_status.1, |value| {
+                    format!("{value:#010x}")
+                }),
+            ),
+        ],
     );
 }
 
 fn print_last_error(detail: &LastError) {
-    outln!(
-        "LastErrorValue = {}",
-        display_named_value(&detail.last_error_value, &detail.last_error_name, |value| {
-            value.to_string()
-        })
-    );
-    outln!(
-        "LastStatusValue = {}",
-        display_named_value(
-            &detail.last_status_value,
-            &detail.last_status_name,
-            |value| format!("{value:#010x}")
-        )
+    outln!("TEB {}", ui::addr(detail.teb.0));
+    print_last_error_fields(
+        (&detail.last_error_value, &detail.last_error_name),
+        (&detail.last_status_value, &detail.last_status_name),
     );
     if let Some(teb32) = &detail.teb32 {
-        print_last_error32(teb32);
+        outln!("TEB32 {}", ui::addr(teb32.teb.0));
+        print_last_error_fields(
+            (&teb32.last_error_value, &teb32.last_error_name),
+            (&teb32.last_status_value, &teb32.last_status_name),
+        );
     }
 }
 

@@ -23,31 +23,37 @@ use ntoseye_macros::{command, grammar};
 /// How many 16-byte lines `.enumtag` shows of each block without a tag.
 const ENUMTAG_PREVIEW_LINES: usize = 4;
 
-/// The dump's tagged blocks, or why there are none.
+/// The dump's tagged blocks, which may be none; an error on a live target,
+/// which has no dump to hold them.
 fn tagged_blocks<'s>(session: &'s Session, command: &str) -> Result<&'s [TaggedBlock]> {
     let Some(dump) = session.target.phys.dmp_info() else {
         return Err(Error::DebugInfo(format!(
             "{command}: tagged data is in crash dumps; this target is live"
         )));
     };
-    if dump.tagged_blocks.is_empty() {
-        return Err(Error::DebugInfo(format!(
-            "{command}: the dump has no tagged data"
-        )));
-    }
     Ok(&dump.tagged_blocks)
 }
 
-/// The data of the block tagged `tag`, or that the dump has none.
+/// The data of the block tagged `tag`, or that the dump has none. The SDK
+/// method behind each blackbox command raises for a missing block, so the
+/// command reports it as an error too, naming what is missing.
 fn blackbox_block<'s>(
     session: &'s Session,
     command: &str,
     tag: &str,
     what: &str,
 ) -> Result<&'s [u8]> {
-    tagged_block(tagged_blocks(session, command)?, tag)
+    let blocks = tagged_blocks(session, command)?;
+    tagged_block(blocks, tag)
         .map(|block| &*block.data)
-        .ok_or_else(|| Error::DebugInfo(format!("{command}: the dump has no {what}")))
+        .ok_or_else(|| {
+            let why = if blocks.is_empty() {
+                "it records no tagged data"
+            } else {
+                "no tagged block holds it (.enumtag lists the blocks)"
+            };
+            Error::DebugInfo(format!("{command}: the dump has no {what}: {why}"))
+        })
 }
 
 /// A blackbox decoder's failure, prefixed with its command.
@@ -78,6 +84,10 @@ fn enumtag(
     #[arg(parse = enumtag_tag)] only: Option<[u8; 16]>,
 ) -> Result<()> {
     let blocks = tagged_blocks(state.ctx, ".enumtag")?;
+    if blocks.is_empty() {
+        outln!("{}", ui::muted("no tagged data in this dump"));
+        return Ok(());
+    }
     let mut shown = 0;
     for block in blocks
         .iter()
@@ -115,10 +125,14 @@ fn enumtag(
         }
         outln!();
     }
-    if shown == 0 {
-        return Err(Error::DebugInfo(
-            ".enumtag: the dump has no block with that tag".into(),
-        ));
+    if let (0, Some(tag)) = (shown, only) {
+        outln!(
+            "{}",
+            ui::muted(&format!(
+                "no tagged data block matching '{}'",
+                format_guid(&tag, GuidStyle::BracedUpper)
+            ))
+        );
     }
     Ok(())
 }
@@ -254,7 +268,6 @@ impl Render for Vec<NtfsRecord> {
             "{} Oplock Break Timeout Records Found",
             count(NTFS_OPLOCK_BREAK_TIMEOUT)
         );
-        outln!();
     }
 }
 
@@ -288,7 +301,6 @@ impl Render for PnpBlackbox {
             "    VetoString         : {}",
             self.veto_string.as_deref().unwrap_or_default()
         );
-        outln!();
     }
 }
 
@@ -314,7 +326,6 @@ impl Render for WinlogonBlackbox {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         outln!("    ThreadName         : {}", self.thread_name);
         outln!("    IsOperationPending : {}", self.is_operation_pending);
-        outln!();
     }
 }
 
@@ -358,7 +369,6 @@ impl Render for Vec<PciRecord> {
                 pci_status_flags(pci.status)
             );
         }
-        outln!();
     }
 }
 
@@ -572,6 +582,5 @@ fn print_boot_status(bsd: &BootStatus) {
                 state as i32
             ),
         }
-        outln!();
     }
 }

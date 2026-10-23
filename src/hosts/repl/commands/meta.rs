@@ -12,7 +12,7 @@ use crate::base::types::{CodeMachine, VirtAddr};
 use crate::hosts::python::embed;
 use crate::nt::expr::{Expr, NumberRadix};
 use crate::nt::target::meta::{
-    ErrorCode, ErrorCodeKind, TargetTime, TargetUserDump, TargetVersion, UserDumpTime,
+    ErrorCode, ErrorCodeKind, TargetDump, TargetTime, TargetUserDump, TargetVersion, UserDumpTime,
     decode_error_code, decode_error_code_as_ntstatus,
 };
 use crate::nt::target::{Target, TargetKind};
@@ -103,7 +103,7 @@ fn radix(state: &mut ReplState<'_>, #[arg(name = "8|10|16")] radix: Option<Strin
         NumberRadix::Decimal => "decimal",
         NumberRadix::Hexadecimal => "hexadecimal",
     };
-    outln!("radix {} ({name})\n", state.radix.value());
+    outln!("radix {} ({name})", state.radix.value());
     Ok(())
 }
 
@@ -147,8 +147,21 @@ fn effmach(
         };
     }
 
-    let machine = session.target.effmach.map_or("auto", CodeMachine::label);
-    outln!("effective machine: {machine}\n");
+    match session.target.effmach {
+        Some(machine) => outln!("effective machine  {}", machine.label()),
+        // Auto picks a machine per address, so the target's own is the one
+        // in effect for its native code.
+        None => {
+            let native = match session.target.arch() {
+                Arch::Amd64 => CodeMachine::Amd64,
+                Arch::Arm64 => CodeMachine::Arm64,
+            };
+            outln!(
+                "effective machine  auto ({} target; by context and image)",
+                native.label()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -181,7 +194,7 @@ fn echotime(_state: &mut ReplState<'_>) -> Result<()> {
         .ok_or_else(|| {
             Error::DebugInfo("the host clock is outside the representable range".to_string())
         })?;
-    outln!("Debugger (not debuggee) time: {now}\n");
+    outln!("Debugger (not debuggee) time: {now}");
     Ok(())
 }
 
@@ -203,7 +216,7 @@ fn printf(
     #[arg(invoked)] name: &str,
 ) -> Result<()> {
     let Some((format, args)) = parse_printf_tail(&tail) else {
-        outln!("{}\n", command_help(name));
+        outln!("{}", command_help(name));
         return Ok(());
     };
     // An unreadable argument is reported (the REPL prints the error), not
@@ -251,7 +264,7 @@ fn open_log_file(path: &str, append: bool) -> Result<()> {
     output::open_log(path, append)
         .map_err(|error| Error::DebugInfo(format!("failed to open log '{path}': {error}")))?;
     outln!(
-        "log {} {}\n",
+        "log {} {}",
         if append { "appending to" } else { "opened" },
         path
     );
@@ -261,8 +274,11 @@ fn open_log_file(path: &str, append: bool) -> Result<()> {
 /// Close the debugger transcript.
 #[command(names = [".logclose"], category = "session", kind = Host, python = none)]
 fn logclose(_state: &mut ReplState<'_>) -> Result<()> {
-    output::close_log();
-    outln!("log closed\n");
+    if output::close_log() {
+        outln!("log closed");
+    } else {
+        outln!("no log is open");
+    }
     Ok(())
 }
 
@@ -283,7 +299,7 @@ fn help(state: &mut ReplState<'_>, command: Option<String>) -> Result<()> {
             .iter()
             .find(|(command, _, _)| command == name)
         {
-            outln!("{name}\n{help}\n");
+            outln!("{name}\n{help}");
             return Ok(());
         }
         if let Some((_, expansion)) = state
@@ -292,13 +308,13 @@ fn help(state: &mut ReplState<'_>, command: Option<String>) -> Result<()> {
             .into_iter()
             .find(|(alias, _)| alias == name)
         {
-            outln!("alias {name} {expansion}\n");
+            outln!("alias {name} {expansion}");
             return Ok(());
         }
         match command_registry().get(name) {
             None => error!("unknown command '{name}'"),
             Some(spec) => {
-                outln!("{}\n", spec_help(spec));
+                outln!("{}", spec_help(spec));
             }
         }
         return Ok(());
@@ -367,7 +383,7 @@ fn help(state: &mut ReplState<'_>, command: Option<String>) -> Result<()> {
     print_help_listing(&listing);
     if !hidden.is_empty() {
         outln!(
-            "{}\n",
+            "{}",
             ui::muted(&format!(
                 "{} commands that need a kernel target are not listed: this is a user-mode minidump",
                 hidden.len()
@@ -413,7 +429,6 @@ fn target_version(session: &mut Session) -> Result<TargetVersion> {
 impl Render for TargetVersion {
     fn render(&self, _: &mut ReplState<'_>, _: ()) {
         print_target_version(self);
-        outln!();
     }
 }
 
@@ -433,7 +448,6 @@ fn target_time(session: &Session) -> Result<TargetTime> {
 impl Render for TargetTime {
     fn render(&self, _: &mut ReplState<'_>, _: ()) {
         print_target_time(self);
-        outln!();
     }
 }
 
@@ -562,10 +576,13 @@ pub fn json_string(value: &str) -> String {
 }
 
 fn print_target_version(detail: &TargetVersion) {
+    // One label column per block: the user-mode block's longest label is
+    // `service pack`, the kernel block's `product version`.
+    let width = if detail.user_dump.is_some() { 12 } else { 15 };
     outln!("{}", ui::label("target version"));
     outln!(
-        "  {} Windows {}.{} build {}{}",
-        ui::muted("target"),
+        "  {}  Windows {}.{} build {}{}",
+        field(width, "target"),
         detail
             .major_version
             .map_or_else(|| "?".to_string(), |value| value.to_string()),
@@ -581,7 +598,7 @@ fn print_target_version(detail: &TargetVersion) {
             .map(|lab| format!(" ({lab})"))
             .unwrap_or_default()
     );
-    outln!("  {} {}", ui::muted("arch"), detail.architecture);
+    outln!("  {}  {}", field(width, "arch"), detail.architecture);
     if let Some(user_dump) = &detail.user_dump {
         print_user_dump_version(detail, user_dump);
         return;
@@ -589,19 +606,19 @@ fn print_target_version(detail: &TargetVersion) {
     if let Some(kernel) = &detail.kernel {
         match kernel.size {
             Some(size) => outln!(
-                "  {} {} size {:#x}",
-                ui::muted("kernel"),
+                "  {}  {} size {:#x}",
+                field(width, "kernel"),
                 ui::addr(kernel.base.0),
                 size
             ),
             None => outln!(
-                "  {} {} size unknown",
-                ui::muted("kernel"),
+                "  {}  {} size -",
+                field(width, "kernel"),
                 ui::addr(kernel.base.0)
             ),
         }
     } else {
-        outln!("  {} unavailable", ui::muted("kernel"));
+        outln!("  {}  -", field(width, "kernel"));
     }
     let pdb_guid = detail
         .kernel
@@ -610,103 +627,153 @@ fn print_target_version(detail: &TargetVersion) {
     let pdb_age = detail.kernel.as_ref().and_then(|kernel| kernel.pdb_age);
     if let (Some(guid), Some(age)) = (pdb_guid, pdb_age) {
         outln!(
-            "  {} ntoskrnl.pdb GUID {} age {}",
-            ui::muted("pdb"),
+            "  {}  ntoskrnl.pdb GUID {} age {}",
+            field(width, "pdb"),
             guid,
             age
         );
     } else {
-        outln!("  {} unavailable", ui::muted("pdb"));
+        outln!("  {}  -", field(width, "pdb"));
     }
     if let Some(kernel) = &detail.kernel {
         if let Some(version) = &kernel.file_version {
-            outln!("  {} file version {}", ui::muted("kernel"), version);
+            outln!("  {}  {}", field(width, "file version"), version);
         }
         if let Some(version) = &kernel.product_version {
-            outln!("  {} product version {}", ui::muted("kernel"), version);
+            outln!("  {}  {}", field(width, "product version"), version);
         }
     }
     outln!(
-        "  {} {}",
-        ui::muted("processors"),
+        "  {}  {}",
+        field(width, "processors"),
         detail
             .processors
-            .map_or_else(|| "unknown".to_string(), |value| value.to_string())
+            .map_or_else(|| "-".to_string(), |value| value.to_string())
     );
-    outln!("  {} {}", ui::muted("product"), detail.product);
+    outln!("  {}  {}", field(width, "product"), detail.product);
     outln!(
-        "  {} {}",
-        ui::muted("uptime"),
-        detail.time.uptime.as_deref().unwrap_or("unknown")
+        "  {}  {}",
+        field(width, "uptime"),
+        detail.time.uptime.as_deref().unwrap_or("-")
     );
     outln!(
-        "  {} {}",
-        ui::muted("backend"),
-        detail.backend.as_deref().unwrap_or("unknown")
+        "  {}  {}",
+        field(width, "backend"),
+        detail.backend.as_deref().unwrap_or("-")
     );
-    outln!("  {} {}", ui::muted("ntoseye"), detail.debugger_version);
-    outln!("  {} {}", ui::muted("symbol path"), detail.symbol_path);
+    outln!("  {}  {}", field(width, "ntoseye"), detail.debugger_version);
+    outln!("  {}  {}", field(width, "symbol path"), detail.symbol_path);
     outln!(
-        "  {} {}",
-        ui::muted("symbol status"),
-        detail.symbol_status.as_deref().unwrap_or("unknown")
+        "  {}  {}",
+        field(width, "symbol status"),
+        detail.symbol_status.as_deref().unwrap_or("-")
     );
     if let Some(time) = detail.time.system_time_iso.as_deref() {
-        outln!("  {} {}", ui::muted("system time"), time);
+        outln!("  {}  {}", field(width, "system time"), time);
     }
     if let Some(dump) = &detail.dump {
-        outln!(
-            "  {} {} (bugcheck: {:#x})",
-            ui::muted("dump"),
-            if dump.is_triage { "yes" } else { "no" },
-            dump.bugcheck_code
-        );
-        outln!(
-            "  {} {} processors, machine {:#x}, service-pack build {}",
-            ui::muted("dump metadata"),
-            dump.number_processors,
-            dump.machine_image_type,
-            dump.service_pack_build
-        );
-        outln!(
-            "  {} dtb {:#x}, kernel {:#x}, exception {}",
-            ui::muted("dump metadata"),
-            dump.directory_table_base.0,
-            dump.kernel_base.map_or(0, |base| base.0),
-            dump.exception_code
-                .map_or_else(|| "none".to_string(), |code| format!("{code:#x}"))
-        );
-        let parameters = dump
-            .bugcheck_parameters
-            .iter()
-            .map(|value| format!("{value:#x}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        outln!(
-            "  {} parameters [{}]",
-            ui::muted("dump metadata"),
-            parameters
-        );
-        outln!(
-            "  {} Windows {}.{} product type {}",
-            ui::muted("dump metadata"),
+        print_dump_header(dump);
+    }
+}
+
+/// The crash dump header's own fields, as a sub-block of `vertarget`. The
+/// header's time and uptime are left out: the block above shows the
+/// target's.
+fn print_dump_header(dump: &TargetDump) {
+    const WIDTH: usize = 18;
+    let yes_no = |value: bool| if value { "yes" } else { "no" };
+    outln!("  {}", ui::muted("dump header"));
+    outln!("    {}  {}", field(WIDTH, "triage"), yes_no(dump.is_triage));
+    outln!(
+        "    {}  {:#x}",
+        field(WIDTH, "bugcheck"),
+        dump.bugcheck_code
+    );
+    let parameters = dump
+        .bugcheck_parameters
+        .iter()
+        .map(|value| format!("{value:#x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    outln!(
+        "    {}  {}",
+        field(WIDTH, "parameters"),
+        if parameters.is_empty() {
+            "-"
+        } else {
+            parameters.as_str()
+        }
+    );
+    outln!(
+        "    {}  {}",
+        field(WIDTH, "build type"),
+        named_value(
             dump.major_version,
-            dump.minor_version,
-            dump.product_type
-        );
-        outln!(
-            "  {} system time {}, uptime {}",
-            ui::muted("dump metadata"),
-            dump.system_time
-                .map_or_else(|| "unknown".to_string(), |time| format!("{time:#x}")),
-            dump.uptime_seconds
-                .map_or_else(|| "unknown".to_string(), |seconds| format!("{seconds}s"))
-        );
-        outln!(
-            "  {} triage overflowed {}",
-            ui::muted("dump metadata"),
-            if dump.triage_overflowed { "yes" } else { "no" }
-        );
+            match dump.major_version {
+                0xf => Some("free"),
+                0xc => Some("checked"),
+                _ => None,
+            }
+        )
+    );
+    outln!("    {}  {}", field(WIDTH, "build"), dump.minor_version);
+    outln!(
+        "    {}  {:#x}",
+        field(WIDTH, "product type"),
+        dump.product_type
+    );
+    outln!(
+        "    {}  {}",
+        field(WIDTH, "processors"),
+        dump.number_processors
+    );
+    outln!(
+        "    {}  {}",
+        field(WIDTH, "machine"),
+        named_value(
+            dump.machine_image_type,
+            match dump.machine_image_type {
+                0x8664 => Some("AMD64"),
+                0xaa64 => Some("ARM64"),
+                0x14c => Some("x86"),
+                _ => None,
+            }
+        )
+    );
+    outln!(
+        "    {}  {}",
+        field(WIDTH, "service pack build"),
+        dump.service_pack_build
+    );
+    outln!(
+        "    {}  {}",
+        field(WIDTH, "DTB"),
+        ui::addr(dump.directory_table_base.0)
+    );
+    outln!(
+        "    {}  {}",
+        field(WIDTH, "kernel base"),
+        dump.kernel_base
+            .map_or_else(|| "-".to_string(), |base| ui::addr(base.0))
+    );
+    outln!(
+        "    {}  {}",
+        field(WIDTH, "exception"),
+        dump.exception_code
+            .map_or_else(|| "-".to_string(), |code| format!("{code:#010x}"))
+    );
+    outln!(
+        "    {}  {}",
+        field(WIDTH, "triage overflowed"),
+        yes_no(dump.triage_overflowed)
+    );
+}
+
+/// An enum value as `Name (0xN)`, or `0xN` when it has no known name.
+fn named_value(value: u32, name: Option<&str>) -> String {
+    match name {
+        Some(name) => format!("{name} ({value:#x})"),
+        None => format!("{value:#x}"),
     }
 }
 
@@ -717,17 +784,17 @@ fn print_target_time(detail: &TargetTime) {
         return;
     }
     match (detail.system_time, detail.system_time_iso.as_deref()) {
-        (Some(raw), Some(iso)) => outln!("  {} {} ({raw:#x})", ui::muted("system time"), iso),
-        (Some(raw), None) => outln!("  {} unavailable ({raw:#x})", ui::muted("system time")),
-        _ => outln!("  {} unavailable", ui::muted("system time")),
+        (Some(raw), Some(iso)) => outln!("  {}  {} ({raw:#x})", field(11, "system time"), iso),
+        (Some(raw), None) => outln!("  {}  - ({raw:#x})", field(11, "system time")),
+        _ => outln!("  {}  -", field(11, "system time")),
     }
     match (detail.uptime_seconds, detail.uptime.as_deref()) {
         (Some(seconds), Some(formatted)) => outln!(
-            "  {} {} ({seconds} seconds)",
-            ui::muted("uptime"),
+            "  {}  {} ({seconds} seconds)",
+            field(11, "uptime"),
             formatted
         ),
-        _ => outln!("  {} unavailable", ui::muted("uptime")),
+        _ => outln!("  {}  -", field(11, "uptime")),
     }
 }
 
@@ -748,55 +815,54 @@ fn print_user_dump_version(detail: &TargetVersion, user_dump: &TargetUserDump) {
         )
     };
     outln!(
-        "  {} {} ({processor})",
-        ui::muted("processors"),
+        "  {}  {} ({processor})",
+        field(12, "processors"),
         detail
             .processors
-            .map_or_else(|| "unknown".to_string(), |value| value.to_string())
+            .map_or_else(|| "-".to_string(), |value| value.to_string())
     );
-    outln!("  {} {}", ui::muted("product"), detail.product);
+    outln!("  {}  {}", field(12, "product"), detail.product);
     if let Some(service_pack) = &user_dump.service_pack {
-        outln!("  {} {}", ui::muted("service pack"), service_pack);
+        outln!("  {}  {}", field(12, "service pack"), service_pack);
     }
-    let process = user_dump.process_name.as_deref().unwrap_or("unknown");
+    let process = user_dump.process_name.as_deref().unwrap_or("-");
     match user_dump.process_id {
-        Some(pid) => outln!("  {} {process} (pid {pid})", ui::muted("process")),
-        None => outln!("  {} {process}", ui::muted("process")),
+        Some(pid) => outln!("  {}  {process} (PID {pid})", field(12, "process")),
+        None => outln!("  {}  {process}", field(12, "process")),
     }
     outln!(
-        "  {} user-mode minidump, {} threads, {} modules",
-        ui::muted("dump"),
+        "  {}  user-mode minidump, {} threads, {} modules",
+        field(12, "dump"),
         user_dump.threads,
         user_dump.modules
     );
     outln!(
-        "  {} {:#x} ({})",
-        ui::muted("dump type"),
+        "  {}  {:#x} ({})",
+        field(12, "dump type"),
         user_dump.flags,
         user_dump.flag_names.join(" | ")
     );
     if let Some(time) = &detail.time.user_dump {
         outln!(
-            "  {} {}",
-            ui::muted("dump written"),
-            time.written_iso.as_deref().unwrap_or("unknown")
+            "  {}  {}",
+            field(12, "dump written"),
+            time.written_iso.as_deref().unwrap_or("-")
         );
     }
     outln!(
-        "  {} {}",
-        ui::muted("exception"),
-        user_dump.exception_code.map_or_else(
-            || "none recorded".to_string(),
-            |code| format!("{code:#010x}")
-        )
+        "  {}  {}",
+        field(12, "exception"),
+        user_dump
+            .exception_code
+            .map_or_else(|| "-".to_string(), |code| format!("{code:#010x}"))
     );
     outln!(
-        "  {} {}",
-        ui::muted("backend"),
-        detail.backend.as_deref().unwrap_or("unknown")
+        "  {}  {}",
+        field(12, "backend"),
+        detail.backend.as_deref().unwrap_or("-")
     );
-    outln!("  {} {}", ui::muted("ntoseye"), detail.debugger_version);
-    outln!("  {} {}", ui::muted("symbol path"), detail.symbol_path);
+    outln!("  {}  {}", field(12, "ntoseye"), detail.debugger_version);
+    outln!("  {}  {}", field(12, "symbol path"), detail.symbol_path);
 }
 
 /// `.time` on a user-mode minidump: when it was written and how long its
@@ -804,14 +870,14 @@ fn print_user_dump_version(detail: &TargetVersion, user_dump: &TargetUserDump) {
 fn print_user_dump_time(detail: &UserDumpTime) {
     let written = detail.written_iso.as_deref().unwrap_or("out of range");
     outln!(
-        "  {} {written} ({:#x})",
-        ui::muted("dump written"),
+        "  {}  {written} ({:#x})",
+        field(16, "dump written"),
         detail.written
     );
     if let Some(local) = &detail.written_local {
         outln!(
-            "  {} {local}{}",
-            ui::muted("local time"),
+            "  {}  {local}{}",
+            field(16, "local time"),
             detail
                 .time_zone
                 .as_deref()
@@ -821,26 +887,32 @@ fn print_user_dump_time(detail: &UserDumpTime) {
         );
     }
     match detail.process_created_iso.as_deref() {
-        Some(created) => outln!("  {} {created}", ui::muted("process created")),
-        None => outln!("  {} not recorded", ui::muted("process created")),
+        Some(created) => outln!("  {}  {created}", field(16, "process created")),
+        None => outln!("  {}  -", field(16, "process created")),
     }
     if let (Some(seconds), Some(uptime)) = (detail.process_uptime_seconds, &detail.process_uptime) {
         outln!(
-            "  {} {uptime} ({seconds} seconds)",
-            ui::muted("process uptime")
+            "  {}  {uptime} ({seconds} seconds)",
+            field(16, "process uptime")
         );
     }
     match (detail.user_time_seconds, detail.kernel_time_seconds) {
         (Some(user), Some(kernel)) => outln!(
-            "  {} user {user} s, kernel {kernel} s",
-            ui::muted("process CPU time")
+            "  {}  user {user} s, kernel {kernel} s",
+            field(16, "process CPU time")
         ),
-        _ => outln!("  {} not recorded", ui::muted("process CPU time")),
+        _ => outln!("  {}  -", field(16, "process CPU time")),
     }
     outln!(
-        "  {} not recorded in a user-mode minidump",
-        ui::muted("system time and uptime")
+        "  {}  not recorded in a user-mode minidump",
+        field(16, "system time")
     );
+}
+
+/// A field label of `vertarget` or `.time`, padded to its block's label
+/// column before it is muted, so that the escape codes do not count.
+fn field(width: usize, label: &str) -> String {
+    ui::muted(&format!("{label:<width$}"))
 }
 
 fn parse_printf_tail(text: &str) -> Option<(String, Vec<String>)> {
@@ -971,28 +1043,48 @@ fn format_printf(
 }
 
 fn print_error_code(detail: &ErrorCode) {
-    // A code without a known name has an empty one.
+    const WIDTH: usize = 11;
     let name = if detail.name.is_empty() {
         "-"
     } else {
         detail.name.as_str()
     };
     match detail.kind {
-        ErrorCodeKind::Ntstatus => {
-            outln!("NTSTATUS {:#010x}: {name}", detail.code);
-            outln!("  {}", detail.description);
-        }
-        ErrorCodeKind::Hresult => {
-            outln!("HRESULT {:#010x}: {name}", detail.code);
-            outln!("  {}", detail.description);
+        ErrorCodeKind::Ntstatus | ErrorCodeKind::Hresult => {
+            let kind = if detail.kind == ErrorCodeKind::Ntstatus {
+                "NTSTATUS"
+            } else {
+                "HRESULT"
+            };
+            outln!("{kind} {:#010x}", detail.code);
+            outln!("  {}  {name}", field(WIDTH, "name"));
+            if let Some(severity) = detail.severity {
+                outln!("  {}  {severity}", field(WIDTH, "severity"));
+            }
+            if let Some(facility) = detail.facility {
+                outln!("  {}  {facility:#x}", field(WIDTH, "facility"));
+            }
+            if let Some(customer) = detail.customer {
+                outln!(
+                    "  {}  {}",
+                    field(WIDTH, "customer"),
+                    if customer { "yes" } else { "no" }
+                );
+            }
             if let Some(win32) = detail.win32_code {
-                outln!("  Win32 code: {win32} ({win32:#x})");
+                outln!(
+                    "  {}  {} ({win32:#x})",
+                    field(WIDTH, "Win32 error"),
+                    detail.win32_name.as_deref().unwrap_or("-")
+                );
             }
         }
-        ErrorCodeKind::Win32 => outln!("Win32 error {} ({:#x}): {name}", detail.code, detail.code),
+        ErrorCodeKind::Win32 => {
+            outln!("Win32 error {:#x}", detail.code);
+            outln!("  {}  {name}", field(WIDTH, "name"));
+        }
         ErrorCodeKind::Unknown => outln!(
-            "Unknown error code {} ({:#x}): {}",
-            detail.code,
+            "unknown error code {:#x}: {}",
             detail.code,
             detail.description
         ),

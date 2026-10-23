@@ -15,7 +15,7 @@ The hypervisor does not name its partitions. Their IDs follow the order in which
 error: Windows hypervisor: partition 0x5 runs no Windows kernel: no NT image is mapped where its VPs run, as in a Linux guest such as WSL2's; !hvd and !hvu read any guest's memory and code
 0: gdb> !hvvps 5
 VP  Address           CPU  VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
-0   ffffe804c5038050       0*   ffffe804c5039000  22754d000  227c3105e    ffffffffbd1df02f  HLT
+0   ffffe804c5038050  -    0*   ffffe804c5039000  22754d000  227c3105e    ffffffffbd1df02f  HLT
 ...
 0: gdb> .partition 4
 inspecting partition 0x4: nt at 0xfffff80586250000, VPs 0 1 2 3
@@ -45,6 +45,7 @@ In the SDK, `dbg.select_partition(id)` switches and `dbg.partition` says which p
 inspecting partition 0x4: nt at 0xfffff80586250000, VPs 0 1 2 3
 
 0: partition 0x4> k
+  # Child-SP          IP                Call Site
  00 fffff805187199a0  fffff8058670f8bd  nt!PpmIdleGuestExecute+0x1d
  01 fffff805187199e0  fffff8058658bc54  nt!PpmIdleExecuteTransition+0x518
  02 fffff80518719b70  fffff8058658a9f0  nt!PoIdle+0x190
@@ -64,20 +65,20 @@ In a partition's view, {command}`ba` sets a breakpoint of the partition's, and {
 hardware breakpoint #0 (execute 1b) set at fffff80586ac0f10 (nt!NtClose)
 
 0: partition 0x4> bl
-ID  Status  Address           Pass Count   Process/Thread         Symbol               Condition  Action
+ID  Status  Address           Pass count   Process/Thread         Symbol               Condition  Action
 #0  e       fffff80586ac0f10  0001 (0001)  partition 0x4, global  watch e1 nt!NtClose  -          -
 
 0: partition 0x4> g
 VM running, waiting for stop (Ctrl+C to pause)...
  BREAK  processor 2  dwm.exe (3832) at nt!NtClose
  ├─ hardware breakpoint #0 e1  nt!NtClose
- └─ thread dwm.exe  state Running  ethread ffff810cc3a5d080  pid 3832  tid 3956
+ └─ thread ffff810cc3a5d080  TID 3956  PID 3832  process dwm.exe  state Running
 ...
 stack
-  #0  fffff80586ac0f10  nt!NtClose
-  #1  fffff80586911d55  nt!KiSystemServiceCopyEnd+0x25
-  #2  fffff80586900180  nt!KiServiceLinkage
-  #3  fffff8051d93c799  win32kbase!rimSignalReadComplete+0x209
+  00  fffff80586ac0f10  nt!NtClose
+  01  fffff80586911d55  nt!KiSystemServiceCopyEnd+0x25
+  02  fffff80586900180  nt!KiServiceLinkage
+  03  fffff8051d93c799  win32kbase!rimSignalReadComplete+0x209
 ```
 
 The partition's VPs run on the target's processors, and only a debug register traps the partition's code there:
@@ -99,19 +100,19 @@ In a partition's view, {command}`t`, {command}`p` and {command}`gu` step the thr
 0: partition 0x4> g nt!NtClose+0xa3
 VM running, waiting for stop (Ctrl+C to pause)...
  BREAK  processor 0  dwm.exe (3832) at nt!NtClose+0xa3
- └─ thread dwm.exe  state Running  ethread ffff810cc3a60080  pid 3832  tid 3944
+ └─ thread ffff810cc3a60080  TID 3944  PID 3832  process dwm.exe  state Running
 ...
  > fffff80586ac0fb3 +0xa3  call nt!ExpLookupHandleTableEntry
 
 0: partition 0x4> p
 VM running, waiting for stop (Ctrl+C to pause)...
  BREAK  processor 0  dwm.exe (3832) at nt!NtClose+0xa8
- └─ thread dwm.exe  state Running  ethread ffff810cc3a60080  pid 3832  tid 3944
+ └─ thread ffff810cc3a60080  TID 3944  PID 3832  process dwm.exe  state Running
 ...
 0: partition 0x4> gu
 VM running, waiting for stop (Ctrl+C to pause)...
  BREAK  processor 0  dwm.exe (3832) at nt!KiSystemServiceCopyEnd+0x25
- └─ thread dwm.exe  state Running  ethread ffff810cc3a60080  pid 3832  tid 3944
+ └─ thread ffff810cc3a60080  TID 3944  PID 3832  process dwm.exe  state Running
 ```
 
 The partition's VPs run on the target's processors, where the hypervisor moves them, so ntoseye cannot single-step one. A step runs the target instead, to debug registers of the partition's on every instruction that the current one can continue at, as for a breakpoint in the view:

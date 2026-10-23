@@ -16,7 +16,7 @@ Make sure that the VM is powered on. If the memory of the target is not on this 
 
 **`permission denied accessing VM process`** (macOS). `ntoseye` must run as root to read the memory of the UTM QEMU process, so run `sudo ntoseye ...`. See the [UTM setup](../setup/utm.md).
 
-**`Another instance of ntoseye is already attached`.** The `kd`, `kdnet`, and `gdb` backends allow only one session for each target. Close the other session, or use the `memory` backend, which is passive, at the same time as the other session.
+**`another instance of ntoseye is already attached`.** The `kd`, `kdnet`, and `gdb` backends allow only one session for each target. Close the other session, or use the `memory` backend, which is passive, at the same time as the other session.
 
 **The KD handshake times out.** For a handshake, Windows must boot with kernel debugging on, and its serial port or network settings must match the host settings. `ntoseye` waits 8 seconds for the first handshake. To fix the problem:
 

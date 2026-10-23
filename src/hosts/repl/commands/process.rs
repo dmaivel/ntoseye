@@ -2,8 +2,6 @@ use std::collections::HashMap;
 
 use tabled::builder::Builder;
 
-use owo_colors::OwoColorize;
-
 use ntoseye_macros::{command, grammar};
 
 use crate::base::error::{Error, Result};
@@ -118,12 +116,17 @@ impl Render<u32> for Vec<ProcessDetail> {
         if flags & 7 == 0 {
             return;
         }
-        for detail in self {
+        for (index, detail) in self.iter().enumerate() {
             let process = &detail.process;
+            // A blank line separates each process record from the one
+            // before it; the table leaves its own before the first.
+            if index > 0 {
+                outln!();
+            }
             outln!(
-                "{} {} ({})",
-                ui::label("process:"),
-                ui::addr(process.eprocess.0),
+                "{}  PID {}  {}",
+                ui::label(&format!("PROCESS {}", ui::addr(process.eprocess.0))),
+                process.pid,
                 process.name
             );
             if flags & 1 != 0 {
@@ -168,7 +171,11 @@ impl Render<Option<String>> for Vec<ProcessInfo> {
             .cloned()
             .collect::<Vec<_>>();
         if shown.is_empty() {
-            outln!("{}\n", "no matching processes".bright_black());
+            let message = match &filter {
+                Some(filter) => format!("no processes matching '{filter}'"),
+                None => "no processes".to_string(),
+            };
+            outln!("{}", ui::muted(&message));
             return;
         }
         print_ps(&shown);
@@ -247,10 +254,11 @@ fn process_context(
     state.caches.refresh_symbol_context(&state.ctx.target);
     state.clear_selected_frame();
     outln!(
-        "process context: {} (PID {}, EPROCESS {}{})",
+        "process context: {} (PID {}, EPROCESS {}, DTB {}{})",
         report.name,
         process.pid,
         ui::addr(process.eprocess.0),
+        ui::addr(process.dtb),
         if process.is_wow64() { ", WOW64" } else { "" },
     );
     print_user_modules(&report);
@@ -286,7 +294,6 @@ fn attach(state: &mut ReplState<'_>, #[arg(complete = Process)] pid: String) -> 
             state.clear_selected_frame();
             outln!("attached to {} (PID {})", report.name, process.pid);
             print_user_modules(&report);
-            outln!();
         }
         Err(e) => error!("failed to attach: {}", e),
     }
@@ -310,7 +317,7 @@ fn detach(state: &mut ReplState<'_>) -> Result<()> {
         state.ctx.target.detach();
         state.caches.refresh_symbol_context(&state.ctx.target);
         state.clear_selected_frame();
-        outln!("detached, now in kernel context\n");
+        outln!("detached, now in kernel context");
     }
 
     Ok(())
@@ -350,7 +357,7 @@ fn context(state: &mut ReplState<'_>, #[arg(complete = Expression)] dtb: String)
     state.clear_selected_frame();
     state.ctx.target.set_context_dtb_override(dtb.0);
     state.caches.refresh_symbol_context(&state.ctx.target);
-    outln!("inspection context DTB set to {}\n", ui::addr(dtb.0));
+    outln!("inspection context DTB set to {:#x}", dtb.0);
     Ok(())
 }
 
@@ -394,7 +401,10 @@ fn process_brief_row(detail: &ProcessDetail) -> Vec<String> {
         format!("{} ({:#x})", process.pid, process.pid),
         display_pointer(detail.peb),
         display_pointer(process.wow64_peb),
-        display_decimal(detail.parent_pid),
+        // The parent's id in the same form as the process's own Cid.
+        detail
+            .parent_pid
+            .map_or_else(|| "-".to_string(), |pid| format!("{pid} ({pid:#x})")),
         display_pointer(detail.directory_table_base.map(VirtAddr)),
         display_pointer(detail.object_table),
         display_decimal(detail.handle_count),
@@ -427,16 +437,16 @@ fn print_process_briefs(details: &[ProcessDetail]) {
 fn print_ps(processes: &[ProcessInfo]) {
     let mut builder = Builder::default();
     builder.push_record(vec![
-        "Name".to_string(),
         "PID".to_string(),
+        "Name".to_string(),
         "EPROCESS".to_string(),
         "DTB".to_string(),
         "Wow64".to_string(),
     ]);
     for process in processes {
         builder.push_record(vec![
-            process.name.to_string(),
             format!("{}", ui::Value(process.pid)),
+            process.name.to_string(),
             ui::addr(process.eprocess.0).to_string(),
             ui::addr(process.dtb),
             if process.is_wow64() { "x86" } else { "-" }.to_string(),
@@ -445,39 +455,42 @@ fn print_ps(processes: &[ProcessInfo]) {
     print_padded_table(builder);
 }
 
+/// The `_EPROCESS` fields `!process` flag 1 adds, as `dt` lays out fields.
 fn print_process_detail(detail: &ProcessDetail) {
-    outln!("  VadRoot        {}", display_pointer(detail.vad_root));
-    outln!("  Token         {}", display_pointer(detail.token));
-    outln!(
-        "  Wow64Peb      {}",
-        display_pointer(detail.process.wow64_peb)
-    );
-    outln!(
-        "  CreateTime    {}",
-        detail
-            .create_time
-            .and_then(filetime_to_iso)
-            .unwrap_or_else(|| "-".to_string())
-    );
-    outln!("  UserTime      {}", display_decimal(detail.user_time));
-    outln!("  KernelTime    {}", display_decimal(detail.kernel_time));
-    outln!(
-        "  QuotaPoolUsage paged={} nonpaged={}",
-        display_decimal(detail.quota_paged_pool),
-        display_decimal(detail.quota_nonpaged_pool)
-    );
-    outln!(
-        "  WorkingSet    {}  Commit={}  PeakVirtualSize={}  PrivatePageCount={}",
-        display_decimal(detail.working_set_size),
-        display_decimal(detail.commit_charge),
-        display_decimal(detail.peak_virtual_size),
-        display_decimal(detail.private_page_count),
-    );
-    outln!(
-        "  DebugPort     {}  Job={}",
-        display_pointer(detail.debug_port),
-        display_pointer(detail.job)
-    );
+    let size =
+        |value: Option<u64>| value.map_or_else(|| "-".to_string(), |value| format!("{value:#x}"));
+    let rows = [
+        ("VadRoot", display_pointer(detail.vad_root)),
+        ("Token", display_pointer(detail.token)),
+        ("Wow64Peb", display_pointer(detail.process.wow64_peb)),
+        (
+            "CreateTime",
+            detail
+                .create_time
+                .and_then(filetime_to_iso)
+                .unwrap_or_else(|| "-".to_string()),
+        ),
+        ("UserTime", display_decimal(detail.user_time)),
+        ("KernelTime", display_decimal(detail.kernel_time)),
+        ("QuotaPoolUsage[PagedPool]", size(detail.quota_paged_pool)),
+        (
+            "QuotaPoolUsage[NonPagedPool]",
+            size(detail.quota_nonpaged_pool),
+        ),
+        ("WorkingSetSize", display_decimal(detail.working_set_size)),
+        ("CommitCharge", display_decimal(detail.commit_charge)),
+        ("PeakVirtualSize", size(detail.peak_virtual_size)),
+        (
+            "PrivatePageCount",
+            display_decimal(detail.private_page_count),
+        ),
+        ("DebugPort", display_pointer(detail.debug_port)),
+        ("Job", display_pointer(detail.job)),
+    ];
+    let width = rows.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+    for (name, value) in rows {
+        outln!("  {name:<width$} : {value}");
+    }
 }
 
 impl ReplState<'_> {
@@ -536,7 +549,10 @@ impl ReplState<'_> {
         let mut threads = match self.ctx.target.enumerate_threads_for_process_info(process) {
             Ok(threads) => threads,
             Err(error) => {
-                error!("  thread list unavailable: {}", error);
+                error!(
+                    "thread list of {} (PID {}) unavailable: {}",
+                    process.name, process.pid, error
+                );
                 return true;
             }
         };
@@ -550,10 +566,15 @@ impl ReplState<'_> {
         };
         for (index, thread) in threads.iter().enumerate() {
             if self.ctx.target.interrupted() {
-                outln!("  interrupted after {index} thread(s)");
+                outln!(
+                    "interrupted after {index} {}",
+                    if index == 1 { "thread" } else { "threads" }
+                );
                 return false;
             }
             let vcpu = active.get(&thread.ethread.0).map(|(vcpu, _)| vcpu.as_str());
+            // A blank line separates each thread record, as WinDbg does.
+            outln!();
             print_thread_detail(
                 &self
                     .ctx
@@ -563,24 +584,27 @@ impl ReplState<'_> {
             if include_stack {
                 match self.ctx.backtrace_thread(thread, vcpu, THREAD_STACK_LIMIT) {
                     Ok(trace) => {
-                        outln!("  k-stack ({}):", trace.source.as_str());
+                        // The same section and `k` columns as `!thread`.
+                        print_section(&format!("stack ({})", trace.source.as_str()));
                         print_stacktrace_data_with_provenance(
                             self.ctx.target.arch(),
                             &trace.stacktrace,
                             THREAD_STACK_LIMIT,
-                            true,
+                            false,
                         );
                     }
-                    Err(error) => error!(
-                        "  k-stack {} unavailable: {}",
-                        ui::addr(thread.ethread.0),
-                        error
-                    ),
+                    // A stack that does not walk (one swapped out, say) is
+                    // part of the thread's record, not a failure of the
+                    // command: its section says why.
+                    Err(error) => {
+                        print_section("stack");
+                        outln!("  {}", error);
+                    }
                 }
             }
         }
         if truncated {
-            outln!("  thread list truncated at {MAX_PROCESS_THREADS} entries");
+            outln!("thread list truncated at {MAX_PROCESS_THREADS} threads");
         }
         true
     }
@@ -590,26 +614,27 @@ impl ReplState<'_> {
         let target = &self.ctx.target;
         if target.in_secure_scope() {
             outln!(
-                "process context: VTL1 memory view (DTB {})\n",
+                "process context: VTL1 memory view (DTB {})",
                 ui::addr(target.current_dtb())
             );
         } else if target.in_secure_address_space() {
             outln!(
-                "process context: VTL1 live stop (DTB {})\n",
+                "process context: VTL1 live stop (DTB {})",
                 ui::addr(target.current_dtb())
             );
         } else if let Some(process) = target.current_process() {
+            // The same words as the line selecting it, plus its DTB.
             outln!(
-                "process context: {} {} (PID {}, DTB {}{})\n",
-                ui::addr(process.eprocess.0),
+                "process context: {} (PID {}, EPROCESS {}, DTB {}{})",
                 process.name,
                 process.pid,
+                ui::addr(process.eprocess.0),
                 ui::addr(process.dtb),
                 if process.is_wow64() { ", WOW64" } else { "" },
             );
         } else {
             outln!(
-                "process context: kernel (DTB {})\n",
+                "process context: kernel (DTB {})",
                 ui::addr(target.kernel_dtb())
             );
         }

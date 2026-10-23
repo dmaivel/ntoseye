@@ -16,13 +16,13 @@ use crate::hosts::ui;
 use crate::nt::expr::Expr;
 use crate::nt::target::cpu::{
     CpuInfo, CpuTriageFallback, DescriptorRegister, Gdt, GdtDescriptor, Idt, IdtGate, Irql, Pcr,
-    Prcb, Processor, ProcessorStateArea, SpecialRegistersArea, msr_name, parse_msr_name,
+    Prcb, Processor, SpecialRegistersArea, msr_name, parse_msr_name,
 };
 use crate::nt::target::{DiagnosticValue, ServedVp, Target};
 use crate::session::Session;
 use crate::session::{UserThreadSummary, VcpuInfo};
 
-use super::diagnostics::{diagnostic_addr, diagnostic_cell, diagnostic_hex};
+use super::diagnostics::{UnavailableNotes, yes_no};
 
 const IDT_VECTOR_COUNT: u16 = 256;
 const MSR_SWITCH: &str = "/p";
@@ -76,100 +76,136 @@ impl FromArg for Msr {
     }
 }
 
-fn render_diagnostic<T>(value: &DiagnosticValue<T>, render: impl FnOnce(&T) -> String) -> String {
-    match value {
-        DiagnosticValue::Available(value) => render(value),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
+/// The fields of a block that could not be read, as the shared
+/// [`UnavailableNotes`] collects them, with any rendering for the ones that
+/// could.
+#[derive(Default)]
+struct Gaps(UnavailableNotes);
+
+impl Gaps {
+    /// `value` rendered, or `-` with `field` noted when it is unavailable.
+    fn cell<T>(
+        &mut self,
+        field: impl Into<String>,
+        value: &DiagnosticValue<T>,
+        render: impl FnOnce(&T) -> String,
+    ) -> String {
+        match value {
+            DiagnosticValue::Available(value) => render(value),
+            DiagnosticValue::Unavailable(error) => self.0.missing(&field.into(), error),
+        }
+    }
+
+    /// Note `field` as unavailable for `error`.
+    fn note(&mut self, field: impl Into<String>, error: &str) {
+        self.0.missing(&field.into(), error);
+    }
+
+    /// The block's note, `indent` in.
+    fn print(&self, indent: &str) {
+        self.0.print(indent);
     }
 }
 
-fn render_decimal(value: &DiagnosticValue<u64>) -> String {
-    render_diagnostic(value, |value| format!("{value} ({value:#x})"))
+fn address_text(value: &VirtAddr) -> String {
+    ui::addr(value.0)
 }
 
-fn render_descriptor(value: &DiagnosticValue<DescriptorRegister>) -> String {
-    render_diagnostic(value, |value| {
-        format!("base {} limit {:#x}", ui::addr(value.base.0), value.limit)
-    })
+/// A pointer field, `-` when it is null (no next thread, no KD version
+/// block).
+fn pointer_text(value: &VirtAddr) -> String {
+    ui::addr_opt(*value)
+}
+
+fn decimal_text(value: &u64) -> String {
+    format!("{value} ({value:#x})")
+}
+
+fn hex_text<T: Copy + Into<u64>>(value: &T) -> String {
+    let value: u64 = (*value).into();
+    format!("{value:#x}")
+}
+
+fn yes_no_text(value: &bool) -> String {
+    yes_no(*value).to_string()
+}
+
+fn descriptor_text(value: &DescriptorRegister) -> String {
+    format!("base {} limit {:#x}", ui::addr(value.base.0), value.limit)
 }
 
 /// An ARM64 `_KPCR` embeds its PRCB, which the first line names, and has
 /// no descriptor tables or TSS, so those rows are AMD64's alone.
 fn print_pcr(detail: &Pcr, arch: Arch) {
+    let mut gaps = Gaps::default();
+    let kpcr = gaps.cell("KPCR address", &detail.kpcr, address_text);
     outln!(
         "KPCR for processor {} at {} (KPRCB {})",
         detail.processor,
-        diagnostic_addr(&detail.kpcr),
+        kpcr,
         ui::addr(detail.kprcb.0)
     );
-    outln!(
-        "  {:<20}: {}",
+    let mut fields = vec![(
         "KdVersionBlock",
-        diagnostic_addr(&detail.kd_version_block)
-    );
+        gaps.cell("KdVersionBlock", &detail.kd_version_block, pointer_text),
+    )];
     match arch {
-        Arch::Amd64 => outln!(
-            "  {:<20}: {}",
+        Arch::Amd64 => fields.push((
             "CurrentPrcb",
-            diagnostic_addr(&detail.current_prcb)
-        ),
+            gaps.cell("CurrentPrcb", &detail.current_prcb, address_text),
+        )),
         Arch::Arm64 => {}
     }
-    outln!("  {:<20}: {}", "Irql", render_decimal(&detail.irql));
-    outln!("  {:<20}: {}", "Self", diagnostic_addr(&detail.self_pcr));
-    outln!("  KPRCB fields:");
-    outln!(
-        "  {:<20}: {}",
-        "CurrentThread",
-        diagnostic_addr(&detail.current_thread)
-    );
-    outln!(
-        "  {:<20}: {}",
-        "NextThread",
-        diagnostic_addr(&detail.next_thread)
-    );
-    outln!(
-        "  {:<20}: {}",
-        "IdleThread",
-        diagnostic_addr(&detail.idle_thread)
-    );
+    fields.push(("Irql", gaps.cell("Irql", &detail.irql, decimal_text)));
+    fields.push(("Self", gaps.cell("Self", &detail.self_pcr, address_text)));
+    print_struct_fields("  ", 20, &fields);
+    // The KPRCB's fields, a sub-block whose colons stay in the KPCR's column.
+    outln!("  KPRCB fields");
+    let mut fields = vec![
+        (
+            "CurrentThread",
+            gaps.cell("CurrentThread", &detail.current_thread, address_text),
+        ),
+        (
+            "NextThread",
+            gaps.cell("NextThread", &detail.next_thread, pointer_text),
+        ),
+        (
+            "IdleThread",
+            gaps.cell("IdleThread", &detail.idle_thread, address_text),
+        ),
+    ];
     match arch {
         Arch::Amd64 => {
-            outln!("  {:<20}: {}", "IDTR", render_descriptor(&detail.idtr));
-            outln!("  {:<20}: {}", "GDTR", render_descriptor(&detail.gdtr));
-            outln!("  {:<20}: {}", "TssBase", diagnostic_addr(&detail.tss_base));
+            fields.push(("IDTR", gaps.cell("IDTR", &detail.idtr, descriptor_text)));
+            fields.push(("GDTR", gaps.cell("GDTR", &detail.gdtr, descriptor_text)));
+            fields.push((
+                "TssBase",
+                gaps.cell("TssBase", &detail.tss_base, address_text),
+            ));
         }
         Arch::Arm64 => {}
     }
+    print_struct_fields("    ", 18, &fields);
+    gaps.print("  ");
 }
 
-fn print_special_registers(value: &SpecialRegistersArea) {
-    outln!(
-        "  SpecialRegisters    : {} ({} bytes, {})",
-        ui::addr(value.address.0),
-        value.size,
-        value.name
-    );
-}
-
-fn print_processor_state(value: &ProcessorStateArea) {
-    outln!(
-        "  ProcessorState      : {} ({} bytes, {})",
-        ui::addr(value.address.0),
-        value.size,
-        value.name
-    );
-    outln!(
-        "  {:<20}: {}",
-        "ContextFrame",
-        diagnostic_addr(&value.context_frame)
-    );
-    match &value.special_registers {
-        DiagnosticValue::Available(value) => print_special_registers(value),
-        DiagnosticValue::Unavailable(error) => {
-            outln!("  SpecialRegisters    : <unavailable: {error}>")
-        }
+/// Windows structure fields, `Name : value`, `indent` in with the names
+/// padded to `width`.
+fn print_struct_fields(indent: &str, width: usize, fields: &[(&str, String)]) {
+    for (name, value) in fields {
+        outln!("{indent}{name:<width$}: {value}");
     }
+}
+
+/// An area embedded in the KPRCB: its address, size and type.
+fn special_registers_text(value: &SpecialRegistersArea) -> String {
+    format!(
+        "{} ({:#x} bytes, {})",
+        ui::addr(value.address.0),
+        value.size,
+        value.name
+    )
 }
 
 fn print_prcb(detail: &Prcb) {
@@ -178,44 +214,67 @@ fn print_prcb(detail: &Prcb) {
         detail.processor,
         ui::addr(detail.kprcb.0)
     );
-    outln!("  {:<20}: {}", "Number", render_decimal(&detail.number));
-    outln!(
-        "  {:<20}: {}",
-        "CurrentThread",
-        diagnostic_addr(&detail.current_thread)
-    );
-    outln!(
-        "  {:<20}: {}",
-        "NextThread",
-        diagnostic_addr(&detail.next_thread)
-    );
-    outln!(
-        "  {:<20}: {}",
-        "IdleThread",
-        diagnostic_addr(&detail.idle_thread)
-    );
-    outln!(
-        "  {:<20}: {}",
-        "DpcRoutineActive",
-        render_decimal(&detail.dpc_routine_active)
-    );
-    outln!(
-        "  {:<20}: {}",
-        "InterruptCount",
-        render_decimal(&detail.interrupt_count)
-    );
+    let mut gaps = Gaps::default();
+    let mut fields = vec![
+        ("Number", gaps.cell("Number", &detail.number, decimal_text)),
+        (
+            "CurrentThread",
+            gaps.cell("CurrentThread", &detail.current_thread, address_text),
+        ),
+        (
+            "NextThread",
+            gaps.cell("NextThread", &detail.next_thread, pointer_text),
+        ),
+        (
+            "IdleThread",
+            gaps.cell("IdleThread", &detail.idle_thread, address_text),
+        ),
+        (
+            "DpcRoutineActive",
+            gaps.cell("DpcRoutineActive", &detail.dpc_routine_active, decimal_text),
+        ),
+        (
+            "InterruptCount",
+            gaps.cell("InterruptCount", &detail.interrupt_count, decimal_text),
+        ),
+    ];
     match &detail.processor_state {
-        DiagnosticValue::Available(value) => print_processor_state(value),
+        DiagnosticValue::Available(state) => {
+            fields.push((
+                "ProcessorState",
+                format!(
+                    "{} ({:#x} bytes, {})",
+                    ui::addr(state.address.0),
+                    state.size,
+                    state.name
+                ),
+            ));
+            fields.push((
+                "ContextFrame",
+                gaps.cell("ContextFrame", &state.context_frame, address_text),
+            ));
+            fields.push((
+                "SpecialRegisters",
+                gaps.cell(
+                    "SpecialRegisters",
+                    &state.special_registers,
+                    special_registers_text,
+                ),
+            ));
+        }
         DiagnosticValue::Unavailable(error) => {
-            outln!("  ProcessorState      : <unavailable: {error}>")
+            gaps.note("ProcessorState", error);
+            fields.push(("ProcessorState", "-".to_string()));
         }
     }
+    print_struct_fields("  ", 20, &fields);
+    gaps.print("  ");
 }
 
 fn print_irql(detail: &Irql) {
     match (&detail.value, &detail.level_name) {
         (DiagnosticValue::Available(value), DiagnosticValue::Available(name)) => {
-            outln!("processor {} IRQL {} ({})", detail.processor, value, name);
+            outln!("processor {} IRQL {name} ({value:#x})", detail.processor);
         }
         (DiagnosticValue::Unavailable(error), _) => {
             error!("current IRQL unavailable: {error}");
@@ -226,116 +285,123 @@ fn print_irql(detail: &Irql) {
     }
 }
 
-fn print_idt_entry(detail: &IdtGate) {
+/// One IDT gate's row of the `!idt` table, and a row under it for the
+/// KiIsrThunk chain it dispatches to.
+fn push_idt_entry(builder: &mut Builder, gaps: &mut Gaps, detail: &IdtGate) {
+    let vector = format!("{:02x}", detail.vector);
+    let field = |name: &str| format!("vector {vector} {name}");
     let handler = match &detail.handler {
         DiagnosticValue::Available(handler) => *handler,
         DiagnosticValue::Unavailable(error) => {
-            outln!("  {:02x}: <unavailable: {}>", detail.vector, error);
+            gaps.note(field("gate"), error);
+            let mut row = vec![vector];
+            row.resize(7, "-".to_string());
+            builder.push_record(row);
             return;
         }
     };
-    let symbol = match &detail.symbol {
-        DiagnosticValue::Available(Some(symbol)) => symbol.clone(),
-        DiagnosticValue::Available(None) => ui::addr(handler.0).to_string(),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
-    };
-    let selector = render_diagnostic(&detail.selector, |selector| format!("{selector:#06x}"));
-    let ist = diagnostic_cell(&detail.ist);
-    let gate_name = diagnostic_cell(&detail.gate_name);
-    let dpl = diagnostic_cell(&detail.dpl);
-    let present = render_diagnostic(&detail.present, |present| {
-        if *present {
-            "present".to_string()
-        } else {
-            "not-present".to_string()
-        }
+    // A handler with no symbol is its address, as a frame's call site is.
+    let symbol = gaps.cell(field("symbol"), &detail.symbol, |symbol| {
+        symbol
+            .clone()
+            .unwrap_or_else(|| format!("{:#x}", handler.0))
+    });
+    let selector = gaps.cell(field("selector"), &detail.selector, |selector| {
+        format!("{selector:#06x}")
     });
     let hook = matches!(&detail.non_nt_hook, DiagnosticValue::Available(true));
-    outln!(
-        "  {:02x}: {} sel={} ist={} type={} dpl={} {}{}",
-        detail.vector,
-        symbol,
+    builder.push_record([
+        vector.clone(),
         selector,
-        ist,
-        gate_name,
-        dpl,
-        present,
-        if hook { " [NON-NT HOOK]" } else { "" }
-    );
+        gaps.cell(field("IST"), &detail.ist, u8::to_string),
+        gaps.cell(field("type"), &detail.gate_name, String::clone),
+        gaps.cell(field("DPL"), &detail.dpl, u8::to_string),
+        gaps.cell(field("present bit"), &detail.present, yes_no_text),
+        format!("{symbol}{}", if hook { "  [NON-NT HOOK]" } else { "" }),
+    ]);
     if let DiagnosticValue::Available(Some(chain)) = &detail.ki_isr_thunk {
-        outln!("       chain: {chain}");
+        let mut row = vec![String::new(); 6];
+        row.push(format!("chain: {chain}"));
+        builder.push_record(row);
     }
 }
 
 fn print_idt(detail: &Idt) {
     outln!(
-        "IDT processor {} base {} limit {:#x}",
+        "IDT for processor {} at {}, limit {:#x}",
         detail.processor,
         ui::addr(detail.base.0),
         detail.limit
     );
+    let mut builder = Builder::default();
+    builder.push_record([
+        "Vector", "Selector", "IST", "Type", "DPL", "Present", "Handler",
+    ]);
+    let mut gaps = Gaps::default();
     for entry in &detail.entries {
-        print_idt_entry(entry);
+        push_idt_entry(&mut builder, &mut gaps, entry);
     }
+    print_padded_table(builder);
+    gaps.print("");
 }
 
-fn print_gdt_entry(detail: &GdtDescriptor) {
-    match &detail.raw {
-        DiagnosticValue::Available(_) => {}
-        DiagnosticValue::Unavailable(error) => {
-            outln!("  {:>3}: <unavailable: {error}>", detail.index);
-            return;
-        }
-    };
-    let base = diagnostic_addr(&detail.base);
-    let limit = diagnostic_hex(&detail.limit);
-    let type_code = diagnostic_hex(&detail.type_code);
-    let kind = diagnostic_cell(&detail.descriptor_kind);
-    let dpl = diagnostic_cell(&detail.dpl);
-    let present = render_diagnostic(&detail.present, |present| {
-        if *present {
-            "present".to_string()
-        } else {
-            "not-present".to_string()
-        }
-    });
-    let long_mode = match &detail.long_mode {
-        DiagnosticValue::Available(true) => " L",
+/// One descriptor's row of the `!gdt` table.
+fn push_gdt_entry(builder: &mut Builder, gaps: &mut Gaps, detail: &GdtDescriptor) {
+    let field = |name: &str| format!("entry {} {name}", detail.index);
+    if let DiagnosticValue::Unavailable(error) = &detail.raw {
+        gaps.note(field("descriptor"), error);
+        let mut row = vec![detail.index.to_string()];
+        row.resize(8, "-".to_string());
+        builder.push_record(row);
+        return;
+    }
+    let mode = match &detail.long_mode {
+        DiagnosticValue::Available(true) => Some("L"),
         DiagnosticValue::Available(false) => match &detail.default_size {
-            DiagnosticValue::Available(true) => " D/B",
-            _ => "",
+            DiagnosticValue::Available(true) => Some("D/B"),
+            _ => None,
         },
-        DiagnosticValue::Unavailable(_) => "",
+        DiagnosticValue::Unavailable(_) => None,
     };
     let granularity = match &detail.granularity {
-        DiagnosticValue::Available(true) => " G",
-        _ => "",
+        DiagnosticValue::Available(true) => Some("G"),
+        _ => None,
     };
-    outln!(
-        "  {:>3}: base {} limit {} type={} {} dpl={} {}{}{}",
-        detail.index,
-        base,
-        limit,
-        type_code,
-        kind,
-        dpl,
-        present,
-        long_mode,
-        granularity
-    );
+    let flags: Vec<&str> = mode.into_iter().chain(granularity).collect();
+    builder.push_record([
+        detail.index.to_string(),
+        gaps.cell(field("base"), &detail.base, address_text),
+        gaps.cell(field("limit"), &detail.limit, hex_text),
+        gaps.cell(field("type"), &detail.type_code, hex_text),
+        gaps.cell(field("kind"), &detail.descriptor_kind, String::clone),
+        gaps.cell(field("DPL"), &detail.dpl, u8::to_string),
+        gaps.cell(field("present bit"), &detail.present, yes_no_text),
+        if flags.is_empty() {
+            "-".to_string()
+        } else {
+            flags.join(" ")
+        },
+    ]);
 }
 
 fn print_gdt(detail: &Gdt) {
     outln!(
-        "GDT processor {} base {} limit {:#x} ({} entries)",
+        "GDT for processor {} at {}, limit {:#x} ({} entries)",
         detail.processor,
         ui::addr(detail.base.0),
         detail.limit,
         detail.entry_count
     );
+    let mut builder = Builder::default();
+    builder.push_record([
+        "Index", "Base", "Limit", "Type", "Kind", "DPL", "Present", "Flags",
+    ]);
+    let mut gaps = Gaps::default();
     for entry in &detail.entries {
-        print_gdt_entry(entry);
+        push_gdt_entry(&mut builder, &mut gaps, entry);
     }
+    print_padded_table(builder);
+    gaps.print("");
 }
 
 /// WinDbg's name for a descriptor type: code and data segments by their
@@ -415,8 +481,10 @@ fn print_selectors(detail: &Gdt, selectors: impl Iterator<Item = u16>) {
                     )
                 }
                 _ => match &entry.raw {
-                    DiagnosticValue::Unavailable(error) => format!("<unreadable: {error}>"),
-                    DiagnosticValue::Available(_) => "<undecodable>".to_string(),
+                    DiagnosticValue::Unavailable(error) => {
+                        format!("descriptor unreadable: {error}")
+                    }
+                    DiagnosticValue::Available(_) => "descriptor undecodable".to_string(),
                 },
             }
         } else if index >= detail.entry_count {
@@ -430,78 +498,130 @@ fn print_selectors(detail: &Gdt, selectors: impl Iterator<Item = u16>) {
         };
         outln!("{selector:04x} {row}");
     }
-    outln!();
+}
+
+/// Labeled fields under a heading, two spaces in, their values in one column.
+fn print_fields(fields: &[(String, String)]) {
+    let width = fields
+        .iter()
+        .map(|(label, _)| label.len())
+        .max()
+        .unwrap_or(0);
+    for (label, value) in fields {
+        outln!("  {label:<width$}  {value}");
+    }
 }
 
 pub fn print_cpuinfo(detail: &CpuInfo) {
+    let mut gaps = Gaps::default();
     if detail.source == "triage-dump PRCB metadata" {
         outln!("CPU information from triage-dump PRCB metadata");
-        outln!("  processor number    : {}", detail.processor);
-        outln!(
-            "  vendor              : {}",
-            diagnostic_cell(&detail.vendor)
-        );
-        outln!("  family              : {}", render_decimal(&detail.family));
-        outln!("  model/stepping      : <unavailable>");
-        outln!("  speed MHz           : {}", render_decimal(&detail.mhz));
-        outln!("  feature bits        : <unavailable>");
+        print_fields(&[
+            ("processor number".into(), detail.processor.to_string()),
+            (
+                "vendor".into(),
+                gaps.cell("vendor", &detail.vendor, String::clone),
+            ),
+            (
+                "family".into(),
+                gaps.cell("family", &detail.family, hex_text),
+            ),
+            ("model".into(), "-".into()),
+            ("stepping".into(), "-".into()),
+            (
+                "speed MHz".into(),
+                gaps.cell("speed", &detail.mhz, u64::to_string),
+            ),
+            ("feature bits".into(), "-".into()),
+        ]);
+        gaps.print("  ");
         return;
     }
+    let kprcb = gaps.cell("KPRCB address", &detail.kprcb, address_text);
     outln!(
         "CPU information for processor {} (KPRCB {})",
         detail.processor,
-        diagnostic_addr(&detail.kprcb)
+        kprcb
     );
-    outln!(
-        "  vendor              : {}",
-        diagnostic_cell(&detail.vendor)
-    );
-    outln!(
-        "  vendor id           : {}",
-        render_decimal(&detail.vendor_id)
-    );
-    outln!("  family              : {}", render_decimal(&detail.family));
-    match (&detail.model, &detail.stepping) {
-        (DiagnosticValue::Available(model), DiagnosticValue::Available(stepping)) => outln!(
-            "  model/stepping      : model {:#x} stepping {}",
-            model,
-            stepping
+    // Family, model and stepping in hex, as `vertarget` and the CPUID
+    // signature give them.
+    let mut fields = vec![
+        (
+            "vendor".to_string(),
+            gaps.cell("vendor", &detail.vendor, String::clone),
         ),
-        (DiagnosticValue::Unavailable(error), _) => {
-            outln!("  model/stepping      : <unavailable: {error}>")
-        }
-        (_, DiagnosticValue::Unavailable(error)) => {
-            outln!("  model/stepping      : <unavailable: {error}>")
-        }
+        (
+            "vendor id".to_string(),
+            gaps.cell("vendor id", &detail.vendor_id, hex_text),
+        ),
+        (
+            "family".to_string(),
+            gaps.cell("family", &detail.family, hex_text),
+        ),
+        (
+            "model".to_string(),
+            gaps.cell("model", &detail.model, hex_text),
+        ),
+        (
+            "stepping".to_string(),
+            gaps.cell("stepping", &detail.stepping, hex_text),
+        ),
+        (
+            "speed MHz".to_string(),
+            gaps.cell("speed", &detail.mhz, u64::to_string),
+        ),
+    ];
+    // Each KPRCB feature field (`FeatureBits`) under a label in the
+    // block's words (`feature bits`), its value a flag set in hex.
+    let features: Vec<(String, String)> = detail
+        .feature_bits
+        .iter()
+        .filter_map(|feature| match &feature.value {
+            DiagnosticValue::Available(value) => {
+                Some((field_words(&feature.name), format!("{value:#x}")))
+            }
+            DiagnosticValue::Unavailable(_) => None,
+        })
+        .collect();
+    if features.is_empty() {
+        fields.push(("feature bits".to_string(), "-".to_string()));
     }
-    outln!("  speed MHz           : {}", render_decimal(&detail.mhz));
-    let mut feature_found = false;
-    for feature in &detail.feature_bits {
-        if let DiagnosticValue::Available(value) = &feature.value {
-            feature_found = true;
-            outln!("  {:<19}: {}", feature.name, ui::addr(*value));
-        }
-    }
-    if !feature_found {
-        outln!("  feature bits        : <unavailable>");
-    }
+    fields.extend(features);
+    print_fields(&fields);
+    gaps.print("  ");
     if let Some(fallback) = detail.triage_fallback.as_ref() {
+        outln!();
         print_triage_fallback(fallback);
     }
 }
 
+/// A structure field's name as lowercase words: `FeatureBits` as
+/// `feature bits`.
+fn field_words(name: &str) -> String {
+    let mut words = String::new();
+    for (index, ch) in name.chars().enumerate() {
+        if ch.is_ascii_uppercase() && index > 0 {
+            words.push(' ');
+        }
+        words.push(ch.to_ascii_lowercase());
+    }
+    words
+}
+
 fn print_triage_fallback(detail: &CpuTriageFallback) {
     outln!("CPU information from triage-dump PRCB metadata");
-    outln!("  processor number    : {}", detail.processor_number);
-    outln!("  vendor              : {}", detail.vendor);
-    outln!(
-        "  family              : {} ({:#x})",
-        detail.family,
-        detail.family
-    );
-    outln!("  model/stepping      : <unavailable>");
-    outln!("  speed MHz           : {}", detail.mhz);
-    outln!("  feature bits        : <unavailable>");
+    print_fields(&[
+        (
+            "processor number".into(),
+            detail.processor_number.to_string(),
+        ),
+        ("vendor".into(), detail.vendor.to_string()),
+        ("family".into(), format!("{:#x}", detail.family)),
+        ("model".into(), "-".into()),
+        ("stepping".into(), "-".into()),
+        ("speed MHz".into(), detail.mhz.to_string()),
+        ("feature bits".into(), "-".into()),
+    ]);
 }
 
 fn render_msr_value(target: &Target, value: u64) -> String {
@@ -927,7 +1047,7 @@ fn vcpu(
 
     state.clear_selected_frame();
     state.caches.refresh_symbol_context(&state.ctx.target);
-    outln!("switched to {}\n", ui::thread(&state.ctx.current_thread));
+    outln!("switched to {}", ui::thread(&state.ctx.current_thread));
 
     Ok(())
 }
@@ -1021,23 +1141,32 @@ impl ReplState<'_> {
                 error!("failed to switch processor: {}", error);
             } else {
                 self.caches.refresh_symbol_context(&self.ctx.target);
-                outln!("switched to {}\n", ui::thread(&id));
+                outln!("switched to {}", ui::thread(&id));
             }
             return Ok(Flow::Continue);
         }
 
-        for id in selected {
+        // Several processors' records are told apart by a line naming each,
+        // as `~*k` on a user dump names each thread.
+        let several = selected.len() > 1;
+        for (index, id) in selected.into_iter().enumerate() {
+            if several {
+                if index > 0 {
+                    outln!();
+                }
+                outln!("{}", ui::muted(&ui::thread(&id)));
+            }
             if let Err(error) = self.ctx.set_current_thread(&id) {
-                error!("failed to switch processor {}: {}", id, error);
+                error!("failed to switch to {}: {}", ui::thread(&id), error);
                 continue;
             }
             self.caches.refresh_symbol_context(&self.ctx.target);
             if let Err(error) = self.dispatch_line(if action == 'k' { "k" } else { "r" }) {
-                error!("processor {} command failed: {}", id, error);
+                error!("{} command failed: {}", ui::thread(&id), error);
             }
         }
         if let Err(error) = self.ctx.set_current_thread(&original) {
-            error!("failed to restore processor {}: {}", original, error);
+            error!("failed to restore {}: {}", ui::thread(&original), error);
         } else {
             self.caches.refresh_symbol_context(&self.ctx.target);
         }
@@ -1115,7 +1244,7 @@ impl ReplState<'_> {
                     Ok(()) => {
                         self.caches.refresh_symbol_context(&self.ctx.target);
                         outln!(
-                            "switched to thread {} ({})\n",
+                            "switched to thread {} ({})",
                             thread.index,
                             ui::thread_id(&thread.id)
                         );
@@ -1125,8 +1254,11 @@ impl ReplState<'_> {
             }
             action @ ("k" | "r") => {
                 let original = self.ctx.current_thread.clone();
-                for thread in &selected {
+                for (index, thread) in selected.iter().enumerate() {
                     if selected.len() > 1 {
+                        if index > 0 {
+                            outln!();
+                        }
                         outln!(
                             "{}",
                             ui::muted(&format!("thread {} ({})", thread.index, thread.id))
@@ -1219,7 +1351,9 @@ impl Render for Contexts {
 /// the current thread and `#` the exception's.
 fn print_user_threads(threads: &[UserThreadSummary]) {
     let mut builder = Builder::default();
-    builder.push_record(["", "#", "Id", "Suspend", "Teb", "Symbol", "Name"]);
+    builder.push_record(["", "#", "Id", "Suspend", "TEB", "Symbol", "Name"]);
+    // Threads the dump holds no context for, said once under the table.
+    let mut notes = Vec::new();
     for thread in threads {
         let marker = match (thread.current, thread.exception) {
             (true, _) => ".",
@@ -1229,8 +1363,13 @@ fn print_user_threads(threads: &[UserThreadSummary]) {
         let symbol = match (thread.rip, &thread.symbol, &thread.error) {
             (Some(_), Some(symbol), _) => symbol.clone(),
             (Some(rip), None, _) => format!("{rip:#x}"),
-            (None, _, Some(error)) => ui::muted(&format!("no context: {error}")).to_string(),
-            (None, _, None) => ui::muted("no context").to_string(),
+            (None, _, error) => {
+                notes.push(match error {
+                    Some(error) => format!("thread {} has no context: {error}", thread.index),
+                    None => format!("thread {} has no context", thread.index),
+                });
+                "-".to_string()
+            }
         };
         builder.push_record([
             marker.to_string(),
@@ -1239,10 +1378,13 @@ fn print_user_threads(threads: &[UserThreadSummary]) {
             thread.suspend_count.to_string(),
             ui::addr(thread.teb).to_string(),
             symbol,
-            thread.name.clone().unwrap_or_default(),
+            thread.name.clone().unwrap_or_else(|| "-".to_string()),
         ]);
     }
     print_padded_table(builder);
+    for note in notes {
+        outln!("{}", ui::muted(&note));
+    }
 }
 
 /// The vCPU list: what each vCPU runs, with the lines below a vCPU in the
@@ -1267,8 +1409,9 @@ fn print_vcpus(vcpus: &[VcpuInfo], current: &str) {
         + widest(
             "RIP",
             &mut vcpus.iter().map(|vcpu| match vcpu.rip {
+                Some(0) => 1,
                 Some(_) => 16,
-                None => "unavailable".len(),
+                None => 1,
             }),
         )
         + widest(
@@ -1278,23 +1421,36 @@ fn print_vcpus(vcpus: &[VcpuInfo], current: &str) {
 
     let mut builder = Builder::default();
     builder.push_record(["", "Processor", "RIP", "Context", "Symbol"]);
+    // Processors whose registers could not be read, said under the table.
+    let mut notes = Vec::new();
     for vcpu in vcpus {
         let (rip_cell, symbol_cell) = match vcpu.rip {
+            // A dump that captured no context for a processor records a
+            // zero RIP, which names no place.
+            Some(0) => ("-".to_string(), "-".to_string()),
             Some(rip) => (
                 ui::addr(rip),
                 vcpu.symbol.clone().unwrap_or_else(|| format!("{rip:#x}")),
             ),
-            None => (
-                ui::muted("unavailable"),
-                vcpu.error.clone().unwrap_or_default(),
-            ),
+            None => {
+                notes.push(match &vcpu.error {
+                    Some(error) => format!("{}: {error}", ui::thread(&vcpu.id)),
+                    None => format!("{}: registers unavailable", ui::thread(&vcpu.id)),
+                });
+                ("-".to_string(), "-".to_string())
+            }
+        };
+        let context = if vcpu.context.is_empty() {
+            "-".to_string()
+        } else {
+            vcpu.context.to_string()
         };
         let marker = if vcpu.id == current { "." } else { "" };
         builder.push_record(vec![
             marker.to_string(),
             thread_label(&vcpu.id),
-            rip_cell.to_string(),
-            vcpu.context.to_string(),
+            rip_cell,
+            context,
             symbol_cell,
         ]);
         // Below a vCPU in the hypervisor: where NT left off, and the
@@ -1320,6 +1476,9 @@ fn print_vcpus(vcpus: &[VcpuInfo], current: &str) {
     }
 
     print_padded_table(builder);
+    for note in notes {
+        outln!("{}", ui::muted(&note));
+    }
 }
 
 /// The guest VP a vCPU in the hypervisor serves, as a line below it in `~`:

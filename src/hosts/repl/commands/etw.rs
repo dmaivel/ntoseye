@@ -7,6 +7,7 @@ use owo_colors::OwoColorize;
 use ntoseye_macros::{command, grammar};
 
 use crate::base::error::{Error, Result};
+use crate::base::time::filetime_to_iso_precise;
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::hosts::repl::*;
@@ -15,8 +16,8 @@ use crate::nt::target::etw::dump::{EtwDumpData, EtwDumpLogger};
 use crate::nt::target::etw::{
     EtwBuffer, EtwBufferIssue, EtwClock, EtwEvent, EtwEventDump, EtwHeaderKind, EtwLogFile,
     EtwLogSave, EtwLogger, EtwLoggerBuffers, EtwLoggerRef, EtwLoggerTable, EtwMessageFormat,
-    EtwSession, GuidStyle, event_trace_group_name, extended_type_name, format_filetime_precise,
-    format_guid, logger_mode_names,
+    EtwSession, GuidStyle, event_trace_group_name, extended_type_name, format_guid,
+    logger_mode_names,
 };
 use crate::session::Session;
 
@@ -331,7 +332,7 @@ impl Render for EtwLogSave {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         let file = &self.file;
         outln!(
-            "wrote logger {:#04x} '{}' to '{}': header buffer and {} buffers of {:#x} bytes ({:#x} bytes)\n",
+            "wrote logger {:#04x} '{}' to '{}': header buffer and {} buffers of {:#x} bytes ({:#x} bytes)",
             file.logger.logger_id(),
             logger_name(file.logger.name()),
             self.path,
@@ -471,6 +472,21 @@ fn kernel_buffer(address: VirtAddr) -> String {
     ui::addr(address.0)
 }
 
+/// A flag set as `0x00800002 (A | B)`, or the bare value when no flag has a
+/// name.
+fn flag_set<S: AsRef<str>>(value: u32, names: &[S]) -> String {
+    if names.is_empty() {
+        return format!("{value:#010x}");
+    }
+    let names: Vec<&str> = names.iter().map(AsRef::as_ref).collect();
+    format!("{value:#010x} ({})", names.join(" | "))
+}
+
+/// A clock type as an enum value: `PerfCounter (0x1)`.
+fn clock_text(clock: EtwClock) -> String {
+    format!("{} ({:#x})", clock.name(), clock.raw())
+}
+
 /// A buffer of a minidump's ETW data, by its offset in the block.
 fn dump_buffer(offset: VirtAddr) -> String {
     format!("+{:#x}", offset.0)
@@ -496,8 +512,17 @@ fn print_loggers(table: &EtwLoggerTable) {
     );
     let mut builder = Builder::default();
     builder.push_record([
-        "Id", "Context", "Name", "Mode", "BufSize", "Buffers", "InUse", "Free", "Written", "Lost",
-        "LogFile",
+        "ID",
+        "Context",
+        "Name",
+        "Mode",
+        "Buffer size",
+        "Buffers",
+        "In use",
+        "Free",
+        "Written",
+        "Lost",
+        "Log file",
     ]);
     for logger in &table.loggers {
         builder.push_record([
@@ -505,13 +530,16 @@ fn print_loggers(table: &EtwLoggerTable) {
             ui::addr(logger.address.0),
             logger_name(logger.name.as_deref()).to_string(),
             format!("{:#010x}", logger.logger_mode),
-            format!("{} KB", logger.buffer_size / 1024),
+            format!("{} KiB", logger.buffer_size / 1024),
             logger.number_of_buffers.to_string(),
             logger.buffers_in_use().to_string(),
             logger.buffers_available.to_string(),
             logger.buffers_written.to_string(),
             logger.events_lost.to_string(),
-            logger_name(logger.log_file_name.as_deref()).to_string(),
+            match logger.log_file_name.as_deref() {
+                Some("") => "-".to_string(),
+                name => logger_name(name).to_string(),
+            },
         ]);
     }
     outln!();
@@ -531,7 +559,6 @@ fn print_logger_buffers(detail: &EtwLoggerBuffers) {
     );
     print_issues(detail.list_stop.as_deref(), &[], kernel_buffer);
     if detail.buffers.is_empty() {
-        outln!();
         return;
     }
     print_buffer_table("Buffer", &detail.buffers, kernel_buffer);
@@ -541,24 +568,20 @@ fn print_logger_buffers(detail: &EtwLoggerBuffers) {
 fn print_logger(logger: &EtwLogger) {
     print_logger_title(logger);
     let row =
-        |label: &str, value: String| outln!("  {} {}", ui::muted(&format!("{label:<25}")), value);
-    row("CollectionOn", u8::from(logger.collection_on).to_string());
+        |label: &str, value: String| outln!("  {} : {}", ui::muted(&format!("{label:<24}")), value);
+    row(
+        "CollectionOn",
+        if logger.collection_on { "yes" } else { "no" }.to_string(),
+    );
     row(
         "LoggerMode",
-        format!(
-            "{:#010x} ({})",
-            logger.logger_mode,
-            logger_mode_names(logger.logger_mode).join(" | ")
-        ),
+        flag_set(logger.logger_mode, &logger_mode_names(logger.logger_mode)),
     );
-    row(
-        "Flags",
-        format!("{:#010x} ({})", logger.flags, logger.flag_names.join(" ")),
-    );
+    row("Flags", flag_set(logger.flags, &logger.flag_names));
     row(
         "BufferSize",
         format!(
-            "{} KB ({:#x})",
+            "{} KiB ({:#x})",
             logger.buffer_size / 1024,
             logger.buffer_size
         ),
@@ -585,23 +608,20 @@ fn print_logger(logger: &EtwLogger) {
         logger.real_time_buffers_lost.to_string(),
     );
     row("NumConsumers", logger.consumers.to_string());
-    row(
-        "ClockType",
-        format!("{} ({})", logger.clock.name(), logger.clock.raw()),
-    );
+    row("ClockType", clock_text(logger.clock));
     row(
         "StartTime",
-        format_filetime_precise(logger.start_time)
+        filetime_to_iso_precise(logger.start_time)
             .unwrap_or_else(|| format!("{:#x}", logger.start_time)),
     );
     row("FlushTimer", format!("{} s", logger.flush_timer));
     row("FlushThreshold", logger.flush_threshold.to_string());
     row(
         "MaximumFileSize",
-        format!("{} MB", logger.maximum_file_size),
+        format!("{} MiB", logger.maximum_file_size),
     );
     row("LoggerThread", ui::addr(logger.logger_thread.0));
-    row("LoggerStatus", format!("{:#x}", logger.logger_status));
+    row("LoggerStatus", format!("{:#010x}", logger.logger_status));
     row(
         "InstanceGuid",
         format_guid(&logger.instance_guid, GuidStyle::Braced),
@@ -609,12 +629,11 @@ fn print_logger(logger: &EtwLogger) {
     row(
         "LogFileName",
         match logger.log_file_name.as_deref() {
-            Some("") => ui::muted("(none)"),
+            Some("") => "-".to_string(),
             Some(name) => name.to_string(),
             None => ui::muted(UNREADABLE_NAME),
         },
     );
-    outln!();
 }
 
 /// Each buffer of `buffers`, the first column `where_` headed and filled
@@ -622,7 +641,7 @@ fn print_logger(logger: &EtwLogger) {
 fn print_buffer_table(where_: &str, buffers: &[EtwBuffer], buffer_at: fn(VirtAddr) -> String) {
     let mut builder = Builder::default();
     builder.push_record([
-        where_, "State", "Cpu", "Sequence", "Saved", "Current", "Data", "Refs",
+        where_, "State", "CPU", "Sequence", "Saved", "Current", "Data", "Refs",
     ]);
     for buffer in buffers {
         builder.push_record([
@@ -649,21 +668,21 @@ fn print_dump_loggers(data: &EtwDumpData) {
     );
     let mut builder = Builder::default();
     builder.push_record([
-        "Id",
+        "ID",
         "Name",
         "Mode",
-        "BufSize",
+        "Buffer size",
         "Clock",
         "Buffers",
         "Data",
-        "StartTime",
+        "Start time",
     ]);
     for logger in &data.loggers {
         builder.push_record([
             format!("{:#04x}", logger.logger_id),
             logger.name.clone(),
             format!("{:#010x}", logger.logger_mode),
-            format!("{} KB", logger.buffer_size / 1024),
+            format!("{} KiB", logger.buffer_size / 1024),
             logger.clock.name().to_string(),
             logger.buffers.len().to_string(),
             format!(
@@ -674,7 +693,7 @@ fn print_dump_loggers(data: &EtwDumpData) {
                     .map(|buffer| u64::from(buffer.data_end))
                     .sum::<u64>()
             ),
-            format_filetime_precise(logger.start_time)
+            filetime_to_iso_precise(logger.start_time)
                 .unwrap_or_else(|| format!("{:#x}", logger.start_time)),
         ]);
     }
@@ -685,7 +704,7 @@ fn print_dump_loggers(data: &EtwDumpData) {
 
 fn print_dump_logger_title(logger: &EtwDumpLogger) {
     outln!(
-        "Logger {:#04x} '{}' in the dump's ETW data",
+        "logger {:#04x} '{}' in the dump's ETW data",
         logger.logger_id,
         logger.name
     );
@@ -701,7 +720,6 @@ fn print_dump_buffers(logger: &EtwDumpLogger) {
         logger.buffer_size
     );
     if logger.buffers.is_empty() {
-        outln!();
         return;
     }
     print_buffer_table("Offset", &logger.buffers, dump_buffer);
@@ -712,31 +730,24 @@ fn print_dump_buffers(logger: &EtwDumpLogger) {
 fn print_dump_logger(logger: &EtwDumpLogger) {
     print_dump_logger_title(logger);
     let row =
-        |label: &str, value: String| outln!("  {} {}", ui::muted(&format!("{label:<25}")), value);
+        |label: &str, value: String| outln!("  {} : {}", ui::muted(&format!("{label:<14}")), value);
     row(
         "LoggerMode",
-        format!(
-            "{:#010x} ({})",
-            logger.logger_mode,
-            logger_mode_names(logger.logger_mode).join(" | ")
-        ),
+        flag_set(logger.logger_mode, &logger_mode_names(logger.logger_mode)),
     );
     row(
         "BufferSize",
         format!(
-            "{} KB ({:#x})",
+            "{} KiB ({:#x})",
             logger.buffer_size / 1024,
             logger.buffer_size
         ),
     );
     row("Buffers", logger.buffers.len().to_string());
-    row(
-        "ClockType",
-        format!("{} ({})", logger.clock.name(), logger.clock.raw()),
-    );
+    row("ClockType", clock_text(logger.clock));
     row(
         "StartTime",
-        format_filetime_precise(logger.start_time)
+        filetime_to_iso_precise(logger.start_time)
             .unwrap_or_else(|| format!("{:#x}", logger.start_time)),
     );
     outln!(
@@ -746,7 +757,6 @@ fn print_dump_logger(logger: &EtwDumpLogger) {
              are in a full or kernel dump"
         )
     );
-    outln!();
 }
 
 /// `!wmitrace.logdump`'s events after the logger's title: how many, in how
@@ -784,15 +794,14 @@ fn print_events(dump: &EtwEventDump) {
     if let Some(note) = &dump.message_format_note {
         outln!("  {}", ui::muted(note));
     }
-    outln!();
 }
 
 fn print_logger_title(logger: &EtwLogger) {
     outln!(
-        "Logger {:#04x} @ {} '{}'",
+        "logger {:#04x} '{}'  context {}",
         logger.logger_id,
-        ui::addr(logger.address.0),
-        logger_name(logger.name.as_deref())
+        logger_name(logger.name.as_deref()),
+        ui::addr(logger.address.0)
     );
 }
 
@@ -824,7 +833,7 @@ fn print_event(event: &EtwEvent) {
         _ => "----.----".to_string(),
     };
     let time = match (
-        event.system_time.and_then(format_filetime_precise),
+        event.system_time.and_then(filetime_to_iso_precise),
         record.timestamp,
     ) {
         (Some(time), _) => time,

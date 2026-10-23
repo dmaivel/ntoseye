@@ -222,7 +222,7 @@ fn list(
     let type_info = match state.lookup_type(type_name) {
         Some(type_info) => type_info,
         None => {
-            error!("!list: type `{}` not found", type_name);
+            error!("!list: type '{}' not found", type_name);
             return Ok(Flow::Continue);
         }
     };
@@ -305,7 +305,7 @@ fn parse_depth_option(arg: &str, prefix: &str, bare: usize) -> std::result::Resu
     }
     let value = suffix
         .parse::<usize>()
-        .map_err(|_| format!("invalid {} depth `{}`", prefix, suffix))?;
+        .map_err(|_| format!("invalid {} depth '{}'", prefix, suffix))?;
     Ok(value.min(MAX_RECURSION_DEPTH))
 }
 
@@ -316,7 +316,7 @@ fn parse_array_option(arg: &str) -> std::result::Result<usize, String> {
     }
     let value = suffix
         .parse::<usize>()
-        .map_err(|_| format!("invalid -a count `{}`", suffix))?;
+        .map_err(|_| format!("invalid -a count '{}'", suffix))?;
     Ok(value.min(MAX_ARRAY_ELEMENTS))
 }
 
@@ -491,7 +491,7 @@ impl DtField {
 
 fn print_dt(dump: &DtDump) {
     outln!(
-        "{} ({} bytes){}",
+        "{} ({:#x} bytes){}",
         dump.type_name,
         dump.size,
         dump.address
@@ -501,7 +501,6 @@ fn print_dt(dump: &DtDump) {
     match &dump.body {
         DtBody::Fields(entries) => {
             print_dt_entries(entries, 2);
-            outln!();
         }
         DtBody::List { records, stop } => {
             for (record, entries) in records {
@@ -534,10 +533,15 @@ fn print_dt_entries(entries: &[DtEntry], indent: usize) {
 
 fn print_enum(name: &str, variants: &[(String, i64)]) {
     outln!("enum {} ({} values)", name, variants.len());
+    // The values in one right-aligned column, as `dt` lists an enum's.
+    let width = variants
+        .iter()
+        .map(|(_, value)| format!("{value:#x}").len())
+        .max()
+        .unwrap_or(0);
     for (name, value) in variants {
-        outln!("  {:#x}  {}", value, name);
+        outln!("  {:>width$}  {}", format!("{value:#x}"), name);
     }
-    outln!();
 }
 
 impl ReplState<'_> {
@@ -591,10 +595,9 @@ impl ReplState<'_> {
                             depth.saturating_sub(1),
                         );
                     } else {
-                        entry.children.push(DtEntry::Note(format!(
-                            "<unavailable: type {} not found>",
-                            type_name
-                        )));
+                        entry
+                            .children
+                            .push(DtEntry::Note(format!("type '{}' not found", type_name)));
                     }
                 }
             }
@@ -711,7 +714,7 @@ impl ReplState<'_> {
                 find_field(current_type.as_deref().unwrap_or(root), requested_name)
                     .map(|(name, info)| (name.to_string(), info.clone()))
             else {
-                return Err(format!("field `{requested_name}` not found"));
+                return Err(format!("field '{requested_name}' not found"));
             };
             let next_type_name = nested_layout_name(&info.type_data);
             components.push(PathComponent { name, info });
@@ -725,7 +728,7 @@ impl ReplState<'_> {
                     .lookup_type(&next_type_name)
                     .or_else(|| abi_layout(&next_type_name).map(Arc::new));
                 let Some(next_type) = next_type else {
-                    return Err(format!("nested type `{next_type_name}` not found"));
+                    return Err(format!("nested type '{next_type_name}' not found"));
                 };
                 current_type = Some(next_type);
             }
@@ -759,7 +762,7 @@ impl ReplState<'_> {
                     self.type_view().field_size(&component.info),
                 )?;
                 if pointer == 0 {
-                    return Err(format!("field `{}` points to null", component.name));
+                    return Err(format!("field '{}' points to null", component.name));
                 }
                 current = VirtAddr(pointer);
                 offset = 0;
@@ -867,10 +870,7 @@ impl ReplState<'_> {
                     let name = unqualified_type_name(&parsed.type_name);
                     print_enum(name, &variants);
                 } else {
-                    error!(
-                        "failed to get type information: type `{}` not found",
-                        parsed.type_name
-                    );
+                    error!("type '{}' not found", parsed.type_name);
                 }
                 return Ok(());
             }

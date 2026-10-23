@@ -40,6 +40,11 @@ pub struct Listing<'a> {
     /// Jumps drawn side by side in the gutter; the ones past it name their
     /// target instead.
     pub lanes: usize,
+    /// Whether the first row names its symbol even when every row stays in
+    /// it: a listing with no heading of its own (`u`, `ub`, `#`) names where
+    /// it is, one under a heading that names the function (`uf`, the stop)
+    /// does not repeat it.
+    pub named: bool,
 }
 
 /// The lines of a listing: a gutter with the jumps between its rows drawn
@@ -166,7 +171,8 @@ pub fn listing_lines(
                 }
         })
         .collect();
-    let labeled = |index: usize| crosses[index] || (index == 0 && crosses.contains(&true));
+    let labeled =
+        |index: usize| crosses[index] || (index == 0 && (listing.named || crosses.contains(&true)));
     let offset_width = offsets.iter().map(String::len).max().unwrap_or(0);
     let hex_width = if listing.bytes {
         rows.iter().map(|row| row.hex.len()).max().unwrap_or(0)

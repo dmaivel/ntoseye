@@ -16,9 +16,9 @@ use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::target::irpfind::{IrpCriteria, IrpCriteriaKind, IrpFindDetail, IrpPool};
 use crate::nt::target::object::{
-    DeviceObjectDetail, DriverObjectDetail, DriverObjectInfo, IrpHit, IrpInfo, IrpSource,
-    NotifyCallback, ObjectDetail, ObjectName, SL_INVOKE_ON_CANCEL, SL_INVOKE_ON_ERROR,
-    SL_INVOKE_ON_SUCCESS, SL_PENDING_RETURNED, SsdtTable,
+    DeviceObjectDetail, DriverObjectDetail, DriverObjectInfo, IrpHit, IrpInfo, NotifyCallback,
+    ObjectDetail, ObjectName, SL_INVOKE_ON_CANCEL, SL_INVOKE_ON_ERROR, SL_INVOKE_ON_SUCCESS,
+    SL_PENDING_RETURNED, SsdtTable,
 };
 use crate::nt::target::{Target, irp_major_function_name, irp_minor_function_name};
 use crate::session::Session;
@@ -30,6 +30,24 @@ fn kernel_symbol(target: &Target, address: VirtAddr) -> String {
         .format_code_address(target.kernel_dtb(), address)
         .map(|symbol| ui::symbol(&symbol))
         .unwrap_or_else(|| ui::addr(address.0))
+}
+
+/// An address, or `-` for a null pointer.
+fn addr_or_dash(address: VirtAddr) -> String {
+    if address.is_zero() {
+        "-".to_string()
+    } else {
+        ui::addr(address.0)
+    }
+}
+
+/// A kernel address as its nearest symbol, or `-` for a null pointer.
+fn kernel_symbol_or_dash(target: &Target, address: VirtAddr) -> String {
+    if address.is_zero() {
+        "-".to_string()
+    } else {
+        kernel_symbol(target, address)
+    }
 }
 
 /// List the driver objects in the \Driver object directory.
@@ -54,17 +72,18 @@ fn drivers(
 /// starts with it.
 impl Render<Option<String>> for Vec<DriverObjectInfo> {
     fn render(&self, repl: &mut ReplState<'_>, filter: Option<String>) {
-        let filter = filter.map(|filter| filter.to_lowercase());
+        let pattern = filter;
+        let filter = pattern.as_ref().map(|filter| filter.to_lowercase());
         let target = &repl.ctx.target;
         let mut builder = Builder::default();
-        builder.push_record(vec![
-            "DriverObject".to_string(),
-            "Name".to_string(),
-            "DriverStart".to_string(),
-            "Size".to_string(),
-            "Module".to_string(),
-            "DeviceObject".to_string(),
-            "DriverUnload".to_string(),
+        builder.push_record([
+            "Driver object",
+            "Name",
+            "Driver start",
+            "Size",
+            "Module",
+            "Device object",
+            "Driver unload",
         ]);
 
         let mut count = 0;
@@ -87,13 +106,18 @@ impl Render<Option<String>> for Vec<DriverObjectInfo> {
                 ui::addr(driver.driver_start.0).to_string(),
                 format!("0x{:x}", driver.driver_size),
                 module.to_string(),
-                ui::addr(driver.device_object.0).to_string(),
-                ui::addr(driver.driver_unload.0),
+                addr_or_dash(driver.device_object),
+                addr_or_dash(driver.driver_unload),
             ]);
         }
 
         if count == 0 {
-            outln!("{}\n", "no matching drivers".bright_black());
+            match pattern {
+                Some(pattern) => {
+                    outln!("{}", ui::muted(&format!("no drivers matching '{pattern}'")))
+                }
+                None => outln!("{}", ui::muted("no drivers")),
+            }
         } else {
             print_padded_table(builder);
         }
@@ -133,7 +157,9 @@ fn driver_argument(
         })
         .map(|driver| driver.object)
         .ok_or_else(|| {
-            ArgError::Message(format!("unknown driver object expression or name: {text}"))
+            ArgError::Message(format!(
+                "driver '{text}' not found, and it is not an address expression"
+            ))
         })
 }
 
@@ -161,39 +187,47 @@ impl Render for DriverObjectDetail {
         } else {
             "direct"
         };
-        outln!("driver object {} ({})", ui::addr(self.object.0), mode);
-        if let Some(name) = &self.name {
-            outln!("  name          : {}", name);
-        }
-        outln!("  driver start  : {}", ui::addr(self.driver_start.0));
-        outln!("  driver size   : {:#x}", self.driver_size);
-        outln!("  driver section: {}", ui::addr(self.driver_section.0));
+        outln!("DRIVER_OBJECT {} ({})", ui::addr(self.object.0), mode);
+        outln!("  DriverName    : {}", self.name.as_deref().unwrap_or("-"));
+        outln!("  DriverStart   : {}", addr_or_dash(self.driver_start));
+        outln!("  DriverSize    : {:#x}", self.driver_size);
+        outln!("  DriverSection : {}", addr_or_dash(self.driver_section));
         outln!(
-            "  driver unload : {}",
-            kernel_symbol(target, self.driver_unload)
+            "  DriverUnload  : {}",
+            kernel_symbol_or_dash(target, self.driver_unload)
         );
 
-        outln!("  devices:");
+        print_section("devices");
         if self.devices.is_empty() {
-            outln!("    {}", "(none)".bright_black());
+            outln!("  {}", ui::muted("no device objects"));
+            print_section("dispatch table");
         } else {
+            let mut builder = Builder::default();
+            builder.push_record([
+                "Device",
+                "Type",
+                "Flags",
+                "Characteristics",
+                "Attached device",
+                "Next device",
+            ]);
             for d in &self.devices {
-                outln!(
-                    "    {} type={:#x} flags={:#x} characteristics={:#x} attached={} next={}",
+                builder.push_record([
                     ui::addr(d.device.0),
-                    d.device_type,
-                    d.flags,
-                    d.characteristics,
-                    ui::addr(d.attached.0),
-                    ui::addr(d.next.0)
-                );
+                    format!("{:#x}", d.device_type),
+                    format!("{:#x}", d.flags),
+                    format!("{:#x}", d.characteristics),
+                    addr_or_dash(d.attached),
+                    addr_or_dash(d.next),
+                ]);
             }
+            print_padded_table(builder);
+            // The table already ends with the blank line that separates sections.
+            outln!("{}", ui::label("dispatch table"));
         }
-
-        outln!("  dispatch table:");
         for routine in &self.dispatch {
             outln!(
-                "    IRP_MJ_{:<28} {}",
+                "  IRP_MJ_{:<28} {}",
                 irp_major_function_name(routine.index as u8),
                 routine
                     .symbol
@@ -202,7 +236,6 @@ impl Render for DriverObjectDetail {
                     .unwrap_or_else(|| ui::addr(routine.routine.0))
             );
         }
-        outln!();
     }
 }
 
@@ -224,33 +257,34 @@ fn devobj(
 
 impl Render for DeviceObjectDetail {
     fn render(&self, repl: &mut ReplState<'_>, (): ()) {
-        outln!("device object {}", ui::addr(self.object.0));
-        outln!("    type            : {:#x}", self.device_type);
-        outln!("    flags           : {:#x}", self.flags);
-        outln!("    characteristics : {:#x}", self.characteristics);
-        outln!("    driver object   : {}", ui::addr(self.driver_object.0));
-        outln!("    attached device : {}", ui::addr(self.attached_device.0));
-        outln!("    next device     : {}", ui::addr(self.next_device.0));
-        outln!("    current irp     : {}", ui::addr(self.current_irp.0));
+        outln!("DEVICE_OBJECT {}", ui::addr(self.object.0));
+        outln!("  DeviceType      : {:#x}", self.device_type);
+        outln!("  Flags           : {:#x}", self.flags);
+        outln!("  Characteristics : {:#x}", self.characteristics);
+        outln!("  DriverObject    : {}", addr_or_dash(self.driver_object));
+        outln!("  AttachedDevice  : {}", addr_or_dash(self.attached_device));
+        outln!("  NextDevice      : {}", addr_or_dash(self.next_device));
+        outln!("  CurrentIrp      : {}", addr_or_dash(self.current_irp));
         outln!(
-            "    device extension: {}",
-            ui::addr(self.device_extension.0)
+            "  DeviceExtension : {}",
+            addr_or_dash(self.device_extension)
         );
 
         if !self.attached_stack.is_empty() {
-            outln!("attached stack:");
+            print_section("attached stack");
+            let mut builder = Builder::default();
+            builder.push_record(["#", "Device", "Driver object", "Type", "Flags"]);
             for (i, e) in self.attached_stack.iter().enumerate() {
-                outln!(
-                    "  #{} {} driver={} type={:#x} flags={:#x}",
-                    i + 1,
+                builder.push_record([
+                    format!("{:02}", i + 1),
                     ui::addr(e.device.0),
-                    kernel_symbol(&repl.ctx.target, e.driver_object),
-                    e.device_type,
-                    e.flags
-                );
+                    kernel_symbol_or_dash(&repl.ctx.target, e.driver_object),
+                    format!("{:#x}", e.device_type),
+                    format!("{:#x}", e.flags),
+                ]);
             }
+            print_padded_table(builder);
         }
-        outln!();
     }
 }
 
@@ -396,7 +430,10 @@ impl Render<Option<String>> for IrpInfo {
                 kernel_symbol(target, ios.completion_routine)
             };
             if !driver.is_empty() || !routine.is_empty() {
-                outln!("               {driver}  {routine}");
+                outln!(
+                    "{}",
+                    format!("               {driver}  {routine}").trim_end()
+                );
             }
             let [a1, a2, a3, a4] = ios.arguments;
             outln!("                        Args: {a1:08x} {a2:08x} {a3:08x} {a4:08x}");
@@ -410,7 +447,6 @@ impl Render<Option<String>> for IrpInfo {
                 ))
             );
         }
-        outln!();
     }
 }
 
@@ -420,7 +456,7 @@ fn print_irp_detail(irp: &IrpInfo) {
     outln!(
         "IoStatus.Status = {}",
         irp.io_status
-            .map_or_else(|| "?".to_string(), |status| format!("{status:08x}"))
+            .map_or_else(|| "-".to_string(), |status| format!("{status:08x}"))
     );
     outln!(
         "RequestorMode = {}",
@@ -465,45 +501,49 @@ impl Render<Option<String>> for Vec<IrpHit> {
     fn render(&self, _: &mut ReplState<'_>, filter: Option<String>) {
         if self.is_empty() {
             match filter {
-                Some(f) => outln!("  {}", format!("no IRPs found for '{}'", f).bright_black()),
-                None => outln!("  {}", "no IRPs found".bright_black()),
+                Some(f) => outln!("{}", ui::muted(&format!("no IRPs matching '{f}'"))),
+                None => outln!("{}", ui::muted("no IRPs")),
             }
-            outln!();
             return;
         }
 
-        outln!("  {:<16} {:<7} Details", "IRP", "Source");
+        let dash = || "-".to_string();
+        // Enum values read `Name (0xN)`, as every command shows them.
+        let named = |name: Option<&str>, value: Option<u8>| match (name, value) {
+            (Some(name), Some(value)) => format!("{name} ({value:#x})"),
+            (None, Some(value)) => format!("{value:#x}"),
+            (_, None) => "-".to_string(),
+        };
+        let mut builder = Builder::default();
+        builder.push_record([
+            "IRP",
+            "Source",
+            "Stack count",
+            "Current",
+            "PID",
+            "TID",
+            "ETHREAD",
+            "State",
+            "Wait reason",
+            "Device",
+            "Driver",
+        ]);
         for h in self {
-            let details = if h.source == IrpSource::Thread {
-                format!(
-                    "pid={} tid={} ethread={} state={} wait={}",
-                    h.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
-                    h.tid.map(|t| t.to_string()).unwrap_or_else(|| "?".into()),
-                    h.ethread
-                        .map(|e| ui::addr(e.0))
-                        .unwrap_or_else(|| "?".into()),
-                    h.state_name().unwrap_or("?"),
-                    h.wait_reason_name().unwrap_or("?"),
-                )
-            } else {
-                format!(
-                    "driver={} device={}",
-                    h.driver.as_deref().unwrap_or("?"),
-                    h.device
-                        .map(|d| ui::addr(d.0))
-                        .unwrap_or_else(|| "?".into()),
-                )
-            };
-            outln!(
-                "  {} {:<7} stack={:<2} current={:<2} {}",
+            builder.push_record([
                 ui::addr(h.irp.0),
                 h.source.to_string(),
-                h.stack_count,
-                h.current_location,
-                details
-            );
+                h.stack_count.to_string(),
+                h.current_location.to_string(),
+                h.pid.map(|p| p.to_string()).unwrap_or_else(dash),
+                h.tid.map(|t| t.to_string()).unwrap_or_else(dash),
+                h.ethread.map(|e| ui::addr(e.0)).unwrap_or_else(dash),
+                named(h.state_name(), h.state),
+                named(h.wait_reason_name(), h.wait_reason),
+                h.device.map(|d| ui::addr(d.0)).unwrap_or_else(dash),
+                h.driver.clone().unwrap_or_else(dash),
+            ]);
         }
-        outln!();
+        print_padded_table(builder);
     }
 }
 
@@ -621,11 +661,22 @@ impl Render<bool> for IrpFindDetail {
             );
         }
         outln!();
+        // The driver names vary in length; pad that column to the longest
+        // so the MDL process and major function line up under their headers.
+        let driver_width = detail
+            .irps
+            .iter()
+            .map(|entry| entry.driver.as_deref().unwrap_or("-").len() + 2)
+            .max()
+            .unwrap_or(0)
+            .max("[Driver]".len());
         outln!(
-            "{:<16} [ {:<16} ] irpStack: (Mj,Mn)  {:<16} [Driver]  MDL Process",
+            "{:<16} [{:<16}] irpStack: (Mj,Mn)  {:<16} {:<driver_width$}  {:<16}  Major function",
             "Irp",
             "Thread",
-            "DevObj"
+            "DevObj",
+            "[Driver]",
+            "MDL Process"
         );
         for entry in &detail.irps {
             let irp = &entry.irp;
@@ -637,16 +688,15 @@ impl Render<bool> for IrpFindDetail {
                     irp.stack_count
                 );
             } else if let Some(stack) = irp.current_stack() {
+                let driver = format!("[{}]", entry.driver.as_deref().unwrap_or("-"));
                 outln!(
-                    "{head} irpStack: ({:>2x},{:>2x})  {} [{}]  {}  IRP_MJ_{}",
+                    "{head} irpStack: ({:>2x},{:>2x})  {} {driver:<driver_width$}  {:<16}  IRP_MJ_{}",
                     stack.major_function,
                     stack.minor_function,
                     ui::addr(stack.device_object.0),
-                    entry.driver.as_deref().unwrap_or("?"),
                     entry
                         .mdl_process
-                        .map(|process| ui::addr(process.0).to_string())
-                        .unwrap_or_default(),
+                        .map_or_else(|| "-".to_string(), addr_or_dash),
                     irp_major_function_name(stack.major_function)
                 );
             } else {
@@ -676,33 +726,35 @@ impl Render<bool> for IrpFindDetail {
                 outln!(
                     "    IoStatus {}  PendingReturned {}  UserEvent {}  UserBuffer {}  MdlAddress {}",
                     irp.io_status
-                        .map(|status| format!("{status:#x}"))
-                        .unwrap_or_else(|| "?".to_string()),
+                        .map(|status| format!("{status:#010x}"))
+                        .unwrap_or_else(|| "-".to_string()),
                     if irp.pending_returned { "yes" } else { "no" },
-                    ui::addr(irp.user_event.0),
-                    ui::addr(irp.user_buffer.0),
-                    ui::addr(irp.mdl_address.0)
+                    addr_or_dash(irp.user_event),
+                    addr_or_dash(irp.user_buffer),
+                    addr_or_dash(irp.mdl_address)
                 );
                 if let Some(stack) = irp.current_stack().filter(|_| !entry.completed()) {
                     outln!(
                         "    stack location {}  FileObject {}  CompletionRoutine {}  Context {}",
                         ui::addr(stack.address.0),
-                        ui::addr(stack.file_object.0),
-                        kernel_symbol(&repl.ctx.target, stack.completion_routine),
-                        ui::addr(stack.context.0)
+                        addr_or_dash(stack.file_object),
+                        kernel_symbol_or_dash(&repl.ctx.target, stack.completion_routine),
+                        addr_or_dash(stack.context)
                     );
                 }
                 outln!(
                     "    OriginalFileObject {}",
-                    ui::addr(entry.original_file_object.0)
+                    addr_or_dash(entry.original_file_object)
                 );
             }
         }
         outln!();
+        let irps = detail.irps.len();
+        let pages = detail.scanned_pages;
         outln!(
-            "{} IRP(s) in {} mapped page(s); big pool: {}",
-            detail.irps.len(),
-            detail.scanned_pages,
+            "{irps} IRP{} in {pages} mapped page{}; big pool: {}",
+            if irps == 1 { "" } else { "s" },
+            if pages == 1 { "" } else { "s" },
             detail.big_pool_status
         );
         if let Some(restart) = detail.restart {
@@ -724,7 +776,6 @@ impl Render<bool> for IrpFindDetail {
         } else if detail.truncated {
             outln!("stopped after 4096 IRPs; big-pool IRPs past the bound are not listed");
         }
-        outln!();
     }
 }
 
@@ -767,44 +818,42 @@ impl Render for ObjectDetail {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         let o = &self.header;
         outln!("object {}", ui::addr(o.body.0));
-        outln!("  input         : {} ({})", ui::addr(o.input.0), o.mode);
-        outln!("  header        : {}", ui::addr(o.header.0));
-        outln!("  pointer count : {}", o.pointer_count);
-        outln!("  handle count  : {}", o.handle_count);
+        outln!("  input          {} ({})", ui::addr(o.input.0), o.mode);
+        outln!("  header         {}", ui::addr(o.header.0));
+        outln!("  pointer count  {}", o.pointer_count);
+        outln!("  handle count   {}", o.handle_count);
         if let Some(ti) = o.type_index {
-            outln!("  type index    : {:#x}", ti);
+            outln!("  type index     {:#x}", ti);
         }
         if let Some(to) = o.type_object {
-            outln!("  type object   : {}", ui::addr(to.0));
+            outln!("  type object    {}", ui::addr(to.0));
         }
         if let Some(tn) = &o.type_name {
-            outln!("  type name     : {}", tn);
+            outln!("  type name      {}", tn);
         }
         if let Some(mask) = o.info_mask {
-            outln!("  info mask     : {:#x}", mask);
+            outln!("  info mask      {:#x}", mask);
         }
         if let Some(ni) = o.name_info {
-            outln!("  name info     : {}", ui::addr(ni.0));
+            outln!("  name info      {}", ui::addr(ni.0));
         }
         if let Some(name) = &o.name {
-            outln!("  name          : {}", name);
+            outln!("  name           {}", name);
         }
         if let Some(entries) = &self.entries {
-            outln!("  entries       : {}", entries.len());
+            outln!("  entries        {}", entries.len());
             let mut builder = Builder::default();
             builder.push_record(["Object", "Type", "Name"]);
             for entry in entries {
                 builder.push_record([
                     ui::addr(entry.object.0).to_string(),
-                    entry.type_name.clone().unwrap_or_else(|| "?".to_string()),
+                    entry.type_name.clone().unwrap_or_else(|| "-".to_string()),
                     entry.name.clone(),
                 ]);
             }
             outln!();
             print_padded_table(builder);
-            return;
         }
-        outln!();
     }
 }
 
@@ -829,6 +878,7 @@ impl Render<Option<String>> for Vec<NotifyCallback> {
         let lowered = filter.as_ref().map(|filter| filter.to_lowercase());
         let mut printed = 0;
         let mut last_kind = None;
+        let mut builder: Option<Builder> = None;
         for c in self {
             let target = c
                 .symbol
@@ -840,27 +890,42 @@ impl Render<Option<String>> for Vec<NotifyCallback> {
                 continue;
             }
             if last_kind != Some(c.kind) {
-                outln!("{} callbacks:", c.kind);
+                if let Some(table) = builder.take() {
+                    print_padded_table(table);
+                }
+                outln!("{}", ui::label(&format!("{} callbacks", c.kind)));
+                let mut table = Builder::default();
+                table.push_record(["#", "Function", "Block", "Raw", "Context"]);
+                builder = Some(table);
                 last_kind = Some(c.kind);
             }
-            outln!(
-                "  [{:02}] fn={}  block={}  raw={}  ctx={}",
-                c.index,
-                ui::symbol(&target),
-                ui::addr(c.block.0),
-                ui::addr(c.raw.0),
-                ui::addr(c.context.0)
-            );
+            if let Some(table) = builder.as_mut() {
+                table.push_record([
+                    format!("{:02}", c.index),
+                    c.symbol
+                        .as_deref()
+                        .map(ui::symbol)
+                        .unwrap_or_else(|| ui::addr(c.function.0)),
+                    ui::addr(c.block.0),
+                    ui::addr(c.raw.0),
+                    // For these notify routines the block's context holds
+                    // the registration's flags (Ex, Ex2), a small value
+                    // rather than a pointer.
+                    format!("{:#x}", c.context.0),
+                ]);
+            }
             printed += 1;
+        }
+        if let Some(table) = builder {
+            print_padded_table(table);
         }
 
         if printed == 0 {
             match filter {
-                Some(f) => outln!("no callbacks matching '{}'", f),
-                None => outln!("no registered callbacks found"),
+                Some(f) => outln!("{}", ui::muted(&format!("no callbacks matching '{f}'"))),
+                None => outln!("{}", ui::muted("no callbacks")),
             }
         }
-        outln!();
     }
 }
 
@@ -882,7 +947,12 @@ impl Render for Vec<SsdtTable> {
             if i > 0 {
                 outln!();
             }
-            outln!("{}: base={} limit={}", t.label, ui::addr(t.base.0), t.limit);
+            outln!(
+                "{}  base {}  limit {}",
+                t.label,
+                ui::addr(t.base.0),
+                t.limit
+            );
             let expected = if t.label.contains("win32k") {
                 "win32k"
             } else {
@@ -909,9 +979,11 @@ impl Render for Vec<SsdtTable> {
                 outln!("  [{:4}] {}{}", e.index, display, mark);
             }
             if hooks > 0 {
-                outln!("  {} hook(s) detected", hooks);
+                outln!(
+                    "  {hooks} hook{} detected",
+                    if hooks == 1 { "" } else { "s" }
+                );
             }
         }
-        outln!();
     }
 }

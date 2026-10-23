@@ -241,7 +241,7 @@ impl Session {
             Family::X86 => {}
             Family::Arm => {
                 return Err(Error::DebugInfo(
-                    "!apic reads an x86 local APIC; an ARM64 target has a GIC".into(),
+                    "an ARM64 target has a GIC, not an x86 local APIC".into(),
                 ));
             }
         }
@@ -254,7 +254,7 @@ impl Session {
             .read_msr(processor, IA32_APIC_BASE)
             .map_err(|error| match error {
                 Error::NotSupported => Error::DebugInfo(
-                    "!apic reads the local APIC through MSRs, which this backend cannot read; \
+                    "the local APIC is read through MSRs, which this backend cannot read; \
                  attach over KD (kd or kdnet)"
                         .into(),
                 ),

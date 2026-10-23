@@ -310,14 +310,14 @@ impl Render for EventPolicy {
                     .map(|action| format!(", final {}", action.label()))
                     .unwrap_or_default();
                 outln!(
-                    "{} {:#010x}{alias}: {}{final_label}\n",
+                    "{} {:#010x}{alias}: {}{final_label}",
                     policy.mode.command(),
                     policy.code,
                     policy.mode.label()
                 );
             }
             EventPolicy::Module(policy) => outln!(
-                "{} {}: {}\n",
+                "{} {}: {}",
                 policy.mode.command(),
                 policy.event_name(),
                 module_event_label(policy.mode)
@@ -423,11 +423,14 @@ fn event_policies(session: &Session) -> Result<EventPolicies> {
 impl Render for EventPolicies {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         if self.exceptions.is_empty() && self.module_events.is_empty() {
-            outln!("No exception policies configured (ordinary exceptions break by default).\n");
+            outln!(
+                "{}",
+                ui::muted("no exception policies configured; ordinary exceptions break by default")
+            );
             return;
         }
         if !self.module_events.is_empty() {
-            outln!("Module load and unload filters:");
+            outln!("module load and unload filters:");
             for policy in &self.module_events {
                 let command = policy
                     .command
@@ -442,11 +445,11 @@ impl Render for EventPolicies {
                 );
             }
             if self.exceptions.is_empty() {
-                outln!();
                 return;
             }
+            outln!();
         }
-        outln!("Exception policies:");
+        outln!("exception policies:");
         for policy in &self.exceptions {
             let alias = policy
                 .alias()
@@ -468,7 +471,6 @@ impl Render for EventPolicies {
                 policy.mode.command()
             );
         }
-        outln!();
     }
 }
 
@@ -499,7 +501,7 @@ fn reset(session: &mut Session) -> Result<()> {
 impl Render for PoliciesReset {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         outln!(
-            "Exception policies reset; ordinary exceptions break by default and module loads and unloads do not stop.\n"
+            "exception policies reset; ordinary exceptions break by default and module loads and unloads do not stop"
         );
     }
 }
@@ -553,7 +555,7 @@ impl Render for LastEventReport {
         };
         let last = match self {
             LastEventReport::None => {
-                outln!("No target event has been observed.\n");
+                outln!("{}", ui::muted("no target event has been observed"));
                 return;
             }
             LastEventReport::Minidump {
@@ -561,36 +563,36 @@ impl Render for LastEventReport {
                 address,
                 thread,
             } => {
-                outln!("Last event (the minidump's exception record):");
-                outln!("  code:        {code:#010x}{}", alias(*code));
-                outln!("  chance:      unavailable");
-                outln!("  address:     {}", ui::addr(*address));
-                outln!("  thread:      {thread}\n");
+                outln!("last event (the minidump's exception record)");
+                outln!("  code         {code:#010x}{}", alias(*code));
+                outln!("  chance       -");
+                outln!("  address      {}", ui::addr(*address));
+                outln!("  thread       {thread}");
                 return;
             }
             LastEventReport::Event(last) => last,
         };
         let stop = &last.stop;
-        outln!("Last event:");
+        outln!("last event");
         match stop.exception_code {
-            Some(code) => outln!("  code:        {code:#010x}{}", alias(code)),
-            None => outln!("  code:        unavailable"),
+            Some(code) => outln!("  code         {code:#010x}{}", alias(code)),
+            None => outln!("  code         -"),
         }
         let chance = match stop.first_chance {
             Some(true) => "first chance",
             Some(false) => "second chance",
-            None => "unavailable",
+            None => "-",
         };
-        outln!("  chance:      {chance}");
+        outln!("  chance       {chance}");
         match stop.exception_address.or(stop.program_counter) {
-            Some(address) => outln!("  address:     {}", ui::addr(address)),
-            None => outln!("  address:     unavailable"),
+            Some(address) => outln!("  address      {}", ui::addr(address)),
+            None => outln!("  address      -"),
         }
         let disposition = last
             .disposition
             .map(ContinueDisposition::label)
             .unwrap_or("not yet continued");
-        outln!("  disposition: {disposition}\n");
+        outln!("  disposition  {disposition}");
     }
 }
 

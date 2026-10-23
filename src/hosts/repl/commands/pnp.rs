@@ -64,7 +64,11 @@ fn compact_devnode_line(node: &DevNodeSummary) -> String {
         ui::addr(node.address.0),
         ui::addr(node.pdo.0),
         node.instance_path,
-        node.service_name,
+        if node.service_name.is_empty() {
+            "-"
+        } else {
+            node.service_name.as_str()
+        },
         node.state_name
     );
     if node.problem != 0 {
@@ -180,27 +184,27 @@ fn print_device_stack(stack: &DeviceStackDetail) {
 }
 
 fn print_pnp_triage(triage: &PnpTriageDetail) {
-    outln!("Problem devnodes:");
+    print_section("problem devnodes");
     if triage.problems.is_empty() {
-        outln!("  none");
+        outln!("  {}", ui::muted("no devnodes with a problem"));
     } else {
         for node in &triage.problems {
             outln!("  {}", compact_devnode_line(node));
         }
     }
 
-    outln!("Devnodes not started:");
+    print_section("devnodes not started");
     if triage.not_started.is_empty() {
-        outln!("  none");
+        outln!("  {}", ui::muted("every devnode is started"));
     } else {
         for node in &triage.not_started {
             outln!("  {}", compact_devnode_line(node));
         }
     }
 
-    outln!("Devnodes with pending PnP IRPs:");
+    print_section("devnodes with pending PnP IRPs");
     if triage.pending_irps.is_empty() {
-        outln!("  none");
+        outln!("  {}", ui::muted("no devnodes with a pending PnP IRP"));
     } else {
         for node in &triage.pending_irps {
             outln!(
@@ -211,9 +215,11 @@ fn print_pnp_triage(triage: &PnpTriageDetail) {
         }
     }
 
+    outln!();
     outln!(
-        "{} devnode(s): {} started, {} with problems, {} not started, {} with pending IRPs{}",
+        "{} devnode{}: {} started, {} with problems, {} not started, {} with pending IRPs{}",
         triage.total,
+        if triage.total == 1 { "" } else { "s" },
         triage.started,
         triage.problems.len(),
         triage.not_started.len(),

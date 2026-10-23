@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use owo_colors::OwoColorize;
 
-use crate::arch::{Arch, RegisterMap, registers::repeats_another_register};
+use crate::arch::{Arch, RegisterMap};
 use crate::base::error::Error;
 use crate::base::memory::MemoryOps;
 use crate::base::types::{CodeMachine, VirtAddr};
@@ -177,28 +177,6 @@ fn format_cpsr(flags: u64) -> String {
     line.into_iter().collect()
 }
 
-/// Print a recovered (partial) register set sorted by name, one row per
-/// register at `indent` columns, under an optional heading line. A register
-/// the set holds under two of `arch`'s names shows once.
-pub fn print_sparse_registers(
-    registers: &HashMap<String, u64>,
-    arch: Arch,
-    heading: Option<&str>,
-    indent: usize,
-) {
-    let mut names: Vec<_> = registers
-        .keys()
-        .filter(|name| !repeats_another_register(name, registers, arch.register_synonyms()))
-        .collect();
-    names.sort();
-    if let Some(heading) = heading {
-        outln!("{heading}");
-    }
-    for name in names {
-        outln!("{:indent$}{:<8} {}", "", name, ui::addr(registers[name]));
-    }
-}
-
 /// The general-purpose registers in `regs`, as a grid, under `heading` as
 /// a section when given (indented, as the stop shows it), flush left
 /// without (as `r` does). With `before`, the register file of the previous
@@ -245,19 +223,21 @@ enum RegisterCell {
 /// `arch`'s register grid, each register as `read` gives it, the flags
 /// named beside or under them.
 fn print_register_grid(arch: Arch, heading: Option<&str>, read: impl Fn(&str) -> RegisterCell) {
-    let styled_value = |name: &str| -> String {
+    // A value's cell is as wide as an address, so the columns line up,
+    // unless it `ends` its line.
+    let styled_value = |name: &str, ends: bool| -> String {
         match read(name) {
             RegisterCell::Changed(value) => ui::changed(&ui::addr(value)),
             RegisterCell::Value(value) => ui::addr(value),
-            RegisterCell::Unsaved => ui::muted(&format!("{:<16}", "-")),
-            RegisterCell::Unavailable => ui::muted(&format!("{:<16}", "N/A")),
+            RegisterCell::Unsaved | RegisterCell::Unavailable if ends => ui::muted("-"),
+            RegisterCell::Unsaved | RegisterCell::Unavailable => ui::muted(&format!("{:<16}", "-")),
         }
     };
-    let cell = |name: &str| {
+    let cell = |name: &str, ends: bool| {
         format!(
             "{} {}",
             ui::muted(&format!("{name:<3}")),
-            styled_value(name)
+            styled_value(name, ends)
         )
     };
 
@@ -266,9 +246,10 @@ fn print_register_grid(arch: Arch, heading: Option<&str>, read: impl Fn(&str) ->
         print_section(heading);
     }
 
-    let row_line = |row: &[&str]| {
+    let row_line = |row: &[&str], ends: bool| {
         row.iter()
-            .map(|name| cell(name))
+            .enumerate()
+            .map(|(index, name)| cell(name, ends && index + 1 == row.len()))
             .collect::<Vec<_>>()
             .join("   ")
     };
@@ -282,18 +263,19 @@ fn print_register_grid(arch: Arch, heading: Option<&str>, read: impl Fn(&str) ->
     match arch {
         // Rows of 3, the flags (as `rfl`, decoded) closing the last one.
         Arch::Amd64 => {
-            let rows: Vec<String> = names.chunks(3).map(row_line).collect();
+            let rows: Vec<&[&str]> = names.chunks(3).collect();
             let Some((last, rows)) = rows.split_last() else {
                 return;
             };
             for row in rows {
-                outln!("{indent}{row}");
+                outln!("{indent}{}", row_line(row, true));
             }
+            let decoded = format_rflags(flags_value);
             outln!(
-                "{indent}{last}   {} {}{}",
+                "{indent}{}   {} {}{decoded}",
+                row_line(last, false),
                 ui::muted("rfl"),
-                styled_value(flags),
-                format_rflags(flags_value)
+                styled_value(flags, decoded.is_empty())
             );
         }
         // Rows of 4 through sp, then pc and the flags, decoded below them.
@@ -302,19 +284,22 @@ fn print_register_grid(arch: Arch, heading: Option<&str>, read: impl Fn(&str) ->
                 return;
             };
             for row in grid.chunks(4) {
-                outln!("{indent}{}", row_line(row));
+                outln!("{indent}{}", row_line(row, true));
             }
             outln!(
                 "{indent}{}   {} {}",
-                cell(pc),
+                cell(pc, false),
                 ui::muted(flags),
-                styled_value(flags)
+                styled_value(flags, true)
             );
             let decoded = format_cpsr(flags_value);
             if !decoded.is_empty() {
                 // Align under the cpsr hex value: cell("pc") (4 + 16 chars) +
                 // the "   cpsr " label, i.e. 28 columns.
-                outln!("{indent}                            {decoded}");
+                outln!(
+                    "{}",
+                    format!("{indent}                            {decoded}").trim_end()
+                );
             }
         }
     }
@@ -514,6 +499,7 @@ pub fn print_disasm_lines(
         returns_to: next.returns_to,
         bytes: false,
         lanes: STOP_LANES,
+        named: false,
     };
     for line in listing::listing_lines(session, trace, &listing) {
         outln!("{line}");
@@ -690,7 +676,12 @@ pub fn print_stacktrace_data_with(
     embedded: bool,
     columns: StackColumns,
 ) {
-    print_stack_frames(arch, stacktrace, 0, display_limit, embedded, columns);
+    let placement = if embedded {
+        StackPlacement::Section
+    } else {
+        StackPlacement::Standalone
+    };
+    print_stack_frames(arch, stacktrace, 0, display_limit, placement, columns);
 }
 
 /// A stop's stack from frame `from`, the frames above it folded into one
@@ -702,9 +693,40 @@ pub fn print_stop_stack(arch: Arch, stacktrace: &StackTrace, from: usize, displa
         stacktrace,
         from,
         display_limit,
-        true,
+        StackPlacement::Section,
         StackColumns::default(),
     );
+}
+
+/// A stack under the line of a report naming its thread, `indent` in, with
+/// no heading of its own: one of several in `!analyze -hang` or the 0x9F
+/// report.
+pub fn print_indented_stack(
+    arch: Arch,
+    stacktrace: &StackTrace,
+    display_limit: usize,
+    indent: &str,
+) {
+    print_stack_frames(
+        arch,
+        stacktrace,
+        0,
+        display_limit,
+        StackPlacement::Indented(indent),
+        StackColumns::default(),
+    );
+}
+
+/// Where a stack sits in the output.
+enum StackPlacement<'a> {
+    /// `k`'s own listing: flush left, with the child-SP column.
+    Standalone,
+    /// A section of a longer display, as the stop's: a `stack` heading,
+    /// then the frames indented under it.
+    Section,
+    /// Under a report's line naming its thread, this far in, with no
+    /// heading.
+    Indented(&'a str),
 }
 
 fn print_stack_frames(
@@ -712,12 +734,22 @@ fn print_stack_frames(
     stacktrace: &StackTrace,
     from: usize,
     display_limit: usize,
-    embedded: bool,
+    placement: StackPlacement<'_>,
     columns: StackColumns,
 ) {
-    let indent = if embedded { "  " } else { "" };
-    if embedded {
-        print_section("stack");
+    let indent = match placement {
+        StackPlacement::Standalone => "",
+        StackPlacement::Section => {
+            print_section("stack");
+            "  "
+        }
+        StackPlacement::Indented(indent) => indent,
+    };
+    // `k`'s own listing has the child-SP column; a stack inside another
+    // display leaves it out: the return address is what to act on there.
+    let with_sp = matches!(placement, StackPlacement::Standalone);
+    if with_sp && !stacktrace.frames.is_empty() {
+        print_stack_header(columns);
     }
 
     let from = from.min(stacktrace.frames.len());
@@ -725,8 +757,8 @@ fn print_stack_frames(
     if from > 0 {
         let folded = &stacktrace.frames[..from];
         let range = match from {
-            1 => "#0".to_string(),
-            _ => format!("#0\u{2013}#{}", from - 1),
+            1 => "00".to_string(),
+            _ => format!("00\u{2013}{:02}", from - 1),
         };
         let name = |frame: &StackFrame| frame.symbol.clone();
         let ends = match folded {
@@ -751,15 +783,15 @@ fn print_stack_frames(
                 frame_size_cell(previous_sp.replace(frame.sp), frame.sp)
             };
             outln!(
-                "{indent}{} {} {}",
-                ui::muted(&format!("#{num:<2}")),
+                "{indent}{}{} {}",
+                frame_number(num, with_sp),
                 size,
-                format_stack_frame(None, frame, !embedded, columns.provenance)
+                format_stack_frame(None, frame, with_sp, columns.provenance)
             );
         } else {
             outln!(
                 "{indent}{}",
-                format_stack_frame(Some(num), frame, !embedded, columns.provenance)
+                format_stack_frame(Some(num), frame, with_sp, columns.provenance)
             );
         }
     }
@@ -776,6 +808,35 @@ pub fn inline_tag() -> String {
     "[inline]".bright_black().to_string()
 }
 
+/// The `k` layout's column header, as WinDbg prints one: the frame number,
+/// `kf`'s frame size, the child SP, the frame's instruction address, and the
+/// call site.
+pub fn print_stack_header(columns: StackColumns) {
+    let memory = if columns.frame_size {
+        format!("{:>8} ", "Memory")
+    } else {
+        String::new()
+    };
+    outln!(
+        " {:>2} {memory}{:<16}  {:<16}  Call Site",
+        "#",
+        "Child-SP",
+        "IP"
+    );
+}
+
+/// A frame's call site as the `k` layout shows it: its symbol, or its raw
+/// address `0x…` when it has none, as WinDbg's Call Site does.
+pub fn call_site(frame: &StackFrame) -> String {
+    if frame.symbol.is_empty() {
+        format!("{:#x}", frame.ip)
+    } else if frame.symbol.starts_with("0x") {
+        frame.symbol.clone()
+    } else {
+        ui::symbol(&frame.symbol)
+    }
+}
+
 /// One frame line in `k`'s layout: the frame `number` when given, the child
 /// SP when `with_sp`, the return address, then the symbol, whether it is an
 /// inline frame, how the frame was recovered (always with
@@ -789,18 +850,14 @@ pub fn format_stack_frame(
 ) -> String {
     let mut line = String::new();
     if let Some(number) = number {
-        line.push_str(&ui::muted(&format!("#{number:<2}")));
-        line.push(' ');
+        line.push_str(&frame_number(number, with_sp));
     }
     if with_sp {
         line.push_str(&ui::addr(frame.sp));
         line.push_str("  ");
     }
     line.push_str(&ui::addr(frame.ip));
-    let mut annotations = Vec::new();
-    if !frame.symbol.starts_with("0x") {
-        annotations.push(ui::symbol(&frame.symbol));
-    }
+    let mut annotations = vec![call_site(frame)];
     if frame.inline {
         annotations.push(inline_tag());
     }
@@ -815,16 +872,27 @@ pub fn format_stack_frame(
     if let Some(location) = frame.source_location.as_ref() {
         annotations.push(format_source_location(location).bright_black().to_string());
     }
-    if !annotations.is_empty() {
-        line.push_str("  ");
-        line.push_str(&annotations.join(" "));
-    }
+    // Two spaces between the call site and each tag, as `k` spaces them.
+    line.push_str("  ");
+    line.push_str(&annotations.join("  "));
     line
+}
+
+/// A frame's number as `k` writes it (`00`), with the space after it: in
+/// `k`'s layout (`with_sp`) behind the column `k` marks the selected frame
+/// in, else muted, as the stop's stack shows it.
+fn frame_number(number: usize, with_sp: bool) -> String {
+    if with_sp {
+        format!(" {number:02} ")
+    } else {
+        format!("{}  ", ui::muted(&format!("{number:02}")))
+    }
 }
 
 /// The note under a stack for the frames not shown or not walked.
 pub fn more_frames(hidden: usize) -> String {
-    format!("... {hidden} more frames")
+    let noun = if hidden == 1 { "frame" } else { "frames" };
+    format!("... {hidden} more {noun}")
         .bright_black()
         .to_string()
 }

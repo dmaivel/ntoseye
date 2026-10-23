@@ -35,7 +35,7 @@ target
   psmods ffff8082614709d0
 ...
  BREAK  processor 0  hypervisor at hv+0x3a6bde
- ├─ thread Idle  state Running  ethread fffff804a2a425c0  pid 0  tid 0
+ ├─ thread fffff804a2a425c0  TID 0  PID 0  process Idle  state Running
  ├─ saved VTL0 nt!HalProcessorIdle+0xf
  └─ inspecting saved VTL0 (.cxr shows the hypervisor's registers)
 ...
@@ -77,7 +77,6 @@ Partition 0x1 is the target's own Windows. The hypervisor does not name the othe
 ```text
 0: gdb> .partition 4
 inspecting partition 0x4: nt at 0xfffff80586250000, VPs 0 1 2 3
-
 0: partition 0x4> lm
 Start             End               Module                 Version  Symbols  Source  Image
 fffff80586250000  fffff805876a0000  nt                     -        loaded   cached  ntoskrnl.exe
@@ -116,6 +115,7 @@ These are the Sandbox's 75 processes, not the target's. Among them are `CExecSvc
    3          fffff8058670f8bd  kernel   nt!PpmIdleGuestExecute+0x1d
 
 0: partition 0x4> k
+  # Child-SP          IP                Call Site
  00 fffff805187199a0  fffff8058670f8bd  nt!PpmIdleGuestExecute+0x1d
  01 fffff805187199e0  fffff8058658bc54  nt!PpmIdleExecuteTransition+0x518
  02 fffff80518719b70  fffff8058658a9f0  nt!PoIdle+0x190
@@ -132,20 +132,21 @@ The host trims the memory of an idle Sandbox, and a trimmed page is not mapped i
 
 ```text
 0: partition 0x4> .process /p 6996
-process context: cmd.exe (PID 6996, EPROCESS ffff810cc2a80080)
+process context: cmd.exe (PID 6996, EPROCESS ffff810cc2a80080, DTB …)
 symbols: loaded 11/11
 
 0: partition 0x4> !peb
 PEB 0000003f10fdb000
-  ImageBaseAddress : 00007ff61ed70000
+  ImageBaseAddress                    : 00007ff61ed70000
   ...
-  OSBuildNumber    : 26100
-  SessionId        : 1
-  NumberOfProcessors: 4
-  Process parameters 000001e28cc979b0
-    CommandLine       : "C:\Windows\system32\cmd.exe"
-    ImagePathName     : C:\Windows\system32\cmd.exe
-    CurrentDirectory  : C:\Users\WDAGUtilityAccount\
+  OSBuildNumber                       : 26100
+  SessionId                           : 1
+  NumberOfProcessors                  : 4
+  ...
+  ProcessParameters 000001e28cc979b0
+    CommandLine      : "C:\Windows\system32\cmd.exe"
+    ImagePathName    : C:\Windows\system32\cmd.exe
+    CurrentDirectory : C:\Users\WDAGUtilityAccount\
 ...
 
 0: partition 0x4> !dlls
@@ -162,28 +163,17 @@ Base              Size      Entry             Timestamp   Name
 ```text
 0: partition 0x4> !process 0 7 cmd.exe
 ...
-thread: ffff810cc3744080  TID 7000  PID 6996  process cmd.exe
-  state=Waiting (0x5) wait=Executive (0x0) kthread=ffff810cc3744080 eprocess=ffff810cc2a80080
+THREAD ffff810cc3744080  TID 7000  PID 6996  process cmd.exe
+  state                Waiting (0x5)
+  wait reason          Executive (0x0)
+  KTHREAD              ffff810cc3744080
+  EPROCESS             ffff810cc2a80080
 ...
-stack
-  #0  fffff805869064d6  nt!KiSwapContext+0x76 [seed]
-  #1  fffff8058651c438  nt!KiSwapThread+0x248 [unwind]
+stack (kernel-stack)
 ...
-  #7  fffff80586b3973e  nt!NtDeviceIoControlFile+0x5e [unwind]
-  #8  fffff80586911d55  nt!KiSystemServiceCopyEnd+0x25 [unwind]
-  #9  00007ff8a8e20ea4  ntdll!NtDeviceIoControlFile+0x14 [unwind]
-  #10 00007ff8a5f9f290  kernelbase!ConsoleCallServerGeneric+0x110 [unwind]
-  #11 00007ff8a5f9f0e9  kernelbase!ReadConsoleInternal+0x1a1 [unwind]
-  #12 00007ff8a5f9ef0e  kernelbase!ReadConsoleW+0x1e [unwind]
-  #13 00007ff61ed8d65d  cmd!?ReadBufFromConsole@@YAHPEAXPEAGHPEAH@Z+0x149 [unwind]
-...
-  #20 00007ff61eda3fa1  cmd!main+0x2c9 [unwind]
-  #21 00007ff61ed97afb  cmd!__scrt_common_main_seh+0x10b [unwind]
-  #22 00007ff8a6d9cd87  kernel32!BaseThreadInitThunk+0x17 [unwind]
-  #23 00007ff8a8d6caec  ntdll!RtlUserThreadStart+0x2c [unwind]
 ```
 
-The Command Prompt waits for you to type the next line, in `ReadConsoleW`, and the stack goes from `cmd!main` through `kernelbase` and `ntdll` into the Sandbox's kernel. If the stack ends at the first user-mode frame, the process's stack page was trimmed: use the process again and break in.
+Each stack is listed as {command}`k` lists it. The Command Prompt waits for you to type the next line, in `ReadConsoleW`: its stack goes from `cmd!main` through `cmd!?ReadBufFromConsole@@YAHPEAXPEAGHPEAH@Z`, `kernelbase!ReadConsoleW` and `ntdll!NtDeviceIoControlFile` into the Sandbox's kernel, where `nt!NtDeviceIoControlFile` waits in `nt!KiSwapContext`. If the stack ends at the first user-mode frame, the process's stack page was trimmed: use the process again and break in.
 
 ## Break in the Sandbox's kernel
 
@@ -197,15 +187,15 @@ hardware breakpoint #0 (execute 1b) set at fffff80586ac0f10 (nt!NtClose)
 VM running, waiting for stop (Ctrl+C to pause)...
  BREAK  processor 2  dwm.exe (3832) at nt!NtClose
  ├─ hardware breakpoint #0 e1  nt!NtClose
- └─ thread dwm.exe  state Running  ethread ffff810cc3a5d080  pid 3832  tid 3956
+ └─ thread ffff810cc3a5d080  TID 3956  PID 3832  process dwm.exe  state Running
 ...
 stack
-  #0  fffff80586ac0f10  nt!NtClose
-  #1  fffff80586911d55  nt!KiSystemServiceCopyEnd+0x25
-  #2  fffff80586900180  nt!KiServiceLinkage
-  #3  fffff8051d93c799  win32kbase!rimSignalReadComplete+0x209
-  #4  fffff8051d94010f  win32kbase!rimProcessDeviceBufferAndStartRead+0x187
-  #5  fffff8051d93fa7f  win32kbase!rimInputApc+0x1af
+  00  fffff80586ac0f10  nt!NtClose
+  01  fffff80586911d55  nt!KiSystemServiceCopyEnd+0x25
+  02  fffff80586900180  nt!KiServiceLinkage
+  03  fffff8051d93c799  win32kbase!rimSignalReadComplete+0x209
+  04  fffff8051d94010f  win32kbase!rimProcessDeviceBufferAndStartRead+0x187
+  05  fffff8051d93fa7f  win32kbase!rimInputApc+0x1af
   ... 14 more frames
 ```
 
@@ -214,12 +204,12 @@ The Sandbox's `dwm.exe` closed a handle on its VP 2, processor 2 in its view, as
 ```text
 2: partition 0x4> t
  BREAK  processor 2  dwm.exe (3832) at nt!NtClose+0x5
- └─ thread dwm.exe  state Running  ethread ffff810cc3a5d080  pid 3832  tid 3956
+ └─ thread ffff810cc3a5d080  TID 3956  PID 3832  process dwm.exe  state Running
 ...
 2: partition 0x4> gu
 VM running, waiting for stop (Ctrl+C to pause)...
  BREAK  processor 2  dwm.exe (3832) at nt!KiSystemServiceCopyEnd+0x25
- └─ thread dwm.exe  state Running  ethread ffff810cc3a5d080  pid 3832  tid 3956
+ └─ thread ffff810cc3a5d080  TID 3956  PID 3832  process dwm.exe  state Running
 ...
 2: partition 0x4> bc *
 breakpoint #0 cleared
@@ -234,7 +224,6 @@ A hypercall breakpoint is in the hypervisor, which is the target's, so set it fr
 ```text
 2: partition 0x4> .partition 1
 inspecting the target (the root partition)
-
 1: gdb> !hvbp HvCallSendSyntheticClusterIpi 4
 hypercall breakpoint #0 set at fffff850200927c0 (hv!HvCallSendSyntheticClusterIpi) (global, hypercall 0x000b HvCallSendSyntheticClusterIpi from partition 0x4)
 
@@ -247,18 +236,18 @@ An idle Sandbox makes few hypercalls, so move the mouse over the Sandbox's windo
 ```text
  BREAK  processor 2  hypervisor at hv!HvCallSendSyntheticClusterIpi
  ├─ hypercall breakpoint #0  hv!HvCallSendSyntheticClusterIpi
- ├─ thread vmmemSandbox  state Running  ethread ffff808268aa2080  pid 11116  tid 7536
+ ├─ thread ffff808268aa2080  TID 7536  PID 11116  process vmmemSandbox  state Running
  ├─ saved VTL0 hvcall!Hypercall
  ├─ serving partition 0x4 VP 2  VTL0 fffff805171e0000, last exit VMCALL (hypercall 0x000b HvCallSendSyntheticClusterIpi fast)
  └─ inspecting saved VTL0 (.cxr shows the hypervisor's registers)
 ...
 stack
-  #0  fffff80432ab0000  hvcall!Hypercall
-  #1  fffff804a2128bb1  nt!HvcallpExtendedFastHypercall+0x51
-  #2  fffff804a2128bd2  nt!HvcallpExtendedFastHypercallWithOutput+0x12
-  #3  fffff804a1c9f314  nt!HvcallFastExtended+0x164
-  #4  fffff806c1bfb6ed  winhvr!WinHvpVpDispatchLoop+0x38d
-  #5  fffff806c1bfb297  winhvr!WinHvRunVpDispatchLoop+0x157
+  00  fffff80432ab0000  hvcall!Hypercall
+  01  fffff804a2128bb1  nt!HvcallpExtendedFastHypercall+0x51
+  02  fffff804a2128bd2  nt!HvcallpExtendedFastHypercallWithOutput+0x12
+  03  fffff804a1c9f314  nt!HvcallFastExtended+0x164
+  04  fffff806c1bfb6ed  winhvr!WinHvpVpDispatchLoop+0x38d
+  05  fffff806c1bfb297  winhvr!WinHvRunVpDispatchLoop+0x157
   ... 3 more frames
 ```
 
@@ -282,7 +271,6 @@ breakpoint #0 cleared
 
 2: gdb> .partition 4
 inspecting partition 0x4: nt at 0xfffff80586250000, VPs 0 1 2 3
-
 0: partition 0x4> ~
    Processor  RIP               Context  Symbol
 .  0          fffff8058670f8bd  kernel   nt!PpmIdleGuestExecute+0x1d
@@ -294,6 +282,7 @@ inspecting partition 0x4: nt at 0xfffff80586250000, VPs 0 1 2 3
 switched to processor 2
 
 2: partition 0x4> k
+  # Child-SP          IP                Call Site
  00 fffff986d4461638  fffff805171e0000  hvcall!Hypercall
  01 fffff986d4461640  fffff8058664f758  nt!HvlSendSyntheticClusterIpi+0x88
  02 fffff986d44616a0  fffff8058655b491  nt!HalpInterruptSendIpi+0x571
@@ -310,7 +299,6 @@ VP 2 was idle: in its idle loop, the Sandbox's kernel woke VP 0 with an interrup
 ```text
 2: partition 0x4> .partition 1
 inspecting the target (the root partition)
-
 2: gdb> q
 ```
 

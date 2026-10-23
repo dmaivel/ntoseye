@@ -36,13 +36,13 @@ VP  Address           CPU  VTL  Context           eVMCS      EPT pointer  Guest 
 
 mem:1> !hvvps 2
 VP  Address           CPU  VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
-0   ffffe80200231050       0*   ffffe80200232000  2052dc000  20523105e    000000001ff26114  HLT
-1   ffffe8020024b050       0*   ffffe8020024c000  2053e7000
+0   ffffe80200231050  -    0*   ffffe80200232000  2052dc000  20523105e    000000001ff26114  HLT
+1   ffffe8020024b050  -    0*   ffffe8020024c000  2053e7000  -            -                 -
 ```
 
 The root partition's VPs are pinned to the processors with their numbers, and the child's VPs show no processor while every processor runs a root VP.
 
-The EPT pointer is the root of the VTL's second-level address translation (SLAT), which maps the guest's physical addresses to host physical addresses with read, write, and execute permissions. The VPs of a partition share one EPT for each VTL, and VTL0 and VTL1 have different ones: this is how the secure kernel and memory integrity (HVCI) set page permissions that NT cannot change. The root partition's EPT maps each address to itself, except the pages that the hypervisor keeps for itself. The eVMCS columns stay empty without the `hv-evmcs` enlightenment, and the state columns stay empty for a VP that has not started, such as the second VP of a VM still in its firmware.
+The EPT pointer is the root of the VTL's second-level address translation (SLAT), which maps the guest's physical addresses to host physical addresses with read, write, and execute permissions. The VPs of a partition share one EPT for each VTL, and VTL0 and VTL1 have different ones: this is how the secure kernel and memory integrity (HVCI) set page permissions that NT cannot change. The root partition's EPT maps each address to itself, except the pages that the hypervisor keeps for itself. The eVMCS columns show `-` without the `hv-evmcs` enlightenment, and the state columns show `-` for a VP that has not started, such as the second VP of a VM still in its firmware.
 
 ## Page permissions of each VTL
 
@@ -77,20 +77,20 @@ With `-v`, the address is virtual in the current address space (the `.process` o
 
 ```text
 mem:1> !hveptdiff
-VTL0 EPT 10155901e: 9184 mappings, 10.1G
-VTL1 EPT 10155c01e: 6378 mappings, 8.9G
+VTL0 EPT 10155901e: 9184 mappings, 10.1 GiB
+VTL1 EPT 10155c01e: 6378 mappings, 8.9 GiB
 
 VTL0  VTL1  Ranges  Size
-rw-   rwx   93      7.8G
-rw-   none  17      1.3G
-r-x   rwx   35      70.0M
-none  rwx   32      35.7M
-r--   rwx   14      24.8M
+rw-   rwx   93      7.8 GiB
+rw-   none  17      1.3 GiB
+r-x   rwx   35      70.0 MiB
+none  rwx   32      35.7 MiB
+r--   rwx   14      24.8 MiB
 ...
 
-Start      End        Size    VTL0  VTL1
+Start      End        Size      VTL0  VTL1
 ...
-216 ranges differ, 9.2G in all
+216 ranges differ, 9.2 GiB in all
 ```
 
 Most of memory is `rw-` in VTL0 because memory integrity does not let NT execute its data. The `r-x` ranges hold the code that NT can execute but not change, the `none` ranges the memory of the secure kernel and trustlets, and the `r--` ranges pages that NT can read but not write. When a VTL uses mode-based execute control, `x` is execute in kernel mode and a fourth character, `u` or `-`, shows execute in user mode. The walk follows Intel's EPT format and needs the `hv-evmcs` enlightenment.
@@ -102,7 +102,6 @@ Most of memory is `rw-` in VTL0 because memory integrity does not let NT execute
 ```text
 mem:1> !hvvmcs -io
 VP 0 of partition 0x1, VTL0: eVMCS 1160e4000
-
 First port  Last port
 0x20        0x21
 0x64        0x64

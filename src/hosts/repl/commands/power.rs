@@ -66,7 +66,7 @@ fn print_power_irp(irp: &PowerIrp, indent: &str) {
         ui::addr(irp.pdo.0)
     );
     outln!(
-        "{indent}  {} {}{}",
+        "{indent}  {}  {}{}",
         ui::muted("sent to   "),
         ui::addr(irp.target_device.0),
         if irp.current_device.is_zero() {
@@ -77,12 +77,12 @@ fn print_power_irp(irp: &PowerIrp, indent: &str) {
     );
     match &irp.holder {
         DiagnosticValue::Available(holder) => outln!(
-            "{indent}  {} {}",
+            "{indent}  {}  {}",
             ui::muted("pending in"),
             holder_text(holder)
         ),
         DiagnosticValue::Unavailable(error) => outln!(
-            "{indent}  {} {}",
+            "{indent}  {}  {}",
             ui::muted("pending in"),
             ui::muted(&format!("unknown: {error}"))
         ),
@@ -96,7 +96,7 @@ fn print_power_irp(irp: &PowerIrp, indent: &str) {
         None => irp.watchdog.label(),
     };
     outln!(
-        "{indent}  {} {}{}  {}",
+        "{indent}  {}  {}{}  {}",
         ui::muted("watchdog  "),
         watchdog,
         if irp.system_transition {
@@ -118,10 +118,10 @@ fn list_title(title: &str, head_name: Option<&str>, head: u64) -> String {
 pub fn print_power_irp_list(list: &PowerIrpList, indent: &str) {
     outln!(
         "{indent}{}",
-        list_title("Allocated power IRPs", list.head_name, list.head.0)
+        list_title("allocated power IRPs", list.head_name, list.head.0)
     );
     if list.entries.is_empty() && list.stopped.is_none() {
-        outln!("{indent}  none");
+        outln!("{indent}  {}", ui::muted("no power IRPs"));
     }
     for entry in &list.entries {
         match &entry.irp {
@@ -147,7 +147,7 @@ pub fn print_power_worker_list(list: &PowerWorkerList, indent: &str) {
         list_title("IRP worker threads", list.head_name, list.head.0)
     );
     if list.entries.is_empty() && list.stopped.is_none() {
-        outln!("{indent}  none");
+        outln!("{indent}  {}", ui::muted("no IRP worker threads"));
     }
     for entry in &list.entries {
         match &entry.worker {
@@ -193,69 +193,83 @@ pub fn print_power_worker_list(list: &PowerWorkerList, indent: &str) {
 
 fn flags_text(flags: u32, names: Vec<&str>) -> String {
     if names.is_empty() {
-        format!("{flags:08x}")
+        format!("{flags:#x}")
     } else {
-        format!("{flags:08x} {}", names.join("|"))
+        format!("{flags:#x} ({})", names.join(" | "))
     }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }
 
 fn print_power_action(detail: &PowerActionDetail) {
     let action = &detail.action;
+    let pointer = |address: u64| {
+        if address == 0 {
+            "-".to_string()
+        } else {
+            ui::addr(address)
+        }
+    };
+    // WinDbg's layout: names dot-led to one column.
+    let field = |name: &str, value: String| outln!("  {name:.<15}: {value}");
     outln!("PopAction: {}", ui::addr(action.address.0));
-    outln!(
-        "  State..........: {} - {}",
-        action.state,
-        power_action_state_name(action.state).unwrap_or("unknown")
+    field(
+        "State",
+        match power_action_state_name(action.state) {
+            Some(name) => format!("{name} ({:#x})", action.state),
+            None => format!("{:#x}", action.state),
+        },
     );
-    outln!("  Updates........: {}", action.updates);
-    outln!("  Action.........: {}", action.action.label());
-    outln!("  Lightest State.: {}", action.lightest_state.label());
-    outln!(
-        "  Flags..........: {}",
-        flags_text(action.flags, power_action_flag_names(action.flags))
+    field("Updates", action.updates.to_string());
+    field("Action", action.action.label().to_string());
+    field("Lightest State", action.lightest_state.label().to_string());
+    field(
+        "Flags",
+        flags_text(action.flags, power_action_flag_names(action.flags)),
     );
-    outln!("  Irp minor......: {:#x}", action.irp_minor);
-    outln!("  System State...: {}", action.system_state.label());
-    outln!("  Next State.....: {}", action.next_system_state.label());
-    outln!(
-        "  Effective State: {}",
-        action.effective_system_state.label()
+    field("IRP minor", format!("{:#x}", action.irp_minor));
+    field("System State", action.system_state.label().to_string());
+    field("Next State", action.next_system_state.label().to_string());
+    field(
+        "Effective State",
+        action.effective_system_state.label().to_string(),
     );
-    outln!("  Current State..: {}", action.current_system_state.label());
-    outln!("  Status.........: {:#010x}", action.status);
-    outln!(
-        "  Shutdown.......: {}  Waking: {}",
-        action.shutdown,
-        action.waking
+    field(
+        "Current State",
+        action.current_system_state.label().to_string(),
     );
-    outln!("  Hiber Context..: {}", ui::addr(action.hiber_context.0));
-    outln!(
-        "  Worker Thread..: {}",
-        ui::addr(action.action_worker_thread.0)
-    );
+    field("Status", format!("{:#010x}", action.status));
+    field("Shutdown", yes_no(action.shutdown).to_string());
+    field("Waking", yes_no(action.waking).to_string());
+    field("Hiber Context", pointer(action.hiber_context.0));
+    field("Worker Thread", pointer(action.action_worker_thread.0));
     match &action.devices {
-        None => outln!("  Device notification: none in progress"),
+        None => field("Device Notify", "none in progress".to_string()),
         Some(DiagnosticValue::Available(devices)) => {
-            outln!(
-                "  Device notification {}: minor {:#x}, {}, thread {}, status {:#010x}{}{}{}",
-                ui::addr(devices.address.0),
-                devices.irp_minor,
-                devices.system_state.label(),
-                ui::addr(devices.thread.0),
-                devices.status,
-                if devices.failed_device.is_zero() {
-                    String::new()
-                } else {
-                    format!(", failed device {}", ui::addr(devices.failed_device.0))
-                },
-                if devices.waking { ", waking" } else { "" },
-                if devices.cancelled { ", cancelled" } else { "" }
+            field(
+                "Device Notify",
+                format!(
+                    "{}  minor {:#x}, {}, thread {}, status {:#010x}{}{}{}",
+                    ui::addr(devices.address.0),
+                    devices.irp_minor,
+                    devices.system_state.label(),
+                    ui::addr(devices.thread.0),
+                    devices.status,
+                    if devices.failed_device.is_zero() {
+                        String::new()
+                    } else {
+                        format!(", failed device {}", ui::addr(devices.failed_device.0))
+                    },
+                    if devices.waking { ", waking" } else { "" },
+                    if devices.cancelled { ", cancelled" } else { "" }
+                ),
             );
         }
-        Some(DiagnosticValue::Unavailable(error)) => outln!(
-            "  Device notification: {}",
-            ui::muted(&format!("unreadable: {error}"))
-        ),
+        Some(DiagnosticValue::Unavailable(error)) => {
+            field("Device Notify", ui::muted(&format!("unreadable: {error}")))
+        }
     }
     outln!();
     match &detail.irps {
@@ -419,14 +433,14 @@ fn print_power_policy(policy: &PowerPolicy) {
         "VideoTimeout:",
         policy.video_timeout,
         "VideoDimDisplay:",
-        policy.video_dim_display
+        yes_no(policy.video_dim_display)
     );
     outln!(
         "  {:<22}{:>8}  {:<22}{:>8}",
         "SpindownTimeout:",
         policy.spindown_timeout,
         "OptimizeForPower:",
-        policy.optimize_for_power
+        yes_no(policy.optimize_for_power)
     );
     outln!(
         "  {:<22}{:>7}%  {:<22}{:>7}%",
@@ -450,7 +464,7 @@ fn print_power_policy(policy: &PowerPolicy) {
     );
     for (index, level) in policy.discharge.iter().enumerate() {
         outln!(
-            "  Discharge[{index}]: {}  battery {}%  {}  Flags: {:08x}  Event: {:08x}  min {}",
+            "  Discharge[{index}]: {}  battery {:>3}%  {:<11}  Flags: {:08x}  Event: {:08x}  min {}",
             if level.enabled {
                 "enabled "
             } else {

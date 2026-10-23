@@ -290,13 +290,12 @@ impl ReplState<'_> {
 #[command(names = ["al", "aliases"], category = "session", kind = Host, python = none)]
 fn aliases(state: &mut ReplState<'_>) -> Result<()> {
     if state.aliases.map.is_empty() {
-        outln!("no aliases defined\n");
+        outln!("no aliases defined");
         return Ok(());
     }
     for (name, expansion) in &state.aliases.map {
         outln!("alias {} {}", name, expansion);
     }
-    outln!();
     Ok(())
 }
 
@@ -327,7 +326,7 @@ fn alias(
         return Ok(());
     }
     state.refresh_alias_cache();
-    outln!("alias {} {}\n", name, expansion);
+    outln!("defined alias {name} as {expansion}");
     Ok(())
 }
 
@@ -342,9 +341,9 @@ fn unalias(state: &mut ReplState<'_>, #[arg(complete = Alias)] name: String) -> 
     match state.aliases.remove(&name) {
         Ok(true) => {
             state.refresh_alias_cache();
-            outln!("unalias {}\n", name);
+            outln!("removed alias {name}");
         }
-        Ok(false) => error!("no such alias: {}", name),
+        Ok(false) => error!("alias '{name}' not found"),
         Err(e) => error!("failed to save aliases: {}", e),
     }
     Ok(())

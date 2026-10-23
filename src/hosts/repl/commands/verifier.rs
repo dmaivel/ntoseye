@@ -20,8 +20,8 @@ fn print_hex_stat(label: &str, value: &DiagnosticValue<u64>) {
     match value {
         DiagnosticValue::Available(value) => outln!("  {label:<40}{value:#x}"),
         DiagnosticValue::Unavailable(error) => {
-            outln!("  {label:<40}<unavailable>");
-            outln!("    reason: {error}");
+            outln!("  {label:<40}-");
+            outln!("    {}", ui::muted(&format!("unavailable: {error}")));
         }
     }
 }
@@ -33,18 +33,21 @@ fn print_value(label: &str, value: &str) {
 fn print_pool_stat(label: &str, allocations: &DiagnosticValue<u64>, bytes: &DiagnosticValue<u64>) {
     let allocations_text = match allocations {
         DiagnosticValue::Available(value) => format!("{value:#x}"),
-        DiagnosticValue::Unavailable(_) => "<unavailable>".to_string(),
+        DiagnosticValue::Unavailable(_) => "-".to_string(),
     };
     let bytes_text = match bytes {
         DiagnosticValue::Available(value) => format!("{value:#x}"),
-        DiagnosticValue::Unavailable(_) => "<unavailable>".to_string(),
+        DiagnosticValue::Unavailable(_) => "-".to_string(),
     };
     outln!("  {label:<40}{allocations_text} for {bytes_text} bytes");
     if let Some(error) = diagnostic_error(allocations) {
-        outln!("    allocations reason: {error}");
+        outln!(
+            "    {}",
+            ui::muted(&format!("allocations unavailable: {error}"))
+        );
     }
     if let Some(error) = diagnostic_error(bytes) {
-        outln!("    bytes reason: {error}");
+        outln!("    {}", ui::muted(&format!("bytes unavailable: {error}")));
     }
 }
 
@@ -55,7 +58,7 @@ fn print_level(detail: &Verifier) -> bool {
         }
         return false;
     };
-    outln!("Verify Level {level:x}  enabled options are:");
+    outln!("Verify Level {level:#x}  enabled options are:");
     if *level == 0 {
         outln!("Driver Verifier is not enabled");
         return false;
@@ -70,11 +73,19 @@ fn print_level(detail: &Verifier) -> bool {
     }
     match &detail.option_flags {
         DiagnosticValue::Available(flags) => out!("  option flags {flags:#x}"),
-        DiagnosticValue::Unavailable(error) => out!("  option flags <unavailable> ({error})"),
+        DiagnosticValue::Unavailable(_) => out!("  option flags -"),
     }
     match &detail.verify_mode {
         DiagnosticValue::Available(mode) => outln!("  verify mode {mode}"),
-        DiagnosticValue::Unavailable(error) => outln!("  verify mode <unavailable> ({error})"),
+        DiagnosticValue::Unavailable(_) => outln!("  verify mode -"),
+    }
+    for (what, value) in [
+        ("option flags", diagnostic_error(&detail.option_flags)),
+        ("verify mode", diagnostic_error(&detail.verify_mode)),
+    ] {
+        if let Some(error) = value {
+            outln!("  {}", ui::muted(&format!("{what} unavailable: {error}")));
+        }
     }
     true
 }
@@ -125,6 +136,7 @@ fn print_driver_list(detail: &Verifier) {
     outln!();
     outln!("Driver Verification List");
     outln!("  Entry             State       NonPagedPool  PagedPool  Module");
+    let note = |text: String| outln!("  {}", ui::muted(&text));
     match &detail.drivers {
         DiagnosticValue::Available(drivers) => {
             for driver in drivers {
@@ -132,11 +144,11 @@ fn print_driver_list(detail: &Verifier) {
             }
         }
         DiagnosticValue::Unavailable(error) => {
-            outln!("  <unavailable>     {error}");
+            note(format!("verified drivers unavailable: {error}"))
         }
     }
     if detail.drivers_truncated {
-        outln!("  <verified-driver AVL walk truncated>");
+        note("the verified-driver walk stops there; more drivers may follow".into());
     }
     match &detail.configured_but_unloaded {
         DiagnosticValue::Available(suspects) => {
@@ -145,22 +157,21 @@ fn print_driver_list(detail: &Verifier) {
             }
         }
         DiagnosticValue::Unavailable(error) => {
-            outln!("  <suspect list unavailable> {error}");
+            note(format!("configured drivers unavailable: {error}"))
         }
     }
     match &detail.suspect_list_termination {
         ListTermination::Head => {}
-        ListTermination::Null => {
-            outln!("  <suspect list terminated at a null link>");
-        }
-        ListTermination::Cycle(address) => {
-            outln!("  <suspect list cycle at {}>", ui::addr(address.0));
-        }
+        ListTermination::Null => note("the configured-driver list ends at a null link".into()),
+        ListTermination::Cycle(address) => note(format!(
+            "the configured-driver list cycles at {:#x}",
+            address.0
+        )),
         ListTermination::Bound => {
-            outln!("  <suspect list truncated at 1000 entries>");
+            note("the configured-driver list stops after 1000 entries".into())
         }
         ListTermination::Corrupt(error) => {
-            outln!("  <suspect list unreadable: {error}>");
+            note(format!("the configured-driver list is unreadable: {error}"))
         }
     }
 }
@@ -186,8 +197,8 @@ fn print_suspect_driver(suspect: &VerifierSuspectDriver) {
         "  {:<18}{:<12}{:<14}{:<11}{}",
         ui::addr(suspect.address.0),
         "Not loaded",
-        "0x0",
-        "0x0",
+        "-",
+        "-",
         module
     );
 }

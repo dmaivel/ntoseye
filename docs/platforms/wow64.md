@@ -53,10 +53,10 @@ An x64 program on an ARM64 target is not a WOW64 process. It runs as a 64-bit pr
 The stack walk reads each frame with the unwind data for the instruction set of that frame, so the x64 frames of the program appear between the thunks that enter and leave ARM64EC code (`$ientry_thunk$…`, `$iexit_thunk$…`):
 
 ```text
-  #9  00007ffaae048534  kernelbase!#WaitForSingleObjectEx+0x84 [unwind]
-  #10 00007ffaae19f4dc  kernelbase!$ientry_thunk$cdecl$i8$i8+0x24 [unwind]
-  #11 00007ff773c7c1e5  qemu-ga+0x6c1e5 [unwind]
-  #12 00007ff773c7b3f5  qemu-ga+0x6b3f5 [unwind]
-  #13 00007ffab157c8bc  msvcrt!$iexit_thunk$cdecl$i8$i8+0x1c [unwind]
-  #14 00007ffab153ef00  msvcrt!_callthreadstartex+0x38 [unwind]
+  09  00007ffaae048534  kernelbase!#WaitForSingleObjectEx+0x84 [unwind]
+  10  00007ffaae19f4dc  kernelbase!$ientry_thunk$cdecl$i8$i8+0x24 [unwind]
+  11  00007ff773c7c1e5  qemu-ga+0x6c1e5 [unwind]
+  12  00007ff773c7b3f5  qemu-ga+0x6b3f5 [unwind]
+  13  00007ffab157c8bc  msvcrt!$iexit_thunk$cdecl$i8$i8+0x1c [unwind]
+  14  00007ffab153ef00  msvcrt!_callthreadstartex+0x38 [unwind]
 ```

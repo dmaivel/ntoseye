@@ -18,13 +18,13 @@ use crate::hosts::ui;
 use crate::nt::target::mm::{
     LookasideDetail, LookasideListsDetail, MdlDetail, PfnDetail, PfnSelector, PoolBlockDetail,
     PoolFindDetail, PoolPageDetail, PoolType, PoolUsageDetail, PoolUsageSort, PoolValidationDetail,
-    PteLevel, PteWalk, PtovDetail, SystemPtesDetail, VmDetail, VtopDetail,
+    PteLevel, PteWalk, PtovDetail, SystemPtesDetail, VmCounter, VmDetail, VtopDetail,
 };
 use crate::nt::target::pool::tag_string;
-use crate::nt::target::{DiagnosticValue, MemoryKind};
+use crate::nt::target::{DiagnosticMetric, DiagnosticValue, MemoryKind};
 use crate::session::Session;
 
-use super::diagnostics::{diagnostic_cell, diagnostic_metric_cell, print_memory_use_summary};
+use super::diagnostics::{UnavailableNotes, print_memory_counters, print_process_memory, yes_no};
 
 /// Show virtual-memory statistics.
 ///
@@ -546,87 +546,102 @@ fn print_pool_validation(detail: &PoolValidationDetail, level: u64) {
     }
     if level >= 1 {
         outln!();
-        outln!(
-            "    {:<16} {:<8} {:<8} {:<12} {:<6} tag",
-            "header",
-            "size",
-            "prev",
-            "state",
-            "type"
-        );
+        print_pool_block_header();
         for block in &detail.blocks {
             print_pool_block_row(block, detail.problem.as_ref().map(|problem| problem.header));
         }
     }
-    outln!();
+}
+
+/// The header row of [`print_pool_block_row`]'s columns.
+fn print_pool_block_header() {
+    outln!(
+        "    {:<16} {:<8} {:<8} {:<12} {:<6} Tag",
+        "Header",
+        "Size",
+        "Prev",
+        "State",
+        "Type"
+    );
 }
 
 fn print_pool_block_row(block: &PoolBlockDetail, problem: Option<VirtAddr>) {
+    // WinDbg marks the block that holds the address with `*`.
     let marker = if problem == Some(block.header) {
         "!"
     } else if block.marked {
-        ">"
+        "*"
     } else {
         " "
     };
     outln!(
-        "  {} {} 0x{:<6x} 0x{:<6x} {:<12} 0x{:<4x} '{}'",
+        "  {} {} 0x{:<6x} 0x{:<6x} {:<12} 0x{:<4x} {}",
         marker,
         ui::addr(block.header.0),
         block.size,
         block.previous_size,
         block.state.to_string(),
         block.pool_type,
-        block.tag_name
+        pool_tag_text(&block.tag_name, block.tag)
     );
 }
 
+/// A pool tag as every pool command shows it: `'Proc' (0x636f7250)`.
+fn pool_tag_text(name: &str, tag: u32) -> String {
+    format!("'{name}' ({tag:#010x})")
+}
+
 fn print_mdl(detail: &MdlDetail) {
-    outln!("Mdl {}", ui::addr(detail.address.0));
-    outln!("  Next           {}", ui::addr(detail.next.0));
+    outln!("MDL {}", ui::addr(detail.address.0));
+    outln!("  Next           : {}", ui::addr(detail.next.0));
     outln!(
-        "  Size           {:#x} ({} PFN slot{})",
+        "  Size           : {:#x} ({} PFN slot{})",
         detail.size,
         detail.capacity,
         if detail.capacity == 1 { "" } else { "s" }
     );
     outln!(
-        "  MdlFlags       {:#06x} {}",
+        "  MdlFlags       : {:#06x} {}",
         detail.flags,
         detail.flag_names.join(" ")
     );
-    outln!("  Process        {}", ui::addr(detail.process.0));
-    outln!("  MappedSystemVa {}", ui::addr(detail.mapped_system_va.0));
-    outln!("  StartVa        {}", ui::addr(detail.start_va.0));
-    outln!("  ByteCount      {:#x}", detail.byte_count);
-    outln!("  ByteOffset     {:#x}", detail.byte_offset);
+    outln!("  Process        : {}", ui::addr(detail.process.0));
+    outln!("  MappedSystemVa : {}", ui::addr(detail.mapped_system_va.0));
+    outln!("  StartVa        : {}", ui::addr(detail.start_va.0));
+    outln!("  ByteCount      : {:#x}", detail.byte_count);
+    outln!("  ByteOffset     : {:#x}", detail.byte_offset);
     outln!(
-        "Physical pages ({} of {} spanned) at {}:",
+        "  physical pages ({} of {} spanned) at {}",
         detail.pfns.len(),
         detail.spanned_pages,
         ui::addr(detail.pfn_array.0)
     );
     for row in detail.pfns.chunks(8) {
         let cells: Vec<String> = row.iter().map(|pfn| format!("{pfn:>8x}")).collect();
-        outln!("  {}", cells.join(" "));
+        outln!("    {}", cells.join(" "));
     }
     if detail.truncated {
         outln!(
-            "  ({} more spanned page(s) not listed)",
-            detail.spanned_pages - detail.pfns.len() as u64
+            "    {}",
+            more_pages(detail.spanned_pages - detail.pfns.len() as u64)
         );
     }
-    outln!();
+}
+
+/// The note under `!mdl`'s PFN list for the spanned pages it leaves out.
+fn more_pages(hidden: u64) -> String {
+    ui::muted(&format!(
+        "... {hidden} more spanned page{} not listed",
+        if hidden == 1 { "" } else { "s" }
+    ))
 }
 
 fn print_system_ptes(detail: &SystemPtesDetail, flags: u64) {
     outln!("System PTE Information");
-    outln!(
-        "  Total System Ptes {}   free {}   in use {}",
-        detail.total,
-        detail.free,
-        detail.total.saturating_sub(detail.free)
-    );
+    outln!("  total   {}", detail.total);
+    outln!("  free    {}", detail.free);
+    outln!("  in use  {}", detail.total.saturating_sub(detail.free));
+    let field = |label: &str, value: String| outln!("    {label:<18}  {value}");
     for pte_type in &detail.types {
         outln!();
         outln!(
@@ -640,30 +655,38 @@ fn print_system_ptes(detail: &SystemPtesDetail, flags: u64) {
             continue;
         }
         let span = pte_type.bitmap_bits.saturating_mul(pte_type.ptes_per_bit);
-        match pte_type.base_va {
-            Some(base) => outln!(
-                "    VA range      {} - {}   first PTE {}",
-                ui::addr(base.0),
-                ui::addr(base.0.wrapping_add(span.saturating_mul(PAGE_SIZE as u64))),
-                ui::addr(pte_type.base_pte.0)
-            ),
-            None => outln!("    first PTE     {}", ui::addr(pte_type.base_pte.0)),
+        if let Some(base) = pte_type.base_va {
+            field(
+                "VA range",
+                format!(
+                    "{} - {}",
+                    ui::addr(base.0),
+                    ui::addr(base.0.wrapping_add(span.saturating_mul(PAGE_SIZE as u64)))
+                ),
+            );
         }
-        outln!(
-            "    Total Ptes    {}   free {}   in use {}   failures {}",
-            pte_type.total,
-            pte_type.free,
-            pte_type.total.saturating_sub(pte_type.free),
-            pte_type.failures
+        field("first PTE", ui::addr(pte_type.base_pte.0));
+        field("total", pte_type.total.to_string());
+        field("free", pte_type.free.to_string());
+        field(
+            "in use",
+            pte_type.total.saturating_sub(pte_type.free).to_string(),
         );
-        outln!(
-            "    bitmap        {:#x} bits at {}, {} PTE{} per bit; {} PTEs reserved beyond Total",
-            pte_type.bitmap_bits,
-            ui::addr(pte_type.bitmap.0),
-            pte_type.ptes_per_bit,
-            if pte_type.ptes_per_bit == 1 { "" } else { "s" },
-            span.saturating_sub(pte_type.total)
+        field("failures", pte_type.failures.to_string());
+        field(
+            "bitmap",
+            format!(
+                "{:#x} bits at {}, {} PTE{} per bit; {} PTEs reserved beyond the total",
+                pte_type.bitmap_bits,
+                ui::addr(pte_type.bitmap.0),
+                pte_type.ptes_per_bit,
+                if pte_type.ptes_per_bit == 1 { "" } else { "s" },
+                span.saturating_sub(pte_type.total)
+            ),
         );
+        field("free blocks", pte_type.free_run_count.to_string());
+        field("free in bitmap", pte_type.bitmap_free.to_string());
+        field("largest free block", pte_type.largest_free_run.to_string());
         if pte_type.unreadable_bitmap_bytes != 0 {
             outln!(
                 "    {} bitmap bytes unreadable (counted as allocated)",
@@ -676,6 +699,9 @@ fn print_system_ptes(detail: &SystemPtesDetail, flags: u64) {
                 pte_type.unscanned_bitmap_bits,
                 pte_type.bitmap_bits - pte_type.unscanned_bitmap_bits
             );
+        }
+        if !pte_type.free_runs.is_empty() {
+            outln!("    free block list");
         }
         for run in &pte_type.free_runs {
             match run.va {
@@ -698,12 +724,6 @@ fn print_system_ptes(detail: &SystemPtesDetail, flags: u64) {
                 pte_type.free_run_count - pte_type.free_runs.len() as u64
             );
         }
-        outln!(
-            "    free blocks: {}   total free: {}   largest free block: {}",
-            pte_type.free_run_count,
-            pte_type.bitmap_free,
-            pte_type.largest_free_run
-        );
         if pte_type.bitmap_free != pte_type.free {
             outln!(
                 "    (the bitmap counts {} free where TotalFreeSystemPtes says {}: the target allocated between the reads)",
@@ -722,90 +742,107 @@ fn print_system_ptes(detail: &SystemPtesDetail, flags: u64) {
         outln!();
         if tracked.is_empty() {
             outln!(
-                "  No allocator tracks its mappings (TrackPtes is off), so there is no record of the PTEs mapping locked pages."
+                "  no allocator tracks its mappings (TrackPtes is off), so there is no record of the PTEs mapping locked pages"
             );
         } else {
             outln!(
-                "  Tracking is on for {}; listing the tracked mappings is not supported.",
+                "  tracking is on for {}; listing the tracked mappings is not supported",
                 tracked.join(", ")
             );
         }
     }
     if flags & 0x1a != 0 {
         outln!();
-        outln!("  Flags 0x2, 0x8, and 0x10 apply to allocators this build does not have; ignored.");
+        outln!(
+            "  flags 0x2, 0x8, and 0x10 apply to allocators this build does not have, so they are ignored"
+        );
     }
-    outln!();
 }
 
 fn print_vm(detail: &VmDetail) {
-    print_memory_use_summary(&detail.system, detail.include_processes);
-    outln!("pool counters:");
-    outln!(
-        "  {:<24}: {} bytes",
-        "nonpaged pool bytes",
-        diagnostic_metric_cell(&detail.pool.nonpaged_pool_bytes)
-    );
-    outln!(
-        "  {:<24}: {} bytes",
+    print_memory_counters(&detail.system);
+    // Paged pool pages and nonpaged pool bytes are in `system memory`
+    // above; this block adds what only the pool counters hold.
+    print_section("pool");
+    let mut notes = UnavailableNotes::default();
+    let maximum = metric_with_unit(
+        &mut notes,
         "nonpaged pool maximum",
-        diagnostic_metric_cell(&detail.pool.nonpaged_pool_maximum)
+        &detail.pool.nonpaged_pool_maximum,
+        Some("bytes"),
     );
-    outln!(
-        "  {:<24}: {} pages",
-        "paged pool pages",
-        diagnostic_metric_cell(&detail.pool.paged_pool_pages)
-    );
+    outln!("  nonpaged pool maximum  {maximum}");
+    notes.print("  ");
     if detail.pool.fields.is_empty() {
-        outln!("  MiState pool fields   : <unavailable>");
+        outln!(
+            "  {}",
+            ui::muted("MiState has no pool fields this build locates")
+        );
     } else {
-        outln!("  MiState pool fields (native units):");
-        for field in &detail.pool.fields {
-            outln!(
-                "    {:<32}: {} {}",
-                field.name,
-                diagnostic_metric_cell(&field.value),
-                field.unit.map_or_else(String::new, |unit| unit.to_string())
-            );
-        }
+        outln!("  MiState pool fields");
+        print_vm_counters(&detail.pool.fields, "    ");
     }
 
-    outln!("PTE counters:");
-    if detail
-        .pte
-        .counters
-        .iter()
-        .all(|counter| matches!(counter.value.value, DiagnosticValue::Unavailable(_)))
-    {
-        outln!("  counters               : <unavailable>");
-    } else {
-        for counter in &detail.pte.counters {
-            outln!(
-                "  {:<24}: {}",
-                counter.name,
-                diagnostic_metric_cell(&counter.value)
-            );
-        }
+    print_section("PTEs");
+    print_vm_counter_section(&detail.pte.counters);
+    print_section("page files");
+    print_vm_counter_section(&detail.page_files);
+    // As in WinDbg, the per-process rows come last.
+    if detail.include_processes {
+        print_process_memory(&detail.system);
     }
+}
 
-    outln!("page files:");
-    if detail
-        .page_files
+/// A section of `!vm` counters, or one line saying none could be read and
+/// why, rather than a column of the same failure.
+fn print_vm_counter_section(counters: &[VmCounter]) {
+    let first_error = counters
         .iter()
-        .all(|counter| matches!(counter.value.value, DiagnosticValue::Unavailable(_)))
-    {
-        outln!("  summary               : <unavailable>");
-    } else {
-        for counter in &detail.page_files {
-            outln!(
-                "  {:<24}: {}{}",
-                counter.name,
-                diagnostic_metric_cell(&counter.value),
-                counter
-                    .unit
-                    .map_or_else(String::new, |unit| format!(" {unit}"))
-            );
+        .find_map(|counter| match &counter.value.value {
+            DiagnosticValue::Unavailable(error) => Some(error),
+            DiagnosticValue::Available(_) => None,
+        });
+    match first_error {
+        _ if counters.is_empty() => outln!("  {}", ui::muted("no counters")),
+        Some(error)
+            if counters
+                .iter()
+                .all(|counter| matches!(counter.value.value, DiagnosticValue::Unavailable(_))) =>
+        {
+            outln!("  {}", ui::muted(&format!("unavailable: {error}")));
         }
+        _ => print_vm_counters(counters, "  "),
+    }
+}
+
+/// `!vm` counters as fields, each value with its unit (`75165 pages`), and a
+/// note for those that could not be read.
+fn print_vm_counters(counters: &[VmCounter], indent: &str) {
+    let width = counters
+        .iter()
+        .map(|counter| counter.name.len())
+        .max()
+        .unwrap_or(0);
+    let mut notes = UnavailableNotes::default();
+    for counter in counters {
+        let unit = counter.unit.map(|unit| unit.to_string());
+        let value = metric_with_unit(&mut notes, &counter.name, &counter.value, unit.as_deref());
+        outln!("{indent}{:<width$}  {value}", counter.name);
+    }
+    notes.print(indent);
+}
+
+/// A counter with its unit, `75165 pages`, or `-` noted in `notes`.
+fn metric_with_unit(
+    notes: &mut UnavailableNotes,
+    label: &str,
+    metric: &DiagnosticMetric<u64>,
+    unit: Option<&str>,
+) -> String {
+    match (&metric.value, unit) {
+        (DiagnosticValue::Available(value), Some(unit)) => format!("{value} {unit}"),
+        (DiagnosticValue::Available(value), None) => value.to_string(),
+        (DiagnosticValue::Unavailable(error), _) => notes.missing(label, error),
     }
 }
 
@@ -816,62 +853,70 @@ fn print_pfn(detail: &PfnDetail) {
         ui::addr(detail.record.0)
     );
     if let PfnSelector::PhysicalAddress(value) = detail.selector {
-        outln!("  {:<20}: {}", "physical address", ui::addr(value));
+        outln!("  {:<20} : {}", "PhysicalAddress", ui::addr(value));
     }
-    outln!("  {:<20}: {}", "PteAddress", ui::addr(detail.pte_address.0));
-    outln!("  {:<20}: {:#x}", "OriginalPte", detail.original_pte);
-    outln!("  {:<20}: {}", "ReferenceCount", detail.reference_count);
+    outln!(
+        "  {:<20} : {}",
+        "PteAddress",
+        ui::addr(detail.pte_address.0)
+    );
+    outln!("  {:<20} : {:#x}", "OriginalPte", detail.original_pte);
+    outln!("  {:<20} : {}", "ReferenceCount", detail.reference_count);
     if let Some(value) = detail.flink {
-        outln!("  {:<20}: {value:#x}", "Flink");
+        outln!("  {:<20} : {value:#x}", "Flink");
     }
     if let Some(value) = detail.blink {
-        outln!("  {:<20}: {value:#x}", "Blink");
+        outln!("  {:<20} : {value:#x}", "Blink");
     }
     if detail.flink.is_some() {
         if let Some(value) = detail.node_flink_low {
-            outln!("  {:<20}: {value:#x}", "NodeFlinkLow");
+            outln!("  {:<20} : {value:#x}", "NodeFlinkLow");
         }
         if let Some(value) = detail.node_blink_low {
-            outln!("  {:<20}: {value:#x}", "NodeBlinkLow");
+            outln!("  {:<20} : {value:#x}", "NodeBlinkLow");
         }
     } else if let Some(value) = detail.share_count {
-        outln!("  {:<20}: {value}", "ShareCount");
+        outln!("  {:<20} : {value}", "ShareCount");
         if let Some(value) = detail.ws_index {
-            outln!("  {:<20}: {value:#x}", "WsIndex");
+            outln!("  {:<20} : {value:#x}", "WsIndex");
         }
         if let Some(value) = detail.event {
-            outln!("  {:<20}: {value:#x}", "Event");
+            outln!("  {:<20} : {value:#x}", "Event");
         }
     } else {
-        outln!("  {:<20}: <unavailable>", "ShareCount");
+        outln!("  {:<20} : -", "ShareCount");
     }
+    let mut notes = UnavailableNotes::default();
     outln!(
-        "  {:<20}: {}",
+        "  {:<20} : {}",
         "UsedPageTableEntries",
         detail.used_entry_count
     );
     outln!(
-        "  {:<20}: {}",
+        "  {:<20} : {}",
         "PageColor",
-        diagnostic_cell(&detail.page_color)
+        notes.value("PageColor", &detail.page_color)
     );
     outln!(
-        "  {:<20}: {:#x} (containing page)",
+        "  {:<20} : {:#x} (containing page)",
         "PteFrame",
         detail.pte_frame
     );
     outln!(
-        "  PageLocation          : {} ({})",
-        detail.page_location.value & 0x7,
-        detail.page_location.name()
+        "  {:<20} : {} ({:#x})",
+        "PageLocation",
+        detail.page_location.name(),
+        detail.page_location.value & 0x7
     );
-    outln!("  Modified              : {}", detail.modified);
+    outln!("  {:<20} : {}", "Modified", yes_no(detail.modified));
     outln!(
-        "  CacheAttribute        : {} ({})",
-        detail.cache_attribute.value & 0x3,
-        detail.cache_attribute.name()
+        "  {:<20} : {} ({:#x})",
+        "CacheAttribute",
+        detail.cache_attribute.name(),
+        detail.cache_attribute.value & 0x3
     );
-    outln!("  Priority              : {}", detail.priority);
+    outln!("  {:<20} : {}", "Priority", detail.priority);
+    notes.print("  ");
 }
 
 fn print_pte_entry(level: &PteLevel) {
@@ -896,7 +941,7 @@ fn print_pte_entry(level: &PteLevel) {
 
 fn print_vtop(detail: &VtopDetail) {
     outln!(
-        "VA {} DTB {}",
+        "VA {}  DTB {}",
         ui::addr(detail.address.0),
         ui::addr(detail.dtb)
     );
@@ -904,19 +949,17 @@ fn print_vtop(detail: &VtopDetail) {
         print_pte_entry(level);
     }
     match detail.physical {
-        Some(physical) => outln!("  physical             : {}", ui::addr(physical)),
-        None => outln!("  physical             : <not mapped>"),
+        Some(physical) => outln!("  physical  {}", ui::addr(physical)),
+        None => outln!("  physical  not mapped"),
     }
     if detail.transition {
-        outln!("  mapping              : transition (resident, not mapped; read-only)");
+        outln!("  mapping   transition (resident, not mapped; read-only)");
     }
     if detail.section {
-        outln!(
-            "  mapping              : section (the view's shared page, not mapped here; read-only)"
-        );
+        outln!("  mapping   section (the view's shared page, not mapped here; read-only)");
     }
     if detail.large {
-        outln!("  mapping              : large page");
+        outln!("  mapping   large page");
     }
 }
 
@@ -930,7 +973,7 @@ fn print_ptov(detail: &PtovDetail) {
         return;
     }
     outln!(
-        "PA {} DTB {}",
+        "PA {}  DTB {}",
         ui::addr(detail.physical),
         ui::addr(detail.dtb)
     );
@@ -964,7 +1007,7 @@ fn print_ptov(detail: &PtovDetail) {
 fn usage_cell(value: Option<i64>) -> String {
     value
         .map(|value| value.to_string())
-        .unwrap_or_else(|| "<unavailable>".to_string())
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn print_pool_usage(detail: &PoolUsageDetail, include_counts: bool) {
@@ -974,23 +1017,28 @@ fn print_pool_usage(detail: &PoolUsageDetail, include_counts: bool) {
         detail.big_status
     );
     if detail.rows_truncated {
-        outln!("pool usage rows bounded; some tags were omitted");
+        outln!(
+            "{}",
+            ui::muted(&format!(
+                "the first {} tags are shown; the tracker holds more",
+                detail.rows.len()
+            ))
+        );
     }
     let mut builder = Builder::default();
     if include_counts {
         builder.push_record([
             "Tag",
-            "NP Allocs",
-            "NP Frees",
-            "NP Bytes",
-            "Paged Allocs",
-            "Paged Frees",
-            "Paged Bytes",
+            "NP allocs",
+            "NP frees",
+            "NP bytes",
+            "Paged allocs",
+            "Paged frees",
+            "Paged bytes",
         ]);
         for row in &detail.rows {
-            let tag = tag_string(row.tag);
             builder.push_record([
-                format!("{tag} ({:#x})", row.tag),
+                pool_tag_text(&tag_string(row.tag), row.tag),
                 usage_cell(row.nonpaged_allocs),
                 usage_cell(row.nonpaged_frees),
                 usage_cell(row.nonpaged_bytes),
@@ -1000,11 +1048,10 @@ fn print_pool_usage(detail: &PoolUsageDetail, include_counts: bool) {
             ]);
         }
     } else {
-        builder.push_record(["Tag", "NP Bytes", "Paged Bytes"]);
+        builder.push_record(["Tag", "NP bytes", "Paged bytes"]);
         for row in &detail.rows {
-            let tag = tag_string(row.tag);
             builder.push_record([
-                format!("{tag} ({:#x})", row.tag),
+                pool_tag_text(&tag_string(row.tag), row.tag),
                 usage_cell(row.nonpaged_bytes),
                 usage_cell(row.paged_bytes),
             ]);
@@ -1015,57 +1062,67 @@ fn print_pool_usage(detail: &PoolUsageDetail, include_counts: bool) {
 
 fn print_pool_find(detail: &PoolFindDetail) {
     if detail.ranges.is_empty() {
-        outln!("pool virtual ranges: <unavailable>");
+        outln!("{}", ui::muted("no pool virtual ranges this build locates"));
+    }
+    // The scanned ranges' matches in range order, then the big-page table's.
+    let matches = detail
+        .ranges
+        .iter()
+        .flat_map(|range| {
+            detail
+                .matches
+                .iter()
+                .filter(move |m| m.source == range.name)
+        })
+        .chain(detail.matches.iter().filter(|m| m.source == "BigPool"));
+    let mut builder = Builder::default();
+    builder.push_record(["Address", "Tag", "Size", "State", "Pool", "Found in"]);
+    let mut rows = 0;
+    for m in matches {
+        let source = match m.table_entry {
+            Some(entry) => format!(
+                "{} entry {}[{}]",
+                m.source,
+                ui::addr(entry.0),
+                m.index.unwrap_or_default()
+            ),
+            None => m.source.clone(),
+        };
+        builder.push_record([
+            ui::addr(m.address.0).to_string(),
+            pool_tag_text(&m.tag_name, m.tag),
+            format!("{:#x}", m.size),
+            m.state.to_string(),
+            m.pool_type
+                .map_or_else(|| "-".to_string(), |kind| kind.to_string()),
+            source,
+        ]);
+        rows += 1;
+    }
+    if rows > 0 {
+        print_padded_table(builder);
     }
     for range in &detail.ranges {
-        for m in detail.matches.iter().filter(|m| m.source == range.name) {
-            outln!(
-                "  {} {} tag '{}' size 0x{:x} ({}, {}, {})",
-                range.name,
-                ui::addr(m.address.0),
-                m.tag_name,
-                m.size,
-                m.state,
-                if m.allocated { "allocated" } else { "free" },
-                m.pool_type
-                    .map_or_else(|| "unknown".to_string(), |kind| kind.to_string())
-            );
-        }
         if let Some(stopped_at) = range.stopped_at {
             outln!(
-                "  {} scan stopped at {} after {} mapped pages",
+                "{} scan stopped at {} after {} mapped pages",
                 range.name,
                 ui::addr(stopped_at.0),
                 range.scanned_pages
             );
         }
     }
-    for m in detail.matches.iter().filter(|m| m.source == "BigPool") {
-        outln!(
-            "  BigPool {} tag '{}' size 0x{:x} ({}, {}){}",
-            ui::addr(m.address.0),
-            m.tag_name,
-            m.size,
-            m.state,
-            m.pool_type
-                .map_or_else(|| "unknown".to_string(), |kind| kind.to_string()),
-            m.table_entry.map_or_else(
-                || "".to_string(),
-                |entry| format!(
-                    " entry {}[{}]",
-                    ui::addr(entry.0),
-                    m.index.unwrap_or_default()
-                )
-            )
-        );
-    }
     if let Some(status) = &detail.big_status {
-        outln!("  big-page table: {status}");
+        outln!("big-page table: {status}");
     }
     if detail.found == 0 {
         outln!("no pool blocks matched '{}'", detail.tag);
     } else {
-        outln!("{} matching pool block(s)", detail.found);
+        outln!(
+            "{} matching pool block{}",
+            detail.found,
+            if detail.found == 1 { "" } else { "s" }
+        );
     }
     if detail.interrupted {
         outln!("pool scan interrupted");
@@ -1073,15 +1130,12 @@ fn print_pool_find(detail: &PoolFindDetail) {
 }
 
 fn print_lookaside_record(detail: &LookasideDetail) {
-    let tag_display = match &detail.tag {
-        DiagnosticValue::Available(tag) => format!("'{}' (0x{:08x})", tag.name(), tag.value),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
-    };
+    let mut notes = UnavailableNotes::default();
+    outln!("GENERAL_LOOKASIDE {}", ui::addr(detail.address.0));
     outln!(
-        "  [{:03}] {} tag {}",
-        detail.index,
-        ui::addr(detail.address.0),
-        tag_display
+        "  {:<14} : {}",
+        "Tag",
+        lookaside_tag_cell(&mut notes, detail)
     );
     for (name, value, suffix) in [
         ("Size", &detail.size, " bytes"),
@@ -1090,23 +1144,59 @@ fn print_lookaside_record(detail: &LookasideDetail) {
         ("TotalFrees", &detail.total_frees, ""),
         ("AllocateMisses", &detail.allocate_misses, ""),
     ] {
-        outln!("       {name:<18}: {}{suffix}", diagnostic_cell(value));
+        let value = match value {
+            DiagnosticValue::Available(value) => format!("{value}{suffix}"),
+            DiagnosticValue::Unavailable(error) => notes.missing(name, error),
+        };
+        outln!("  {name:<14} : {value}");
+    }
+    notes.print("  ");
+}
+
+fn lookaside_tag_cell(notes: &mut UnavailableNotes, detail: &LookasideDetail) -> String {
+    match &detail.tag {
+        DiagnosticValue::Available(tag) => pool_tag_text(&tag.name(), tag.value),
+        DiagnosticValue::Unavailable(error) => notes.missing("Tag", error),
     }
 }
 
 fn print_lookaside_lists(detail: &LookasideListsDetail) {
     if detail.records.is_empty() {
-        outln!("lookaside lists: <unavailable>");
+        outln!("{}", ui::muted("no lookaside lists"));
         return;
     }
     outln!(
-        "lookaside lists ({} nonpaged, {} paged/other):",
+        "lookaside lists: {} nonpaged, {} paged or other",
         detail.nonpaged_count,
         detail.paged_count
     );
+    let mut builder = Builder::default();
+    builder.push_record([
+        "#",
+        "Address",
+        "Tag",
+        "Size",
+        "Depth",
+        "TotalAllocates",
+        "TotalFrees",
+        "AllocateMisses",
+    ]);
+    let mut notes = UnavailableNotes::default();
     for record in &detail.records {
-        print_lookaside_record(record);
+        let index = format!("[{:03}] ", record.index);
+        builder.push_record([
+            format!("{:03}", record.index),
+            ui::addr(record.address.0).to_string(),
+            lookaside_tag_cell(&mut notes, record),
+            notes.value(&format!("{index}Size"), &record.size),
+            notes.value(&format!("{index}Depth"), &record.depth),
+            notes.value(&format!("{index}TotalAllocates"), &record.total_allocates),
+            notes.value(&format!("{index}TotalFrees"), &record.total_frees),
+            notes.value(&format!("{index}AllocateMisses"), &record.allocate_misses),
+        ]);
     }
+    print_padded_table(builder);
+    notes.print("");
     if detail.interrupted {
         outln!("lookaside walk interrupted");
     }
@@ -1156,39 +1246,39 @@ fn print_pte_walk(result: &PteWalk, invalid_pte_mask: u64) {
         .with(Modify::new(Rows::first()).with(Alignment::center()))
         .with(tabled::settings::Style::empty());
 
-    outln!("{}\n", table);
+    // The centered header and the padded cells leave trailing spaces.
+    for line in table.to_string().lines() {
+        outln!("{}", line.trim_end());
+    }
 }
 
 /// `!pool`: the big-pool allocation holding `target`, or the pool page's
 /// blocks with the one holding `target` marked.
 fn print_pool_page(detail: &PoolPageDetail, target: VirtAddr) {
     if let Some(big) = &detail.big {
-        outln!("big pool @ {}", ui::addr(big.address.0));
-        outln!("  target        : {}", ui::addr(big.target.0));
+        outln!("big pool allocation {}", ui::addr(big.address.0));
+        outln!("  target       {}", ui::addr(big.target.0));
         outln!(
-            "  range         : {} - {} ({} bytes)",
+            "  range        {} - {} ({} bytes)",
             ui::addr(big.address.0),
             ui::addr(big.address.0.saturating_add(big.size)),
             big.size
         );
-        outln!("  offset        : 0x{:x} / 0x{:x}", big.offset, big.size);
-        outln!("  tag           : '{}' (0x{:08x})", big.tag_name, big.tag);
-        outln!("  table entry   : {}[{}]", ui::addr(big.entry.0), big.index);
-        outln!(
-            "  nonpaged      : {}",
-            if big.nonpaged { "yes" } else { "no" }
-        );
-        outln!("  pattern       : 0x{:x}", big.pattern);
-        outln!("  pool flags    : 0x{:x}", big.pool_flags);
-        outln!("  slush size    : 0x{:x}", big.slush_size);
+        outln!("  offset       0x{:x} / 0x{:x}", big.offset, big.size);
+        outln!("  tag          {}", pool_tag_text(&big.tag_name, big.tag));
+        outln!("  table entry  {}[{}]", ui::addr(big.entry.0), big.index);
+        outln!("  nonpaged     {}", if big.nonpaged { "yes" } else { "no" });
+        outln!("  pattern      0x{:x}", big.pattern);
+        outln!("  pool flags   0x{:x}", big.pool_flags);
+        outln!("  slush size   0x{:x}", big.slush_size);
         return;
     }
 
     outln!("pool page {}", ui::addr(detail.page.0));
-    outln!("  target        : {}", ui::addr(target.0));
+    outln!("  target         {}", ui::addr(target.0));
     if let Some(region) = &detail.region {
         outln!(
-            "  region        : {} [{} - {}]",
+            "  region         {} [{} - {}]",
             region.name,
             ui::addr(region.start.0),
             ui::addr(region.end.0)
@@ -1196,31 +1286,28 @@ fn print_pool_page(detail: &PoolPageDetail, target: VirtAddr) {
     }
     if let Some(idx) = detail.target_index {
         outln!(
-            "  blocks in run : {} (target is #{})",
+            "  blocks in run  {} (target is #{})",
             detail.blocks.len(),
             idx + 1
         );
     }
-    outln!();
     if detail.blocks.is_empty() {
-        outln!("  (no plausible pool block found for this address)");
-    } else {
         outln!(
-            "    {:<16} {:<8} {:<8} {:<12} {:<6} tag",
-            "header",
-            "size",
-            "prev",
-            "state",
-            "type"
+            "  {}",
+            ui::muted("no plausible pool block holds this address")
         );
+    } else {
+        outln!();
+        print_pool_block_header();
         for block in &detail.blocks {
             print_pool_block_row(block, None);
         }
         if let Some(idx) = detail.target_index {
             let block = &detail.blocks[idx];
             if let Some(offset) = block.target_offset {
+                outln!();
                 outln!(
-                    "  target offset : 0x{:x} into body (block @ {}, body @ {})",
+                    "  target offset  0x{:x} into the body (block {}, body {})",
                     offset,
                     ui::addr(block.header.0),
                     ui::addr(block.body.0)
@@ -1230,13 +1317,14 @@ fn print_pool_page(detail: &PoolPageDetail, target: VirtAddr) {
     }
 
     if let Some(message) = &detail.message {
-        outln!("  {message}.");
-        outln!("  it may be segment heap, special pool, a mapped view, or image/stack.");
+        outln!(
+            "  {message}; it may be segment heap, special pool, a mapped view, or an image or stack"
+        );
         if let Some(hint) = &detail.segment_heap_hint {
-            outln!("  hint          : {}", hint);
+            outln!("  hint           {}", hint);
         }
         if let Some(near) = &detail.near_symbol {
-            outln!("  near symbol   : {}", near);
+            outln!("  near symbol    {}", near);
         }
     }
 }

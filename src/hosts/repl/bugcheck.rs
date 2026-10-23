@@ -107,8 +107,8 @@ pub fn print_bugcheck_analysis(analysis: &BugcheckAnalysis) {
         .iter()
         .enumerate()
         .map(|(idx, arg)| {
-            // `#N` matches the stack-frame index style; the parent node
-            // already says `args`.
+            // `#N` counts from 1, as WinDbg's Arg1..Arg4 do; the parent
+            // node already says `args`.
             let prefix = format!(
                 "{} {}",
                 ui::muted(&format!("#{}", idx + 1)),

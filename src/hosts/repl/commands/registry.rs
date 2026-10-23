@@ -25,24 +25,29 @@ use crate::session::Session;
 const PREVIEW_CHARS: usize = 96;
 const PREVIEW_BYTES: usize = 32;
 
-/// A labeled line of a detail view.
+/// A labeled line of a detail view, under the view's heading.
 fn field(label: &str, value: impl Display) {
-    outln!("{} {value}", ui::label(&format!("{label:<12}")));
+    outln!("  {}  {value}", ui::label(&format!("{label:<10}")));
 }
 
-/// A FILETIME as UTC to the second, or muted `never` for zero.
+/// A FILETIME as ISO 8601 UTC to the second, or `-` for zero.
 fn written(filetime: u64) -> String {
     if filetime == 0 {
-        return ui::muted("never");
+        return "-".to_string();
     }
-    match filetime_to_iso(filetime) {
-        Some(iso) => iso.trim_end_matches('Z').replace('T', " "),
-        None => format!("{filetime:#x}"),
-    }
+    filetime_to_iso(filetime).unwrap_or_else(|| format!("{filetime:#x}"))
 }
 
 fn type_text(value_type: u32) -> String {
     value_type_name(value_type).map_or_else(|| format!("{value_type:#x}"), str::to_string)
+}
+
+/// A value type as a detail view shows an enum: `REG_SZ (0x1)`.
+fn type_field(value_type: u32) -> String {
+    value_type_name(value_type).map_or_else(
+        || format!("{value_type:#x}"),
+        |name| format!("{name} ({value_type:#x})"),
+    )
 }
 
 fn value_name(name: &str) -> String {
@@ -89,7 +94,9 @@ fn data_preview(value: &RegValue, truncated: &mut bool) -> String {
         DiagnosticValue::Unavailable(_) => return ui::muted("(does not read; see below)"),
     };
     match data {
+        RegData::Text(text) if text.is_empty() => "-".to_string(),
         RegData::Text(text) => preview_text(&one_line(&text), truncated),
+        RegData::Strings(strings) if strings.is_empty() => "-".to_string(),
         RegData::Strings(strings) => {
             let joined = strings
                 .iter()
@@ -107,17 +114,25 @@ fn data_preview(value: &RegValue, truncated: &mut bool) -> String {
                 ui::muted(&format!("({:#x} bytes)", bytes.len()))
             )
         }
+        RegData::Bytes(bytes) if bytes.is_empty() => "-".to_string(),
         RegData::Bytes(bytes) => hex_bytes(&bytes),
     }
 }
 
-/// Every byte, 16 to a line with their offset and ASCII.
+/// Every byte, 16 to a line with their offset and ASCII, in the form
+/// `!wmitrace.logdump` shows a payload: lowercase, the offset at least four
+/// digits and as wide as the last one needs.
 fn print_hex_dump(bytes: &[u8]) {
+    let width = format!("{:x}", bytes.len().saturating_sub(1)).len().max(4);
     for (line, chunk) in bytes.chunks(16).enumerate() {
-        let (hex, text) = hex_ascii_row(chunk, HexCase::Upper);
-        outln!("  {:06x}  {hex:<47}  {text}", line * 16);
+        let (hex, text) = hex_ascii_row(chunk, HexCase::Lower);
+        outln!("  {:0width$x}  {hex:<47}  {text}", line * 16);
     }
 }
+
+/// The characters `_HBASE_BLOCK.FileName` holds: the end of the hive's
+/// path, cut at the front when longer.
+const BASE_BLOCK_NAME_CHARS: usize = 31;
 
 fn print_hives(list: &HiveList) {
     let mut builder = Builder::default();
@@ -128,7 +143,15 @@ fn print_hives(list: &HiveList) {
             Ok(hive) => {
                 let file = match (&hive.file, &hive.base_block_name) {
                     (Some(file), _) => file.clone(),
-                    (None, Some(name)) => ui::muted(&format!("{name} (base block)")),
+                    (None, Some(name)) => {
+                        // A name that fills the field may have lost its start.
+                        let cut = if name.chars().count() >= BASE_BLOCK_NAME_CHARS {
+                            "..."
+                        } else {
+                            ""
+                        };
+                        ui::muted(&format!("{cut}{name} (base block)"))
+                    }
                     (None, None) if hive.master => ui::muted("(master hive)"),
                     (None, None) => ui::muted("(in memory only)"),
                 };
@@ -148,7 +171,7 @@ fn print_hives(list: &HiveList) {
         }
     }
     if list.hives.is_empty() {
-        outln!("{}\n", ui::muted("no hives are loaded"));
+        outln!("{}", ui::muted("no hives are loaded"));
     } else {
         print_padded_table(builder);
     }
@@ -161,23 +184,23 @@ fn print_hives(list: &HiveList) {
 }
 
 fn print_key_header(key: &RegKey) {
-    field("Key", &key.path);
+    outln!("key {}", key.path);
     for link in &key.links {
-        field("Link", format!("{} -> {}", link.from, link.to));
+        field("link", format!("{} -> {}", link.from, link.to));
     }
-    field("Hive", ui::addr(key.hive.0));
+    field("hive", ui::addr(key.hive.0));
     match key.cell {
         Some(cell) => field(
-            "Key node",
+            "key node",
             format!("{}  cell {cell:#x}", ui::addr(key.node.0)),
         ),
-        None => field("Key node", ui::addr(key.node.0)),
+        None => field("key node", ui::addr(key.node.0)),
     }
     let flags = key_flag_names(key.flags);
     if !flags.is_empty() {
-        field("Flags", flags.join(" "));
+        field("flags", format!("{:#x} ({})", key.flags, flags.join(" | ")));
     }
-    field("Last write", written(key.last_write));
+    field("last write", written(key.last_write));
 }
 
 fn print_key(key: &RegKey, command: &str) {
@@ -271,22 +294,21 @@ fn print_key(key: &RegKey, command: &str) {
             ))
         );
     }
-    outln!();
 }
 
 fn print_value(key: &RegKey, value: &RegValue) {
     print_key_header(key);
     outln!();
-    field("Value", value_name(&value.name));
-    field("Type", type_text(value.value_type));
+    outln!("value {}", value_name(&value.name));
+    field("type", type_field(value.value_type));
     let storage = match value.storage {
         DataStorage::Inline => "in the value record",
         DataStorage::Cell => "in a cell",
         DataStorage::Big => "in big data segments",
     };
-    field("Length", format!("{:#x} bytes, {storage}", value.length));
+    field("length", format!("{:#x} bytes, {storage}", value.length));
     field(
-        "Value node",
+        "value node",
         format!("{}  cell {:#x}", ui::addr(value.node.0), value.cell),
     );
     let bytes = match &value.data {
@@ -297,53 +319,57 @@ fn print_value(key: &RegKey, value: &RegValue) {
         }
     };
     match RegData::decode(value.value_type, bytes) {
-        RegData::Text(text) => field("Data", text),
+        RegData::Text(text) if text.is_empty() => field("data", "-"),
+        RegData::Text(text) => field("data", text),
         RegData::Strings(strings) => {
-            field("Data", format!("{} strings", strings.len()));
+            let plural = if strings.len() == 1 { "" } else { "s" };
+            field("data", format!("{} string{plural}", strings.len()));
             for (index, string) in strings.iter().enumerate() {
-                outln!("  [{index}] {string}");
+                outln!("    [{index}] {string}");
             }
         }
-        RegData::Number(number) => field("Data", format!("{number:#x} ({number})")),
+        RegData::Number(number) => field("data", format!("{number:#x} ({number})")),
         RegData::Bytes(_) => {}
     }
     outln!();
     print_hex_dump(bytes);
-    outln!();
 }
 
 fn print_cell(location: &CellLocation) {
-    field(
-        "Cell",
-        format!(
-            "{:#x} ({})  hive {}",
-            location.cell,
-            if location.volatile {
-                "volatile"
-            } else {
-                "stable"
-            },
-            ui::addr(location.hive.0)
-        ),
+    outln!(
+        "cell {:#x} ({})  hive {}",
+        location.cell,
+        if location.volatile {
+            "volatile"
+        } else {
+            "stable"
+        },
+        ui::addr(location.hive.0)
     );
     match &location.map {
         Some(map) => {
             field(
-                "Map",
+                "map",
                 format!(
                     "directory {}, table {}, offset {:#x}",
                     map.directory, map.table, map.offset
                 ),
             );
             field(
-                "Map entry",
+                "map entry",
                 format!("{}  block {}", ui::addr(map.entry.0), ui::addr(map.block.0)),
             );
         }
-        None => field("Map", "none: a flat hive, read from its base block"),
+        None => field(
+            "map",
+            format!(
+                "-  {}",
+                ui::muted("(a flat hive, read from its base block)")
+            ),
+        ),
     }
     field(
-        "Address",
+        "address",
         format!(
             "{}  data at {}",
             ui::addr(location.address.0),
@@ -352,14 +378,14 @@ fn print_cell(location: &CellLocation) {
     );
     match &location.size {
         DiagnosticValue::Available(size) if *size < 0 => {
-            field("Size", format!("{:#x}, in use", size.unsigned_abs()))
+            field("size", format!("{:#x}, in use", size.unsigned_abs()))
         }
-        DiagnosticValue::Available(size) => field("Size", format!("{size:#x}, free")),
+        DiagnosticValue::Available(size) => field("size", format!("{size:#x}, free")),
         DiagnosticValue::Unavailable(error) => {
-            field("Size", ui::muted(&format!("does not read: {error}")))
+            field("size", "-");
+            outln!("  {}", ui::muted(&format!("size unavailable: {error}")));
         }
     }
-    outln!();
 }
 
 /// What `!reg` was asked for.

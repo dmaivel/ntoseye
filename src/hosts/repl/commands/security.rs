@@ -1,7 +1,9 @@
 use tabled::builder::Builder;
+use tabled::settings::{Padding, Style};
 
 use ntoseye_macros::{command, grammar};
 
+use crate::base::diagnostics::print_warning;
 use crate::base::error::Result;
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
@@ -13,9 +15,11 @@ use crate::nt::target::security::{
 };
 use crate::session::Session;
 
-use super::diagnostics::{diagnostic_cell, diagnostic_hex};
-
 const MAX_SESSION_DISPLAY: usize = 64;
+
+/// What `!session` and `!sprocess` say when the process walk hit its bound.
+const TRUNCATED_NOTE: &str =
+    "the process walk stopped at 4096 processes; later ones are not listed";
 
 /// The address of a command that takes exactly one expression: any other
 /// word count prints the help.
@@ -140,7 +144,11 @@ fn acl(session: &Session, #[arg(parse = single_address)] address: VirtAddr) -> R
 
 impl Render for Acl {
     fn render(&self, _: &mut ReplState<'_>, _: ()) {
-        print_acl(self, "ACL", false);
+        let mut notes = Vec::new();
+        outln!("ACL {}", ui::addr(self.address.0));
+        outln!("  {}", acl_summary(self));
+        print_aces(self, false, "  ", &mut notes);
+        print_notes(&notes);
     }
 }
 
@@ -268,39 +276,83 @@ fn sid_text(sid: &Sid, annotate_well_known: bool) -> String {
     sid.sid.clone()
 }
 
-fn print_sid_diagnostic(value: &DiagnosticValue<Sid>, annotate_well_known: bool) -> String {
+/// A value that may not have been read: `None` when it was not, with the
+/// reason added to `notes` once, so the block shows `-` in the field and
+/// reports each reason after its fields instead of in every cell.
+fn available<'a, T>(
+    value: &'a DiagnosticValue<T>,
+    what: &str,
+    notes: &mut Vec<String>,
+) -> Option<&'a T> {
     match value {
-        DiagnosticValue::Available(sid) => sid_text(sid, annotate_well_known),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
+        DiagnosticValue::Available(value) => Some(value),
+        DiagnosticValue::Unavailable(error) => {
+            let note = format!("{what} unavailable: {error}");
+            if !notes.contains(&note) {
+                notes.push(note);
+            }
+            None
+        }
     }
 }
 
-fn print_acl(detail: &Acl, label: &str, annotate_well_known: bool) {
+/// The reasons a block's fields show `-`, as one warning.
+fn print_notes(notes: &[String]) {
+    if !notes.is_empty() {
+        print_warning(notes.join("; "));
+    }
+}
+
+/// Flag names as the data layer joins them (`A|B`), spaced as every
+/// command's flag sets are (`A | B`).
+fn spaced_flags(names: &str) -> String {
+    names.replace('|', " | ")
+}
+
+/// An ACL's header fields on one line: revision, size and ACE count.
+fn acl_summary(detail: &Acl) -> String {
     let status = if detail.unknown_revision {
-        " (unknown revision; ACEs not decoded)"
+        " (unknown revision, so the ACEs are not decoded)"
     } else if detail.bounded {
         " (bounded)"
     } else {
         ""
     };
-    outln!(
-        "  {label} {} revision {} size {:#x} ACEs {}{status}",
-        ui::addr(detail.address.0),
-        detail.revision,
-        detail.size,
-        detail.ace_count
-    );
+    format!(
+        "revision {}  size {:#x}  ACEs {}{status}",
+        detail.revision, detail.size, detail.ace_count
+    )
+}
+
+/// The ACEs as a table indented by `indent`: print_padded_table cannot
+/// indent, and the ACEs sit inside their descriptor's or ACL's block.
+fn print_aces(detail: &Acl, annotate_well_known: bool, indent: &str, notes: &mut Vec<String>) {
+    if detail.aces.is_empty() {
+        return;
+    }
+    let mut builder = Builder::default();
+    builder.push_record(["ACE", "Type", "Flags", "Mask", "SID"]);
     for ace in &detail.aces {
-        outln!(
-            "    ACE[{}] type={} ({:#x}) flags={} ({:#x}) mask={} SID={}",
-            ace.index,
-            ace.type_name,
-            ace.ace_type,
-            ace.flag_names,
-            ace.flags,
-            diagnostic_hex(&ace.access_mask),
-            print_sid_diagnostic(&ace.sid, annotate_well_known),
-        );
+        let what = format!("ACE {}", ace.index);
+        builder.push_record([
+            ace.index.to_string(),
+            format!("{} ({:#x})", ace.type_name, ace.ace_type),
+            // An ACE without inheritance or audit flags shows its value alone.
+            if ace.flags == 0 {
+                format!("{:#x}", ace.flags)
+            } else {
+                format!("{:#x} ({})", ace.flags, spaced_flags(&ace.flag_names))
+            },
+            available(&ace.access_mask, &format!("{what} mask"), notes)
+                .map_or_else(|| "-".to_string(), |mask| format!("{mask:#x}")),
+            available(&ace.sid, &format!("{what} SID"), notes)
+                .map_or_else(|| "-".to_string(), |sid| sid_text(sid, annotate_well_known)),
+        ]);
+    }
+    let mut table = builder.build();
+    table.with(Style::empty()).with(Padding::new(0, 2, 0, 0));
+    for line in table.to_string().lines() {
+        outln!("{indent}{}", line.trim_end());
     }
 }
 
@@ -310,29 +362,30 @@ fn print_descriptor_component(
     control: &DiagnosticValue<u16>,
     bit: u16,
     annotate_well_known: bool,
+    notes: &mut Vec<String>,
 ) {
-    let Some(control) = (match control {
-        DiagnosticValue::Available(value) => Some(*value),
-        DiagnosticValue::Unavailable(error) => {
-            outln!("  {label:22}: <unavailable: Control could not be read: {error}>");
-            None
-        }
-    }) else {
+    // Without Control, whether the ACL is present is unknown; the Control
+    // field's note already says why.
+    let Some(control) = available(control, "Control", notes) else {
+        outln!("  {label:8} : -");
         return;
     };
     if control & bit == 0 {
-        outln!("  {label:22}: not present");
+        outln!("  {label:8} : not present");
         return;
     }
-    match value {
-        DiagnosticValue::Unavailable(error) => {
-            outln!("  {label:22}: <unavailable: {error}>");
+    match available(value, label, notes) {
+        None => outln!("  {label:8} : -"),
+        Some(None) => {
+            outln!("  {label:8} : - (a NULL DACL grants everyone full access)");
         }
-        DiagnosticValue::Available(None) => {
-            outln!("  {label:22}: NULL (unrestricted)");
-        }
-        DiagnosticValue::Available(Some(acl)) => {
-            print_acl(acl, label, annotate_well_known);
+        Some(Some(acl)) => {
+            outln!(
+                "  {label:8} : {}  {}",
+                ui::addr(acl.address.0),
+                acl_summary(acl)
+            );
+            print_aces(acl, annotate_well_known, "    ", notes);
         }
     }
 }
@@ -341,41 +394,43 @@ fn print_sid_component(
     label: &str,
     value: &DiagnosticValue<Option<Sid>>,
     annotate_well_known: bool,
+    notes: &mut Vec<String>,
 ) {
-    match value {
-        DiagnosticValue::Unavailable(error) => {
-            outln!("  {label:22}: <unavailable: {error}>");
-        }
-        DiagnosticValue::Available(None) => outln!("  {label:22}: NULL"),
-        DiagnosticValue::Available(Some(sid)) => {
-            outln!("  {label:22}: {}", sid_text(sid, annotate_well_known));
+    match available(value, label, notes) {
+        None | Some(None) => outln!("  {label:8} : -"),
+        Some(Some(sid)) => {
+            outln!("  {label:8} : {}", sid_text(sid, annotate_well_known));
         }
     }
 }
 
 fn print_security_descriptor(detail: &SecurityDescriptor, annotate_well_known: bool) {
+    let mut notes = Vec::new();
     outln!("SECURITY_DESCRIPTOR {}", ui::addr(detail.address.0));
     outln!(
-        "  Revision              : {}",
-        diagnostic_hex(&detail.revision)
+        "  Revision : {}",
+        available(&detail.revision, "Revision", &mut notes)
+            .map_or_else(|| "-".to_string(), |revision| format!("{revision:#x}"))
     );
-    match &detail.control {
-        DiagnosticValue::Available(control) => outln!(
-            "  Control               : {control:#06x} ({})",
-            diagnostic_cell(&detail.control_names)
-        ),
-        DiagnosticValue::Unavailable(error) => {
-            outln!("  Control               : <unavailable: {error}>");
+    let control = available(&detail.control, "Control", &mut notes).copied();
+    let control_names =
+        control.and_then(|_| available(&detail.control_names, "Control", &mut notes).cloned());
+    match (control, control_names) {
+        (Some(control), Some(names)) if names != "-" && !names.is_empty() => {
+            outln!("  Control  : {control:#06x} ({})", spaced_flags(&names));
         }
+        (Some(control), _) => outln!("  Control  : {control:#06x}"),
+        (None, _) => outln!("  Control  : -"),
     }
-    print_sid_component("Owner", &detail.owner, annotate_well_known);
-    print_sid_component("Group", &detail.group, annotate_well_known);
+    print_sid_component("Owner", &detail.owner, annotate_well_known, &mut notes);
+    print_sid_component("Group", &detail.group, annotate_well_known, &mut notes);
     print_descriptor_component(
         "DACL",
         &detail.dacl,
         &detail.control,
         0x0004,
         annotate_well_known,
+        &mut notes,
     );
     print_descriptor_component(
         "SACL",
@@ -383,7 +438,9 @@ fn print_security_descriptor(detail: &SecurityDescriptor, annotate_well_known: b
         &detail.control,
         0x0010,
         annotate_well_known,
+        &mut notes,
     );
+    print_notes(&notes);
     if detail.unsupported_revision
         && let DiagnosticValue::Available(revision) = &detail.revision
     {
@@ -392,63 +449,63 @@ fn print_security_descriptor(detail: &SecurityDescriptor, annotate_well_known: b
 }
 
 fn print_object_security(detail: &ObjectSecurity) {
-    outln!(
-        "object {} header {} SecurityDescriptor {} (fast-ref {:#x})",
-        ui::addr(detail.object.0),
-        ui::addr(detail.header.0),
-        ui::addr(detail.descriptor_address.0),
-        detail.fast_reference
-    );
+    outln!("object {}", ui::addr(detail.object.0));
+    outln!("  header               {}", ui::addr(detail.header.0));
     match &detail.descriptor {
-        Some(descriptor) => print_security_descriptor(descriptor, true),
-        None => outln!("security descriptor: NULL"),
+        Some(_) => outln!(
+            "  security descriptor  {} (fast reference {:#x})",
+            ui::addr(detail.descriptor_address.0),
+            detail.fast_reference
+        ),
+        None => outln!("  security descriptor  -"),
+    }
+    if let Some(descriptor) = &detail.descriptor {
+        outln!();
+        print_security_descriptor(descriptor, true);
     }
 }
 
 fn print_session(detail: &security::Session) {
-    match detail.id {
-        Some(id) => outln!(
-            "  Session {id}: {} process{}",
-            detail.processes.len(),
-            if detail.processes.len() == 1 {
-                ""
-            } else {
-                "es"
-            }
-        ),
-        None => outln!(
-            "  Session ?: {} process{}",
-            detail.processes.len(),
-            if detail.processes.len() == 1 {
-                ""
-            } else {
-                "es"
-            }
-        ),
+    let id = detail
+        .id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let shown = if detail.processes.len() > MAX_SESSION_DISPLAY {
+        format!(" (the first {MAX_SESSION_DISPLAY}; !sprocess {id} lists them all)")
+    } else {
+        String::new()
+    };
+    outln!(
+        "session {id}: {} process{}{shown}",
+        detail.processes.len(),
+        if detail.processes.len() == 1 {
+            ""
+        } else {
+            "es"
+        }
+    );
+    if detail.processes.is_empty() {
+        outln!();
+        return;
     }
+    let mut builder = Builder::default();
+    builder.push_record(["PID", "Name", "EPROCESS"]);
     for process in detail.processes.iter().take(MAX_SESSION_DISPLAY) {
-        outln!(
-            "    {:>6} {}  EPROCESS {}",
-            process.pid,
-            process.name,
-            ui::addr(process.eprocess.0)
-        );
+        builder.push_record([
+            process.pid.to_string(),
+            process.name.clone(),
+            ui::addr(process.eprocess.0),
+        ]);
     }
-    if detail.processes.len() > MAX_SESSION_DISPLAY {
-        outln!(
-            "    ... {} additional processes omitted",
-            detail.processes.len() - MAX_SESSION_DISPLAY
-        );
-    }
+    print_padded_table(builder);
 }
 
 fn print_sessions(detail: &Sessions) {
-    outln!("sessions: {}", detail.sessions.len());
     for session in &detail.sessions {
         print_session(session);
     }
     if detail.truncated {
-        outln!("process enumeration bounded at 4096");
+        outln!("{}", ui::muted(TRUNCATED_NOTE));
     }
 }
 
@@ -473,7 +530,7 @@ fn print_session_processes(detail: &SessionProcesses, detailed: bool) {
                 ui::addr(row.process.dtb),
                 row.session
                     .map(|id| id.to_string())
-                    .unwrap_or_else(|| "?".into()),
+                    .unwrap_or_else(|| "-".into()),
             ]);
         }
     } else {
@@ -486,6 +543,6 @@ fn print_session_processes(detail: &SessionProcesses, detailed: bool) {
         print_padded_table(builder);
     }
     if detail.truncated {
-        outln!("process enumeration bounded at 4096");
+        outln!("{}", ui::muted(TRUNCATED_NOTE));
     }
 }

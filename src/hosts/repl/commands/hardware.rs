@@ -130,9 +130,11 @@ impl Render for IpiState {
         }
         for error in &self.errors {
             outln!(
-                "processor {}: <unavailable: {}>",
-                error.processor,
-                error.message
+                "{}",
+                ui::muted(&format!(
+                    "processor {}: IPI state unavailable: {}",
+                    error.processor, error.message
+                ))
             );
         }
     }
@@ -471,16 +473,18 @@ fn print_queued_locks(detail: &QueuedLocks) {
                     lock.name,
                     holder.processor,
                     lock.lock
-                        .map_or_else(|| "?".into(), |lock| ui::addr(lock.0))
+                        .map_or_else(|| "-".into(), |lock| ui::addr(lock.0))
                 );
             }
         }
     }
     for error in &detail.errors {
         outln!(
-            "processor {}: <unavailable: {}>",
-            error.processor,
-            error.message
+            "{}",
+            ui::muted(&format!(
+                "processor {}: queued locks unavailable: {}",
+                error.processor, error.message
+            ))
         );
     }
 }
@@ -492,16 +496,24 @@ fn print_ipi_processor(processor: &IpiProcessor) {
         ui::addr(processor.kprcb.0)
     );
     let field = |name: &str| processor.fields.iter().find(|field| field.name == name);
+    let mut unavailable = Vec::new();
     for entry in &processor.fields {
         let value = match (&entry.value, entry.name) {
-            (DiagnosticValue::Available(value), "IpiFrozen") => {
-                format!("{value:#x} [{}]", ipi_frozen_name(*value))
-            }
+            (DiagnosticValue::Available(value), "IpiFrozen") => match ipi_frozen_name(*value) {
+                "Unknown" => format!("{value:#x}"),
+                name => format!("{name} ({value:#x})"),
+            },
             (DiagnosticValue::Available(value), "IpiFrame") => ui::addr(*value),
             (DiagnosticValue::Available(value), _) => format!("{value:#x}"),
-            (DiagnosticValue::Unavailable(error), _) => format!("<unavailable: {error}>"),
+            (DiagnosticValue::Unavailable(error), _) => {
+                unavailable.push(format!("{} unavailable: {error}", entry.name));
+                "-".to_string()
+            }
         };
         outln!("    {:<22}{value}", entry.name);
+    }
+    for note in unavailable {
+        outln!("    {}", ui::muted(&note));
     }
     let outstanding = matches!(
         field("TargetCount").map(|field| &field.value),
@@ -533,7 +545,7 @@ fn print_ipi_processor(processor: &IpiProcessor) {
                         ipi_request_type_name(*summary).unwrap_or("unknown type")
                     ),
                     DiagnosticValue::Unavailable(error) => {
-                        format!("summary <unavailable: {error}>")
+                        format!("summary unavailable: {error}")
                     }
                 };
                 outln!(
@@ -550,7 +562,9 @@ fn print_ipi_processor(processor: &IpiProcessor) {
                             }
                             None => ui::addr(routine.0),
                         },
-                        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
+                        DiagnosticValue::Unavailable(error) => {
+                            format!("- {}", ui::muted(&format!("(unavailable: {error})")))
+                        }
                     };
                     outln!("        Worker Routine: {worker}");
                     if let DiagnosticValue::Available(parameters) = &request.parameters {
@@ -782,7 +796,7 @@ fn print_pci_function(request: &PciRequest, function: &PciFunction) {
             );
         }
         let pin = match header.interrupt_pin {
-            0 => "none".to_string(),
+            0 => "-".to_string(),
             pin @ 1..=4 => format!("{pin} (INT{})", char::from(b'A' + pin - 1)),
             pin => format!("{pin:#x} (invalid)"),
         };

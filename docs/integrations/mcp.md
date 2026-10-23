@@ -97,14 +97,14 @@ The guest runs freely between calls. When a breakpoint on a shared page stops th
 
 ```json
 {"backend": "dump", "connect": "powershell-exception.dmp", "status": "connected",
- "target": "user-mode minidump", "process": "powershell.exe (pid 4340)", "threads": 20,
+ "target": "user-mode minidump", "process": "powershell.exe (PID 4340)", "threads": 20,
  "thread": "10f4.cc4", "exception": "0xe0d7e5e1 at kernelbase!RaiseException+0x8a on thread 10f4.cc4"}
 ```
 
 The trailer names the selected thread and the exception:
 
 ```text
-[minidump powershell.exe (pid 4340), 20 threads | thread ~17 10f4.cc4 0x7ff9493c2d14 ntdll!NtGetContextThread+0x14 | exception 0xe0d7e5e1 on ~17 10f4.cc4]
+[minidump powershell.exe (PID 4340), 20 threads | thread ~17 10f4.cc4 0x7ff9493c2d14 ntdll!NtGetContextThread+0x14 | exception 0xe0d7e5e1 on ~17 10f4.cc4]
 ```
 
 {command}`~` lists the threads and `~<n>s` selects one, and `.ecxr; k` shows the stack of the exception. Commands that need a kernel, run control, breakpoints, and writes return an error result (`isError`), such as `!process: this needs a kernel target; a user-mode minidump holds one process and no kernel` or `the minidump backend cannot run or step the target`.

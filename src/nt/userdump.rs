@@ -385,11 +385,11 @@ impl UserDumpInfo {
         }
     }
 
-    /// `charmap.exe (pid 1234)`, as far as the dump records it.
+    /// `charmap.exe (PID 1234)`, as far as the dump records it.
     pub fn process_label(&self) -> String {
         let name = self.process_name().unwrap_or("process");
         match self.process_id {
-            Some(pid) => format!("{name} (pid {pid})"),
+            Some(pid) => format!("{name} (PID {pid})"),
             None => name.to_string(),
         }
     }

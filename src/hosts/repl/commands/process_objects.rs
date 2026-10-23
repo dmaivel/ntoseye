@@ -2,6 +2,7 @@
 //! ports, and exited processes and threads still referenced.
 
 use crate::base::error::Result;
+use crate::base::time::filetime_to_iso_precise;
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::hosts::repl::*;
@@ -11,13 +12,13 @@ use crate::nt::target::DiagnosticValue;
 use crate::nt::target::alpc::{
     AlpcConnection, AlpcMessage, AlpcPort, AlpcPortKind, AlpcProcessPorts, lpc_message_type_name,
 };
-use crate::nt::target::etw::format_filetime_precise;
 use crate::nt::target::gflag::{GLOBAL_FLAGS, GlobalFlagChange, GlobalFlags, global_flags_set};
 use crate::nt::target::htrace::HandleTraces;
 use crate::nt::target::job::{Job, job_limit_flag_names};
 use crate::nt::target::zombies::{MAX_ZOMBIES, ZombieKinds, Zombies};
 use crate::session::Session;
 use ntoseye_macros::{command, grammar};
+use tabled::builder::Builder;
 
 /// Show an ALPC port, an ALPC message, or the ports that a process holds.
 ///
@@ -281,14 +282,18 @@ impl Render<bool> for GlobalFlags {
     fn render(&self, _: &mut ReplState<'_>, list: bool) {
         if list {
             for flag in &GLOBAL_FLAGS {
+                let abbreviation = if flag.abbreviation.is_empty() {
+                    "-"
+                } else {
+                    flag.abbreviation
+                };
                 outln!(
                     "  {:#010x} {:<3} {}",
                     flag.bit,
-                    flag.abbreviation,
+                    abbreviation,
                     flag.description
                 );
             }
-            outln!();
             return;
         }
         if let Some(change) = &self.change {
@@ -329,71 +334,110 @@ impl Render<u64> for Job {
 }
 
 fn print_job(job: &Job, flags: u64) {
-    outln!("Job at {}", ui::addr(job.address.0));
+    outln!("job {}", ui::addr(job.address.0));
     let optional = |value: Option<u64>| value.map_or("-".to_string(), |value| value.to_string());
-    outln!(
-        "  JobId {}  SessionId {}",
-        optional(job.job_id),
-        optional(job.session_id)
-    );
+    let mut fields = vec![
+        ("JobId", optional(job.job_id)),
+        ("SessionId", optional(job.session_id)),
+    ];
+    if flags & 1 != 0 {
+        fields.push((
+            "JobFlags",
+            with_names(optional_hex(job.job_flags), &job.job_flag_names),
+        ));
+        fields.push(("NestingDepth", optional(job.nesting_depth)));
+        fields.push(("ParentJob", optional_addr(job.parent_job)));
+        fields.push(("RootJob", optional_addr(job.root_job)));
+        if job.silo {
+            fields.push(("ServerSiloGlobals", optional_addr(job.server_silo_globals)));
+        }
+    }
+    print_fields(2, &fields);
     if flags & 1 != 0 {
         outln!("  Basic Accounting Information");
-        for (field, value) in job.accounting.fields() {
-            if let Some(value) = value {
-                outln!("    {:<28} {value:#x}", format!("{field}:"));
-            }
-        }
-        outln!("  Job Flags ({})", optional_hex(job.job_flags));
-        for name in &job.job_flag_names {
-            outln!("    [{name}]");
-        }
+        let accounting: Vec<_> = job
+            .accounting
+            .fields()
+            .filter_map(|(field, value)| Some((field, format!("{:#x}", value?))))
+            .collect();
+        print_fields(4, &accounting);
         outln!("  Limit Information");
-        for (field, value) in job.limits.fields() {
-            let Some(value) = value else { continue };
-            let names = if field.ends_with("LimitFlags") {
-                format!(" {}", job_limit_flag_names(value).join(" "))
-            } else {
-                String::new()
-            };
-            outln!("    {:<28} {value:#x}{names}", format!("{field}:"));
-        }
-        outln!(
-            "  Nesting: depth {}  parent {}  root {}",
-            optional(job.nesting_depth),
-            optional_addr(job.parent_job),
-            optional_addr(job.root_job)
-        );
-        for child in &job.child_jobs {
-            outln!("    child job {}", ui::addr(child.0));
-        }
-        if let Some(why) = job.child_job_list_termination.diagnostic() {
-            outln!("    child job list ended early: {why}");
-        }
-        if job.silo {
-            outln!(
-                "  Silo: ServerSiloGlobals {}",
-                optional_addr(job.server_silo_globals)
-            );
+        let limits: Vec<_> = job
+            .limits
+            .fields()
+            .filter_map(|(field, value)| {
+                let value = value?;
+                let text = format!("{value:#x}");
+                if !field.ends_with("LimitFlags") {
+                    return Some((field, text));
+                }
+                // An unnamed bit comes back as its value, which the hex
+                // value already shows, so only the named bits are listed.
+                let names: Vec<String> = job_limit_flag_names(value)
+                    .into_iter()
+                    .filter(|name| !name.starts_with("0x"))
+                    .collect();
+                Some((field, with_names(text, &names)))
+            })
+            .collect();
+        print_fields(4, &limits);
+        let child_list_end = job.child_job_list_termination.diagnostic();
+        if !job.child_jobs.is_empty() || child_list_end.is_some() {
+            outln!("  Child Jobs");
+            for child in &job.child_jobs {
+                outln!("    {}", ui::addr(child.0));
+            }
+            if let Some(why) = child_list_end {
+                outln!("    child job list ended early: {why}");
+            }
         }
     }
     if flags & 2 != 0 {
-        outln!("  Processes assigned to this job:");
-        for process in &job.processes {
-            outln!(
-                "    PROCESS {}  Cid: {:04x}  Image: {}",
-                ui::addr(process.eprocess.0),
-                process.pid,
-                process.name
-            );
+        outln!("  Processes assigned to this job");
+        let mut rows: Vec<[String; 3]> = job
+            .processes
+            .iter()
+            .map(|process| {
+                [
+                    process.pid.to_string(),
+                    process.name.clone(),
+                    ui::addr(process.eprocess.0),
+                ]
+            })
+            .collect();
+        rows.extend(
+            job.unreadable_processes
+                .iter()
+                .map(|eprocess| ["-".to_string(), "-".to_string(), ui::addr(eprocess.0)]),
+        );
+        // The rows sit inside the job's block, which print_padded_table
+        // cannot indent, so the columns are padded here.
+        let width = |column: usize, header: &str| {
+            rows.iter()
+                .map(|row| row[column].len())
+                .max()
+                .unwrap_or(0)
+                .max(header.len())
+        };
+        let (pid_width, name_width) = (width(0, "PID"), width(1, "Name"));
+        outln!(
+            "    {:<pid_width$}  {:<name_width$}  EPROCESS",
+            "PID",
+            "Name"
+        );
+        for [pid, name, eprocess] in &rows {
+            outln!("    {pid:<pid_width$}  {name:<name_width$}  {eprocess}");
         }
-        for eprocess in &job.unreadable_processes {
-            outln!("    PROCESS {}  (unreadable)", ui::addr(eprocess.0));
+        if !job.unreadable_processes.is_empty() {
+            outln!(
+                "    {} on the list could not be read",
+                counted(job.unreadable_processes.len(), "process", "processes")
+            );
         }
         if let Some(why) = job.process_list_termination.diagnostic() {
             outln!("    process list ended early: {why}");
         }
     }
-    outln!();
 }
 
 fn print_global_flags(detail: &GlobalFlags) {
@@ -430,28 +474,36 @@ fn print_global_flags(detail: &GlobalFlags) {
             ),
         }
     }
-    outln!();
 }
 
 fn print_handle_traces(detail: &HandleTraces) {
     let process = &detail.process;
     outln!(
-        "Process {} ({}, PID {})",
+        "PROCESS {}  PID {}  {}",
         ui::addr(process.eprocess.0),
-        process.name,
-        process.pid
+        process.pid,
+        process.name
     );
-    outln!("ObjectTable {}", ui::addr(detail.object_table.0));
+    let object_table = ("ObjectTable", ui::addr(detail.object_table.0));
     let Some(debug_info) = detail.debug_info else {
-        outln!("Handle tracing is not enabled for this process.\n");
+        print_fields(2, &[object_table]);
+        outln!(
+            "handle tracing is off for {}: the Handles check of Application Verifier or NtSetInformationProcess(ProcessHandleTracing) turns it on",
+            process.name
+        );
         return;
     };
-    outln!(
-        "DebugInfo {}  TableSize {:#x}  {:#x} trace(s) recorded",
-        ui::addr(debug_info.0),
-        detail.table_size,
-        detail.recorded
+    print_fields(
+        2,
+        &[
+            object_table,
+            ("DebugInfo", ui::addr(debug_info.0)),
+            ("TableSize", format!("{:#x}", detail.table_size)),
+            ("CurrentStackIndex", format!("{:#x}", detail.recorded)),
+        ],
     );
+    // The trace records below keep WinDbg's !htrace layout, separators and
+    // unnumbered `address: symbol` frames included.
     let separator = "-".repeat(38);
     outln!("{separator}");
     for trace in &detail.traces {
@@ -469,102 +521,163 @@ fn print_handle_traces(detail: &HandleTraces) {
         }
         outln!("{separator}");
     }
-    outln!("Parsed {:#x} stack trace(s).", detail.parsed);
-    outln!("Dumped {:#x} stack trace(s).", detail.traces.len());
+    let traces = |count: u64| {
+        let noun = if count == 1 { "trace" } else { "traces" };
+        format!("{count:#x} stack {noun}")
+    };
+    outln!("Parsed {}", traces(detail.parsed));
+    outln!("Dumped {}", traces(detail.traces.len() as u64));
     if detail.unreadable != 0 {
-        outln!("{:#x} trace slot(s) unreadable.", detail.unreadable);
+        let noun = if detail.unreadable == 1 {
+            "slot"
+        } else {
+            "slots"
+        };
+        outln!("{:#x} trace {noun} unreadable", detail.unreadable);
     }
-    outln!();
+}
+
+/// Prints `Name : value` fields at `indent`, with the colons in one column.
+fn print_fields(indent: usize, fields: &[(&str, String)]) {
+    let width = fields.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+    for (name, value) in fields {
+        outln!("{:indent$}{name:<width$} : {value}", "");
+    }
+}
+
+/// A flag set: `value (A | B)`, or `value` alone when no names are set.
+fn with_names(value: String, names: &[String]) -> String {
+    if names.is_empty() {
+        value
+    } else {
+        format!("{value} ({})", names.join(" | "))
+    }
+}
+
+/// `1 connection`, `2 connections`.
+fn counted(count: usize, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
 }
 
 fn optional_addr(value: Option<VirtAddr>) -> String {
-    value.map_or("-".to_string(), |value| ui::addr(value.0))
+    value.map_or("-".to_string(), addr_or_dash)
+}
+
+/// A null pointer is no object, so it shows as `-`.
+fn addr_or_dash(value: VirtAddr) -> String {
+    if value.0 == 0 {
+        "-".to_string()
+    } else {
+        ui::addr(value.0)
+    }
 }
 
 fn optional_hex(value: Option<u64>) -> String {
     value.map_or("-".to_string(), |value| format!("{value:#x}"))
 }
 
-/// `[a] [b] ...`.
-fn bracketed(names: &[String]) -> String {
-    names
-        .iter()
-        .map(|name| format!("[{name}]"))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 fn optional_count(value: Option<u64>) -> String {
-    value.map_or("?".to_string(), |value| value.to_string())
+    value.map_or("-".to_string(), |value| value.to_string())
 }
 
+/// `address (image)`, or the address alone when the image name is unknown.
 fn owner_label(owner: VirtAddr, name: &Option<String>) -> String {
-    format!("{} ({})", ui::addr(owner.0), name.as_deref().unwrap_or("?"))
+    match name {
+        Some(name) if owner.0 != 0 => format!("{} ({name})", ui::addr(owner.0)),
+        _ => addr_or_dash(owner),
+    }
 }
 
-fn kind_name(kind: Option<AlpcPortKind>) -> String {
-    kind.map_or_else(|| "unknown".to_string(), |kind| kind.to_string())
+/// `address (kind)`, or the address alone when the port kind is unknown.
+fn port_label(port: VirtAddr, kind: Option<AlpcPortKind>) -> String {
+    match kind {
+        Some(kind) if port.0 != 0 => format!("{} ({kind})", ui::addr(port.0)),
+        _ => addr_or_dash(port),
+    }
 }
 
-fn print_alpc_connection(connection: &AlpcConnection) {
+/// ` ('name')`, or nothing for an unnamed port.
+fn quoted_name(name: &Option<String>) -> String {
+    name.as_ref()
+        .map_or(String::new(), |name| format!(" ('{name}')"))
+}
+
+fn print_alpc_connection(indent: usize, connection: &AlpcConnection) {
+    // An entry the walk could not read has no ports; the line saying why
+    // the list ended early follows it.
+    if connection.server_port.0 == 0 && connection.client_port.0 == 0 {
+        return;
+    }
     outln!(
-        "    {} {} -> {} {} {}",
-        ui::addr(connection.server_port.0),
+        "{:indent$}{} {} -> {} {} {}",
+        "",
+        addr_or_dash(connection.server_port),
         optional_count(connection.server_queued),
-        ui::addr(connection.client_port.0),
+        addr_or_dash(connection.client_port),
         optional_count(connection.client_queued),
         owner_label(connection.client_owner, &connection.client_owner_name)
     );
 }
 
 fn print_alpc_port(port: &AlpcPort) {
-    match &port.name {
-        Some(name) => outln!("Port {} ('{name}')", ui::addr(port.address.0)),
-        None => outln!("Port {}", ui::addr(port.address.0)),
-    }
-    let row = |label: &str, value: String| outln!("  {label:<24}: {value}");
-    row(
-        "Type",
-        format!(
-            "{} (Type bits {})",
-            kind_name(port.kind),
-            optional_hex(port.port_type)
-        ),
+    outln!(
+        "port {}{}",
+        ui::addr(port.address.0),
+        quoted_name(&port.name)
     );
-    row(
-        "PointerCount/Handles",
-        format!("{} / {}", port.pointer_count, port.handle_count),
+    let port_type = match (port.kind, port.port_type) {
+        (Some(kind), Some(bits)) => format!("{kind} ({bits:#x})"),
+        (Some(kind), None) => kind.to_string(),
+        (None, bits) => optional_hex(bits),
+    };
+    print_fields(
+        2,
+        &[
+            ("Type", port_type),
+            ("PointerCount", port.pointer_count.to_string()),
+            ("HandleCount", port.handle_count.to_string()),
+            ("OwnerProcess", owner_label(port.owner, &port.owner_name)),
+            ("SequenceNo", optional_hex(port.sequence_no)),
+            ("CompletionPort", optional_addr(port.completion_port)),
+            ("CompletionList", optional_addr(port.completion_list)),
+            ("PortContext", optional_addr(port.port_context)),
+            ("PortAttributes.Flags", optional_hex(port.attribute_flags)),
+            ("MaxMessageLength", optional_hex(port.max_message_length)),
+            (
+                "State",
+                with_names(optional_hex(port.state), &port.state_flags),
+            ),
+        ],
     );
-    row("OwnerProcess", owner_label(port.owner, &port.owner_name));
-    row("CommunicationInfo", ui::addr(port.communication_info.0));
-    row("  ConnectionPort", optional_addr(port.connection_port));
-    row("  ServerCommunicationPort", optional_addr(port.server_port));
-    row("  ClientCommunicationPort", optional_addr(port.client_port));
-    row("SequenceNo", optional_hex(port.sequence_no));
-    row("CompletionPort", optional_addr(port.completion_port));
-    row("CompletionList", optional_addr(port.completion_list));
-    row("PortContext", optional_addr(port.port_context));
-    row("PortAttributes.Flags", optional_hex(port.attribute_flags));
-    row("MaxMessageLength", optional_hex(port.max_message_length));
-    row(
-        "State",
-        format!(
-            "{} {}",
-            optional_hex(port.state),
-            bracketed(&port.state_flags)
-        ),
+    outln!(
+        "  CommunicationInfo {}",
+        addr_or_dash(port.communication_info)
     );
-    outln!();
+    print_fields(
+        4,
+        &[
+            ("ConnectionPort", optional_addr(port.connection_port)),
+            ("ServerCommunicationPort", optional_addr(port.server_port)),
+            ("ClientCommunicationPort", optional_addr(port.client_port)),
+        ],
+    );
+    print_section("queues");
+    let width = port
+        .queues
+        .iter()
+        .map(|queue| queue.field.len())
+        .chain(["DirectQueue".len()])
+        .max()
+        .unwrap_or(0);
     for queue in &port.queues {
-        let what = if queue.key == "wait" {
-            "thread(s)"
+        let entries = if queue.key == "wait" {
+            counted(queue.entries.len(), "thread", "threads")
         } else {
-            "message(s)"
+            counted(queue.entries.len(), "message", "messages")
         };
         outln!(
-            "  {}: {} {what} (length {})",
+            "  {:<width$}  {entries}, length {}",
             queue.field,
-            queue.entries.len(),
             optional_count(queue.length)
         );
         for entry in &queue.entries {
@@ -575,140 +688,152 @@ fn print_alpc_port(port: &AlpcPort) {
         }
     }
     outln!(
-        "  DirectQueue: length {}",
+        "  {:<width$}  length {}",
+        "DirectQueue",
         optional_count(port.direct_queue_length)
     );
     if let Some(termination) = &port.connection_termination {
-        outln!();
-        outln!(
-            "  {} connection(s) (server port, queued -> client port, queued, client process):",
-            port.connections.len()
-        );
-        port.connections.iter().for_each(print_alpc_connection);
+        print_section(&format!("connections ({})", port.connections.len()));
+        if !port.connections.is_empty() {
+            outln!(
+                "  {}",
+                ui::muted("(server port, queued -> client port, queued, client process)")
+            );
+        }
+        for connection in &port.connections {
+            print_alpc_connection(2, connection);
+        }
         if let Some(why) = termination.diagnostic() {
-            outln!("    connection list ended early: {why}");
+            outln!("  connection list ended early: {why}");
         }
     }
-    outln!();
 }
 
 fn print_alpc_message(message: &AlpcMessage) {
-    outln!("Message {}", ui::addr(message.address.0));
-    let row = |label: &str, value: String| outln!("  {label:<22}: {value}");
+    outln!("message {}", ui::addr(message.address.0));
     let number =
         |value: Option<u64>| value.map_or("-".to_string(), |value| format!("{value:#x} ({value})"));
-    row("MessageID", number(message.message_id));
-    row("CallbackID", number(message.callback_id));
-    row("SequenceNumber", number(message.sequence_no));
-    row(
-        "Type",
-        match message.message_type {
-            Some(value) => format!(
-                "{} ({value:#x})",
-                lpc_message_type_name(value).unwrap_or("unknown")
-            ),
-            None => "-".to_string(),
+    let message_type = match message.message_type {
+        Some(value) => match lpc_message_type_name(value) {
+            Some(name) => format!("{name} ({value:#x})"),
+            None => format!("{value:#x}"),
         },
-    );
-    row("DataLength", number(message.data_length));
-    row("TotalLength", number(message.total_length));
-    row(
-        "ClientId",
-        format!(
-            "{}.{}",
-            optional_hex(message.client_process_id),
-            optional_hex(message.client_thread_id)
+        None => "-".to_string(),
+    };
+    let mut fields = vec![
+        ("MessageID", number(message.message_id)),
+        ("CallbackID", number(message.callback_id)),
+        ("SequenceNumber", number(message.sequence_no)),
+        ("Type", message_type),
+        ("DataLength", number(message.data_length)),
+        ("TotalLength", number(message.total_length)),
+        (
+            "ClientId",
+            format!(
+                "{}.{}",
+                optional_hex(message.client_process_id),
+                optional_hex(message.client_thread_id)
+            ),
         ),
-    );
-    row(
-        "State",
-        format!(
-            "{} QueueType {} QueuePortType {} {}",
-            optional_hex(message.state),
-            optional_count(message.queue_type),
-            optional_count(message.queue_port_type),
-            bracketed(&message.state_flags)
+        (
+            "State",
+            with_names(optional_hex(message.state), &message.state_flags),
         ),
-    );
-    row(
-        "OwnerPort",
-        format!(
-            "{} [{}]",
-            ui::addr(message.owner_port.0),
-            kind_name(message.owner_port_kind)
+        ("QueueType", optional_count(message.queue_type)),
+        ("QueuePortType", optional_count(message.queue_port_type)),
+        (
+            "OwnerPort",
+            port_label(message.owner_port, message.owner_port_kind),
         ),
-    );
-    row(
-        "QueuePort",
-        format!(
-            "{} [{}]",
-            ui::addr(message.port_queue.0),
-            kind_name(message.port_queue_kind)
+        (
+            "QueuePort",
+            port_label(message.port_queue, message.port_queue_kind),
         ),
-    );
+    ];
     if let Some(owner) = message.port_queue_owner {
-        row(
+        fields.push((
             "QueuePortOwnerProcess",
             owner_label(owner, &message.port_queue_owner_name),
-        );
+        ));
     }
     for field in &message.pointers {
-        row(field.field, ui::addr(field.value.0));
+        fields.push((field.field, addr_or_dash(field.value)));
     }
-    row("CancelSequenceNumber", number(message.cancel_sequence_no));
-    row("ExtensionBufferSize", number(message.extension_buffer_size));
+    fields.push(("CancelSequenceNumber", number(message.cancel_sequence_no)));
+    fields.push(("ExtensionBufferSize", number(message.extension_buffer_size)));
     for field in &message.attributes {
-        row(field.field, ui::addr(field.value.0));
+        fields.push((field.field, addr_or_dash(field.value)));
     }
-    outln!();
+    print_fields(2, &fields);
 }
 
 fn print_alpc_process_ports(ports: &AlpcProcessPorts) {
     let process = &ports.process;
     let label = format!(
-        "{} ({}, PID {})",
-        ui::addr(process.eprocess.0),
+        "{} (PID {}), EPROCESS {}",
         process.name,
-        process.pid
+        process.pid,
+        ui::addr(process.eprocess.0)
     );
-    outln!("Ports created by the process {label}:");
+    // The first title is the first line, so it skips print_section's blank.
+    outln!("{}", ui::label(&format!("ports created by {label}")));
+    if ports.created.is_empty() {
+        outln!("  {}", ui::muted("no connection ports"));
+    }
     for port in &ports.created {
         outln!(
-            "  {} ('{}') handle {:#x}, {} connection(s)",
+            "  {}{}  handle {:#x}, {}",
             ui::addr(port.port.0),
-            port.name.as_deref().unwrap_or(""),
+            quoted_name(&port.name),
             port.handle,
-            port.connections.len()
+            counted(port.connections.len(), "connection", "connections")
         );
-        port.connections.iter().for_each(print_alpc_connection);
+        for connection in &port.connections {
+            print_alpc_connection(4, connection);
+        }
         if let Some(why) = port.termination.diagnostic() {
             outln!("    connection list ended early: {why}");
         }
     }
-    outln!();
-    outln!("Ports the process {label} is connected to:");
-    outln!("  (client port, queued -> server port, queued, server process; connection port)");
+    print_section(&format!(
+        "ports {} (PID {}) is connected to",
+        process.name, process.pid
+    ));
+    if ports.connected.is_empty() {
+        outln!("  {}", ui::muted("no client ports"));
+    } else {
+        outln!(
+            "  {}",
+            ui::muted(
+                "(client port, queued -> server port, queued, server process; connection port)"
+            )
+        );
+    }
     for port in &ports.connected {
         outln!(
-            "  {} {} -> {} {} {}  {} ('{}')  handle {:#x}",
-            ui::addr(port.port.0),
+            "  {} {} -> {} {} {}  {}{}  handle {:#x}",
+            addr_or_dash(port.port),
             optional_count(port.queued),
-            ui::addr(port.server_port.0),
+            addr_or_dash(port.server_port),
             optional_count(port.server_queued),
             port.server_owner
                 .map_or("-".to_string(), |owner| owner_label(
                     owner,
                     &port.server_owner_name
                 )),
-            ui::addr(port.connection_port.0),
-            port.connection_name.as_deref().unwrap_or(""),
+            addr_or_dash(port.connection_port),
+            quoted_name(&port.connection_name),
             port.handle
         );
     }
     outln!();
     outln!(
-        "{} server communication port handle(s); scanned {}/{} handle slots{}",
-        ports.server_ports,
+        "{}; scanned {} of {} handle slots{}",
+        counted(
+            ports.server_ports,
+            "server communication port handle",
+            "server communication port handles"
+        ),
         ports.scanned_handles,
         ports.advertised_handles,
         if ports.skipped_entries == 0 {
@@ -717,78 +842,17 @@ fn print_alpc_process_ports(ports: &AlpcProcessPorts) {
             format!(", {} unreadable", ports.skipped_entries)
         }
     );
-    outln!();
 }
 
 fn print_zombies(detail: &Zombies) {
     let exited = |filetime: u64| {
-        format_filetime_precise(filetime).unwrap_or_else(|| format!("{filetime:#x}"))
+        filetime_to_iso_precise(filetime).unwrap_or_else(|| format!("{filetime:#x}"))
     };
-    if detail.kinds.processes {
-        outln!(
-            "Zombie processes: {} (and {} live process object(s) seen)",
-            detail.processes.len(),
-            detail.live_processes
-        );
-        if !detail.processes.is_empty() {
-            outln!(
-                "  {:<16}  {:>6}  {:<15}  {:<28}  {:<10}  {:>7}  {:>8}",
-                "EPROCESS",
-                "PID",
-                "Image",
-                "Exited",
-                "Status",
-                "Handles",
-                "Pointers"
-            );
-        }
-        for process in &detail.processes {
-            outln!(
-                "  {}  {:>6}  {:<15}  {:<28}  {:#010x}  {:>7}  {:>8}",
-                ui::addr(process.eprocess.0),
-                process.pid,
-                process.image,
-                exited(process.exit_time),
-                process.exit_status,
-                process.handle_count,
-                process.pointer_count
-            );
-        }
-    }
-    if detail.kinds.threads {
-        outln!(
-            "Zombie threads: {} (and {} live thread object(s) seen)",
-            detail.threads.len(),
-            detail.live_threads
-        );
-        if !detail.threads.is_empty() {
-            outln!(
-                "  {:<16}  {:<13}  {:<16}  {:<15}  {:<10}  {:>7}  {:>8}",
-                "ETHREAD",
-                "Cid",
-                "Process",
-                "Image",
-                "Status",
-                "Handles",
-                "Pointers"
-            );
-        }
-        for thread in &detail.threads {
-            outln!(
-                "  {}  {:<13}  {}  {:<15}  {:#010x}  {:>7}  {:>8}",
-                ui::addr(thread.ethread.0),
-                format!("{:x}.{:x}", thread.pid, thread.tid),
-                ui::addr(thread.process.0),
-                thread.image.as_deref().unwrap_or("?"),
-                thread.exit_status,
-                thread.handle_count,
-                thread.pointer_count
-            );
-        }
-    }
     let region = format!(
-        "{} pages of nonpaged pool ({:#x} - {:#x}) scanned",
-        detail.scanned_pages, detail.region_start.0, detail.region_end.0
+        "{} of nonpaged pool ({:#x} - {:#x}) scanned",
+        counted(detail.scanned_pages as usize, "page", "pages"),
+        detail.region_start.0,
+        detail.region_end.0
     );
     if detail.interrupted {
         outln!("{region}; interrupted, so the lists are partial");
@@ -797,5 +861,75 @@ fn print_zombies(detail: &Zombies) {
     } else {
         outln!("{region}");
     }
-    outln!();
+    // print_padded_table ends with a blank line, so the title of the
+    // threads after the process table needs none of its own.
+    let mut after_table = false;
+    if detail.kinds.processes {
+        print_section(&format!(
+            "zombie processes ({}; {} live)",
+            detail.processes.len(),
+            detail.live_processes
+        ));
+        if detail.processes.is_empty() {
+            outln!("  {}", ui::muted("no exited process is still referenced"));
+        } else {
+            let mut builder = Builder::default();
+            builder.push_record([
+                "PID", "Name", "EPROCESS", "Exited", "Status", "Handles", "Pointers",
+            ]);
+            for process in &detail.processes {
+                builder.push_record([
+                    process.pid.to_string(),
+                    if process.image.is_empty() {
+                        "-".to_string()
+                    } else {
+                        process.image.clone()
+                    },
+                    ui::addr(process.eprocess.0),
+                    exited(process.exit_time),
+                    format!("{:#010x}", process.exit_status),
+                    process.handle_count.to_string(),
+                    process.pointer_count.to_string(),
+                ]);
+            }
+            print_padded_table(builder);
+            after_table = true;
+        }
+    }
+    if detail.kinds.threads {
+        let title = format!(
+            "zombie threads ({}; {} live)",
+            detail.threads.len(),
+            detail.live_threads
+        );
+        if after_table {
+            outln!("{}", ui::label(&title));
+        } else {
+            print_section(&title);
+        }
+        if detail.threads.is_empty() {
+            outln!(
+                "  {}",
+                ui::muted("no terminated thread is still referenced")
+            );
+        } else {
+            let mut builder = Builder::default();
+            builder.push_record([
+                "TID", "PID", "Name", "ETHREAD", "EPROCESS", "Status", "Handles", "Pointers",
+            ]);
+            for thread in &detail.threads {
+                builder.push_record([
+                    thread.tid.to_string(),
+                    thread.pid.to_string(),
+                    thread.image.clone().unwrap_or_else(|| "-".to_string()),
+                    ui::addr(thread.ethread.0),
+                    ui::addr(thread.process.0),
+                    format!("{:#010x}", thread.exit_status),
+                    thread.handle_count.to_string(),
+                    thread.pointer_count.to_string(),
+                ]);
+            }
+            print_padded_table(builder);
+        }
+    }
 }

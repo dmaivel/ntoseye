@@ -499,14 +499,19 @@ fn detail_error(command: &str, address: VirtAddr, error: &Error) -> Error {
 
 /// A labeled line of a detail view.
 fn field(label: &str, value: impl Display) {
-    outln!("{} {value}", ui::label(&format!("{label:<20}")));
+    outln!("  {} {value}", ui::label(&format!("{label:<20}")));
 }
 
-/// An address, or a muted `none` for a null pointer that means there is
+/// The heading line naming the object a detail view shows.
+fn heading(kind: &str, value: impl Display) {
+    outln!("{} {value}", ui::label(kind));
+}
+
+/// An address, or a muted `-` for a null pointer that means there is
 /// none, such as the end of a chain.
 fn addr_or_none(value: VirtAddr) -> String {
     if value.is_zero() {
-        ui::muted("none")
+        ui::muted("-")
     } else {
         ui::addr(value.0)
     }
@@ -564,12 +569,12 @@ fn oid_text(request: &NdisOidRequest) -> String {
     text
 }
 
-/// A pending OID request, why it does not decode, or a muted `none`.
+/// A pending OID request, why it does not decode, or a muted `-`.
 fn pending_oid_text(request: &Option<NdisOidRequest>, error: &Option<String>) -> String {
     match (request, error) {
         (Some(request), _) => oid_text(request),
         (None, Some(error)) => ui::muted(error),
-        (None, None) => ui::muted("none"),
+        (None, None) => ui::muted("-"),
     }
 }
 
@@ -582,7 +587,7 @@ fn print_miniport_table(miniports: &[NdisMiniportListEntry]) {
         match entry {
             Ok(miniport) => builder.push_record([
                 ui::addr(miniport.address.0),
-                miniport.driver_name.clone().unwrap_or_else(|| "?".into()),
+                miniport.driver_name.clone().unwrap_or_else(|| "-".into()),
                 miniport.state.clone(),
                 media_text(miniport),
                 miniport.power.clone(),
@@ -594,11 +599,11 @@ fn print_miniport_table(miniports: &[NdisMiniportListEntry]) {
             ]),
             Err(unreadable) => builder.push_record([
                 ui::addr(unreadable.address.0),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
+                "-".into(),
+                "-".into(),
+                "-".into(),
+                "-".into(),
+                "-".into(),
                 ui::muted(&format!("unreadable: {}", unreadable.error)),
             ]),
         }
@@ -607,9 +612,9 @@ fn print_miniport_table(miniports: &[NdisMiniportListEntry]) {
 }
 
 fn print_driver_fields(driver: &NdisDriver) {
-    field("Service", &driver.service_name);
+    field("service", &driver.service_name);
     field(
-        "Image",
+        "image",
         match &driver.module {
             Some(module) => format!("{}  (module {module})", driver.image_name),
             None => driver.image_name.clone(),
@@ -618,7 +623,7 @@ fn print_driver_fields(driver: &NdisDriver) {
     field("DRIVER_OBJECT", ui::addr_opt(driver.driver_object));
     field("NDIS version", &driver.ndis_version);
     if let Some(version) = &driver.driver_version {
-        field("Driver version", version);
+        field("driver version", version);
     }
 }
 
@@ -639,16 +644,16 @@ fn print_minidrivers(list: &NdisDriverList) {
                 driver.service_name.clone(),
                 driver.image_name.clone(),
                 driver.ndis_version.clone(),
-                driver.driver_version.clone().unwrap_or_default(),
+                driver.driver_version.clone().unwrap_or_else(|| "-".into()),
                 driver.miniports.len().to_string(),
             ]),
             Err(unreadable) => builder.push_record([
                 ui::addr(unreadable.address.0),
                 ui::muted(&format!("unreadable: {}", unreadable.error)),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
+                "-".into(),
+                "-".into(),
+                "-".into(),
+                "-".into(),
             ]),
         }
     }
@@ -659,10 +664,9 @@ fn print_minidrivers(list: &NdisDriverList) {
 fn print_minidriver(detail: &NdisMinidriver) {
     let driver = &detail.driver;
     let miniports = &detail.entries;
-    field("Driver block", ui::addr(driver.address.0));
+    heading("driver block", ui::addr(driver.address.0));
     print_driver_fields(driver);
-    outln!();
-    outln!("{} ({})", ui::label("Miniports"), miniports.len());
+    print_section(&format!("miniports ({})", miniports.len()));
     if !miniports.is_empty() {
         print_miniport_table(miniports);
     }
@@ -671,8 +675,8 @@ fn print_minidriver(detail: &NdisMinidriver) {
 
 fn print_miniport(detail: &NdisMiniportDetail) {
     let miniport = &detail.miniport;
-    field(
-        "Miniport",
+    heading(
+        "miniport",
         format!(
             "{}  {}",
             ui::addr(miniport.address.0),
@@ -681,13 +685,13 @@ fn print_miniport(detail: &NdisMiniportDetail) {
     );
     if !detail.listed {
         field(
-            "Note",
+            "note",
             ui::muted("not on ndis!ndisMiniportList (being added or removed, or not a miniport)"),
         );
     }
-    field("Device name", &miniport.name);
+    field("device name", &miniport.name);
     if let Some(instance_id) = &detail.instance_id {
-        field("Instance ID", instance_id);
+        field("instance ID", instance_id);
     }
     field("NDIS version", &detail.ndis_version);
     match (&detail.driver, &detail.driver_error) {
@@ -699,10 +703,10 @@ fn print_miniport(detail: &NdisMiniportDetail) {
             if let Some(version) = &driver.driver_version {
                 text.push_str(&format!(" v{version}"));
             }
-            field("Driver", text);
+            field("driver", text);
             field("DRIVER_OBJECT", ui::addr_opt(driver.driver_object));
         }
-        (None, error) => field("Driver", ui::muted(error.as_deref().unwrap_or_default())),
+        (None, error) => field("driver", ui::muted(error.as_deref().unwrap_or_default())),
     }
     // A driver without a DRIVER_OBJECT has no module to look up; its image
     // name without the extension is the module name its PDB goes by.
@@ -716,9 +720,9 @@ fn print_miniport(detail: &NdisMiniportDetail) {
         })
     });
     field(
-        "Adapter context",
+        "adapter context",
         if detail.adapter_context.is_zero() {
-            ui::muted("none")
+            ui::muted("-")
         } else {
             format!(
                 "{}  {}",
@@ -732,10 +736,10 @@ fn print_miniport(detail: &NdisMiniportDetail) {
         },
     );
     if detail.device_object.is_zero() && detail.pdo.is_zero() {
-        field("Device objects", ui::muted("none (a virtual miniport)"));
+        field("device objects", ui::muted("- (a virtual miniport)"));
     } else {
         field(
-            "Device objects",
+            "device objects",
             format!(
                 "FDO {}  PDO {}",
                 ui::addr_opt(detail.device_object),
@@ -743,19 +747,18 @@ fn print_miniport(detail: &NdisMiniportDetail) {
             ),
         );
     }
-    outln!();
-    field("State", &miniport.state);
+    field("state", &miniport.state);
     field("PnP state", &miniport.pnp_state);
-    field("Power", &miniport.power);
+    field("power", &miniport.power);
     field(
-        "Media",
+        "media",
         format!(
             "{}, {} duplex, medium {}, physical {}",
             miniport.media_connect, detail.duplex, detail.medium, detail.physical_medium
         ),
     );
     field(
-        "Link speed",
+        "link speed",
         format!(
             "{} transmit, {} receive",
             link_speed_text(miniport.xmit_link_speed),
@@ -763,41 +766,36 @@ fn print_miniport(detail: &NdisMiniportDetail) {
         ),
     );
     field(
-        "Interface",
+        "interface",
         format!(
             "IfIndex {}, NetLuid {:#x}, {}",
             miniport.if_index, detail.net_luid, detail.oper_status
         ),
     );
     field(
-        "References",
+        "references",
         detail
             .references
             .map_or_else(|| ui::muted("unreadable"), |count| count.to_string()),
     );
     field(
-        "Resets",
+        "resets",
         format!(
-            "internal {}, miniport {}, last status {:#x}",
+            "internal {}, miniport {}, last status {:#010x}",
             detail.internal_resets, detail.miniport_resets, detail.reset_status
         ),
     );
     field(
-        "Pending OID",
+        "pending OID",
         pending_oid_text(&detail.pending_oid, &detail.pending_oid_error),
     );
-    field("Pending return NBLs", detail.pending_return_nbls);
+    field("pending return NBLs", detail.pending_return_nbls);
     field(
-        "Flags",
+        "flags",
         format!("{:#x}, PnP flags {:#x}", detail.flags, detail.pnp_flags),
     );
 
-    outln!();
-    outln!(
-        "{} ({}, top first)",
-        ui::label("Filters"),
-        detail.filters.len()
-    );
+    print_section(&format!("filters ({}, top first)", detail.filters.len()));
     if !detail.filters.is_empty() {
         let mut builder = Builder::default();
         builder.push_record(["Filter", "State", "Driver", "Context", "Name"]);
@@ -805,9 +803,9 @@ fn print_miniport(detail: &NdisMiniportDetail) {
             builder.push_record([
                 ui::addr(filter.address.0),
                 filter.state.clone(),
-                filter.driver_image.clone().unwrap_or_else(|| "?".into()),
+                filter.driver_image.clone().unwrap_or_else(|| "-".into()),
                 ui::addr_opt(filter.context),
-                filter.name.clone().unwrap_or_default(),
+                filter.name.clone().unwrap_or_else(|| "-".into()),
             ]);
         }
         print_padded_table(builder);
@@ -823,20 +821,25 @@ fn print_miniport(detail: &NdisMiniportDetail) {
     }
     print_stopped("filter stack", &detail.filters_stopped);
 
-    outln!();
-    outln!(
-        "{} ({}, NumOpens {})",
-        ui::label("Protocol bindings"),
+    let title = format!(
+        "protocol bindings ({}, NumOpens {})",
         detail.opens.len(),
         detail.num_opens
     );
+    // The filter table already ends with the blank line that sets this
+    // section apart.
+    if detail.filters.is_empty() || detail.filters_stopped.is_some() {
+        print_section(&title);
+    } else {
+        outln!("{}", ui::label(&title));
+    }
     if !detail.opens.is_empty() {
         let mut builder = Builder::default();
         builder.push_record(["Open", "Protocol", "Protocol block", "Context"]);
         for open in &detail.opens {
             builder.push_record([
                 ui::addr(open.address.0),
-                open.protocol_name.clone().unwrap_or_else(|| "?".into()),
+                open.protocol_name.clone().unwrap_or_else(|| "-".into()),
                 ui::addr_opt(open.protocol),
                 ui::addr_opt(open.context),
             ]);
@@ -854,15 +857,15 @@ fn print_filter_table(filters: &[NdisFilterListEntry]) {
             Ok(filter) => builder.push_record([
                 ui::addr(filter.address.0),
                 filter.state.clone(),
-                filter.driver_image.clone().unwrap_or_else(|| "?".into()),
+                filter.driver_image.clone().unwrap_or_else(|| "-".into()),
                 ui::addr_opt(filter.miniport),
-                filter.name.clone().unwrap_or_default(),
+                filter.name.clone().unwrap_or_else(|| "-".into()),
             ]),
             Err(unreadable) => builder.push_record([
                 ui::addr(unreadable.address.0),
-                String::new(),
-                String::new(),
-                String::new(),
+                "-".into(),
+                "-".into(),
+                "-".into(),
                 ui::muted(&format!("unreadable: {}", unreadable.error)),
             ]),
         }
@@ -872,8 +875,8 @@ fn print_filter_table(filters: &[NdisFilterListEntry]) {
 
 fn print_filter(detail: &NdisFilterDetail) {
     let filter = &detail.filter;
-    field(
-        "Filter",
+    heading(
+        "filter",
         format!(
             "{}  {}",
             ui::addr(filter.address.0),
@@ -882,7 +885,7 @@ fn print_filter(detail: &NdisFilterDetail) {
     );
     if !detail.listed {
         field(
-            "Note",
+            "note",
             ui::muted("not on ndis!ndisGlobalFilterList (being attached or detached)"),
         );
     }
@@ -893,9 +896,9 @@ fn print_filter(detail: &NdisFilterDetail) {
     if let Some(image) = &filter.driver_image {
         driver.push_str(&format!(" ({image})"));
     }
-    field("Filter driver", driver);
+    field("filter driver", driver);
     field(
-        "Miniport",
+        "miniport",
         format!(
             "{}  {}",
             ui::addr_opt(filter.miniport),
@@ -908,9 +911,9 @@ fn print_filter(detail: &NdisFilterDetail) {
         .and_then(|image| image.rsplit_once('.').map(|(stem, _)| stem))
         .unwrap_or("<driver>");
     field(
-        "Module context",
+        "module context",
         if filter.context.is_zero() {
-            ui::muted("none")
+            ui::muted("-")
         } else {
             format!(
                 "{}  {}",
@@ -923,25 +926,24 @@ fn print_filter(detail: &NdisFilterDetail) {
         },
     );
     field(
-        "Stack",
+        "stack",
         format!(
             "higher {}, lower {}",
             if detail.higher.is_zero() {
-                ui::muted("none (top)")
+                ui::muted("- (top)")
             } else {
                 ui::addr(detail.higher.0)
             },
             if detail.lower.is_zero() {
-                ui::muted("none (bottom, above the miniport)")
+                ui::muted("- (bottom, above the miniport)")
             } else {
                 ui::addr(detail.lower.0)
             }
         ),
     );
-    outln!();
-    field("State", &filter.state);
+    field("state", &filter.state);
     field(
-        "Link",
+        "link",
         format!(
             "{}, {} transmit, {} receive",
             detail.media_connect,
@@ -951,13 +953,13 @@ fn print_filter(detail: &NdisFilterDetail) {
     );
     field("IfIndex", detail.if_index);
     field(
-        "References",
+        "references",
         detail
             .references
             .map_or_else(|| ui::muted("unreadable"), |count| count.to_string()),
     );
     field(
-        "Dropped",
+        "dropped",
         format!(
             "{} receive NBLs, {} send NBLs, {} status indications",
             detail.dropped_receive_nbls,
@@ -966,10 +968,10 @@ fn print_filter(detail: &NdisFilterDetail) {
         ),
     );
     field(
-        "Pending OID",
+        "pending OID",
         pending_oid_text(&filter.pending_oid, &filter.pending_oid_error),
     );
-    field("Flags", format!("{:#x}", detail.flags));
+    field("flags", format!("{:#x}", detail.flags));
 }
 
 fn print_filter_drivers(list: &NdisFilterDriverList) {
@@ -997,11 +999,11 @@ fn print_filter_drivers(list: &NdisFilterDriverList) {
             Err(unreadable) => builder.push_record([
                 ui::addr(unreadable.address.0),
                 ui::muted(&format!("unreadable: {}", unreadable.error)),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
+                "-".into(),
+                "-".into(),
+                "-".into(),
+                "-".into(),
+                "-".into(),
             ]),
         }
     }
@@ -1012,24 +1014,23 @@ fn print_filter_drivers(list: &NdisFilterDriverList) {
 fn print_filter_driver(detail: &NdisFilterDriverDetail) {
     let driver = &detail.driver;
     let filters = &detail.entries;
-    field("Driver block", ui::addr(driver.address.0));
-    field("Name", &driver.friendly_name);
-    field("Unique name", &driver.unique_name);
-    field("Service", &driver.service_name);
+    heading("driver block", ui::addr(driver.address.0));
+    field("name", &driver.friendly_name);
+    field("unique name", &driver.unique_name);
+    field("service", &driver.service_name);
     field(
-        "Image",
+        "image",
         match &driver.module {
             Some(module) => format!("{}  (module {module})", driver.image_name),
             None => driver.image_name.clone(),
         },
     );
     field("DRIVER_OBJECT", ui::addr_opt(driver.driver_object));
-    field("Driver context", addr_or_none(driver.context));
+    field("driver context", addr_or_none(driver.context));
     field("NDIS version", &driver.ndis_version);
-    field("Driver version", &driver.driver_version);
-    field("Flags", format!("{:#x}", driver.flags));
-    outln!();
-    outln!("{} ({})", ui::label("Filter modules"), filters.len());
+    field("driver version", &driver.driver_version);
+    field("flags", format!("{:#x}", driver.flags));
+    print_section(&format!("filter modules ({})", filters.len()));
     if !filters.is_empty() {
         print_filter_table(filters);
     }
@@ -1051,7 +1052,7 @@ fn print_protocols(list: &NdisProtocolList) {
             Ok(protocol) => builder.push_record([
                 ui::addr(protocol.address.0),
                 protocol.name.clone(),
-                protocol.image_name.clone().unwrap_or_default(),
+                protocol.image_name.clone().unwrap_or_else(|| "-".into()),
                 protocol.ndis_version.clone(),
                 protocol.driver_version.clone(),
                 protocol.opens.len().to_string(),
@@ -1059,10 +1060,10 @@ fn print_protocols(list: &NdisProtocolList) {
             Err(unreadable) => builder.push_record([
                 ui::addr(unreadable.address.0),
                 ui::muted(&format!("unreadable: {}", unreadable.error)),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
+                "-".into(),
+                "-".into(),
+                "-".into(),
+                "-".into(),
             ]),
         }
     }
@@ -1072,22 +1073,22 @@ fn print_protocols(list: &NdisProtocolList) {
 
 fn print_protocol(detail: &NdisProtocolDetail) {
     let protocol = &detail.protocol;
-    field(
-        "Protocol block",
+    heading(
+        "protocol block",
         format!("{}  {}", ui::addr(protocol.address.0), protocol.name),
     );
     if !detail.listed {
         field(
-            "Note",
+            "note",
             ui::muted("not on ndis!ndisProtocolList (being registered or deregistered)"),
         );
     }
     if let Some(image) = &protocol.image_name {
-        field("Image", image);
+        field("image", image);
     }
     field("NDIS version", &protocol.ndis_version);
-    field("Driver version", &protocol.driver_version);
-    field("Driver context", addr_or_none(protocol.context));
+    field("driver version", &protocol.driver_version);
+    field("driver context", addr_or_none(protocol.context));
     field(
         "BindAdapterHandlerEx",
         match &detail.bind_handler_name {
@@ -1095,9 +1096,8 @@ fn print_protocol(detail: &NdisProtocolDetail) {
             None => addr_or_none(protocol.bind_handler),
         },
     );
-    field("Flags", format!("{:#x}", protocol.flags));
-    outln!();
-    outln!("{} ({})", ui::label("Bindings"), detail.bindings.len());
+    field("flags", format!("{:#x}", protocol.flags));
+    print_section(&format!("bindings ({})", detail.bindings.len()));
     if !detail.bindings.is_empty() {
         let mut builder = Builder::default();
         builder.push_record(["Open", "Miniport", "Context", "Name"]);
@@ -1106,7 +1106,7 @@ fn print_protocol(detail: &NdisProtocolDetail) {
                 ui::addr(binding.open.0),
                 ui::addr_opt(binding.miniport),
                 ui::addr_opt(binding.context),
-                binding.miniport_name.clone().unwrap_or_default(),
+                binding.miniport_name.clone().unwrap_or_else(|| "-".into()),
             ]);
         }
         print_padded_table(builder);
@@ -1117,7 +1117,7 @@ fn print_protocol(detail: &NdisProtocolDetail) {
 fn print_pending_oids(oids: &NdisPendingOids) {
     if oids.pending.is_empty() {
         outln!(
-            "No pending OID requests on {} miniports and {} filter modules.",
+            "no pending OID requests on {} miniports and {} filter modules",
             oids.miniports,
             oids.filters
         );
@@ -1129,7 +1129,7 @@ fn print_pending_oids(oids: &NdisPendingOids) {
                 pending.owner.to_string(),
                 ui::addr(pending.address.0),
                 pending_oid_text(&pending.request, &pending.error),
-                pending.name.clone().unwrap_or_default(),
+                pending.name.clone().unwrap_or_else(|| "-".into()),
             ]);
         }
         print_padded_table(builder);
@@ -1141,27 +1141,27 @@ fn print_pending_oids(oids: &NdisPendingOids) {
 
 fn status_text(status: u32) -> String {
     match ntstatus_name(status) {
-        Some(name) => format!("{status:#x} ({name})"),
-        None => format!("{status:#x}"),
+        Some(name) => format!("{status:#010x} ({name})"),
+        None => format!("{status:#010x}"),
     }
 }
 
 fn print_nbl(nbl: &NdisNbl) {
-    field("NBL", ui::addr(nbl.address.0));
-    field("Next", addr_or_none(nbl.next));
-    field("Parent", addr_or_none(nbl.parent));
+    heading("NBL", ui::addr(nbl.address.0));
+    field("next", addr_or_none(nbl.next));
+    field("parent", addr_or_none(nbl.parent));
     field(
-        "Source",
+        "source",
         match &nbl.source {
             Some(source) => format!("{}  {source}", ui::addr(nbl.source_handle.0)),
             None => addr_or_none(nbl.source_handle),
         },
     );
-    field("Pool", addr_or_none(nbl.pool));
-    field("Context", addr_or_none(nbl.context));
+    field("pool", addr_or_none(nbl.pool));
+    field("context", addr_or_none(nbl.context));
     let names = nbl.nbl_flag_names();
     field(
-        "Flags",
+        "flags",
         format!(
             "{:#x}, NblFlags {:#x}{}",
             nbl.flags,
@@ -1169,14 +1169,13 @@ fn print_nbl(nbl: &NdisNbl) {
             if names.is_empty() {
                 String::new()
             } else {
-                format!(" ({})", names.join(" "))
+                format!(" ({})", names.join(" | "))
             }
         ),
     );
-    field("Status", status_text(nbl.status));
-    field("Child references", nbl.child_ref_count);
-    outln!();
-    outln!("{} ({})", ui::label("NET_BUFFERs"), nbl.net_buffers.len());
+    field("status", status_text(nbl.status));
+    field("child references", nbl.child_ref_count);
+    print_section(&format!("NET_BUFFERs ({})", nbl.net_buffers.len()));
     if !nbl.net_buffers.is_empty() {
         let mut builder = Builder::default();
         builder.push_record([
@@ -1237,7 +1236,7 @@ fn print_nbl_data(nbl: &NdisNbl) {
         let shown = (nb.data_length as usize).min(MAX_NET_BUFFER_DATA);
         let mut title = format!(
             "{} {} ({:#x} bytes",
-            ui::label("Data of NET_BUFFER"),
+            ui::label("data of NET_BUFFER"),
             ui::addr(nb.address.0),
             nb.data_length
         );

@@ -665,7 +665,7 @@ mod tests {
                     segment: Some("gs".into()),
                     ..operand(OperandKind::Memory, "byte [gs:0x85]")
                 },
-                immediate("0xF9", 0xf9),
+                immediate("0xf9", 0xf9),
             ]
         );
 

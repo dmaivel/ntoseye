@@ -36,14 +36,14 @@ fn thread_state_label(thread: &ThreadInfo) -> String {
     thread
         .state
         .map(|state| format!("{} ({:#x})", kthread_state_name(state), state))
-        .unwrap_or_else(|| "?".to_string())
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn wait_reason_label(thread: &ThreadInfo) -> String {
     thread
         .wait_reason
         .map(|reason| format!("{} ({:#x})", wait_reason_name(reason), reason))
-        .unwrap_or_else(|| "?".to_string())
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn thread_matches_filter(thread: &ThreadInfo, filter: &str) -> bool {
@@ -62,110 +62,73 @@ fn thread_matches_filter(thread: &ThreadInfo, filter: &str) -> bool {
         || format!("{:x}", thread.ethread.0) == filter_lower.trim_start_matches("0x")
 }
 
-fn print_thread_info(thread: &ThreadInfo) {
+/// `!thread`'s text for one thread, as `!process` lists threads too.
+pub(super) fn print_thread_detail(detail: &ThreadDetail) {
+    let thread = &detail.thread;
+    let id =
+        |value: Option<u64>| value.map_or_else(|| "-".to_string(), |id| ui::Value(id).to_string());
     outln!(
         "{} {}  TID {}  PID {}  process {}",
-        ui::label("thread:"),
+        ui::label("THREAD"),
         ui::addr(thread.ethread.0),
-        thread
-            .tid
-            .map(ui::Value)
-            .map(|tid| tid.to_string())
-            .unwrap_or_else(|| "-".to_string()),
-        thread
-            .pid
-            .map(ui::Value)
-            .map(|pid| pid.to_string())
-            .unwrap_or_else(|| "-".to_string()),
-        thread.process_name.as_deref().unwrap_or("unknown")
+        id(thread.tid),
+        id(thread.pid),
+        thread.process_name.as_deref().unwrap_or("-")
     );
-    outln!(
-        "  state={} wait={} kthread={} eprocess={}",
-        thread_state_label(thread),
-        wait_reason_label(thread),
-        ui::addr(thread.kthread.0),
-        thread
-            .eprocess
-            .map(|addr| ui::addr(addr.0))
-            .unwrap_or_else(|| "-".to_string())
-    );
-    outln!(
-        "  start={} win32_start={} teb={} kernel_stack={}",
-        thread
-            .start_address
-            .map(|addr| ui::addr(addr.0))
-            .unwrap_or_else(|| "-".to_string()),
-        thread
-            .win32_start_address
-            .map(|addr| ui::addr(addr.0))
-            .unwrap_or_else(|| "-".to_string()),
-        thread
-            .teb
-            .map(|addr| ui::addr(addr.0))
-            .unwrap_or_else(|| "-".to_string()),
-        thread
-            .kernel_stack
-            .map(|addr| ui::addr(addr.0))
-            .unwrap_or_else(|| "-".to_string())
-    );
-    outln!(
-        "  priority={} base_priority={} wait_irql={} stack_resident={}",
-        thread
-            .priority
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "-".to_string()),
-        thread
-            .base_priority
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "-".to_string()),
-        thread
-            .wait_irql
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "-".to_string()),
-        thread
-            .kernel_stack_resident
-            .map(|resident| if resident { "yes" } else { "no" })
-            .unwrap_or("-")
-    );
-    outln!(
-        "  stack_base={} stack_limit={} trap_frame={}",
-        thread
-            .stack_base
-            .map(|addr| ui::addr(addr.0))
-            .unwrap_or_else(|| "-".to_string()),
-        thread
-            .stack_limit
-            .map(|addr| ui::addr(addr.0))
-            .unwrap_or_else(|| "-".to_string()),
-        thread
-            .trap_frame
-            .map(|addr| ui::addr(addr.0))
-            .unwrap_or_else(|| "-".to_string())
-    );
-    if let Some(irps) = &thread.pending_irps {
-        if irps.is_empty() {
-            outln!("  irp_list=empty");
-        } else {
-            outln!("  irp_list={} pending", irps.len());
-            for (index, irp) in irps.iter().enumerate() {
-                outln!("    [{}] {}", index, ui::addr(irp.0));
+    let address =
+        |value: Option<VirtAddr>| value.map_or_else(|| "-".to_string(), |addr| ui::addr(addr.0));
+    let number =
+        |value: Option<u8>| value.map_or_else(|| "-".to_string(), |value| value.to_string());
+    let fields = [
+        ("state", thread_state_label(thread)),
+        ("wait reason", wait_reason_label(thread)),
+        ("KTHREAD", ui::addr(thread.kthread.0)),
+        ("EPROCESS", address(thread.eprocess)),
+        ("start address", address(thread.start_address)),
+        ("Win32 start address", address(thread.win32_start_address)),
+        ("TEB", address(thread.teb)),
+        ("Win32Thread", display_pointer(detail.win32_thread)),
+        ("priority", number(thread.priority)),
+        ("base priority", number(thread.base_priority)),
+        ("wait IRQL", number(thread.wait_irql)),
+        ("kernel stack", address(thread.kernel_stack)),
+        (
+            "stack resident",
+            thread
+                .kernel_stack_resident
+                .map_or("-", |resident| if resident { "yes" } else { "no" })
+                .to_string(),
+        ),
+        ("stack base", address(thread.stack_base)),
+        ("stack limit", address(thread.stack_limit)),
+        ("trap frame", address(thread.trap_frame)),
+        (
+            "pending IRPs",
+            thread
+                .pending_irps
+                .as_ref()
+                .map_or_else(|| "-".to_string(), |irps| irps.len().to_string()),
+        ),
+        ("user time", display_decimal(detail.user_time)),
+        ("kernel time", display_decimal(detail.kernel_time)),
+        ("wait time", display_decimal(detail.wait_time)),
+        ("ready time", display_decimal(detail.ready_time)),
+        ("quantum target", display_decimal(detail.quantum_target)),
+    ];
+    let width = fields
+        .iter()
+        .map(|(label, _)| label.len())
+        .max()
+        .unwrap_or(0);
+    for (label, value) in fields {
+        outln!("  {label:<width$}  {value}");
+        // Each pending IRP, under the count, at the values' column.
+        if label == "pending IRPs" {
+            for irp in thread.pending_irps.iter().flatten() {
+                outln!("  {:width$}  {}", "", ui::addr(irp.0));
             }
         }
     }
-}
-
-/// `!thread`'s text for one thread, as `!process` lists threads too.
-pub(super) fn print_thread_detail(detail: &ThreadDetail) {
-    print_thread_info(&detail.thread);
-    outln!("  win32thread={}", display_pointer(detail.win32_thread));
-    outln!(
-        "  times user={} kernel={} wait_time={} ready_time={} quantum_target={}",
-        display_decimal(detail.user_time),
-        display_decimal(detail.kernel_time),
-        display_decimal(detail.wait_time),
-        display_decimal(detail.ready_time),
-        display_decimal(detail.quantum_target),
-    );
 }
 
 impl ReplState<'_> {
@@ -215,7 +178,7 @@ impl ReplState<'_> {
     fn print_thread_kstack(&mut self, thread: &ThreadInfo, running_on: Option<&str>, limit: usize) {
         match self.ctx.backtrace_thread(thread, running_on, limit) {
             Ok(trace) => {
-                outln!("k-stack ({}):", trace.source.as_str());
+                print_section(&format!("stack ({})", trace.source.as_str()));
                 print_stacktrace_data_with_provenance(
                     self.ctx.target.arch(),
                     &trace.stacktrace,
@@ -223,14 +186,15 @@ impl ReplState<'_> {
                     false,
                 );
             }
-            Err(error) => error!("failed to unwind thread stack: {}", error),
+            // The walk's error says the stack is unavailable and why.
+            Err(error) => error!("{error}"),
         }
     }
 
     fn print_running_kstack(&mut self, source: &str, limit: usize) {
         match self.ctx.backtrace(limit) {
             Ok(trace) => {
-                outln!("k-stack ({source}):");
+                print_section(&format!("stack ({source})"));
                 print_stacktrace_data(self.ctx.target.arch(), &trace, limit, false);
             }
             Err(error) => error!("failed to unwind thread stack: {}", error),
@@ -275,7 +239,7 @@ impl ReplState<'_> {
             print_thread_detail(detail);
             match word {
                 Some("k" | "r" | "registers") => error!(
-                    "VM is running; `thread <tid> k|r` selects the thread, which needs a halted target"
+                    "the target is running; `thread <tid> k|r` selects the thread, which needs a halted target"
                 ),
                 Some(other) if !action.numeric => {
                     error!("unknown thread action '{}': expected k or r", other)
@@ -285,7 +249,6 @@ impl ReplState<'_> {
             if action.default_stack {
                 self.print_thread_kstack(thread, detail.vcpu.as_deref(), stack_limit);
             }
-            outln!();
             return;
         }
 
@@ -303,13 +266,16 @@ impl ReplState<'_> {
             } else {
                 match word {
                     Some("k") => match self.ctx.backtrace(frame_limit) {
-                        Ok(stacktrace) => print_stacktrace_data_with_provenance(
-                            self.ctx.target.arch(),
-                            &stacktrace,
-                            frame_limit,
-                            false,
-                        ),
-                        Err(error) => error!("failed to unwind parked thread stack: {}", error),
+                        Ok(stacktrace) => {
+                            print_section("stack");
+                            print_stacktrace_data_with_provenance(
+                                self.ctx.target.arch(),
+                                &stacktrace,
+                                frame_limit,
+                                false,
+                            )
+                        }
+                        Err(error) => error!("{error}"),
                     },
                     Some("r" | "registers") => error!(
                         "parked thread has no coherent register context; select a live vCPU with `vcpu <id>`"
@@ -321,10 +287,10 @@ impl ReplState<'_> {
                     None => {}
                 }
             }
-            outln!();
             return;
         };
 
+        let previous = self.ctx.current_thread.clone();
         let selection = match self.ctx.select_running_windows_thread(vcpu, thread) {
             Ok(selection) => selection,
             Err(e) => {
@@ -333,11 +299,15 @@ impl ReplState<'_> {
             }
         };
         self.caches.refresh_symbol_context(&self.ctx.target);
-        outln!(
-            "switched to {} running ETHREAD {}\n",
-            ui::thread(&self.ctx.current_thread),
-            ui::addr(thread.ethread.0)
-        );
+        // Selecting the thread the current processor already runs
+        // switches nothing, so only a real switch is reported.
+        if self.ctx.current_thread != previous {
+            outln!(
+                "switched to {} running thread {:#x}",
+                ui::thread(&self.ctx.current_thread),
+                thread.ethread.0
+            );
+        }
         print_thread_detail(detail);
         let source = match selection {
             ThreadContext::SavedVtl0(_) => ThreadStackSource::SavedVtl0,
@@ -351,17 +321,17 @@ impl ReplState<'_> {
             match word {
                 Some("k") => match self.ctx.backtrace(frame_limit) {
                     Ok(trace) => {
+                        print_section(&format!("stack ({source})"));
                         print_stacktrace_data(self.ctx.target.arch(), &trace, frame_limit, false)
                     }
                     Err(error) => error!("failed to unwind thread stack: {}", error),
                 },
                 Some("r" | "registers") => {
                     if let Some(frame) = self.ctx.target.selected_frame.as_ref() {
-                        print_sparse_registers(
+                        print_known_registers(
                             &frame.registers,
                             self.ctx.target.arch(),
-                            Some(&format!("registers ({source}):")),
-                            4,
+                            &format!("registers ({source})"),
                         );
                     } else {
                         let regs = match self.ctx.read_registers() {
@@ -376,7 +346,7 @@ impl ReplState<'_> {
                             self.ctx.target.arch(),
                             &regs,
                             None,
-                            None,
+                            Some(&format!("registers ({source})")),
                         );
                     }
                 }
@@ -385,7 +355,6 @@ impl ReplState<'_> {
                 None => {}
             }
         }
-        outln!();
     }
 }
 
@@ -470,7 +439,11 @@ impl Render<Option<String>> for WindowsThreads {
             })
             .collect();
         if threads.is_empty() {
-            outln!("{}\n", "no matching threads".bright_black());
+            let note = match filter.as_deref() {
+                Some(filter) => format!("no threads matching '{filter}'"),
+                None => "no threads".to_string(),
+            };
+            outln!("{}", ui::muted(&note));
             return;
         }
 
@@ -482,8 +455,8 @@ impl Render<Option<String>> for WindowsThreads {
             "TID".to_string(),
             "Process".to_string(),
             "State".to_string(),
-            "Wait".to_string(),
-            "Start".to_string(),
+            "Wait reason".to_string(),
+            "Start address".to_string(),
         ]);
         for thread in threads {
             let active_vcpu = self
@@ -504,11 +477,7 @@ impl Render<Option<String>> for WindowsThreads {
                     .map(ui::Value)
                     .map(|tid| tid.to_string())
                     .unwrap_or_else(|| "-".to_string()),
-                thread
-                    .process_name
-                    .as_deref()
-                    .unwrap_or("unknown")
-                    .to_string(),
+                thread.process_name.as_deref().unwrap_or("-").to_string(),
                 thread_state_label(thread).to_string(),
                 wait_reason_label(thread).to_string(),
                 start
@@ -620,26 +589,26 @@ fn dot_thread(
         })?;
         state.caches.refresh_symbol_context(&state.ctx.target);
         if state.ctx.backend.is_running() {
-            outln!("cleared the thread selection\n");
+            outln!("cleared the thread selection");
         } else {
-            outln!("reset thread context to {}\n", ui::thread(&current));
+            outln!("reset thread context to {}", ui::thread(&current));
         }
         return Ok(());
     };
     match state.ctx.select_windows_thread(&thread) {
         Ok(ThreadContext::Live(vcpu)) => outln!(
-            "switched register context to {} (ETHREAD {})\n",
-            vcpu,
-            ui::addr(thread.ethread.0)
+            "switched register context to {} (thread {:#x})",
+            ui::thread(&vcpu),
+            thread.ethread.0
         ),
         Ok(ThreadContext::SavedVtl0(vcpu)) => outln!(
-            "switched register context to the VTL0 state the hypervisor saved for {} (ETHREAD {})\n",
-            vcpu,
-            ui::addr(thread.ethread.0)
+            "switched register context to the VTL0 state the hypervisor saved for {} (thread {:#x})",
+            ui::thread(&vcpu),
+            thread.ethread.0
         ),
         Ok(ThreadContext::Parked) => outln!(
-            "selected parked thread context ETHREAD {} (stack only)\n",
-            ui::addr(thread.ethread.0)
+            "selected the stack of parked thread {:#x}; it has no register context",
+            thread.ethread.0
         ),
         Err(error) => {
             return Err(Error::DebugInfo(format!(

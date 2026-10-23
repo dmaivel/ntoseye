@@ -23,12 +23,12 @@ use crate::session::Session;
 
 /// A labeled line of a detail view.
 fn field(label: &str, value: impl Display) {
-    outln!("{} {value}", ui::label(&format!("{label:<20}")));
+    outln!("  {} {value}", ui::label(&format!("{label:<20}")));
 }
 
 fn vectors_text(vectors: &[u8]) -> String {
     if vectors.is_empty() {
-        ui::muted("none")
+        "-".to_string()
     } else {
         vectors
             .iter()
@@ -63,11 +63,11 @@ fn lvt_text(entry: &ApicLvt) -> String {
 }
 
 fn print_apic(apic: &LocalApic) {
+    outln!("Local APIC for processor {}", apic.processor);
     field(
-        "Local APIC",
+        "APIC ID",
         format!(
-            "processor {}, APIC ID {:#x}, {} mode{}{}",
-            apic.processor,
+            "{:#x}, {} mode{}{}",
             apic.id,
             if apic.x2apic { "x2APIC" } else { "xAPIC" },
             if apic.bootstrap_processor() {
@@ -79,7 +79,7 @@ fn print_apic(apic: &LocalApic) {
         ),
     );
     field(
-        "Version",
+        "version",
         format!(
             "{:#x} (version {:#04x}, {} LVT entries{})",
             apic.version,
@@ -94,11 +94,11 @@ fn print_apic(apic: &LocalApic) {
     );
     field("IA32_APIC_BASE", format!("{:#x}", apic.apic_base));
     field(
-        "Priorities",
+        "priorities",
         format!("TPR {:#04x}, PPR {:#04x}", apic.tpr, apic.ppr),
     );
     field(
-        "Spurious (SVR)",
+        "spurious (SVR)",
         format!(
             "{:#x}  vector {:#04x}, {}{}",
             apic.svr,
@@ -115,10 +115,10 @@ fn print_apic(apic: &LocalApic) {
             }
         ),
     );
-    field("Logical destination", format!("{:#x}", apic.ldr));
+    field("logical destination", format!("{:#x}", apic.ldr));
     let icr = &apic.icr;
     field(
-        "Command (ICR)",
+        "command (ICR)",
         format!(
             "{:#x}  vector {:#04x}, {}, {} destination {:#x}, shorthand {}{}",
             icr.raw,
@@ -141,7 +141,7 @@ fn print_apic(apic: &LocalApic) {
         );
     }
     field(
-        "Timer",
+        "timer",
         format!(
             "initial count {:#x}, current count {:#x}, divide by {}",
             apic.timer_initial,
@@ -150,15 +150,14 @@ fn print_apic(apic: &LocalApic) {
         ),
     );
     field(
-        "Error status",
+        "error status",
         apic.esr
-            .map_or_else(|| ui::muted("unreadable"), |esr| format!("{esr:#x}")),
+            .map_or_else(|| "-".to_string(), |esr| format!("{esr:#x}")),
     );
     outln!();
-    field("In service (ISR)", vectors_text(&apic.isr));
-    field("Requested (IRR)", vectors_text(&apic.irr));
-    field("Level (TMR)", vectors_text(&apic.tmr));
-    outln!();
+    field("in service (ISR)", vectors_text(&apic.isr));
+    field("requested (IRR)", vectors_text(&apic.irr));
+    field("level (TMR)", vectors_text(&apic.tmr));
 }
 
 fn print_controller(controller: &HalController) {
@@ -177,6 +176,9 @@ fn print_controller(controller: &HalController) {
     if let Some(problem) = &controller.problem {
         outln!("  problem: {problem}");
     }
+    // A line table ends with its own blank line, which also parts this
+    // controller from the next one.
+    let mut ends_with_table = false;
     for range in &controller.ranges {
         outln!(
             "  {} lines {} to {}{}: {} set up",
@@ -189,6 +191,7 @@ fn print_controller(controller: &HalController) {
                 .unwrap_or_default(),
             range.lines.len()
         );
+        ends_with_table = !range.lines.is_empty();
         if range.lines.is_empty() {
             continue;
         }
@@ -199,7 +202,8 @@ fn print_controller(controller: &HalController) {
         for line in &range.lines {
             builder.push_record([
                 line.line.to_string(),
-                line.gsi.map(|gsi| gsi.to_string()).unwrap_or_default(),
+                line.gsi
+                    .map_or_else(|| "-".to_string(), |gsi| gsi.to_string()),
                 format!("{:#04x}", line.vector),
                 line.irql.to_string(),
                 if line.level { "level" } else { "edge" }.to_string(),
@@ -208,21 +212,24 @@ fn print_controller(controller: &HalController) {
                 format!("{:#x}", line.flags),
             ]);
         }
-        print_padded_table(builder);
+        print_indented_table(builder, "    ");
     }
     if let Some(stopped) = &controller.ranges_stopped {
+        ends_with_table = false;
         outln!(
             "{}",
             ui::muted(&format!("  (line list stopped: {stopped})"))
         );
     }
-    outln!();
+    if !ends_with_table {
+        outln!();
+    }
 }
 
 fn print_controllers(controllers: &HalControllers) {
     if controllers.controllers.is_empty() {
         outln!(
-            "{}\n",
+            "{}",
             ui::muted("the HAL registered no interrupt controllers")
         );
     }
@@ -280,7 +287,6 @@ fn print_machine_id(table: &SmbiosTable) {
         line("BaseBoardProduct", board.string(5).map(str::to_string));
         line("BaseBoardVersion", board.string(6).map(str::to_string));
     }
-    outln!();
 }
 
 fn print_smbios(table: &SmbiosTable) {
@@ -296,7 +302,7 @@ fn print_smbios(table: &SmbiosTable) {
     outln!();
     for structure in &table.structures {
         outln!(
-            "{} (type {}) - handle {:#06x}, length {:#x}",
+            "{} ({:#x})  handle {:#06x}  length {:#x}",
             ui::label(structure_name(structure.kind)),
             structure.kind,
             structure.handle,
@@ -312,7 +318,6 @@ fn print_smbios(table: &SmbiosTable) {
             ui::muted(&format!("(table parse stopped: {stopped})"))
         );
     }
-    outln!();
 }
 
 /// The processor of `!apic`, whose errors name the command.

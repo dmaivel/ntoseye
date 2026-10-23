@@ -32,7 +32,7 @@ fn reboot(session: &mut Session) -> Result<Motion> {
     session
         .request_reboot()
         .map_err(|error| Error::DebugInfo(format!("failed to reboot target: {error}")))?;
-    outln!("Target is rebooting; waiting for target reload.");
+    outln!("target is rebooting; waiting for it to reload");
     Ok(Motion::Wait)
 }
 
@@ -56,8 +56,8 @@ fn crash(session: &mut Session) -> Result<Motion> {
         .request_crash()
         .map_err(|error| Error::DebugInfo(format!("failed to force target bugcheck: {error}")))?;
     outln!(
-        "Forcing target bugcheck 0xE2 (MANUALLY_INITIATED_CRASH); the target writes its crash \
-         dump before rebooting or breaking in."
+        "forcing target bugcheck 0xE2 (MANUALLY_INITIATED_CRASH); the target writes its crash \
+         dump before rebooting or breaking in"
     );
     Ok(Motion::Wait)
 }
@@ -110,7 +110,7 @@ impl Render for DumpWrite {
         if self.unreadable_pages != 0 {
             outln!("{} pages unreadable (zero-filled)", self.unreadable_pages);
         }
-        outln!("Wrote full kernel dump to {}.", self.path)
+        outln!("wrote full kernel dump to {}", self.path)
     }
 }
 
@@ -233,13 +233,13 @@ impl Render for KdFilesChanged {
                 show_kdfiles(state);
                 return;
             }
-            Self::Cleared => outln!("Driver replacement map cleared."),
-            Self::Removed(target) => outln!("Removed mapping for {target}."),
+            Self::Cleared => outln!("driver replacement map cleared"),
+            Self::Removed(target) => outln!("removed mapping for {target}"),
             Self::Added(mapping) => {
-                outln!("Mapped {} -> {}.", mapping.target, mapping.host.display())
+                outln!("mapped {} -> {}", mapping.target, mapping.host.display())
             }
             Self::Loaded { count, path } => outln!(
-                "Loaded {count} mapping{} from {path}.",
+                "loaded {count} mapping{} from {path}",
                 if *count == 1 { "" } else { "s" }
             ),
         }
@@ -250,7 +250,10 @@ impl Render for KdFilesChanged {
 fn show_kdfiles(state: &mut ReplState<'_>) {
     let mappings = kd_files().mappings();
     if mappings.is_empty() {
-        outln!("No driver replacement map. Use `.kdfiles -m <target> <host>`.\n");
+        outln!(
+            "{}",
+            ui::muted("no driver replacement map; `.kdfiles -m <target> <host>` adds a mapping")
+        );
         return;
     }
     let width = mappings
@@ -272,7 +275,6 @@ fn show_kdfiles(state: &mut ReplState<'_>) {
         stats.refused
     );
     warn_if_file_io_unsupported(state);
-    outln!();
 }
 
 fn warn_if_file_io_unsupported(state: &mut ReplState<'_>) {
@@ -289,7 +291,7 @@ fn warn_if_file_io_unsupported(state: &mut ReplState<'_>) {
 #[command(names = ["status"], category = "target control", kind = Query, python = none)]
 fn status(state: &mut ReplState<'_>) -> Result<()> {
     if state.ctx.backend.is_running() {
-        outln!("VM is running\n");
+        outln!("VM is running");
         return Ok(());
     }
     state
@@ -344,9 +346,8 @@ fn dbgprint(state: &mut ReplState<'_>, #[arg(parse = dbgprint_count)] count: usi
         // Nothing printed since attach: what the kernel printed before
         // it, such as the drivers that failed at boot, is in its buffer.
         outln!("{}", ui::muted("no debug output since ntoseye attached"));
-        if print_kernel_print_buffer(state, count).is_err() {
-            outln!();
-        }
+        // The buffer is a bonus here: failing to read it leaves the line above.
+        let _ = print_kernel_print_buffer(state, count);
         return Ok(());
     }
     let start = if count == 0 {
@@ -361,7 +362,6 @@ fn dbgprint(state: &mut ReplState<'_>, #[arg(parse = dbgprint_count)] count: usi
             output::neutralize_controls(&line.text)
         );
     }
-    outln!();
     Ok(())
 }
 
@@ -401,12 +401,12 @@ fn print_kernel_print_buffer(state: &mut ReplState<'_>, count: usize) -> Result<
     outln!(
         "{}",
         ui::muted(&format!(
-            "kernel DbgPrint buffer at {:#x}, {} bytes, {wrapped}",
+            "kernel DbgPrint buffer at {:#x}, {:#x} bytes, {wrapped}",
             position.buffer.0, position.size
         ))
     );
     if lines.is_empty() {
-        outln!("{}\n", ui::muted("the buffer is empty"));
+        outln!("{}", ui::muted("the buffer is empty"));
         return Ok(());
     }
     let start = if count == 0 {
@@ -417,7 +417,6 @@ fn print_kernel_print_buffer(state: &mut ReplState<'_>, count: usize) -> Result<
     for line in &lines[start..] {
         outln!("{}", output::neutralize_controls(line));
     }
-    outln!();
     Ok(())
 }
 

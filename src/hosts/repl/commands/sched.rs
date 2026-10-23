@@ -1,6 +1,7 @@
 use ntoseye_macros::{command, grammar};
 
 use super::hardware::ready_processor;
+use crate::base::diagnostics::print_warning;
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
@@ -11,8 +12,8 @@ use crate::nt::expr::Expr;
 use crate::nt::guest::ProcessInfo;
 use crate::nt::target::sched::{
     Apc, ApcQueues, ApcSelector, DpcQueues, FindStack, KernelTimer, ReadyQueues, RunningProcessors,
-    ThreadStacks, TimerTable, UniqStackOptions, UniqStackScope, UniqStacks, UnwalkedThread,
-    findstack_level,
+    SchedulerError, ThreadStack, ThreadStacks, TimerTable, UniqStackOptions, UniqStackScope,
+    UniqStacks, UnwalkedThread, findstack_level,
 };
 use crate::nt::target::workqueue::{WorkItem, WorkQueueTypes, WorkQueues};
 use crate::nt::target::{
@@ -21,17 +22,55 @@ use crate::nt::target::{
 use crate::nt::unwind::StackFrame;
 use crate::session::Session;
 
-use super::diagnostics::{diagnostic_addr, diagnostic_cell};
+/// The values a block could not read. Each shows `-` in its cell, and the
+/// reasons print once after the block, one warning for each distinct reason
+/// naming the values it hid.
+#[derive(Default)]
+struct Unread(Vec<(String, Vec<String>)>);
 
-fn diagnostic_option_cell<T>(
-    value: &DiagnosticValue<Option<T>>,
-    render: impl FnOnce(&T) -> String,
-    none: &str,
-) -> String {
-    match value {
-        DiagnosticValue::Available(Some(value)) => render(value),
-        DiagnosticValue::Available(None) => none.to_string(),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
+impl Unread {
+    fn note(&mut self, what: String, error: &str) {
+        match self.0.iter_mut().find(|(reason, _)| reason == error) {
+            Some((_, whats)) => whats.push(what),
+            None => self.0.push((error.to_string(), vec![what])),
+        }
+    }
+
+    /// `value` rendered, or `-` with its reason noted under `what`.
+    fn cell<T>(
+        &mut self,
+        value: &DiagnosticValue<T>,
+        what: impl FnOnce() -> String,
+        render: impl FnOnce(&T) -> String,
+    ) -> String {
+        match value {
+            DiagnosticValue::Available(value) => render(value),
+            DiagnosticValue::Unavailable(error) => {
+                self.note(what(), error);
+                "-".to_string()
+            }
+        }
+    }
+
+    fn print(&self) {
+        // A reason shared by many rows names a few of them, not thousands.
+        const NAMED: usize = 3;
+        for (error, whats) in &self.0 {
+            let mut named = whats[..whats.len().min(NAMED)].join(", ");
+            if whats.len() > NAMED {
+                named.push_str(&format!(" and {} more", whats.len() - NAMED));
+            }
+            print_warning(format!("{named}: {error}"));
+        }
+    }
+}
+
+/// `count` with `noun`, plural unless it is 1: `1 thread`, `2 threads`.
+fn count_of(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
     }
 }
 
@@ -40,81 +79,98 @@ fn option_cell<T>(value: Option<&T>, render: impl FnOnce(&T) -> String, none: &s
 }
 
 fn thread_tid(thread: &ThreadInfo) -> String {
-    option_cell(
-        thread.tid.as_ref(),
-        |tid| tid.to_string(),
-        &ui::addr(thread.ethread.0).to_string(),
-    )
+    option_cell(thread.tid.as_ref(), |tid| tid.to_string(), "-")
 }
 
 fn thread_pid(thread: &ThreadInfo) -> String {
-    option_cell(thread.pid.as_ref(), |pid| pid.to_string(), "<unavailable>")
+    option_cell(thread.pid.as_ref(), |pid| pid.to_string(), "-")
 }
 
 fn thread_process(thread: &ThreadInfo) -> String {
-    option_cell(thread.process_name.as_ref(), Clone::clone, "<unknown>")
+    option_cell(thread.process_name.as_ref(), Clone::clone, "-")
 }
 
 fn thread_priority(thread: &ThreadInfo) -> String {
     option_cell(
         thread.priority.as_ref(),
         |priority| priority.to_string(),
-        "<unavailable>",
+        "-",
     )
 }
 
 fn thread_state(thread: &ThreadInfo) -> String {
     option_cell(
         thread.state.as_ref(),
-        |state| format!("{} ({state})", kthread_state_name(*state)),
-        "<unavailable>",
+        |state| format!("{} ({state:#x})", kthread_state_name(*state)),
+        "-",
     )
 }
 
 fn thread_wait_reason(thread: &ThreadInfo) -> String {
     option_cell(
         thread.wait_reason.as_ref(),
-        |reason| format!("{} ({reason})", wait_reason_name(*reason)),
-        "<unavailable>",
-    )
-}
-
-fn running_thread_kthread(value: &DiagnosticValue<Option<ThreadInfo>>) -> String {
-    diagnostic_option_cell(value, |thread| ui::addr(thread.kthread.0).to_string(), "-")
-}
-
-fn running_thread_detail(value: &DiagnosticValue<Option<ThreadInfo>>) -> String {
-    diagnostic_option_cell(
-        value,
-        |thread| {
-            format!(
-                "{} {} (pid {})",
-                ui::addr(thread.kthread.0),
-                thread_process(thread),
-                thread_pid(thread)
-            )
-        },
+        |reason| format!("{} ({reason:#x})", wait_reason_name(*reason)),
         "-",
     )
 }
 
-fn short_stack_cell(value: Option<&DiagnosticValue<Vec<StackFrame>>>) -> String {
+/// The `THREAD <addr>  TID n  PID n  process <name>` heading of a thread.
+fn thread_heading(thread: &ThreadInfo) -> String {
+    format!(
+        "THREAD {}  TID {}  PID {}  process {}",
+        ui::addr(thread.ethread.0),
+        thread_tid(thread),
+        thread_pid(thread),
+        thread_process(thread)
+    )
+}
+
+/// A processor's next or idle thread as its KTHREAD, or `-` when there is
+/// none or it is the `current` thread the row already shows.
+fn other_thread_cell(
+    value: &DiagnosticValue<Option<ThreadInfo>>,
+    current: Option<VirtAddr>,
+    unread: &mut Unread,
+    what: impl FnOnce() -> String,
+) -> String {
+    unread.cell(value, what, |thread| match thread {
+        Some(thread) if Some(thread.kthread) != current => ui::addr(thread.kthread.0).to_string(),
+        _ => "-".to_string(),
+    })
+}
+
+fn short_stack_cell(
+    value: Option<&DiagnosticValue<Vec<StackFrame>>>,
+    unread: &mut Unread,
+    what: impl FnOnce() -> String,
+) -> String {
     let Some(value) = value else {
         return "-".to_string();
     };
-    match value {
-        DiagnosticValue::Available(frames) if frames.is_empty() => "<no frames>".to_string(),
-        DiagnosticValue::Available(frames) => frames
+    unread.cell(value, what, |frames| {
+        if frames.is_empty() {
+            return "-".to_string();
+        }
+        frames
             .iter()
             .map(|frame| frame.symbol.as_str())
             .collect::<Vec<_>>()
-            .join(" <- "),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
-    }
+            .join(" <- ")
+    })
 }
 
 fn termination_message(termination: &ListTermination) -> Option<String> {
     termination.diagnostic()
+}
+
+/// One warning for each processor whose queues could not be read.
+fn print_scheduler_errors(errors: &[SchedulerError]) {
+    for error in errors {
+        match error.processor {
+            Some(processor) => print_warning(format!("CPU {processor}: {}", error.message)),
+            None => print_warning(&error.message),
+        }
+    }
 }
 
 /// Show the thread that runs on each processor.
@@ -141,47 +197,48 @@ fn running(
 impl Render for RunningProcessors {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         if self.processors.is_empty() {
-            outln!("no non-idle running threads\n");
+            outln!("{}", ui::muted("no non-idle running threads"));
             return;
         }
         let mut builder = tabled::builder::Builder::default();
         builder.push_record([
-            "CPU", "KPCR", "KPRCB", "KTHREAD", "TID", "Process", "Priority", "Next", "Idle",
+            "CPU", "KPCR", "KPRCB", "KTHREAD", "TID", "PID", "Process", "Priority", "Next", "Idle",
             "Stack",
         ]);
+        let mut unread = Unread::default();
         for processor in &self.processors {
+            let cpu = processor.index;
             let current = match &processor.current_thread {
-                DiagnosticValue::Available(Some(thread)) => thread,
-                _ => {
-                    builder.push_record([
-                        processor.index.to_string(),
-                        diagnostic_addr(&processor.kpcr),
-                        diagnostic_addr(&processor.prcb),
-                        running_thread_kthread(&processor.current_thread),
-                        "-".to_string(),
-                        "<unavailable>".to_string(),
-                        "<unavailable>".to_string(),
-                        running_thread_detail(&processor.next_thread),
-                        running_thread_detail(&processor.idle_thread),
-                        short_stack_cell(processor.short_stack.as_ref()),
-                    ]);
-                    continue;
+                DiagnosticValue::Available(thread) => thread.as_ref(),
+                DiagnosticValue::Unavailable(error) => {
+                    unread.note(format!("CPU {cpu} thread"), error);
+                    None
                 }
             };
+            let current_kthread = current.map(|thread| thread.kthread);
+            let address = |address: &VirtAddr| ui::addr(address.0).to_string();
             builder.push_record([
-                processor.index.to_string(),
-                diagnostic_addr(&processor.kpcr),
-                diagnostic_addr(&processor.prcb),
-                ui::addr(current.kthread.0).to_string(),
-                thread_tid(current),
-                thread_process(current),
-                thread_priority(current),
-                running_thread_detail(&processor.next_thread),
-                running_thread_detail(&processor.idle_thread),
-                short_stack_cell(processor.short_stack.as_ref()),
+                cpu.to_string(),
+                unread.cell(&processor.kpcr, || format!("CPU {cpu} KPCR"), address),
+                unread.cell(&processor.prcb, || format!("CPU {cpu} KPRCB"), address),
+                current.map_or_else(|| "-".to_string(), |thread| address(&thread.kthread)),
+                current.map_or_else(|| "-".to_string(), thread_tid),
+                current.map_or_else(|| "-".to_string(), thread_pid),
+                current.map_or_else(|| "-".to_string(), thread_process),
+                current.map_or_else(|| "-".to_string(), thread_priority),
+                other_thread_cell(&processor.next_thread, current_kthread, &mut unread, || {
+                    format!("CPU {cpu} next thread")
+                }),
+                other_thread_cell(&processor.idle_thread, current_kthread, &mut unread, || {
+                    format!("CPU {cpu} idle thread")
+                }),
+                short_stack_cell(processor.short_stack.as_ref(), &mut unread, || {
+                    format!("CPU {cpu} stack")
+                }),
             ]);
         }
         print_padded_table(builder);
+        unread.print();
     }
 }
 
@@ -239,50 +296,53 @@ impl Render for DpcQueues {
             "CPU",
             "Queue",
             "KDPC",
-            "DeferredRoutine",
+            "Deferred routine",
             "Context",
             "Importance",
         ]);
+        let mut unread = Unread::default();
+        let mut stops = Vec::new();
         for queue in &self.queues {
             for entry in &queue.entries {
+                let what = || format!("KDPC {:#x}", entry.address.0);
                 builder.push_record([
                     queue.processor.to_string(),
                     queue.queue.to_string(),
                     ui::addr(entry.address.0).to_string(),
-                    routine_cell(&entry.deferred_routine, &entry.deferred_routine_symbol),
-                    diagnostic_option_cell(
-                        &entry.context,
-                        |address| ui::addr(address.0).to_string(),
-                        "0x0",
+                    routine_cell(
+                        &entry.deferred_routine,
+                        &entry.deferred_routine_symbol,
+                        &mut unread,
+                        what,
                     ),
-                    diagnostic_cell(&entry.importance),
+                    unread.cell(&entry.context, what, |context| {
+                        context.map_or_else(
+                            || "-".to_string(),
+                            |address| ui::addr(address.0).to_string(),
+                        )
+                    }),
+                    unread.cell(&entry.importance, what, u8::to_string),
                 ]);
             }
             if let Some(stop) = termination_message(&queue.termination) {
-                outln!(
-                    "CPU {} queue {}: list walk stopped: {}",
-                    queue.processor,
-                    queue.queue,
-                    stop
-                );
+                stops.push(format!(
+                    "CPU {} queue {}: list walk stopped: {stop}",
+                    queue.processor, queue.queue
+                ));
             }
         }
-        for error in &self.errors {
-            outln!(
-                "CPU {}: <unavailable: {}>",
-                error
-                    .processor
-                    .map_or_else(|| "?".to_string(), |value| value.to_string()),
-                error.message
-            );
-        }
-        if self.total == 0 {
-            outln!("DPC queues are empty or unavailable\n");
-        } else {
+        if self.total != 0 {
             print_padded_table(builder);
+        } else if self.errors.is_empty() {
+            outln!("{}", ui::muted("no queued DPCs"));
         }
+        unread.print();
+        for stop in &stops {
+            print_warning(stop);
+        }
+        print_scheduler_errors(&self.errors);
         if self.truncated {
-            outln!("DPC output bounded at 4096 entries\n");
+            outln!("DPC output bounded at 4096 entries");
         }
     }
 }
@@ -728,76 +788,83 @@ fn print_ready_queues(detail: &ReadyQueues) {
         "Priority",
         "KTHREAD",
         "TID",
+        "PID",
         "Process",
-        "ThreadPriority",
+        "Thread priority",
         "State",
     ]);
+    let mut unread = Unread::default();
+    let mut stops = Vec::new();
     for queue in &detail.queues {
         for entry in &queue.entries {
-            let (tid, process, priority, state) = match &entry.thread {
-                DiagnosticValue::Available(thread) => (
-                    thread_tid(thread),
-                    thread_process(thread),
-                    thread_priority(thread),
-                    thread_state(thread),
-                ),
-                DiagnosticValue::Unavailable(error) => (
-                    "<unavailable>".to_string(),
-                    format!("<unavailable: {error}>"),
-                    "<unavailable>".to_string(),
-                    "<unavailable>".to_string(),
-                ),
+            let thread = match &entry.thread {
+                DiagnosticValue::Available(thread) => Some(thread),
+                DiagnosticValue::Unavailable(error) => {
+                    unread.note(format!("KTHREAD {:#x}", entry.kthread.0), error);
+                    None
+                }
             };
+            let field =
+                |render: fn(&ThreadInfo) -> String| thread.map_or_else(|| "-".to_string(), render);
             builder.push_record([
                 queue.processor.to_string(),
                 queue.priority.to_string(),
                 ui::addr(entry.kthread.0).to_string(),
-                tid,
-                process,
-                priority,
-                state,
+                field(thread_tid),
+                field(thread_pid),
+                field(thread_process),
+                field(thread_priority),
+                field(thread_state),
             ]);
         }
         if let Some(stop) = termination_message(&queue.termination) {
-            outln!(
-                "CPU {} priority {}: list walk stopped: {}",
-                queue.processor,
-                queue.priority,
-                stop
-            );
+            stops.push(format!(
+                "CPU {} priority {}: list walk stopped: {stop}",
+                queue.processor, queue.priority
+            ));
         }
     }
-    for error in &detail.errors {
-        outln!(
-            "CPU {}: <unavailable: {}>",
-            error
-                .processor
-                .map_or_else(|| "?".to_string(), |value| value.to_string()),
-            error.message
-        );
-    }
-    if detail.total == 0 {
-        outln!("ready lists are empty or unavailable\n");
-    } else {
+    if detail.total != 0 {
         print_padded_table(builder);
+    } else if detail.errors.is_empty() {
+        outln!("{}", ui::muted("no ready threads"));
     }
+    unread.print();
+    for stop in &stops {
+        print_warning(stop);
+    }
+    print_scheduler_errors(&detail.errors);
     if detail.truncated {
-        outln!("ready-list output bounded at 4096 entries\n");
+        outln!("ready-list output bounded at 4096 entries");
     }
 }
 
+/// A routine as its symbol, or its address when no symbol resolves; `-`
+/// when there is none.
 fn routine_cell(
     pointer: &DiagnosticValue<Option<VirtAddr>>,
     symbol: &DiagnosticValue<Option<String>>,
+    unread: &mut Unread,
+    what: impl FnOnce() -> String,
 ) -> String {
-    match pointer {
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
-        DiagnosticValue::Available(None) => "null".to_string(),
-        DiagnosticValue::Available(Some(address)) => match symbol {
-            DiagnosticValue::Available(Some(symbol)) => symbol.clone(),
-            DiagnosticValue::Available(None) => ui::addr(address.0).to_string(),
-            DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
-        },
+    match (pointer, symbol) {
+        (DiagnosticValue::Unavailable(error), _) => {
+            unread.note(what(), error);
+            "-".to_string()
+        }
+        (DiagnosticValue::Available(None), _) => "-".to_string(),
+        (DiagnosticValue::Available(Some(_)), DiagnosticValue::Available(Some(symbol))) => {
+            symbol.clone()
+        }
+        (DiagnosticValue::Available(Some(address)), DiagnosticValue::Available(None)) => {
+            format!("{:#x}", address.0)
+        }
+        // The address is known even when its symbol lookup failed, so the
+        // cell shows it and the failure goes in the block's warning.
+        (DiagnosticValue::Available(Some(address)), DiagnosticValue::Unavailable(error)) => {
+            unread.note(what(), error);
+            format!("{:#x}", address.0)
+        }
     }
 }
 
@@ -808,12 +875,8 @@ fn interrupt_value(interrupt_time: &DiagnosticValue<u64>) -> Option<u64> {
     }
 }
 
-/// `detail`'s due time, and how far it is from `now` (the interrupt time).
-fn format_due_time(detail: &KernelTimer, now: Option<u64>) -> String {
-    let DiagnosticValue::Available(raw) = &detail.due_time else {
-        return diagnostic_cell(&detail.due_time);
-    };
-    let raw = *raw;
+/// `raw`, a due time, and how far it is from `now` (the interrupt time).
+fn format_due_time(raw: u64, now: Option<u64>) -> String {
     let Some(now) = now else {
         return format!("{raw:#x}");
     };
@@ -833,108 +896,131 @@ fn format_due_time(detail: &KernelTimer, now: Option<u64>) -> String {
     }
 }
 
-fn timer_dpc_cell(detail: &KernelTimer) -> String {
+fn timer_dpc_cell(detail: &KernelTimer, unread: &mut Unread) -> String {
+    let what = || format!("KTIMER {:#x} DPC", detail.address.0);
     if let DiagnosticValue::Unavailable(error) = &detail.dpc {
-        if let DiagnosticValue::Available(Some(encoded)) = &detail.dpc_encoded {
-            return format!("<encoded> {:#x}", encoded.0);
+        match &detail.dpc_encoded {
+            DiagnosticValue::Available(Some(encoded)) => {
+                unread.note(what(), &format!("{error} (encoded Dpc {:#x})", encoded.0))
+            }
+            _ => unread.note(what(), error),
         }
-        return format!("<unavailable: {error}>");
+        return "-".to_string();
     }
-    routine_cell(&detail.dpc_routine, &detail.dpc_routine_symbol)
+    routine_cell(
+        &detail.dpc_routine,
+        &detail.dpc_routine_symbol,
+        unread,
+        what,
+    )
+}
+
+/// The cells of a timer: its due time, period, and DPC routine.
+fn timer_cells(timer: &KernelTimer, now: Option<u64>, unread: &mut Unread) -> [String; 3] {
+    let what = || format!("KTIMER {:#x}", timer.address.0);
+    [
+        unread.cell(&timer.due_time, what, |raw| format_due_time(*raw, now)),
+        unread.cell(&timer.period, what, u32::to_string),
+        timer_dpc_cell(timer, unread),
+    ]
 }
 
 fn print_timer_detail(detail: &KernelTimer, now: Option<u64>) {
-    outln!("timer {}", ui::addr(detail.address.0));
-    outln!("  DueTime : {}", format_due_time(detail, now));
-    outln!("  Period  : {}", diagnostic_cell(&detail.period));
-    outln!("  DPC     : {}", timer_dpc_cell(detail));
-    outln!();
+    let mut unread = Unread::default();
+    let [due_time, period, dpc] = timer_cells(detail, now, &mut unread);
+    outln!("KTIMER {}", ui::addr(detail.address.0));
+    outln!("  DueTime : {due_time}");
+    outln!("  Period  : {period}");
+    outln!("  DPC     : {dpc}");
+    unread.print();
 }
 
 fn print_timer_list(detail: &TimerTable) {
-    outln!(
-        "interrupt time {}",
-        match &detail.interrupt_time {
-            DiagnosticValue::Available(value) =>
-                format!("{value:#x} [KUSER_SHARED_DATA.InterruptTime]"),
-            DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
-        }
+    let mut unread = Unread::default();
+    let interrupt_time = unread.cell(
+        &detail.interrupt_time,
+        || "interrupt time".to_string(),
+        |value| format!("{value:#x} [KUSER_SHARED_DATA.InterruptTime]"),
     );
+    outln!("interrupt time {interrupt_time}");
     let now = interrupt_value(&detail.interrupt_time);
     let mut builder = tabled::builder::Builder::default();
-    builder.push_record(["CPU", "Bucket", "KTIMER", "DueTime", "Period", "DPC"]);
+    builder.push_record(["CPU", "Bucket", "KTIMER", "Due time", "Period", "DPC"]);
     for entry in &detail.entries {
+        let [due_time, period, dpc] = timer_cells(&entry.timer, now, &mut unread);
         builder.push_record([
             entry.processor.to_string(),
             entry.bucket.to_string(),
             ui::addr(entry.timer.address.0).to_string(),
-            format_due_time(&entry.timer, now),
-            diagnostic_cell(&entry.timer.period),
-            timer_dpc_cell(&entry.timer),
+            due_time,
+            period,
+            dpc,
         ]);
     }
+    if detail.total != 0 {
+        print_padded_table(builder);
+    } else if detail.errors.is_empty() {
+        outln!("{}", ui::muted("no timers"));
+    }
+    unread.print();
     for bucket in &detail.terminations {
         if let Some(stop) = termination_message(&bucket.termination) {
-            outln!(
-                "CPU {} bucket {}: list walk stopped: {}",
-                bucket.processor,
-                bucket.bucket,
-                stop
-            );
+            print_warning(format!(
+                "CPU {} bucket {}: list walk stopped: {stop}",
+                bucket.processor, bucket.bucket
+            ));
         }
     }
-    for error in &detail.errors {
-        outln!(
-            "CPU {}: <unavailable: {}>",
-            error
-                .processor
-                .map_or_else(|| "?".to_string(), |value| value.to_string()),
-            error.message
-        );
-    }
-    if detail.total == 0 {
-        outln!("timer table is empty or unavailable\n");
-    } else {
-        print_padded_table(builder);
-    }
+    print_scheduler_errors(&detail.errors);
     if detail.truncated {
-        outln!("timer output bounded at 4096 entries\n");
+        outln!("timer output bounded at 4096 entries");
     }
 }
 
-fn print_apc_detail(label: &str, detail: &Apc) {
+fn print_apc_detail(label: &str, detail: &Apc, unread: &mut Unread) {
+    let what = || format!("APC {:#x}", detail.address.0);
+    let kernel = routine_cell(
+        &detail.kernel_routine,
+        &detail.kernel_routine_symbol,
+        unread,
+        what,
+    );
+    let normal = routine_cell(
+        &detail.normal_routine,
+        &detail.normal_routine_symbol,
+        unread,
+        what,
+    );
     outln!(
-        "  {label:<6} APC {}  KernelRoutine {}  NormalRoutine {}",
+        "  {label:<6} APC {}  KernelRoutine {kernel}  NormalRoutine {normal}",
         ui::addr(detail.address.0),
-        routine_cell(&detail.kernel_routine, &detail.kernel_routine_symbol),
-        routine_cell(&detail.normal_routine, &detail.normal_routine_symbol),
     );
 }
 
 fn print_apcs(detail: &ApcQueues) {
     if let Some(error) = &detail.layout_error {
-        outln!("APC layout: <unavailable: {error}>\n");
+        print_warning(format!("APC layout unavailable: {error}"));
     }
     if detail.threads.is_empty() {
-        outln!("no matching Windows threads\n");
+        outln!("{}", ui::muted("no matching Windows threads"));
         return;
     }
-    for thread in &detail.threads {
-        outln!(
-            "thread {}  ETHREAD {}  process {} (pid {})",
-            thread_tid(&thread.thread),
-            ui::addr(thread.thread.ethread.0),
-            thread_process(&thread.thread),
-            thread_pid(&thread.thread)
-        );
+    let mut unread = Unread::default();
+    for (index, thread) in detail.threads.iter().enumerate() {
+        if index > 0 {
+            outln!();
+        }
+        outln!("{}", thread_heading(&thread.thread));
         for apc in &thread.kernel {
-            print_apc_detail("kernel", apc);
+            print_apc_detail("kernel", apc, &mut unread);
         }
         for apc in &thread.user {
-            print_apc_detail("user", apc);
+            print_apc_detail("user", apc, &mut unread);
         }
         if let Some(error) = &thread.state_error {
-            outln!("  APC state: <unavailable: {error}>");
+            outln!("  APC state unavailable: {error}");
+        } else if thread.kernel.is_empty() && thread.user.is_empty() {
+            outln!("  {}", ui::muted("no queued APCs"));
         }
         if let Some(stop) = termination_message(&thread.kernel_termination) {
             outln!("  kernel APC list stopped: {stop}");
@@ -943,10 +1029,9 @@ fn print_apcs(detail: &ApcQueues) {
             outln!("  user APC list stopped: {stop}");
         }
     }
+    unread.print();
     if detail.truncated {
-        outln!("APC output bounded at 4096 entries\n");
-    } else {
-        outln!();
+        outln!("APC output bounded at 4096 entries");
     }
 }
 
@@ -977,6 +1062,7 @@ fn print_work_queues(detail: &WorkQueues) {
         let list: Vec<String> = selected.iter().map(u8::to_string).collect();
         outln!("items listed for priorities {} only", list.join(", "));
     }
+    let mut unread = Unread::default();
     for queue in &detail.queues {
         outln!(
             "**** Partition {}  NUMA Node {}  {} queue {} ****",
@@ -1022,31 +1108,31 @@ fn print_work_queues(detail: &WorkQueues) {
         outln!(" -> Associated Threads ({})", queue.threads.len());
         for worker in &queue.threads {
             match &worker.thread {
-                DiagnosticValue::Available(info) => {
-                    let thread = info;
-                    outln!(
-                        "    THREAD {}  Cid {}.{}  {}  {}  Priority {}",
-                        ui::addr(thread.ethread.0),
-                        thread_pid(thread),
-                        thread_tid(thread),
-                        thread_state(thread),
-                        thread_wait_reason(thread),
-                        thread_priority(thread)
-                    );
-                }
-                DiagnosticValue::Unavailable(error) => outln!(
-                    "    KTHREAD {}  <unavailable: {error}>",
-                    ui::addr(worker.kthread.0)
+                DiagnosticValue::Available(thread) => outln!(
+                    "    THREAD {}  TID {}  PID {}  {}  {}  Priority {}",
+                    ui::addr(thread.ethread.0),
+                    thread_tid(thread),
+                    thread_pid(thread),
+                    thread_state(thread),
+                    thread_wait_reason(thread),
+                    thread_priority(thread)
                 ),
+                DiagnosticValue::Unavailable(error) => {
+                    outln!("    KTHREAD {}", ui::addr(worker.kthread.0));
+                    unread.note(format!("KTHREAD {:#x}", worker.kthread.0), error);
+                }
             }
             match &worker.stack {
                 Some(DiagnosticValue::Available(frames)) => {
                     for (index, frame) in frames.iter().enumerate() {
-                        outln!("      #{index:<2} {}", frame.symbol);
+                        outln!(
+                            "      {}",
+                            format_stack_frame(Some(index), frame, true, false)
+                        );
                     }
                 }
                 Some(DiagnosticValue::Unavailable(error)) => {
-                    outln!("      <stack unavailable: {error}>")
+                    outln!("      {}", ui::muted(error))
                 }
                 None => {}
             }
@@ -1056,11 +1142,21 @@ fn print_work_queues(detail: &WorkQueues) {
         }
         outln!();
     }
+    unread.print();
     for error in &detail.errors {
-        outln!("<unavailable: {error}>");
+        print_warning(error);
     }
-    if detail.queues.is_empty() {
-        outln!("no executive work queues found\n");
+    if detail.queues.is_empty() && detail.errors.is_empty() {
+        outln!("{}", ui::muted("no executive work queues"));
+    }
+}
+
+/// The stack error of a thread, from the walk or from its top frame.
+fn stack_error(thread: &ThreadStack) -> Option<&str> {
+    match (&thread.error, &thread.top_symbol) {
+        (Some(error), _) => Some(error.as_str()),
+        (None, DiagnosticValue::Unavailable(error)) => Some(error.as_str()),
+        (None, DiagnosticValue::Available(_)) => None,
     }
 }
 
@@ -1071,8 +1167,8 @@ fn print_stacks(detail: &ThreadStacks) {
         _ => 1,
     };
     outln!(
-        "{} thread(s), level {}, frame bound {}{}",
-        detail.scanned_threads,
+        "{}, level {}, frame bound {}{}",
+        count_of(detail.scanned_threads, "thread"),
         detail.level,
         frame_bound,
         detail
@@ -1081,80 +1177,115 @@ fn print_stacks(detail: &ThreadStacks) {
             .map(|value| format!(", filter '{value}'"))
             .unwrap_or_default()
     );
-    for thread in &detail.threads {
-        outln!(
-            "{}  {:<16}  {:<8}  {:<24}  {:<20}  {}",
-            thread_tid(&thread.thread),
-            thread_process(&thread.thread),
-            thread_pid(&thread.thread),
-            thread_state(&thread.thread),
-            thread_wait_reason(&thread.thread),
-            diagnostic_option_cell(&thread.top_symbol, |symbol| symbol.clone(), "<unavailable>"),
-        );
-        if detail.level > 0 {
-            for (index, frame) in thread.frames.iter().enumerate() {
-                outln!("    #{index:<2} {}", frame.symbol);
+    if detail.level == 0 {
+        if !detail.threads.is_empty() {
+            let mut builder = tabled::builder::Builder::default();
+            builder.push_record(["TID", "PID", "Process", "State", "Wait reason", "Top frame"]);
+            for thread in &detail.threads {
+                let top = match &thread.top_symbol {
+                    DiagnosticValue::Available(Some(symbol)) => symbol.clone(),
+                    _ => "-".to_string(),
+                };
+                builder.push_record([
+                    thread_tid(&thread.thread),
+                    thread_pid(&thread.thread),
+                    thread_process(&thread.thread),
+                    thread_state(&thread.thread),
+                    thread_wait_reason(&thread.thread),
+                    top,
+                ]);
             }
+            print_padded_table(builder);
         }
-        if detail.level > 0 && thread.truncated != 0 {
-            outln!("    <{} additional frame(s) omitted>", thread.truncated);
-        }
-        if let Some(error) = &thread.error
-            && detail.level == 0
-        {
-            outln!("    <unavailable: {error}>");
+        print_unwalked(
+            detail
+                .threads
+                .iter()
+                .filter_map(|thread| Some((&thread.thread, stack_error(thread)?)))
+                .collect(),
+        );
+    } else {
+        for (index, thread) in detail.threads.iter().enumerate() {
+            if index > 0 {
+                outln!();
+            }
+            outln!("{}", thread_label(&thread.thread));
+            for (index, frame) in thread.frames.iter().enumerate() {
+                outln!(
+                    "    {}",
+                    format_stack_frame(Some(index), frame, true, false)
+                );
+            }
+            if thread.truncated != 0 {
+                outln!("    {}", more_frames(thread.truncated));
+            }
+            if let Some(error) = stack_error(thread) {
+                outln!("    {}", ui::muted(error));
+            }
         }
     }
     if detail.interrupted {
         outln!(
-            "interrupted after {} displayed thread(s)\n",
-            detail.displayed_threads
+            "interrupted after {}",
+            count_of(detail.displayed_threads, "displayed thread")
         );
     } else if detail.displayed_threads == 0 {
-        outln!("no matching thread stacks\n");
-    } else {
-        outln!();
+        let none = match &detail.filter {
+            Some(filter) => format!("no threads matching '{filter}'"),
+            None => "no threads".to_string(),
+        };
+        outln!("{}", ui::muted(&none));
     }
 }
 
+/// A thread's heading with its state and wait reason.
 fn thread_label(thread: &ThreadInfo) -> String {
     format!(
-        "{} {} ({})  {}  {}",
-        thread_tid(thread),
-        thread_process(thread),
-        thread_pid(thread),
+        "{}  {}  {}",
+        thread_heading(thread),
         thread_state(thread),
         thread_wait_reason(thread)
     )
 }
 
-fn print_unwalked(unwalked: &[UnwalkedThread]) {
+/// The threads whose stacks did not walk, grouped by the reason.
+fn print_unwalked(unwalked: Vec<(&ThreadInfo, &str)>) {
     if unwalked.is_empty() {
         return;
     }
-    outln!("{} thread stack(s) could not be walked:", unwalked.len());
-    let mut by_error: Vec<(&str, Vec<ThreadInfo>)> = Vec::new();
-    for thread in unwalked {
-        match by_error
-            .iter_mut()
-            .find(|(error, _)| *error == thread.error)
-        {
-            Some((_, threads)) => threads.push(thread.thread.clone()),
-            None => by_error.push((&thread.error, vec![thread.thread.clone()])),
+    outln!(
+        "{} could not be walked:",
+        count_of(unwalked.len(), "thread stack")
+    );
+    let mut by_error: Vec<(&str, Vec<&ThreadInfo>)> = Vec::new();
+    for (thread, error) in unwalked {
+        match by_error.iter_mut().find(|(reason, _)| *reason == error) {
+            Some((_, threads)) => threads.push(thread),
+            None => by_error.push((error, vec![thread])),
         }
     }
     for (error, threads) in by_error {
-        outln!("    {} thread(s): {error}", threads.len());
-        outln!("        {}", thread_ids_by_process(&threads));
+        outln!("    {}: {error}", count_of(threads.len(), "thread"));
+        outln!("        {}", thread_ids_by_process(threads));
     }
 }
 
+fn unwalked_threads(unwalked: &[UnwalkedThread]) -> Vec<(&ThreadInfo, &str)> {
+    unwalked
+        .iter()
+        .map(|thread| (&thread.thread, thread.error.as_str()))
+        .collect()
+}
+
 fn print_findstack(detail: &FindStack) {
-    for thread in &detail.threads {
+    for (index, thread) in detail.threads.iter().enumerate() {
+        if index > 0 && detail.level > 0 {
+            outln!();
+        }
         outln!(
-            "Thread {}, {} frame(s) match",
+            "{}: {}",
             thread_label(&thread.thread),
-            thread.matches.len()
+            count_of(thread.matches.len(), "matching frame")
         );
         let frames = &thread.stack.frames;
         match detail.level {
@@ -1184,41 +1315,53 @@ fn print_findstack(detail: &FindStack) {
                 }
             }
         }
-        if detail.level > 0 {
-            outln!();
-        }
     }
-    outln!(
-        "{} of {} thread(s) have a frame matching '{}'{}",
-        detail.threads.len(),
-        detail.scanned_threads,
-        detail.pattern,
-        if detail.interrupted {
-            " (interrupted: not every thread was searched)"
-        } else {
-            ""
-        }
-    );
-    print_unwalked(&detail.unwalked);
-    outln!();
+    if detail.level > 0 && !detail.threads.is_empty() {
+        outln!();
+    }
+    let interrupted = if detail.interrupted {
+        " (interrupted: not every thread was searched)"
+    } else {
+        ""
+    };
+    if detail.threads.is_empty() {
+        outln!(
+            "{}",
+            ui::muted(&format!(
+                "no threads with a frame matching '{}' ({} searched){interrupted}",
+                detail.pattern, detail.scanned_threads
+            ))
+        );
+    } else {
+        outln!(
+            "{} of {} {} a frame matching '{}'{interrupted}",
+            detail.threads.len(),
+            count_of(detail.scanned_threads, "thread"),
+            if detail.threads.len() == 1 {
+                "has"
+            } else {
+                "have"
+            },
+            detail.pattern,
+        );
+    }
+    print_unwalked(unwalked_threads(&detail.unwalked));
 }
 
 fn print_uniqstack(detail: &UniqStacks, options: UniqStackOptions) {
+    let threads = count_of(detail.scanned_threads, "thread");
     match &detail.scope {
-        UniqStackScope::AllThreads => {
-            outln!("{} thread(s) of every process\n", detail.scanned_threads)
-        }
-        UniqStackScope::Process { pid, name } => {
-            outln!("{} thread(s) of {name} ({pid})\n", detail.scanned_threads)
-        }
+        UniqStackScope::AllThreads => outln!("{threads} of every process"),
+        UniqStackScope::Process { pid, name } => outln!("{threads} of {name} (PID {pid})"),
     }
+    outln!();
     let mut sharing = 0;
     for group in &detail.groups {
         let first = &group.threads[0];
         outln!(
-            ". {}  -- {} thread(s) with this stack",
+            ". {}  -- {} with this stack",
             thread_label(first),
-            group.threads.len()
+            count_of(group.threads.len(), "thread")
         );
         sharing += group.threads.len() - 1;
         for (index, frame) in group.stack.frames.iter().enumerate() {
@@ -1236,12 +1379,12 @@ fn print_uniqstack(detail: &UniqStacks, options: UniqStackOptions) {
             outln!("    {}", more_frames(group.stack.truncated));
         }
         if group.threads.len() > 1 {
-            outln!("    Threads: {}", thread_ids_by_process(&group.threads));
+            outln!("    threads: {}", thread_ids_by_process(&group.threads));
         }
         outln!();
     }
     outln!(
-        "Total threads: {}, walked: {}, unique stacks: {}, threads sharing an earlier stack: {sharing}{}",
+        "total threads: {}, walked: {}, unique stacks: {}, threads sharing an earlier stack: {sharing}{}",
         detail.scanned_threads,
         detail.walked_threads(),
         detail.groups.len(),
@@ -1251,15 +1394,15 @@ fn print_uniqstack(detail: &UniqStacks, options: UniqStackOptions) {
             ""
         }
     );
-    print_unwalked(&detail.unwalked);
-    outln!();
+    print_unwalked(unwalked_threads(&detail.unwalked));
 }
 
-/// `System (4): 12 16 20; smss.exe (544): 548`, in the threads' order.
-fn thread_ids_by_process(threads: &[ThreadInfo]) -> String {
+/// `System (PID 4): 12 16 20; smss.exe (PID 540): 544`, in the threads'
+/// order.
+fn thread_ids_by_process<'a>(threads: impl IntoIterator<Item = &'a ThreadInfo>) -> String {
     let mut runs: Vec<(String, Vec<String>)> = Vec::new();
     for thread in threads {
-        let process = format!("{} ({})", thread_process(thread), thread_pid(thread));
+        let process = format!("{} (PID {})", thread_process(thread), thread_pid(thread));
         match runs.last_mut() {
             Some((last, tids)) if *last == process => tids.push(thread_tid(thread)),
             _ => runs.push((process, vec![thread_tid(thread)])),

@@ -19,10 +19,10 @@ pub fn addr(value: u64) -> String {
     format!("{value:016x}")
 }
 
-/// An address, or a muted `unavailable` when null.
+/// An address, or a muted `-` when null: a pointer to nothing.
 pub fn addr_opt(value: VirtAddr) -> String {
     if value.is_zero() {
-        muted("unavailable")
+        muted("-")
     } else {
         addr(value.0)
     }

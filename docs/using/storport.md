@@ -25,21 +25,21 @@ Give the adapter extension or the FDO to see the adapter and its units:
 
 ```text
 !storagekd.storadapter ffffc8884314b1a0
-Adapter              ffffc8884314b1a0  storahci  \Device\RaidPort0 (port 0)
-Driver               storahci  DRIVER_OBJECT ffffc88843122350  _RAID_DRIVER_EXTENSION ffffc8884306ad20
-State                Working
-Power                D0, system Working
-Device objects       FDO ffffc8884314b050  PDO ffffc88843089360  lower ffffc88843043de0
-Location             PCI 00:1f.2
-Adapter ID           PCI\VEN_8086&DEV_2922&SUBSYS_11001AF4&REV_02
-Miniport extension   ffffc8884314fac0  (0x2d0 bytes)
-Unit extension size  0x0 bytes
-Paths                paging 4, crash dump 1, hibernation 0
-Flags                InitializedMiniport WmiMiniPortInitialized WmiInitialized IdlePowerManagementEnabled BootAdapter InterruptsEnabled D3ColdAllowed DumpActiveNotCapable ProtocolCommandEffectsPendingUpdate FindAdapterCalled EtwEnabled AdapterInterfaceTypeInitialized
-I/O                  idle  (pause count 0, busy count 0)
-Gateway              ffffc8884313ce80  outstanding 0 of 31, waiting 0, busy 0, paused 0
+adapter ffffc8884314b1a0  storahci  \Device\RaidPort0 (port 0)
+  driver               storahci  DRIVER_OBJECT ffffc88843122350  _RAID_DRIVER_EXTENSION ffffc8884306ad20
+  state                Working
+  power                D0, system Working
+  device objects       FDO ffffc8884314b050  PDO ffffc88843089360  lower ffffc88843043de0
+  location             PCI 00:1f.2
+  adapter ID           PCI\VEN_8086&DEV_2922&SUBSYS_11001AF4&REV_02
+  miniport extension   ffffc8884314fac0  (0x2d0 bytes)
+  unit extension size  0x0 bytes
+  paths                paging 4, crash dump 1, hibernation 0
+  flags                InitializedMiniport | WmiMiniPortInitialized | WmiInitialized | IdlePowerManagementEnabled | BootAdapter | InterruptsEnabled | D3ColdAllowed | DumpActiveNotCapable | ProtocolCommandEffectsPendingUpdate | FindAdapterCalled | EtwEnabled | AdapterInterfaceTypeInitialized
+  I/O                  idle  (pause count 0, busy count 0)
+  gateway              ffffc8884313ce80  outstanding 0 of 31, waiting 0, busy 0, paused 0
 
-Units
+units
 B/T/L  Unit              PDO               State    Product        I/O
 0/0/0  ffffc888431531a0  ffffc88843153050  Working  QEMU HARDDISK  idle
 ```
@@ -58,24 +58,24 @@ Give a unit extension, as {command}`!storagekd.storadapter` lists it, or the uni
 
 ```text
 !storagekd.storunit ffffa08e681511a0
-Unit                 ffffa08e681511a0  QEMU HARDDISK  2.5+
-Address              bus 0, target 0, LUN 0
-Adapter              ffffa08e6814a1a0
-Device object        ffffa08e68151050
-State                Working
-Power                D0
-Miniport extension   none
-Flags                DeviceClaimed Enumerated Present WmiInitialized DeviceInitialized DumpActiveNotCapable RegisteredForPoFx BootUnit SupportsAtaInformation
-Queue                depth 31 (unit maximum 186)
-Counts               pause 0, busy 0, bypass 0, waiting 0, waiting to bypass 0
-I/O                  1 with the miniport
+unit ffffa08e681511a0  QEMU HARDDISK  2.5+
+  address              bus 0, target 0, LUN 0
+  adapter              ffffa08e6814a1a0
+  device object        ffffa08e68151050
+  state                Working
+  power                D0
+  miniport extension   -
+  flags                DeviceClaimed | Enumerated | Present | WmiInitialized | DeviceInitialized | DumpActiveNotCapable | RegisteredForPoFx | BootUnit | SupportsAtaInformation
+  queue                depth 31 (unit maximum 186)
+  counts               pause 0, busy 0, bypass 0, waiting 0, waiting to bypass 0
+  I/O                  1 with the miniport
 
-Requests with the miniport
+requests with the miniport
 XRB               IRP               SRB               CPU  Command
 ffffb3012c4d2030  ffffa08e727eede0  ffffb3012c4d4f60  1    WRITE(10) LBA 0x64b500, 8 blocks
 ```
 
-**Miniport extension** is the unit's extension that `StorPortGetLogicalUnit` returns, or `none` when the driver asked for no unit extension.
+**Miniport extension** is the unit's extension that `StorPortGetLogicalUnit` returns, or `-` when the driver asked for no unit extension.
 
 **Queue** shows the unit's device queue: its depth, which is how many requests StorPort lets the miniport hold for the unit, and the largest depth the unit allows. It also names the states that hold the queue: `Frozen` after an error, until the class driver releases the queue, and `Locked` while the class driver has locked it. **Counts** shows the unit's pause and busy counts, which are not zero while the miniport pauses the unit (`StorPortPauseDevice`) or reports it busy (`StorPortDeviceBusy`), the requests that bypass the queue, and the requests that wait in StorPort because the queue is full or held.
 
@@ -98,10 +98,10 @@ StorPort keeps a log of each adapter's last 256 events in its extension (`RaidLo
 
 ```text
 StorPort log of adapter ffffa08e6814a1a0  storahci  (ring ffffa08e6814ba20, 256 entries, newest 0x1069b55)
-Entry      Time (UTC)                   Event                Details
-0x1069b50  2026-10-10 01:03:01.9123674  CallMiniportBuildIo  IRP ffffa08e6cd1d010 SRB ffffb3012c4a2f60 WRITE(10), SRB status PENDING
-0x1069b51  2026-10-10 01:03:01.9123674  CallMiniportStartIo  IRP ffffa08e6cd1d010 SRB ffffb3012c4a2f60 WRITE(10), SRB status PENDING
-0x1069b52  2026-10-10 01:03:01.9123674  MiniportCompletion   IRP ffffa08e6cd1d010 SRB ffffb3012c4a2f60 WRITE(10), SRB status SUCCESS
+Entry      Time                          Event                Details
+0x1069b50  2026-10-10T01:03:01.9123674Z  CallMiniportBuildIo  IRP ffffa08e6cd1d010 SRB ffffb3012c4a2f60 WRITE(10), SRB status PENDING
+0x1069b51  2026-10-10T01:03:01.9123674Z  CallMiniportStartIo  IRP ffffa08e6cd1d010 SRB ffffb3012c4a2f60 WRITE(10), SRB status PENDING
+0x1069b52  2026-10-10T01:03:01.9123674Z  MiniportCompletion   IRP ffffa08e6cd1d010 SRB ffffb3012c4a2f60 WRITE(10), SRB status SUCCESS
 ```
 
 StorPort numbers the entries from 1 as it writes them, and the ring keeps the newest 256. `<start>` shows the entries from that number, `<start> <end>` that range, and `L <count>` how many. For the events of storport's request path (`CallMiniportBuildIo`, `CallMiniportStartIo`, `MiniportCompletion`), the details are the IRP, the SRB, the command's operation code, and the SRB status, which reads `PENDING` until the miniport completes the request. For any other event, they are the four parameters StorPort logged, each code address by its symbol.
@@ -118,21 +118,21 @@ A request whose `CallMiniportStartIo` entry has no `MiniportCompletion` after it
 
 ```text
 !storagekd.storsrb @rdx
-SRB                  ffffb3012c4cff60  (STORAGE_REQUEST_BLOCK)
-Function             EXECUTE_SCSI (0x0)
-Status               SRB PENDING (0x00), SCSI GOOD
-Command              WRITE(10) LBA 0x8f71948, 8 blocks  (CDB 2a 00 08 f7 19 48 00 00 08 00)
-Address              port 0, path 0, target 0, LUN 0
-Data                 0x1000 bytes, DataBuffer null
-IRP                  ffffa08e732cade0
-Flags                0x200382 (QUEUE_ACTION_ENABLE DATA_OUT NO_QUEUE_FREEZE ADAPTER_CACHE_ENABLE PORT_DRIVER_ALLOCSENSE)
-Timeout              30 s
-Tag                  0xa0, priority 2
-Sense                255 bytes at ffffb3012c4cd3b0: not valid (no AUTOSENSE_VALID)
-Contexts             class none, port ffffb3012c4cd030, miniport ffffb3012c4cd4b0
-Next SRB             none
+SRB ffffb3012c4cff60  (STORAGE_REQUEST_BLOCK)
+  function             EXECUTE_SCSI (0x0)
+  status               SRB PENDING (0x00), SCSI GOOD
+  command              WRITE(10) LBA 0x8f71948, 8 blocks  (CDB 2a 00 08 f7 19 48 00 00 08 00)
+  address              port 0, path 0, target 0, LUN 0
+  data                 0x1000 bytes, DataBuffer -
+  IRP                  ffffa08e732cade0
+  flags                0x200382 (QUEUE_ACTION_ENABLE | DATA_OUT | NO_QUEUE_FREEZE | ADAPTER_CACHE_ENABLE | PORT_DRIVER_ALLOCSENSE)
+  timeout              30 s
+  tag                  0xa0, priority 2
+  sense                255 bytes at ffffb3012c4cd3b0: not valid (no AUTOSENSE_VALID)
+  contexts             class -, port ffffb3012c4cd030, miniport ffffb3012c4cd4b0
+  next SRB             -
 
-Extended data (2)
+extended data (2)
 Address           Type       Length
 ffffb3012c4cfff8  ScsiCdb16  0x20
 ffffb3012c4d0020  IoInfo     0x18
@@ -152,25 +152,25 @@ ffffa08e683b1060  disk    0       Sata  QEMU HARDDISK 2.5+  1 in flight, 34 free
 With the address of an FDO, its device extension, or its private data, it shows the device, the requests in flight, and the error log:
 
 ```text
-Class device         FDO ffffa08e683b1060  extension ffffa08e683b11b0  private data ffffa08e683c5040
-Driver               disk, device number 0
-Device               QEMU HARDDISK 2.5+  serial QM00001
-Bus                  Sata, boot device
-Lower devices        next ffffa08e68151050  PDO ffffa08e68151050
-Capacity             128.0 GiB (0x2000000000 bytes), 512-byte sectors
-Timeout              30 s, up to 4 retries
-Error count          0
-Transfer packets     1 in flight, 34 free of 35
+class device FDO ffffa08e683b1060  extension ffffa08e683b11b0  private data ffffa08e683c5040
+  driver               disk, device number 0
+  device               QEMU HARDDISK 2.5+  serial QM00001
+  bus                  Sata, boot device
+  lower devices        next ffffa08e68151050  PDO ffffa08e68151050
+  capacity             128.0 GiB (0x2000000000 bytes), 512-byte sectors
+  timeout              30 s, up to 4 retries
+  error count          0
+  transfer packets     1 in flight, 34 free of 35
 
-Requests in flight
+requests in flight
 Packet            IRP               Client IRP        SRB               Command                            Status   Retries left
 ffffa08e73a584c0  ffffa08e732cade0  ffffa08e747a2380  ffffa08e6ffef9f0  WRITE(10) LBA 0x8f71948, 8 blocks  PENDING  4
 
-Error log (3, oldest first)
-Age           P/T/L    Command                           SRB status                SCSI status      Sense                        Notes
-3650.7 s ago  -/0/0/0  MODE SENSE(6) page 0x08           INVALID_REQUEST           GOOD
-3650.7 s ago  -/0/0/0  MODE SENSE(6) page 0x08           INVALID_REQUEST           GOOD
-2991.9 s ago  -/0/0/0  READ(10) LBA 0x547f820, 8 blocks  ABORTED, AUTOSENSE_VALID  CHECK CONDITION  sense ABORTED COMMAND 00/00  paging retried
+error log (3, oldest first)
+Age           Port  B/T/L  Command                           SRB status                SCSI status      Sense                        Notes
+3650.7 s ago  -     0/0/0  MODE SENSE(6) page 0x08           INVALID_REQUEST           GOOD             -                            -
+3650.7 s ago  -     0/0/0  MODE SENSE(6) page 0x08           INVALID_REQUEST           GOOD             -                            -
+2991.9 s ago  -     0/0/0  READ(10) LBA 0x547f820, 8 blocks  ABORTED, AUTOSENSE_VALID  CHECK CONDITION  sense ABORTED COMMAND 00/00  paging retried
 ```
 
 A transfer packet is in flight when it is on none of classpnp's free lists: those of each NUMA node, those of each processor, and the one packet it keeps for forward progress. Each row shows the IRP that classpnp sent down, the client's IRP that the packet serves, the SRB with its command and status, and how many retries classpnp has left for it. A packet whose retries fell below the device's limit failed at least once.

@@ -26,6 +26,7 @@ use crate::nt::target::{CodeExtent, VP_STATE_REGISTERS};
 use crate::nt::unwind::{halted_in_windows_hypervisor, try_format_symbol_at};
 use crate::session::Session;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
 
 /// How two VTLs' access to a range differs: VTL0's, then VTL1's.
 type DifferenceKind = (Option<Access>, Option<Access>);
@@ -56,18 +57,24 @@ fn access_text(access: Option<Access>) -> String {
     access.map_or_else(|| "none".to_string(), |access| access.to_string())
 }
 
-/// `bytes` in the largest of K, M, and G it reaches, with one decimal when
-/// it is not a whole number of them.
+/// Reports why the arguments of hypervisor command `name` do not parse,
+/// then its usage line.
+fn report_usage(name: &str, reason: impl Display) {
+    error!("{}", usage_error(name, reason));
+}
+
+/// `bytes` in the largest of KiB, MiB, and GiB it reaches, with one decimal
+/// when it is not a whole number of them.
 fn size_text(bytes: u64) -> String {
     let (unit, name) = match bytes {
-        b if b >= 1 << 30 => (1u64 << 30, 'G'),
-        b if b >= 1 << 20 => (1 << 20, 'M'),
-        _ => (1 << 10, 'K'),
+        b if b >= 1 << 30 => (1u64 << 30, "GiB"),
+        b if b >= 1 << 20 => (1 << 20, "MiB"),
+        _ => (1 << 10, "KiB"),
     };
     if bytes.is_multiple_of(unit) {
-        format!("{}{name}", bytes / unit)
+        format!("{} {name}", bytes / unit)
     } else {
-        format!("{:.1}{name}", bytes as f64 / unit as f64)
+        format!("{:.1} {name}", bytes as f64 / unit as f64)
     }
 }
 
@@ -454,7 +461,7 @@ impl ReplState<'_> {
         if target.in_secure_scope() {
             let secure = target.secure_kernel()?;
             outln!(
-                "VTL1 memory view (.vtl 1, no registers): DTB {}, securekernel {} (system DTB {})\n",
+                "VTL1 memory view (.vtl 1, no registers): DTB {}, securekernel {} (system DTB {})",
                 ui::addr(target.current_dtb()),
                 ui::addr(secure.image.base_address.0),
                 ui::addr(secure.image.dtb())
@@ -476,7 +483,6 @@ impl ReplState<'_> {
                     )
                 );
             }
-            outln!();
         } else if let Some(rip) = target.register_value(target.arch().pc_register())
             && halted_in_windows_hypervisor(target, target.current_dtb(), rip)
         {
@@ -488,11 +494,11 @@ impl ReplState<'_> {
                 ui::addr(target.current_dtb())
             );
             outln!(
-                "{}\n",
+                "{}",
                 ui::muted(".vtlcxr selects where VTL0 left off; .thread <tid> a Windows thread")
             );
         } else {
-            outln!("VTL0 inspection: DTB {}\n", ui::addr(target.current_dtb()));
+            outln!("VTL0 inspection: DTB {}", ui::addr(target.current_dtb()));
         }
         Ok(())
     }
@@ -540,7 +546,7 @@ impl ReplState<'_> {
             target.read_physical(address, page)
         }) {
             Ok(MsrIntercepts::Every) => {
-                outln!("every RDMSR and WRMSR exits: the controls use no MSR bitmap\n");
+                outln!("every RDMSR and WRMSR exits: the controls use no MSR bitmap");
                 return;
             }
             Ok(MsrIntercepts::Bitmap {
@@ -599,7 +605,6 @@ impl ReplState<'_> {
         ) {
             outln!("{}", ui::muted(&line));
         }
-        outln!();
     }
 
     /// The I/O ports the eVMCS `vmcs` intercepts: through its I/O bitmaps A
@@ -611,11 +616,11 @@ impl ReplState<'_> {
             target.read_physical(address, page)
         }) {
             Ok(IoIntercepts::Never) => {
-                outln!("no I/O instruction exits: the controls use no I/O bitmaps\n");
+                outln!("no I/O instruction exits: the controls use no I/O bitmaps");
                 return;
             }
             Ok(IoIntercepts::Every) => {
-                outln!("every I/O instruction exits: the controls use no I/O bitmaps\n");
+                outln!("every I/O instruction exits: the controls use no I/O bitmaps");
                 return;
             }
             Ok(IoIntercepts::Bitmaps { ports }) => ports,
@@ -883,7 +888,6 @@ fn hvpartitions(repl: &mut ReplState<'_>) -> Result<()> {
     for node in &forest {
         outln!("{}", partition_tree(node, 0));
     }
-    outln!();
     Ok(())
 }
 
@@ -912,8 +916,8 @@ fn hvvps(
     #[arg(invoked)] name: &str,
     #[arg(parse = all_words, usage = "[partition-id]", complete = None)] argv: Vec<String>,
 ) -> Result<()> {
-    if argv.len() > 1 {
-        outln!("{}\n", command_help(name));
+    if let Some(extra) = argv.get(1) {
+        report_usage(name, format!("unexpected argument '{extra}'"));
         return Ok(());
     }
     let id = match argv.first().map(String::as_str) {
@@ -973,12 +977,15 @@ fn hvvps(
                 format!("{}{current}", vtl.level),
                 ui::addr(vtl.context),
                 vtl.vmcs
-                    .map_or_else(String::new, |page| format!("{page:x}")),
-                state.map_or_else(String::new, |state| format!("{:x}", state.ept_pointer)),
-                state.map_or_else(String::new, |state| ui::addr(state.rip)),
+                    .map_or_else(|| "-".to_string(), |page| format!("{page:x}")),
+                state.map_or_else(
+                    || "-".to_string(),
+                    |state| format!("{:x}", state.ept_pointer),
+                ),
+                state.map_or_else(|| "-".to_string(), |state| ui::addr(state.rip)),
                 state
                     .and_then(|state| state.exit_reason_name())
-                    .unwrap_or_default()
+                    .unwrap_or("-")
                     .to_string(),
             ]);
         }
@@ -993,7 +1000,7 @@ fn hvvps(
     let unlinked = vtls.peek().is_some() && vtls.all(|vtl| vtl.vmcs.is_none());
     if unlinked && repl.ctx.target.evmcs_found() == Some(true) {
         outln!(
-            "{}\n",
+            "{}",
             ui::muted(
                 "eVMCS pages were found, but not where this hypervisor build's VTL contexts keep theirs"
             )
@@ -1034,8 +1041,12 @@ fn hvept(
 ) -> Result<()> {
     let virtual_address = matches!(argv.first().map(String::as_str), Some("-v" | "/v"));
     let arguments = &argv[usize::from(virtual_address)..];
-    if arguments.is_empty() || arguments.len() > 3 {
-        outln!("{}\n", command_help(name));
+    if arguments.is_empty() {
+        report_usage(name, "missing address");
+        return Ok(());
+    }
+    if let Some(extra) = arguments.get(3) {
+        report_usage(name, format!("unexpected argument '{extra}'"));
         return Ok(());
     }
     let Some(values) = repl.eval_all(arguments) else {
@@ -1168,8 +1179,8 @@ fn hveptdiff(
         String,
     >,
 ) -> Result<()> {
-    if argv.len() > 2 {
-        outln!("{}\n", command_help(name));
+    if let Some(extra) = argv.get(2) {
+        report_usage(name, format!("unexpected argument '{extra}'"));
         return Ok(());
     }
     let Some(values) = repl.eval_all(&argv) else {
@@ -1257,7 +1268,7 @@ fn hveptdiff(
     let total: u64 = differences.iter().map(|d| d.end - d.start).sum();
     print_padded_table(table);
     outln!(
-        "{} ranges differ, {} in all\n",
+        "{} ranges differ, {} in all",
         differences.len(),
         size_text(total)
     );
@@ -1289,8 +1300,12 @@ fn hvcalls(
     let all = match argv.as_slice() {
         [] => false,
         [flag] if matches!(flag.as_ref(), "-a" | "/a") => true,
-        _ => {
-            outln!("{}\n", command_help(name));
+        [flag] => {
+            report_usage(name, format!("unknown option '{flag}'"));
+            return Ok(());
+        }
+        [_, extra, ..] => {
+            report_usage(name, format!("unexpected argument '{extra}'"));
             return Ok(());
         }
     };
@@ -1317,14 +1332,14 @@ fn hvcalls(
         }
         let size = |bytes: u16| {
             if bytes == 0 {
-                String::new()
+                "-".to_string()
             } else {
                 format!("{bytes:#x}")
             }
         };
         table_out.push_record([
             format!("{:#06x}", entry.code),
-            entry.name().unwrap_or_default().to_string(),
+            entry.name().unwrap_or("-").to_string(),
             kind,
             size(entry.input_size),
             size(entry.input_element_size),
@@ -1335,7 +1350,7 @@ fn hvcalls(
     }
     print_padded_table(table_out);
     outln!(
-        "{implemented} of {} codes implemented; code 0's handler serves the rest\n",
+        "{implemented} of {} codes implemented; code 0's handler serves the rest",
         table.len()
     );
     Ok(())
@@ -1437,7 +1452,6 @@ fn hvcall(repl: &mut ReplState<'_>) -> Result<()> {
             for line in lines {
                 outln!("{line}");
             }
-            outln!();
         }
         Err(reason) => error!("{reason}"),
     }
@@ -1477,8 +1491,8 @@ fn hvvmcs(
         _ => "fields",
     };
     let arguments = &argv[usize::from(view != "fields")..];
-    if arguments.len() > 3 {
-        outln!("{}\n", command_help(name));
+    if let Some(extra) = arguments.get(3) {
+        report_usage(name, format!("unexpected argument '{extra}'"));
         return Ok(());
     }
     let Some(values) = repl.eval_all(arguments) else {
@@ -1509,7 +1523,7 @@ fn hvvmcs(
         return Ok(());
     }
     outln!(
-        "{} {page:x}\n",
+        "{} {page:x}",
         ui::muted(&format!(
             "VP {} of partition {id:#x}, VTL{level}: eVMCS",
             vp.index
@@ -1574,8 +1588,12 @@ fn hvd(
     }
     // `<partition-id> <vp-index> <address> [range]`, or `<address>
     // [range]` for the guest VP the current vCPU's processor runs.
-    if !(1..=4).contains(&arguments.len()) {
-        outln!("{}\n", command_help(name));
+    if arguments.is_empty() {
+        report_usage(name, "missing address");
+        return Ok(());
+    }
+    if let Some(extra) = arguments.get(4) {
+        report_usage(name, format!("unexpected argument '{extra}'"));
         return Ok(());
     }
     let (selector, arguments) = arguments.split_at(if arguments.len() >= 3 { 2 } else { 0 });
@@ -1663,8 +1681,12 @@ fn hvu(
     // As for !hvd: `<partition-id> <vp-index> <address> [range]`, or
     // `<address> [range]` for the guest VP the current vCPU's processor
     // runs.
-    if !(1..=4).contains(&arguments.len()) {
-        outln!("{}\n", command_help(name));
+    if arguments.is_empty() {
+        report_usage(name, "missing address");
+        return Ok(());
+    }
+    if let Some(extra) = arguments.get(4) {
+        report_usage(name, format!("unexpected argument '{extra}'"));
         return Ok(());
     }
     let (selector, arguments) = arguments.split_at(if arguments.len() >= 3 { 2 } else { 0 });
@@ -1721,7 +1743,6 @@ fn hvu(
         let space = if physical { "physical" } else { "virtual" };
         error!("guest {space} memory at {at:#x} is unreadable");
     }
-    outln!();
     Ok(())
 }
 
@@ -1756,8 +1777,12 @@ fn hvr(
         String,
     >,
 ) -> Result<()> {
-    if !matches!(argv.len(), 0 | 2 | 3) {
-        outln!("{}\n", command_help(name));
+    if argv.len() == 1 {
+        report_usage(name, "a VP index must follow the partition ID");
+        return Ok(());
+    }
+    if let Some(extra) = argv.get(3) {
+        report_usage(name, format!("unexpected argument '{extra}'"));
         return Ok(());
     }
     let Some(arguments) = repl.eval_all(&argv) else {
@@ -1791,7 +1816,6 @@ fn hvr(
                 );
             }
             print_vp_registers(&found.registers);
-            outln!();
         }
         Err(error) => error!("{error}"),
     }
@@ -1863,16 +1887,16 @@ fn partition(
     #[arg(invoked)] name: &str,
     #[arg(parse = all_words, usage = "[partition-id]", complete = None)] argv: Vec<String>,
 ) -> Result<()> {
-    if argv.len() > 1 {
-        outln!("{}\n", command_help(name));
+    if let Some(extra) = argv.get(1) {
+        report_usage(name, format!("unexpected argument '{extra}'"));
         return Ok(());
     }
     if argv.is_empty() {
         match repl.ctx.partition() {
             Some(partition) => outln!(
-                "inspecting partition {partition:#x}; .partition with the root partition's ID returns to the target\n"
+                "inspecting partition {partition:#x}; .partition with the root partition's ID returns to the target"
             ),
-            None => outln!("inspecting the target (the root partition)\n"),
+            None => outln!("inspecting the target (the root partition)"),
         }
         return Ok(());
     }
@@ -1889,7 +1913,7 @@ fn partition(
                     .ctx
                     .target
                     .kernel_base()
-                    .map_or_else(|| "?".to_string(), |base| format!("{:#x}", base.0));
+                    .map_or_else(|| "-".to_string(), |base| format!("{:#x}", base.0));
                 let vps: Vec<String> = repl
                     .ctx
                     .backend
@@ -1899,11 +1923,11 @@ fn partition(
                     .map(|id| thread_label(id))
                     .collect();
                 outln!(
-                    "inspecting partition {partition:#x}: nt at {kernel}, VPs {}\n",
+                    "inspecting partition {partition:#x}: nt at {kernel}, VPs {}",
                     vps.join(" ")
                 );
             }
-            None => outln!("inspecting the target (the root partition)\n"),
+            None => outln!("inspecting the target (the root partition)"),
         },
         Err(error) => error!("{error}"),
     }

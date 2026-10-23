@@ -1,8 +1,9 @@
 use crate::analysis::triage_report::{
-    BlackboxState, CodeOwner, CulpritAttribution, CulpritSubject, FailureSignatureSource,
-    KmdfLogFinding, POWER_THREAD_STACK_LIMIT, PowerFailureFinding, PowerThreadRole,
-    TRIAGE_BACKTRACE_LIMIT, TriageReport, UserDumpTriage, UserExceptionFinding, UserProcessSummary,
-    UserStackSource, UserStackThread, WheaRecordState, power_failure_finding,
+    BlackboxState, CodeOwner, CulpritAttribution, CulpritConfidence, CulpritEvidenceKind,
+    CulpritSubject, FailureSignatureSource, KmdfLogFinding, POWER_THREAD_STACK_LIMIT,
+    PowerFailureFinding, PowerThreadRole, TRIAGE_BACKTRACE_LIMIT, TriageReport, UserDumpTriage,
+    UserExceptionFinding, UserProcessSummary, UserStackSource, UserStackThread, WheaRecordState,
+    power_failure_finding,
 };
 use crate::arch::Arch;
 use crate::backend::dbg_backend::BugcheckInfo;
@@ -15,7 +16,7 @@ use crate::nt::expr::{Expr, NumberRadix};
 use crate::nt::guest::ModuleInfo;
 use crate::nt::pe::headers::CodeView;
 use crate::nt::target::{Target, wait_reason_name};
-use crate::nt::unwind::FrameSource;
+use tabled::builder::Builder;
 
 use super::power::{
     duration_text, holder_text, print_power_irp_list, print_power_worker_list, request_text,
@@ -54,6 +55,40 @@ pub fn product_name(product_type: u32) -> &'static str {
         2 => "DomainController",
         3 => "Server",
         _ => "Unknown",
+    }
+}
+
+/// A dump header's product type as an enum value: `Workstation (0x1)`,
+/// `-` when the header records none.
+fn product_text(product_type: u32) -> String {
+    match product_type {
+        0 => "-".to_string(),
+        1..=3 => format!("{} ({product_type:#x})", product_name(product_type)),
+        other => format!("{other:#x}"),
+    }
+}
+
+/// How sure a culprit attribution is, in words.
+fn confidence_text(confidence: CulpritConfidence) -> &'static str {
+    match confidence {
+        CulpritConfidence::Low => "low",
+        CulpritConfidence::Medium => "medium",
+        CulpritConfidence::High => "high",
+    }
+}
+
+/// The label of an item of culprit evidence in `!analyze`'s block.
+fn evidence_label(kind: CulpritEvidenceKind) -> &'static str {
+    match kind {
+        CulpritEvidenceKind::RecordedBrokenDriver => "broken driver",
+        CulpritEvidenceKind::RecordedBugcheckDriver => "bugcheck driver",
+        CulpritEvidenceKind::BugcheckFaultAddress => "fault address",
+        CulpritEvidenceKind::ExceptionAddress => "exception address",
+        CulpritEvidenceKind::CurrentInstruction => "current instruction",
+        CulpritEvidenceKind::TopFrame => "top frame",
+        CulpritEvidenceKind::PowerFailureDriver => "power failure driver",
+        CulpritEvidenceKind::PnpLockOwnerStack => "PnP lock owner",
+        CulpritEvidenceKind::FirstNonSystemFrame => "first non-system frame",
     }
 }
 
@@ -155,6 +190,7 @@ fn print_bugcheck_header(analysis: &BugcheckAnalysis) {
 }
 
 fn print_hang_report(arch: Arch, report: &HangReport) {
+    let id = |value: Option<u64>| value.map_or_else(|| "-".to_string(), |id| id.to_string());
     print_section("hang analysis");
     if report.processors.is_empty() {
         outln!("  {}", ui::muted("processor count unavailable"));
@@ -164,28 +200,29 @@ fn print_hang_report(arch: Arch, report: &HangReport) {
         match &entry.current {
             Ok(HangThread { thread, stack }) => {
                 outln!(
-                    "  cpu {}  {}  tid {} pid {}  {}",
+                    "  processor {}: THREAD {}  TID {}  PID {}  process {}",
                     processor,
                     ui::addr(thread.ethread.0),
-                    thread
-                        .tid
-                        .map(|tid| tid.to_string())
-                        .unwrap_or_else(|| "?".into()),
-                    thread
-                        .pid
-                        .map(|pid| pid.to_string())
-                        .unwrap_or_else(|| "?".into()),
-                    thread.process_name.as_deref().unwrap_or("unknown")
+                    id(thread.tid),
+                    id(thread.pid),
+                    thread.process_name.as_deref().unwrap_or("-")
                 );
                 match stack {
-                    Ok(trace) => print_stacktrace_data(arch, trace, ANALYZE_HANG_STACK_LIMIT, true),
+                    // A dump that captured no context for a processor
+                    // records a zero RIP, which names no place.
+                    Ok(trace) if trace.frames.first().is_none_or(|frame| frame.ip == 0) => {
+                        outln!("    {}", ui::muted("no context"))
+                    }
+                    Ok(trace) => {
+                        print_indented_stack(arch, trace, ANALYZE_HANG_STACK_LIMIT, "    ")
+                    }
                     Err(error) => {
                         outln!("    {}", ui::muted(&format!("stack unavailable: {error}")))
                     }
                 }
             }
             Err(error) => outln!(
-                "  cpu {}  {}",
+                "  processor {}: {}",
                 processor,
                 ui::muted(&format!("current thread unavailable: {error}"))
             ),
@@ -203,21 +240,39 @@ fn print_hang_report(arch: Arch, report: &HangReport) {
             return;
         }
     };
+    if threads.is_empty() {
+        outln!("  {}", ui::muted("no waiting threads with pending I/O"));
+        return;
+    }
+    let mut builder = Builder::default();
+    builder.push_record(["Thread", "TID", "PID", "Wait reason", "IRPs"]);
     for thread in threads {
+        builder.push_record([
+            ui::addr(thread.ethread.0).to_string(),
+            id(thread.tid),
+            id(thread.pid),
+            thread.wait_reason.map_or_else(
+                || "-".to_string(),
+                |reason| format!("{} ({reason:#x})", wait_reason_name(reason)),
+            ),
+            thread.pending_irps.as_ref().map_or(0, Vec::len).to_string(),
+        ]);
+    }
+    print_indented_table(builder, "  ");
+}
+
+/// A block of `!analyze`'s fields, indented under their section, each
+/// label muted and padded so the values start in one column.
+fn print_report_fields<L: AsRef<str>>(fields: &[(L, String)]) {
+    let width = fields
+        .iter()
+        .map(|(label, _)| label.as_ref().len())
+        .max()
+        .unwrap_or(0);
+    for (label, value) in fields {
         outln!(
-            "  {} tid {} pid {} wait {} ({}) irps {}",
-            ui::addr(thread.ethread.0),
-            thread
-                .tid
-                .map(|tid| tid.to_string())
-                .unwrap_or_else(|| "?".into()),
-            thread
-                .pid
-                .map(|pid| pid.to_string())
-                .unwrap_or_else(|| "?".into()),
-            thread.wait_reason.unwrap_or(0),
-            wait_reason_name(thread.wait_reason.unwrap_or(0)),
-            thread.pending_irps.as_ref().map_or(0, Vec::len)
+            "  {}  {value}",
+            ui::muted(&format!("{:<width$}", label.as_ref()))
         );
     }
 }
@@ -227,55 +282,57 @@ fn print_triage_report(arch: Arch, report: &TriageReport, verbose: bool) {
         print_user_triage_report(arch, report, user, verbose);
         return;
     }
-    outln!("{}", ui::label("crash analysis"));
+    print_section("crash analysis");
 
     match &report.bugcheck {
-        Some(analysis) => {
-            outln!();
-            if verbose {
-                print_bugcheck_analysis(analysis);
-            } else {
-                print_bugcheck_header(analysis);
-            }
-        }
+        Some(analysis) if verbose => print_bugcheck_analysis(analysis),
+        Some(analysis) => print_bugcheck_header(analysis),
         None => outln!("{}", ui::muted("no recorded bugcheck")),
     }
 
     if verbose {
         if let Some(exception) = &report.exception {
             print_section("exception");
-            outln!(
-                "  {} {} ({:#010x})",
-                ui::muted("code   "),
-                exception_code_name(exception.code),
-                exception.code
-            );
-            outln!("  {} {}", ui::muted("address"), ui::addr(exception.address));
-            outln!("  {} {:#x}", ui::muted("flags  "), exception.flags);
+            let mut fields = vec![
+                (
+                    "code".to_string(),
+                    format!(
+                        "{:#010x}  {}",
+                        exception.code,
+                        exception_code_name(exception.code)
+                    ),
+                ),
+                (
+                    "address".to_string(),
+                    ui::addr(exception.address).to_string(),
+                ),
+                ("flags".to_string(), format!("{:#x}", exception.flags)),
+            ];
             for (index, parameter) in exception.parameters.iter().enumerate() {
-                outln!(
-                    "  {} {}",
-                    ui::muted(&format!("param {} ", index + 1)),
-                    ui::addr(*parameter)
-                );
+                fields.push((
+                    format!("param {}", index + 1),
+                    ui::addr(*parameter).to_string(),
+                ));
             }
+            print_report_fields(&fields);
         }
 
         print_section("faulting context");
-        outln!(
-            "  {} {}",
-            ui::muted("state  "),
-            if report.status.running {
-                "running"
-            } else {
-                "halted"
-            }
-        );
-        outln!(
-            "  {} {}",
-            ui::muted("context"),
-            ui::thread(&report.status.current_thread)
-        );
+        let mut fields = vec![
+            (
+                "state".to_string(),
+                if report.status.running {
+                    "running"
+                } else {
+                    "halted"
+                }
+                .to_string(),
+            ),
+            (
+                "context".to_string(),
+                ui::thread(&report.status.current_thread).to_string(),
+            ),
+        ];
         // Where the fault happened, from its trap frame, rather than where
         // the processor stopped (the debugger break the bugcheck ended in).
         let trap = report.bugcheck.as_ref().and_then(|analysis| {
@@ -290,18 +347,18 @@ fn print_triage_report(arch: Arch, report: &TriageReport, verbose: bool) {
                 .as_deref()
                 .map(|symbol| format!("  {}", ui::symbol(symbol)))
                 .unwrap_or_default();
-            outln!(
-                "  {} {}{}",
-                ui::muted("rip    "),
-                ui::addr(frame.instruction_pointer()),
-                symbol
-            );
-            outln!(
-                "  {} {}  {}",
-                ui::muted("trap   "),
-                ui::addr(trap.address),
-                ui::muted("(.trap selects it)")
-            );
+            fields.push((
+                "rip".to_string(),
+                format!("{}{symbol}", ui::addr(frame.instruction_pointer())),
+            ));
+            fields.push((
+                "trap".to_string(),
+                format!(
+                    "{}  {}",
+                    ui::addr(trap.address),
+                    ui::muted("(.trap selects it)")
+                ),
+            ));
         } else if let Some(rip) = report.status.rip {
             let symbol = report
                 .status
@@ -309,63 +366,71 @@ fn print_triage_report(arch: Arch, report: &TriageReport, verbose: bool) {
                 .as_deref()
                 .map(|symbol| format!("  {}", ui::symbol(symbol)))
                 .unwrap_or_default();
-            outln!("  {} {}{}", ui::muted("rip    "), ui::addr(rip), symbol);
+            fields.push(("rip".to_string(), format!("{}{symbol}", ui::addr(rip))));
         }
         if let Some(process) = &report.status.attached_process {
-            outln!(
-                "  {} {} (pid {}, eprocess {})",
-                ui::muted("scope  "),
-                process.name,
-                process.pid,
-                ui::addr(process.eprocess.0)
-            );
-        }
-        if !report.status.coherent {
-            outln!(
-                "  {}",
-                ui::muted("target metadata is still being rebuilt after reload")
-            );
+            fields.push((
+                "scope".to_string(),
+                format!(
+                    "{} (PID {}), EPROCESS {}",
+                    process.name,
+                    process.pid,
+                    ui::addr(process.eprocess.0)
+                ),
+            ));
         }
         if let Some(context) = &report.crash_context {
-            let process = context.process_name.as_deref().unwrap_or("unknown");
+            let process = context.process_name.as_deref().unwrap_or("-");
             let pid = context
                 .process_id
                 .map(|pid| pid.to_string())
-                .unwrap_or_else(|| "unknown".into());
+                .unwrap_or_else(|| "-".into());
             let tid = context
                 .thread_id
                 .map(|tid| tid.to_string())
-                .unwrap_or_else(|| "unknown".into());
-            outln!(
-                "  {} {} (pid {}, tid {})",
-                ui::muted("crash  "),
-                process,
-                pid,
-                tid
-            );
+                .unwrap_or_else(|| "-".into());
+            fields.push((
+                "crash".to_string(),
+                format!("{process} (PID {pid}), TID {tid}"),
+            ));
             if let Some(parent) = context.parent_process_id {
-                outln!("  {} {}", ui::muted("parent "), parent);
+                fields.push(("parent".to_string(), parent.to_string()));
             }
             if let Some(status) = context.exit_status {
-                outln!("  {} {:#x}", ui::muted("process exit"), status as u32);
+                fields.push((
+                    "process exit".to_string(),
+                    format!("{:#010x}", status as u32),
+                ));
             }
             if let Some(status) = context.thread_exit_status {
-                outln!("  {} {:#x}", ui::muted("thread exit "), status as u32);
+                fields.push((
+                    "thread exit".to_string(),
+                    format!("{:#010x}", status as u32),
+                ));
             }
             if let Some(time) = context.create_time
                 && let Some(time) = filetime_to_iso(time)
             {
-                outln!("  {} {}", ui::muted("created"), time);
+                fields.push(("created".to_string(), time));
             }
         }
         if let Some(prcb) = &report.prcb {
+            fields.push((
+                "processor".to_string(),
+                format!(
+                    "{}  thread {}  {} MHz  {}",
+                    prcb.processor_number,
+                    ui::addr(prcb.current_thread),
+                    prcb.mhz,
+                    prcb.vendor_string
+                ),
+            ));
+        }
+        print_report_fields(&fields);
+        if !report.status.coherent {
             outln!(
-                "  {} #{} thread {}  {} MHz  {}",
-                ui::muted("processor"),
-                prcb.processor_number,
-                ui::addr(prcb.current_thread),
-                prcb.mhz,
-                prcb.vendor_string
+                "  {}",
+                ui::muted("target metadata is still being rebuilt after reload")
             );
         }
 
@@ -405,9 +470,10 @@ fn print_triage_report(arch: Arch, report: &TriageReport, verbose: bool) {
 fn print_crash_intelligence(arch: Arch, report: &TriageReport) {
     if let Some(signature) = &report.failure_signature {
         print_section("failure signature");
-        outln!("  {}", signature.bucket);
-        let source = signature_source(signature.source);
-        outln!("  {}", ui::muted(&format!("source: {source}")));
+        print_report_fields(&[
+            ("bucket", signature.bucket.clone()),
+            ("source", signature_source(signature.source).to_string()),
+        ]);
     }
 
     if let Some(culprit) = &report.culprit {
@@ -416,29 +482,24 @@ fn print_crash_intelligence(arch: Arch, report: &TriageReport) {
             CulpritSubject::Module(module) => ui::symbol(module),
             CulpritSubject::DynamicCode(_) => culprit_label(culprit),
         };
-        outln!(
-            "  {}  {}",
-            subject,
-            ui::muted(&format!("{:?} confidence", culprit.confidence).to_ascii_lowercase())
-        );
+        let mut fields = vec![
+            ("culprit", subject),
+            (
+                "confidence",
+                confidence_text(culprit.confidence).to_string(),
+            ),
+        ];
         if let Some(caller) = culprit_caller_text(culprit) {
-            outln!("  {caller}");
+            fields.push(("called from", caller));
         }
         for evidence in &culprit.evidence {
-            match evidence.address {
-                Some(address) => outln!(
-                    "  {} {}  {}",
-                    ui::muted(&format!("{:?}", evidence.kind)),
-                    ui::addr(address),
-                    evidence.detail
-                ),
-                None => outln!(
-                    "  {}  {}",
-                    ui::muted(&format!("{:?}", evidence.kind)),
-                    evidence.detail
-                ),
-            }
+            let value = match evidence.address {
+                Some(address) => format!("{}  {}", ui::addr(address), evidence.detail),
+                None => evidence.detail.clone(),
+            };
+            fields.push((evidence_label(evidence.kind), value));
         }
+        print_report_fields(&fields);
     }
 
     if let Some(verifier) = &report.verifier {
@@ -450,16 +511,14 @@ fn print_crash_intelligence(arch: Arch, report: &TriageReport) {
             verifier.subcode,
             verifier.subcode_description
         );
+        let mut fields = Vec::new();
         if let Some(driver) = &verifier.associated_driver {
-            outln!("  {} {}", ui::muted("driver"), ui::symbol(driver));
+            fields.push(("driver", ui::symbol(driver)));
         }
         for address in &verifier.addresses {
-            outln!(
-                "  {} {}",
-                ui::muted(&address.role),
-                ui::addr(address.address)
-            );
+            fields.push((address.role.as_str(), ui::addr(address.address)));
         }
+        print_report_fields(&fields);
         for argument in &verifier.arguments {
             outln!("  {}  {}", ui::addr(argument.value), argument.description);
         }
@@ -468,7 +527,7 @@ fn print_crash_intelligence(arch: Arch, report: &TriageReport) {
     if let Some(whea) = &report.whea {
         print_section("WHEA");
         if let Some(address) = whea.record_address {
-            outln!("  {} {}", ui::muted("record"), ui::addr(address));
+            outln!("  {}  {}", ui::muted("record"), ui::addr(address));
         }
         match &whea.state {
             WheaRecordState::Decoded(record) => {
@@ -532,26 +591,41 @@ fn print_crash_intelligence(arch: Arch, report: &TriageReport) {
 fn print_power_failure(arch: Arch, finding: &PowerFailureFinding) {
     let failure = &finding.failure;
     print_section("power failure");
-    outln!("  subtype {:#x}: {}", failure.subtype, failure.description);
+    outln!(
+        "  {}  {:#x}  {}",
+        ui::muted("subtype    "),
+        failure.subtype,
+        failure.description
+    );
     if let Some(culprit) = &failure.culprit {
         outln!(
-            "  {} {} {}",
+            "  {}  {} {}",
             ui::muted("driver     "),
             ui::symbol(&culprit.driver.label()),
             culprit.reason
         );
     }
     if let Some(blocked) = &failure.blocked_irp {
-        outln!(
-            "  {} {}  {}",
-            ui::muted("blocked IRP"),
-            ui::addr(blocked.irp.0),
-            ui::muted("(!irp)")
-        );
+        if blocked.irp.is_zero() {
+            outln!(
+                "  {}  {}",
+                ui::muted("blocked IRP"),
+                ui::addr_opt(blocked.irp)
+            );
+        } else {
+            outln!(
+                "  {}  {}  {}",
+                ui::muted("blocked IRP"),
+                ui::addr(blocked.irp.0),
+                ui::muted("(!irp)")
+            );
+        }
+        // A null IRP has no stack location to say where it is pending.
         match blocked.holder.as_result() {
+            _ if blocked.irp.is_zero() => {}
             Ok(holder) => {
                 outln!(
-                    "  {} {}",
+                    "  {}  {}",
                     ui::muted("request    "),
                     request_text(
                         holder.major_function,
@@ -559,10 +633,10 @@ fn print_power_failure(arch: Arch, finding: &PowerFailureFinding) {
                         holder.state.as_ref()
                     )
                 );
-                outln!("  {} {}", ui::muted("pending in "), holder_text(holder));
+                outln!("  {}  {}", ui::muted("pending in "), holder_text(holder));
             }
             Err(error) => outln!(
-                "  {} {}",
+                "  {}  {}",
                 ui::muted("pending in "),
                 ui::muted(&format!("unknown: {error}"))
             ),
@@ -573,7 +647,7 @@ fn print_power_failure(arch: Arch, finding: &PowerFailureFinding) {
                 |pending| format!("{} since the watchdog was armed", duration_text(pending)),
             );
             outln!(
-                "  {} {}  {}",
+                "  {}  {}  {}",
                 ui::muted("pending for"),
                 pending,
                 ui::muted(&format!("POP_IRP_DATA {}", ui::addr(data.data.0)))
@@ -582,7 +656,7 @@ fn print_power_failure(arch: Arch, finding: &PowerFailureFinding) {
     }
     if let Some(device) = failure.device {
         outln!(
-            "  {} {}  {}",
+            "  {}  {}  {}",
             ui::muted("device     "),
             ui::addr(device.0),
             ui::muted("(!devstack, !podev)")
@@ -597,7 +671,7 @@ fn print_power_failure(arch: Arch, finding: &PowerFailureFinding) {
                 .map(|holder| holder.device);
             for entry in &stack.entries {
                 let marker = if Some(entry.device_object) == holder {
-                    ">"
+                    "*"
                 } else {
                     " "
                 };
@@ -609,22 +683,22 @@ fn print_power_failure(arch: Arch, finding: &PowerFailureFinding) {
                 );
             }
             if holder.is_some() {
-                outln!("  {}", ui::muted("> holds the blocked IRP"));
+                outln!("  {}", ui::muted("* holds the blocked IRP"));
             }
         }
         Some(Err(error)) => outln!(
-            "  {} {}",
+            "  {}  {}",
             ui::muted("stack      "),
             ui::muted(&format!("unavailable: {error}"))
         ),
         None => {}
     }
     if let Some(seconds) = failure.timeout_seconds {
-        outln!("  {} {} s", ui::muted("timeout    "), seconds);
+        outln!("  {}  {} s", ui::muted("timeout    "), seconds);
     }
     if let Some(owner) = failure.pnp_lock_owner {
         outln!(
-            "  {} {}  {}",
+            "  {}  {}  {}",
             ui::muted("PnP lock   "),
             ui::addr(owner.0),
             ui::muted("thread holding it (!thread)")
@@ -648,10 +722,10 @@ fn print_power_failure(arch: Arch, finding: &PowerFailureFinding) {
                 ui::addr(device.0)
             ),
         };
-        outln!("  thread {}  {}", ui::addr(thread.thread.0), role);
+        outln!("  THREAD {}  {}", ui::addr(thread.thread.0), role);
         match &thread.stack {
-            Ok(trace) => print_stacktrace_data(arch, trace, POWER_THREAD_STACK_LIMIT, false),
-            Err(error) => outln!("  {}", ui::muted(&format!("stack unavailable: {error}"))),
+            Ok(trace) => print_indented_stack(arch, trace, POWER_THREAD_STACK_LIMIT, "    "),
+            Err(error) => outln!("    {}", ui::muted(&format!("stack unavailable: {error}"))),
         }
     }
     for note in &failure.notes {
@@ -685,7 +759,7 @@ fn print_report_modules(report: &TriageReport, verbose: bool) {
             ))
         );
     } else {
-        for module in report
+        let shown: Vec<&ModuleInfo> = report
             .modules
             .iter()
             .filter(|module| verbose || report.loaded_module_is_relevant(module))
@@ -694,9 +768,15 @@ fn print_report_modules(report: &TriageReport, verbose: bool) {
             } else {
                 ANALYZE_MODULE_LIMIT
             })
-        {
+            .collect();
+        let width = shown
+            .iter()
+            .map(|module| module.name.len())
+            .max()
+            .unwrap_or(0);
+        for module in shown {
             outln!(
-                "  {:<24} {}-{}  {:#x} bytes",
+                "  {:<width$}  {}-{}  {:#x} bytes",
                 module.name,
                 ui::addr(module.base_address.0),
                 ui::addr(module.end_address().0),
@@ -731,8 +811,7 @@ fn print_report_modules(report: &TriageReport, verbose: bool) {
         outln!("  {}", ui::muted("no relevant unloaded modules"));
         return;
     }
-    let mut shown = 0;
-    for driver in report
+    let listed: Vec<_> = report
         .unloaded_drivers
         .iter()
         .filter(|driver| verbose || report.unloaded_driver_is_relevant(driver))
@@ -741,15 +820,21 @@ fn print_report_modules(report: &TriageReport, verbose: bool) {
         } else {
             ANALYZE_UNLOADED_LIMIT
         })
-    {
+        .collect();
+    let shown = listed.len();
+    let width = listed
+        .iter()
+        .map(|driver| driver.name.len())
+        .max()
+        .unwrap_or(0);
+    for driver in listed {
         outln!(
-            "  {:<24} {}-{}  {}",
+            "  {:<width$}  {}-{}  {}",
             driver.name,
             ui::addr(driver.start_address),
             ui::addr(driver.end_address),
             ui::muted("recorded address/name match")
         );
-        shown += 1;
     }
     if verbose {
         if report.unloaded_drivers.len() > shown {
@@ -783,45 +868,48 @@ fn print_dump_metadata(report: &TriageReport) {
     }
 
     print_section("dump metadata");
+    let mut fields = Vec::new();
     if let Some(info) = &report.system_info {
         let machine = info.machine();
-        outln!(
-            "  {} Windows {}.{}  {}  service-pack build {}",
-            ui::muted("system "),
-            info.major_version,
-            info.minor_version,
-            machine,
-            info.service_pack_build
-        );
+        // A kernel dump header's MajorVersion is 0xF for a free build and
+        // 0xC for a checked one, and its MinorVersion is the build number.
+        let version = match info.major_version {
+            0xf | 0xc => format!("build {}", info.minor_version),
+            major => format!("{major}.{}", info.minor_version),
+        };
+        // Shaped as a user dump's `system` line: `Windows <version> <arch>`.
+        let service_pack = match info.service_pack_build {
+            0 => String::new(),
+            build => format!(" (service pack build {build})"),
+        };
+        fields.push((
+            "system",
+            format!("Windows {version} {machine}{service_pack}"),
+        ));
         if info.system_up_time > 0 {
-            outln!(
-                "  {} {} seconds",
-                ui::muted("uptime "),
-                info.system_up_time / 10_000_000
-            );
+            fields.push((
+                "uptime",
+                format!("{} seconds", info.system_up_time / 10_000_000),
+            ));
         }
         if info.system_time > 0
             && let Some(time) = filetime_to_iso(info.system_time as u64)
         {
-            outln!("  {} {}", ui::muted("time   "), time);
+            fields.push(("time", time));
         }
-        outln!(
-            "  {} {}  suite {:#x}",
-            ui::muted("product"),
-            product_name(info.product_type),
-            info.suite_mask
-        );
+        fields.push(("product", product_text(info.product_type)));
+        fields.push(("suite", format!("{:#x}", info.suite_mask)));
     }
     if let Some(driver) = &report.broken_driver {
-        outln!("  {} {}", ui::muted("recorded broken driver"), driver);
+        fields.push(("broken driver", driver.to_string()));
     }
     if let Some(overflowed) = report.triage_overflowed {
-        outln!(
-            "  {} {}",
-            ui::muted("triage overflow"),
-            if overflowed { "yes" } else { "no" }
-        );
+        fields.push((
+            "triage overflow",
+            if overflowed { "yes" } else { "no" }.to_string(),
+        ));
     }
+    print_report_fields(&fields);
 }
 
 /// The one-line verdict of a user dump's exception: `exception 0xc0000005 at
@@ -867,7 +955,8 @@ pub fn culprit_label(culprit: &CulpritAttribution) -> String {
 }
 
 /// For a culprit in generated code, the module code that called into it:
-/// `called from #4 system.core.ni+0x5ecdfa (System.Core.ni.dll)`.
+/// `frame 04 system.core.ni+0x5ecdfa (System.Core.ni.dll)`, the frame
+/// numbered as `k` numbers it.
 pub fn culprit_caller_text(culprit: &CulpritAttribution) -> Option<String> {
     let CulpritSubject::DynamicCode(code) = &culprit.subject else {
         return None;
@@ -875,11 +964,11 @@ pub fn culprit_caller_text(culprit: &CulpritAttribution) -> Option<String> {
     Some(match &code.caller {
         Some(caller) => match &caller.owner {
             CodeOwner::Module { name, .. } => {
-                format!("called from #{} {} ({name})", caller.index, caller.symbol)
+                format!("frame {:02} {} ({name})", caller.index, caller.symbol)
             }
-            _ => format!("called from #{} {}", caller.index, caller.symbol),
+            _ => format!("frame {:02} {}", caller.index, caller.symbol),
         },
-        None => "called from no frame a module holds".into(),
+        None => "no frame a module holds".into(),
     })
 }
 
@@ -914,21 +1003,28 @@ pub fn user_system_text(process: &UserProcessSummary) -> String {
 /// `20 threads, 91 modules, 3 unloaded modules, 512 handles`.
 pub fn user_captured_text(process: &UserProcessSummary) -> String {
     let mut text = format!(
-        "{} threads, {} modules, {} unloaded modules",
-        process.threads, process.modules, process.unloaded_modules
+        "{}, {}, {}",
+        counted(process.threads as u64, "thread"),
+        counted(process.modules as u64, "module"),
+        counted(process.unloaded_modules as u64, "unloaded module")
     );
     match process.handles {
-        Some(handles) => text.push_str(&format!(", {handles} handles")),
+        Some(handles) => text.push_str(&format!(", {}", counted(handles as u64, "handle"))),
         None => text.push_str(", no handle data"),
     }
     text
 }
 
-/// `powershell.exe (pid 4340)`.
+/// `1 module`, `2 modules`.
+fn counted(count: u64, noun: &str) -> String {
+    format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
+}
+
+/// `powershell.exe (PID 4340)`.
 pub fn user_process_label(process: &UserProcessSummary) -> String {
     let name = process.name.as_deref().unwrap_or("unknown process");
     match process.pid {
-        Some(pid) => format!("{name} (pid {pid})"),
+        Some(pid) => format!("{name} (PID {pid})"),
         None => name.to_string(),
     }
 }
@@ -943,7 +1039,7 @@ fn print_user_triage_report(
     user: &UserDumpTriage,
     verbose: bool,
 ) {
-    outln!("{}", ui::label("crash analysis"));
+    print_section("crash analysis");
     match &user.exception {
         Some(exception) => print_user_exception(report, exception, verbose),
         None => outln!(
@@ -966,16 +1062,7 @@ fn print_user_triage_report(
                 } else {
                     ANALYZE_STACK_LIMIT
                 };
-                for (number, frame) in trace.frames.iter().take(limit).enumerate() {
-                    outln!(
-                        "  {}",
-                        format_stack_frame(Some(number), frame, false, false)
-                    );
-                }
-                let hidden = trace.frames.len().saturating_sub(limit) + trace.truncated;
-                if hidden > 0 {
-                    outln!("  {}", more_frames(hidden));
-                }
+                print_indented_stack(arch, trace, limit, "  ");
             }
             None => outln!("  {}", ui::muted("unavailable")),
         }
@@ -986,11 +1073,13 @@ fn print_user_triage_report(
             let cells: Vec<String> = row
                 .iter()
                 .map(|register| {
-                    format!(
-                        "{} {}",
-                        ui::muted(&format!("{:<6}", register.name)),
-                        ui::addr(register.value)
-                    )
+                    // Named and laid out as `r` and the stop display show
+                    // them, which call the flags register `rfl`.
+                    let name = match register.name.as_str() {
+                        "eflags" => "rfl",
+                        name => name,
+                    };
+                    format!("{name:<3} {}", ui::addr(register.value))
                 })
                 .collect();
             outln!("  {}", cells.join("   "));
@@ -1025,7 +1114,7 @@ fn print_user_triage_report(
 pub fn user_no_culprit_text(exception: &UserExceptionFinding) -> String {
     match &exception.blamed_frame {
         Some(frame) => format!(
-            "none: frame #{} ({:#x}) is the first outside the system modules: {}",
+            "none: frame {:02} ({:#x}) is the first outside the system modules: {}",
             frame.index,
             frame.ip,
             code_owner_text(&frame.owner)
@@ -1037,44 +1126,45 @@ pub fn user_no_culprit_text(exception: &UserExceptionFinding) -> String {
 fn print_user_exception(report: &TriageReport, exception: &UserExceptionFinding, verbose: bool) {
     outln!("{}", user_exception_verdict(exception));
     print_section("exception");
-    outln!(
-        "  {} {:#010x}  {}",
-        ui::muted("code   "),
-        exception.code,
-        exception.name
-    );
+    let mut fields = vec![(
+        "code".to_string(),
+        format!("{:#010x}  {}", exception.code, exception.name),
+    )];
     let flags = if exception.flag_names.is_empty() {
         String::new()
     } else {
-        format!("  {}", exception.flag_names.join(" | "))
+        format!(" ({})", exception.flag_names.join(" | "))
     };
-    outln!("  {} {:#x}{flags}", ui::muted("flags  "), exception.flags);
-    outln!(
-        "  {} {}  {}",
-        ui::muted("address"),
-        ui::addr(exception.address),
-        ui::symbol(&exception.symbol)
-    );
-    outln!(
-        "  {} {}",
-        ui::muted("module "),
-        code_owner_text(&exception.address_owner)
-    );
+    fields.push((
+        "flags".to_string(),
+        format!("{:#x}{flags}", exception.flags),
+    ));
+    fields.push((
+        "address".to_string(),
+        format!(
+            "{}  {}",
+            ui::addr(exception.address),
+            ui::symbol(&exception.symbol)
+        ),
+    ));
+    fields.push((
+        "module".to_string(),
+        code_owner_text(&exception.address_owner),
+    ));
     let thread_name = exception
         .thread_name
         .as_deref()
         .map(|name| format!(" ({name})"))
         .unwrap_or_default();
-    outln!(
-        "  {} {}{thread_name}",
-        ui::muted("thread "),
-        ui::thread_id(&exception.thread)
-    );
+    fields.push((
+        "thread".to_string(),
+        format!("{}{thread_name}", ui::thread_id(&exception.thread)),
+    ));
     if let Some(summary) = &exception.summary {
-        outln!("  {} {}", ui::muted("meaning"), summary);
+        fields.push(("meaning".to_string(), summary.to_string()));
     }
     if exception.parameters.is_empty() {
-        outln!("  {} {}", ui::muted("params "), ui::muted("none"));
+        fields.push(("params".to_string(), "-".to_string()));
     }
     for (index, parameter) in exception.parameters.iter().enumerate() {
         let label = parameter
@@ -1086,20 +1176,22 @@ fn print_user_exception(report: &TriageReport, exception: &UserExceptionFinding,
             .as_deref()
             .map(|meaning| format!(": {meaning}"))
             .unwrap_or_default();
-        outln!(
-            "  {} {}{label}{meaning}",
-            ui::muted(&format!("param {}", index + 1)),
-            ui::addr(parameter.value)
-        );
+        fields.push((
+            format!("param {}", index + 1),
+            format!("{}{label}{meaning}", ui::addr(parameter.value)),
+        ));
     }
     if exception.record != 0 {
-        outln!(
-            "  {} {}  {}",
-            ui::muted("chained"),
-            ui::addr(exception.record),
-            ui::muted("(.exr reads it)")
-        );
+        fields.push((
+            "chained".to_string(),
+            format!(
+                "{}  {}",
+                ui::addr(exception.record),
+                ui::muted("(.exr reads it)")
+            ),
+        ));
     }
+    print_report_fields(&fields);
 
     if verbose {
         return;
@@ -1116,22 +1208,13 @@ fn print_user_exception(report: &TriageReport, exception: &UserExceptionFinding,
         .as_ref()
         .map_or(start, |frame| frame.index);
     for (index, frame) in trace.frames.iter().enumerate().take(end + 1).skip(start) {
-        let source = if frame.source == FrameSource::Scan {
-            format!("  {}", ui::muted("[scan]"))
-        } else {
-            String::new()
-        };
-        outln!(
-            "  #{index:<2} {}  {}{source}",
-            ui::addr(frame.ip),
-            ui::symbol(&frame.symbol)
-        );
+        outln!("  {}", format_stack_frame(Some(index), frame, false, false));
     }
     match &exception.blamed_frame {
         Some(frame) => outln!(
             "  {}",
             ui::muted(&format!(
-                "#{} is the first frame outside the system modules: {}",
+                "frame {:02} is the first outside the system modules: {}",
                 frame.index,
                 code_owner_text(&frame.owner)
             ))
@@ -1145,32 +1228,24 @@ fn print_user_exception(report: &TriageReport, exception: &UserExceptionFinding,
 
 fn print_user_process(process: &UserProcessSummary) {
     print_section("process");
-    outln!(
-        "  {} {}",
-        ui::muted("process "),
-        user_process_label(process)
-    );
-    outln!("  {} {}", ui::muted("system  "), user_system_text(process));
+    let mut fields = vec![
+        ("process", user_process_label(process)),
+        ("system", user_system_text(process)),
+    ];
     if let Some(time) = unix_time_to_iso(u64::from(process.dump_time)) {
-        outln!("  {} {}", ui::muted("written "), time);
+        fields.push(("written", time));
     }
     if let Some(time) = process
         .create_time
         .and_then(|time| unix_time_to_iso(u64::from(time)))
     {
-        outln!("  {} {}", ui::muted("created "), time);
+        fields.push(("created", time));
     }
     if let Some((user, kernel)) = process.cpu_times {
-        outln!(
-            "  {} {user} s user, {kernel} s kernel",
-            ui::muted("cpu time")
-        );
+        fields.push(("cpu time", format!("{user} s user, {kernel} s kernel")));
     }
-    outln!(
-        "  {} {}",
-        ui::muted("captured"),
-        user_captured_text(process)
-    );
+    fields.push(("captured", user_captured_text(process)));
+    print_report_fields(&fields);
 }
 
 /// The modules whose details `-v` shows on a user dump: the faulting
@@ -1216,27 +1291,30 @@ pub fn user_detail_modules<'a>(
 fn print_user_module_details(report: &TriageReport, user: &UserDumpTriage) {
     for module in user_detail_modules(report, user) {
         print_section(&format!("module {}", module.name));
-        outln!(
-            "  {} {}-{}",
-            ui::muted("range   "),
-            ui::addr(module.base_address.0),
-            ui::addr(module.end_address().0)
-        );
+        let mut fields = vec![(
+            "range",
+            format!(
+                "{}-{}",
+                ui::addr(module.base_address.0),
+                ui::addr(module.end_address().0)
+            ),
+        )];
         if let Some(path) = &module.path {
-            outln!("  {} {}", ui::muted("path    "), path);
+            fields.push(("path", path.to_string()));
         }
         if let Some(version) = &module.file_version {
-            outln!("  {} {}", ui::muted("version "), version);
+            fields.push(("version", version.to_string()));
         }
         if let Some(stamp) = module.time_date_stamp {
-            outln!("  {} {stamp:#x}", ui::muted("time    "));
+            fields.push(("time", format!("{stamp:#x}")));
         }
         if let Some(checksum) = module.checksum {
-            outln!("  {} {checksum:#x}", ui::muted("checksum"));
+            fields.push(("checksum", format!("{checksum:#x}")));
         }
         if let Some(pdb) = module.codeview.as_ref().map(codeview_path) {
-            outln!("  {} {}", ui::muted("pdb     "), pdb);
+            fields.push(("pdb", pdb.to_string()));
         }
+        print_report_fields(&fields);
     }
 }
 
@@ -1268,7 +1346,7 @@ impl Render for Option<BugcheckAnalysis> {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         let Some(analysis) = self else {
             outln!(
-                "{}\n",
+                "{}",
                 ui::muted("no bugcheck: the target has not bugchecked")
             );
             return;
@@ -1283,7 +1361,6 @@ impl Render for Option<BugcheckAnalysis> {
         if let Some(source) = &analysis.source {
             outln!("{}", ui::muted(&format!("from {source}")));
         }
-        outln!();
     }
 }
 
@@ -1420,6 +1497,5 @@ impl Render for Analysis {
             }
             None => {}
         }
-        outln!();
     }
 }

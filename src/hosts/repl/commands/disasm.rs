@@ -1,7 +1,5 @@
 //! Disassembly: `u`, `uf`, `ub`, and the `#` search.
 
-use owo_colors::OwoColorize;
-
 use ntoseye_macros::{command, grammar};
 
 use crate::base::disasm::FunctionDisassembly;
@@ -111,7 +109,19 @@ fn disassemble(
             .ok_or(Error::InvalidRange)?;
         let readable = page_end.saturating_sub(address.0).min(byte_len) as usize;
         bytes.truncate(readable);
-        session.read_masked(address, &mut bytes)?;
+        // Not even the first page reads: say it is not resident, as the
+        // stop's disassembly does, rather than call the address bad.
+        session
+            .read_masked(address, &mut bytes)
+            .map_err(|error| match error {
+                Error::BadVirtualAddress(_)
+                | Error::AddressNotInDump(_)
+                | Error::PartialRead(0) => Error::DebugInfo(format!(
+                    "the page holding {:#x} is not resident, so there is nothing to decode",
+                    address.0
+                )),
+                error => error,
+            })?;
     }
 
     let target = &session.target;
@@ -167,13 +177,14 @@ fn continues_listing(
 
 /// A listing as `u` and `ub` show it.
 fn show_listing(rows: &[DisasmRow], repl: &ReplState<'_>) {
-    print_listing(repl.ctx, rows, LISTING_LANES);
+    print_listing(repl.ctx, rows, LISTING_LANES, true);
 }
 
 /// A listing with its bytes, its jumps drawn and their targets named, each
 /// row's offset from its symbol, and the instruction the selected thread is
-/// at marked, with whether its jump is taken.
-fn print_listing(session: &Session, rows: &[DisasmRow], lanes: usize) {
+/// at marked, with whether its jump is taken. With `named`, the first row
+/// names its symbol even when no row leaves it.
+fn print_listing(session: &Session, rows: &[DisasmRow], lanes: usize, named: bool) {
     let target = &session.target;
     let trace = resolve_thread_trace_context(target, target.current_dtb());
     let current = target
@@ -194,11 +205,11 @@ fn print_listing(session: &Session, rows: &[DisasmRow], lanes: usize) {
         returns_to: None,
         bytes: true,
         lanes,
+        named,
     };
     for line in listing_lines(session, &trace, &listing) {
         outln!("{line}");
     }
-    outln!();
 }
 
 impl Render<ContinuesListing> for Vec<DisasmRow> {
@@ -246,8 +257,8 @@ fn address_or_ip(
 
 impl Render for FunctionDisassembly {
     fn render(&self, repl: &mut ReplState<'_>, (): ()) {
-        outln!("{}  {} bytes", ui::symbol(&self.symbol), self.length);
-        print_listing(repl.ctx, &self.rows, FUNCTION_LANES);
+        outln!("{}  ({:#x} bytes)", ui::symbol(&self.symbol), self.length);
+        print_listing(repl.ctx, &self.rows, FUNCTION_LANES, false);
     }
 }
 
@@ -327,13 +338,13 @@ fn disasm_search(
         [count] => match windbg_count_expression(count) {
             Some(count) => Some(count),
             None => {
-                outln!("{}\n", command_help("#"));
+                outln!("{}", command_help("#"));
                 return Ok(());
             }
         },
         [l, count] if l.eq_ignore_ascii_case("l") => Some(count.as_str()),
         _ => {
-            outln!("{}\n", command_help("#"));
+            outln!("{}", command_help("#"));
             return Ok(());
         }
     };
@@ -341,7 +352,7 @@ fn disasm_search(
         state.disasm_search.pattern = Some(pattern.clone());
     }
     let Some(pattern) = state.disasm_search.pattern.clone() else {
-        outln!("{}\n", command_help("#"));
+        outln!("{}", command_help("#"));
         return Ok(());
     };
     let start = match args.get(1) {
@@ -361,7 +372,7 @@ fn disasm_search(
         Some(count) => match state.eval_or_report(count) {
             Some(count) if (1..=MAX_SEARCH_INSTRUCTIONS).contains(&count.0) => count.0,
             Some(_) => {
-                error!("instruction count must be 1..{MAX_SEARCH_INSTRUCTIONS:#x}");
+                error!("instruction count must be 1..{MAX_SEARCH_INSTRUCTIONS}");
                 return Ok(());
             }
             None => return Ok(()),
@@ -421,7 +432,7 @@ fn disasm_search(
             }
         }
         if next == cursor {
-            stop = Some(format!("{} is unreadable", ui::addr(read_end)));
+            stop = Some(format!("{read_end:#x} is unreadable"));
             break;
         }
         cursor = next;
@@ -431,19 +442,26 @@ fn disasm_search(
         Some(row) => {
             let len = row.hex.split_whitespace().count() as u64;
             state.disasm_search.next = Some(VirtAddr(row.ip.saturating_add(len)));
-            render_rows(&[row], |_| None);
+            // The match as `u` lists it, under the symbol it is in.
+            print_listing(&*state.ctx, &[row], LISTING_LANES, true);
         }
         None => {
             state.disasm_search.next = Some(VirtAddr(cursor));
+            let noun = if searched == 1 {
+                "instruction"
+            } else {
+                "instructions"
+            };
             outln!(
-                "{} for '{pattern}' in {searched:#x} instructions from {}{}",
-                "no match".bright_black(),
-                ui::addr(start.0),
-                stop.map(|stop| format!("; {stop}")).unwrap_or_default()
+                "{}",
+                ui::muted(&format!(
+                    "no instructions matching '{pattern}' in {searched} {noun} from {:#x}{}",
+                    start.0,
+                    stop.map(|stop| format!("; {stop}")).unwrap_or_default()
+                ))
             );
         }
     }
-    outln!();
     Ok(())
 }
 

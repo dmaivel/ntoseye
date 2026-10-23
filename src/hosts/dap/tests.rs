@@ -447,7 +447,10 @@ fn a_console_cxr_invalidates_the_clients_view() {
         .unwrap();
 
     let result = response["result"].as_str().unwrap();
-    assert!(result.contains("selected context"), "{result}");
+    assert!(
+        result.contains(&format!("{:#x}", base + record as u64)),
+        "{result}"
+    );
     let messages = decode_sink(&sink);
     assert!(
         messages

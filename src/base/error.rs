@@ -69,13 +69,13 @@ pub enum Error {
     #[error("breakpoint: refusing breakpoint at {address:#x}: {reason}")]
     NotCode { address: u64, reason: String },
 
-    #[error("Register '{0}' not found")]
+    #[error("register '{0}' not found")]
     RegisterNotFound(String),
 
-    #[error("Register '{0}' is wider than 64 bits (a 128-bit register has '{0}l' / '{0}h' halves)")]
+    #[error("register '{0}' is wider than 64 bits (a 128-bit register has '{0}l' / '{0}h' halves)")]
     RegisterTooWide(String),
 
-    #[error("Breakpoint '{0}' not found")]
+    #[error("breakpoint '{0}' not found")]
     BPNotFound(u32),
 
     #[error("the current backend does not support this")]
@@ -100,7 +100,7 @@ pub enum Error {
     #[error("PDB file not found for {0:?}")]
     PdbNotFound(PathBuf),
 
-    #[error("Ntoskrnl not found")]
+    #[error("ntoskrnl not found")]
     NtoskrnlNotFound,
 
     /// A kernel operation on a user-mode minidump.
@@ -129,46 +129,46 @@ pub enum Error {
     #[error("PE view failed")]
     ViewFailed,
 
-    #[error("Storage directory wasn't found")]
+    #[error("storage directory wasn't found")]
     StorageNotFound,
 
-    #[error("Symbol '{0}' not found")]
+    #[error("symbol '{0}' not found")]
     SymbolNotFound(String),
 
-    #[error("Symbol '{name}' is ambiguous: {candidates}", candidates = .candidates.join(", "))]
+    #[error("symbol '{name}' is ambiguous: {candidates}", candidates = .candidates.join(", "))]
     AmbiguousSymbol {
         name: String,
         candidates: Vec<String>,
     },
 
-    #[error("Unsupported target architecture: {0}")]
+    #[error("unsupported target architecture: {0}")]
     UnsupportedArchitecture(String),
 
-    #[error("Process '{0}' not found")]
+    #[error("process '{0}' not found")]
     ProcessNotFound(u64),
 
-    #[error("Structure '{0}' not found")]
+    #[error("structure '{0}' not found")]
     StructNotFound(String),
 
-    #[error("Field '{0}' not found")]
+    #[error("field '{0}' not found")]
     FieldNotFound(String),
 
-    #[error("Field '{0}' is not a {1}")]
+    #[error("field '{0}' is not a {1}")]
     FieldTypeMismatch(String, String),
 
-    #[error("Invalid expression: {0}")]
+    #[error("invalid expression: {0}")]
     InvalidExpression(String),
 
-    #[error("Expected loaded symbols")]
+    #[error("expected loaded symbols")]
     ExpectedSymbols,
 
-    #[error("Process missing PEB (kernel process?)")]
+    #[error("the process has no PEB (a kernel process?)")]
     MissingPEB,
 
-    #[error("Process missing ImageBase")]
+    #[error("the process has no ImageBase")]
     MissingImageBase,
 
-    #[error("Process image not found")]
+    #[error("process image not found")]
     MissingImage,
 
     #[error("no usable guest RAM mapping found in the VM process")]
@@ -206,37 +206,37 @@ pub enum Error {
     )]
     PtraceDenied { pid: i32, scope: String },
 
-    #[error("Another instance of ntoseye is already attached to {0}")]
+    #[error("another instance of ntoseye is already attached to {0}")]
     AlreadyRunning(String),
 
-    #[error("Data doesn't fit in buffer")]
+    #[error("data doesn't fit in buffer")]
     BufferNotEnough,
 
-    #[error("Invalid range")]
+    #[error("invalid range")]
     InvalidRange,
 
-    #[error("Partial read: {0}b")]
+    #[error("partial read: {0}b")]
     PartialRead(usize),
 
-    #[error("Partial write: {0}b")]
+    #[error("partial write: {0}b")]
     PartialWrite(usize),
 
-    #[error("Bad virtual address: {0:x}")]
+    #[error("bad virtual address: {0:#x}")]
     BadVirtualAddress(VirtAddr),
 
-    #[error("Address {0:x} is not captured in the triage dump's memory snapshot")]
+    #[error("address {0:#x} is not captured in the triage dump's memory snapshot")]
     AddressNotInDump(VirtAddr),
 
     /// A read of a user-mode minidump's memory reached `address`, which the
     /// dump did not capture; the bytes before it were read. `resumes` is
     /// where captured memory starts again, `None` when nothing above does.
-    #[error("Address {address:x} is not in the minidump's captured memory")]
+    #[error("address {address:#x} is not in the minidump's captured memory")]
     NotCaptured {
         address: VirtAddr,
         resumes: Option<VirtAddr>,
     },
 
-    #[error("Bad physical address: {0:x}")]
+    #[error("bad physical address: {0:#x}")]
     BadPhysicalAddress(PhysAddr),
 
     #[error("crash dump is read-only")]

@@ -33,10 +33,9 @@ pub fn handle_attribute_names(attributes: u32) -> Vec<String> {
     names
 }
 
-/// The type a handle's stream entry names, or a placeholder when it names
-/// none.
+/// The type a handle's stream entry names, or `-` when it names none.
 pub fn handle_type_label(handle: &UserHandle) -> &str {
-    handle.type_name.as_deref().unwrap_or("<no type recorded>")
+    handle.type_name.as_deref().unwrap_or("-")
 }
 
 /// Handles per type, most numerous first.
@@ -107,7 +106,7 @@ mod tests {
         assert_eq!(
             handle_type_counts(&handles),
             [
-                ("<no type recorded>".to_string(), 2),
+                ("-".to_string(), 2),
                 ("Event".to_string(), 2),
                 ("ALPC Port".to_string(), 1),
                 ("File".to_string(), 1),

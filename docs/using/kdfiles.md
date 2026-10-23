@@ -20,7 +20,7 @@ The quick form takes the driver name and the host path:
 
 ```
 0: kd> .kdfiles -m mydriver.sys /home/me/build/mydriver.sys
-Mapped mydriver.sys -> /home/me/build/mydriver.sys.
+mapped mydriver.sys -> /home/me/build/mydriver.sys
 ```
 
 Then reload the driver in the guest with `sc stop mydriver` and `sc start mydriver`, or with a different loader. The debugger shows a note for each image that it serves:
@@ -43,7 +43,7 @@ If a host path contains spaces, put it in `'` or `"` quotes:
 
 ```
 0: kd> .kdfiles -m mydriver.sys '/home/me/my builds/mydriver.sys'
-Mapped mydriver.sys -> /home/me/my builds/mydriver.sys.
+mapped mydriver.sys -> /home/me/my builds/mydriver.sys
 ```
 
 After you rebuild the driver, reload it in the guest. You do not have to load the mapping again.

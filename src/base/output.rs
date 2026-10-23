@@ -9,12 +9,14 @@
 //! Transcript logging is process-wide so a `.logopen` command also records
 //! diagnostics emitted by the backend or another command context.
 //!
-//! A command's output never ends with a blank line, as in WinDbg, gdb and
-//! lldb: the prompt follows its last line. Each stream holds its blank
-//! lines back ([`BlankLines`]) and writes them only once text follows, so
-//! the blank lines between a command's sections still print; the REPL drops
-//! what is held before each prompt ([`drop_trailing_blank_lines`]), and a
-//! capture drops it when it ends.
+//! A command's output neither starts nor ends with a blank line, as in
+//! WinDbg, gdb and lldb: its first line follows the command line, and the
+//! prompt follows its last. Each stream holds its blank lines back
+//! ([`BlankLines`]) and writes them only once text follows, so the blank
+//! lines between a command's sections still print. The REPL drops what is
+//! held before each prompt ([`drop_trailing_blank_lines`]) and the blank
+//! lines a command starts with ([`drop_leading_blank_lines`]); a capture
+//! does both on its own.
 //!
 //! Styling reaches stdout and stderr only when the stream is a terminal,
 //! `NO_COLOR` is unset or empty, and `TERM` is not `dumb`; a redirected
@@ -47,32 +49,43 @@ struct Capture {
 static LOG_SINK: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| Mutex::new(None));
 
 /// The blank lines held back from stdout and from the transcript.
-static STDOUT_BLANK_LINES: Mutex<BlankLines> = Mutex::new(BlankLines::new());
-static LOG_BLANK_LINES: Mutex<BlankLines> = Mutex::new(BlankLines::new());
+static STDOUT_BLANK_LINES: Mutex<BlankLines> = Mutex::new(BlankLines::new(false));
+static LOG_BLANK_LINES: Mutex<BlankLines> = Mutex::new(BlankLines::new(false));
 
 /// A stream's blank lines, held back until text follows them: what a
-/// stream ends with is never written.
+/// stream ends with is never written, nor, from `starting`, what it starts
+/// with.
 struct BlankLines {
     /// Whether the stream's last line lacks its newline.
     open: bool,
     /// How many blank lines are held back.
     held: usize,
+    /// Whether nothing has been written since the command began, so a
+    /// blank line would start its output.
+    starting: bool,
 }
 
 impl BlankLines {
-    const fn new() -> Self {
+    const fn new(starting: bool) -> Self {
         Self {
             open: false,
             held: 0,
+            starting,
         }
     }
 
     /// Pass `text`, the next piece of the stream, on to `write`, holding
     /// back the blank lines it ends with and writing those held before it.
     fn pass(&mut self, text: &str, write: &mut impl FnMut(&str)) {
+        let text = if self.starting && !self.open {
+            text.trim_start_matches('\n')
+        } else {
+            text
+        };
         let body = text.trim_end_matches('\n');
         let mut newlines = text.len() - body.len();
         if !body.is_empty() {
+            self.starting = false;
             for _ in 0..self.held {
                 write("\n");
             }
@@ -95,6 +108,7 @@ impl BlankLines {
             write("\n");
         }
         self.held = 0;
+        self.starting = false;
     }
 }
 
@@ -123,6 +137,13 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub fn drop_trailing_blank_lines() {
     lock(&STDOUT_BLANK_LINES).held = 0;
     lock(&LOG_BLANK_LINES).held = 0;
+}
+
+/// Drop the blank lines the next command's output starts with: it follows
+/// the command line.
+pub fn drop_leading_blank_lines() {
+    lock(&STDOUT_BLANK_LINES).starting = true;
+    lock(&LOG_BLANK_LINES).starting = true;
 }
 
 static NO_COLOR: LazyLock<bool> =
@@ -276,14 +297,17 @@ pub fn open_log(path: impl AsRef<Path>, append: bool) -> io::Result<()> {
     Ok(())
 }
 
-/// Close the command transcript sink, flushing it first when possible.
-pub fn close_log() {
+/// Close the command transcript sink, flushing it first when possible;
+/// `false` when none was open.
+pub fn close_log() -> bool {
     let mut sink = LOG_SINK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(mut file) = sink.take() {
-        let _ = file.flush();
-    }
+    let Some(mut file) = sink.take() else {
+        return false;
+    };
+    let _ = file.flush();
+    true
 }
 
 fn log_text(text: &str) {
@@ -442,7 +466,7 @@ fn capture_with<R>(diagnostics: bool, f: impl FnOnce() -> R) -> (R, String) {
         stack.push(Capture {
             text: Vec::new(),
             diagnostics,
-            blank_lines: BlankLines::new(),
+            blank_lines: BlankLines::new(true),
         });
         stack.len() - 1
     });
@@ -575,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_keeps_blank_lines_between_text_and_drops_the_trailing_ones() {
+    fn capture_keeps_blank_lines_between_text_and_drops_the_leading_and_trailing_ones() {
         let (_, text) = capture(|| {
             outln!("registers");
             outln!();
@@ -592,6 +616,11 @@ mod tests {
         assert_eq!(text, "listing\n\nerror: cut short\n");
         let (_, text) = capture(|| outln!());
         assert_eq!(text, "");
+        let (_, text) = capture(|| {
+            outln!();
+            outln!("\nfirst");
+        });
+        assert_eq!(text, "first\n");
     }
 
     #[test]

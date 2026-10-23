@@ -1,12 +1,13 @@
 //! KMDF (`!wdfkd.*`): client drivers, handles, objects, devices, queues,
 //! requests, I/O targets, and In-Flight Recorder logs.
 
-use std::fmt::Display;
+use std::fmt::{Display, LowerHex};
 
 use ntoseye_macros::{command, grammar};
 use tabled::builder::Builder;
 
 use crate::base::error::Result;
+use crate::base::time::filetime_to_iso_precise;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::hosts::repl::*;
 use crate::hosts::ui;
@@ -110,7 +111,7 @@ fn wdf_handle(session: &Session, handle: u64) -> Result<WdfObject> {
 impl Render for WdfObject {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         print_object(self);
-        field("View", object_command(self));
+        field("view", object_command(self));
     }
 }
 
@@ -411,7 +412,7 @@ impl Render for WdfCrashDump {
 
 /// A labeled line of a detail view.
 fn field(label: &str, value: impl Display) {
-    outln!("{} {value}", ui::label(&format!("{label:<22}")));
+    outln!("  {}  {value}", ui::label(&format!("{label:<21}")));
 }
 
 fn enum_text(value: &WdfEnumValue) -> String {
@@ -423,7 +424,7 @@ fn enum_text(value: &WdfEnumValue) -> String {
 
 fn object_ref_text(object: &Option<WdfObjectRef>) -> String {
     let Some(object) = object else {
-        return ui::muted("none");
+        return ui::muted("-");
     };
     let mut text = ui::addr(object.address.0);
     if let Some(handle) = object.handle {
@@ -436,7 +437,7 @@ fn object_ref_text(object: &Option<WdfObjectRef>) -> String {
 }
 
 fn handle_text(handle: Option<u64>) -> String {
-    handle.map_or_else(|| ui::muted("none"), ui::addr)
+    handle.map_or_else(|| ui::muted("-"), ui::addr)
 }
 
 fn version_text(client: &WdfClient) -> String {
@@ -457,17 +458,29 @@ fn print_stopped(indent: &str, what: &str, stopped: &Option<String>) {
     }
 }
 
-/// A client's name, or a muted `(unnamed)`.
+/// A client's name, or a muted `-`.
 fn name_text(name: &Option<String>) -> String {
-    name.clone().unwrap_or_else(|| ui::muted("(unnamed)"))
+    name.clone().unwrap_or_else(|| ui::muted("-"))
 }
 
-/// A client's name, or, without one, its driver object's (`\Driver\kdnic`).
+/// A client's name, or, without one, the last part of its driver object's
+/// name (`kdnic` for `\Driver\kdnic`), which is the same service name the
+/// other clients go by.
 fn client_name_text(client: &WdfClient) -> String {
     match (&client.name, &client.driver_object_name) {
         (Some(name), _) => name.clone(),
-        (None, Some(object)) => ui::muted(object),
-        (None, None) => ui::muted("(unnamed)"),
+        (None, Some(object)) => ui::muted(object.rsplit('\\').next().unwrap_or(object.as_str())),
+        (None, None) => ui::muted("-"),
+    }
+}
+
+/// A flags value with the names of its set flags: `0x3 (A | B)`, or only
+/// the value when no name is known.
+fn flags_text(value: impl LowerHex, names: &[String]) -> String {
+    if names.is_empty() {
+        format!("{value:#x}")
+    } else {
+        format!("{value:#x} ({})", names.join(" | "))
     }
 }
 
@@ -490,7 +503,7 @@ fn print_loader(loader: &WdfLoader) {
         builder.push_record([
             client_name_text(client),
             client.version.map_or_else(
-                || "?".to_string(),
+                || "-".to_string(),
                 |version| format!("v{}.{}", version.major, version.minor),
             ),
             ui::addr(client.globals.0),
@@ -521,7 +534,7 @@ fn print_loader(loader: &WdfLoader) {
 }
 
 fn print_client(client: &WdfClient) {
-    field("Driver", name_text(&client.name));
+    outln!("{} {}", ui::label("driver"), name_text(&client.name));
     field("KMDF version", version_text(client));
     field("_FX_DRIVER_GLOBALS", ui::addr(client.globals.0));
     field(
@@ -536,14 +549,14 @@ fn print_client(client: &WdfClient) {
         "FxDriver",
         client
             .driver
-            .map_or_else(|| ui::muted("none"), |driver| ui::addr(driver.0)),
+            .map_or_else(|| ui::muted("-"), |driver| ui::addr(driver.0)),
     );
     field("WDFDRIVER", handle_text(client.wdf_driver));
     if let Some(path) = &client.registry_path {
-        field("Registry path", path);
+        field("registry path", path);
     }
     field(
-        "Image",
+        "image",
         format!(
             "{}  size {:#x}",
             ui::addr(client.image_base.0),
@@ -554,18 +567,17 @@ fn print_client(client: &WdfClient) {
         "IFR log",
         client
             .log_header
-            .map_or_else(|| ui::muted("none"), |header| ui::addr(header.0)),
+            .map_or_else(|| ui::muted("-"), |header| ui::addr(header.0)),
     );
-    field("Verifier", if client.verifier_on { "on" } else { "off" });
+    field("verifier", if client.verifier_on { "on" } else { "off" });
     for problem in &client.problems {
-        field("Problem", problem);
+        field("problem", problem);
     }
 }
 
 fn print_driver_info(info: &WdfDriverInfo) {
     print_client(&info.client);
-    outln!();
-    outln!("{}", ui::label("Devices"));
+    print_section("devices");
     let mut builder = Builder::default();
     builder.push_record(["DEVICE_OBJECT", "WDFDEVICE", "Kind", "PnP state"]);
     for device in &info.devices {
@@ -575,13 +587,16 @@ fn print_driver_info(info: &WdfDriverInfo) {
                 handle_text(device.handle),
                 device
                     .kind
-                    .map_or_else(|| "?".to_string(), |kind| kind.to_string()),
-                device.pnp_state.as_ref().map(enum_text).unwrap_or_default(),
+                    .map_or_else(|| "-".to_string(), |kind| kind.to_string()),
+                device
+                    .pnp_state
+                    .as_ref()
+                    .map_or_else(|| "-".to_string(), enum_text),
             ]),
             Some(why) => builder.push_record([
                 ui::addr(device.device_object.0),
-                ui::muted("none"),
-                String::new(),
+                ui::muted("-"),
+                ui::muted("-"),
                 ui::muted(&format!("not a WDFDEVICE of this driver: {why}")),
             ]),
         }
@@ -612,34 +627,31 @@ fn object_command(object: &WdfObject) -> String {
 }
 
 fn print_object(object: &WdfObject) {
-    field("Handle", ui::addr(object.handle));
+    outln!("{} {}", ui::label("handle"), ui::addr(object.handle));
     let mut address = ui::addr(object.address.0);
     if let Some(offset) = object.offset {
         address.push_str(&format!("  (offset handle, WDFOBJECT_OFFSET {offset:#x})"));
     }
     field("FxObject", address);
     field(
-        "Type",
+        "type",
         format!("{} ({:#x})", object.type_name, object.type_value),
     );
     field(
-        "Driver",
+        "driver",
         format!(
             "{}  (globals {})",
             name_text(&object.driver),
             ui::addr(object.globals.0)
         ),
     );
-    field("Object size", format!("{:#x}", object.object_size));
-    field("Reference count", object.refcount);
-    field("State", enum_text(&object.state));
-    field(
-        "Flags",
-        format!("{:#x}  {}", object.flags, object.flag_names.join(" ")),
-    );
-    field("Parent", object_ref_text(&object.parent));
+    field("object size", format!("{:#x}", object.object_size));
+    field("reference count", object.refcount);
+    field("state", enum_text(&object.state));
+    field("flags", flags_text(object.flags, &object.flag_names));
+    field("parent", object_ref_text(&object.parent));
     if object.contexts.is_empty() {
-        field("Contexts", ui::muted("none"));
+        field("contexts", ui::muted("-"));
     }
     for context in &object.contexts {
         let name = context.name.as_deref().unwrap_or("(no type)");
@@ -648,9 +660,9 @@ fn print_object(object: &WdfObject) {
             .map(|size| format!("  size {size:#x}"))
             .unwrap_or_default();
         field(
-            "Context",
+            "context",
             format!(
-                "{} {}{size}  (header {})",
+                "{}  {}{size}  (header {})",
                 ui::addr(context.context.0),
                 name,
                 ui::addr(context.header.0)
@@ -664,63 +676,67 @@ fn print_object_detail(detail: &WdfObjectDetail) {
     print_object(&detail.object);
     let command = object_command(&detail.object);
     if !command.starts_with("!wdfkd.wdfobject") {
-        field("View", command);
+        field("view", command);
     }
-    outln!();
-    outln!("{} ({})", ui::label("Children"), detail.children.len());
+    print_section(&format!("children ({})", detail.children.len()));
+    if detail.children.is_empty() {
+        print_stopped("", "child list", &detail.children_stopped);
+        return;
+    }
+    let mut builder = Builder::default();
+    builder.push_record(["Handle", "FxObject", "Type"]);
     for child in &detail.children {
-        outln!(
-            "   {}  {}  {}",
+        builder.push_record([
             handle_text(child.handle),
             ui::addr(child.address.0),
-            child.type_name.as_deref().unwrap_or("?")
-        );
+            child.type_name.as_deref().unwrap_or("-").to_string(),
+        ]);
     }
-    print_stopped("   ", "child list", &detail.children_stopped);
+    print_padded_table(builder);
+    print_stopped("", "child list", &detail.children_stopped);
 }
 
 fn print_device(device: &WdfDeviceDetail) {
-    field("WDFDEVICE", ui::addr(device.handle));
+    outln!("{} {}", ui::label("WDFDEVICE"), ui::addr(device.handle));
     field("FxDevice", ui::addr(device.address.0));
     field(
-        "Driver",
+        "driver",
         format!(
             "{}  (globals {})",
             name_text(&device.driver),
             ui::addr(device.globals.0)
         ),
     );
-    field("Kind", device.kind);
+    field("kind", device.kind);
     if let Some(name) = &device.device_name {
-        field("Name", name);
+        field("name", name);
     }
-    field("Device object", ui::addr_opt(device.device_object));
-    field("Attached to", ui::addr_opt(device.attached_device));
+    field("device object", ui::addr_opt(device.device_object));
+    field("attached to", ui::addr_opt(device.attached_device));
     field("PDO", ui::addr_opt(device.physical_device));
     if device.parent.is_some() {
-        field("Parent", object_ref_text(&device.parent));
+        field("parent", object_ref_text(&device.parent));
     }
     field("PnP state", enum_text(&device.pnp_state));
-    field("Power state", enum_text(&device.power_state));
-    field("Power policy state", enum_text(&device.power_policy_state));
+    field("power state", enum_text(&device.power_state));
+    field("power policy state", enum_text(&device.power_policy_state));
     if let Some(state) = &device.device_power_state {
-        field("Device power state", enum_text(state));
+        field("device power state", enum_text(state));
     }
     if let Some(state) = &device.system_power_state {
-        field("System power state", enum_text(state));
+        field("system power state", enum_text(state));
     }
     field("FxPkgPnp", ui::addr_opt(device.pkg_pnp));
     field("FxPkgIo", ui::addr_opt(device.pkg_io));
     if device.default_child_list.is_some() || device.static_child_list.is_some() {
-        field("Default child list", handle_text(device.default_child_list));
-        field("Static child list", handle_text(device.static_child_list));
+        field("default child list", handle_text(device.default_child_list));
+        field("static child list", handle_text(device.static_child_list));
     }
     if device.default_io_target.is_some() || device.self_io_target.is_some() {
-        field("Default I/O target", handle_text(device.default_io_target));
-        field("Self I/O target", handle_text(device.self_io_target));
+        field("default I/O target", handle_text(device.default_io_target));
+        field("self I/O target", handle_text(device.self_io_target));
     }
-    outln!();
-    outln!("{}", ui::label("Queues"));
+    print_section("queues");
     let mut builder = Builder::default();
     builder.push_record([
         "WDFQUEUE",
@@ -729,7 +745,7 @@ fn print_device(device: &WdfDeviceDetail) {
         "Power managed",
         "Pending",
         "Driver owned",
-        "",
+        "Default",
     ]);
     for queue in &device.queues {
         builder.push_record([
@@ -739,15 +755,14 @@ fn print_device(device: &WdfDeviceDetail) {
                 || format!("{:#x}", queue.dispatch_type.value),
                 |name| name.trim_start_matches("WdfIoQueueDispatch").to_string(),
             ),
-            if queue.power_managed { "yes" } else { "no" }.to_string(),
+            yes_no(queue.power_managed).to_string(),
             queue.pending.to_string(),
             queue.driver_owned.to_string(),
-            if queue.is_default { "default" } else { "" }.to_string(),
+            yes_no(queue.is_default).to_string(),
         ]);
     }
     print_padded_table(builder);
     print_stopped("", "queue list", &device.queues_stopped);
-    outln!();
     outln!("{}", ui::label("I/O targets"));
     let mut builder = Builder::default();
     builder.push_record([
@@ -756,7 +771,7 @@ fn print_device(device: &WdfDeviceDetail) {
         "Kind",
         "State",
         "Target device",
-        "",
+        "Default",
     ]);
     for target in &device.io_targets {
         builder.push_record([
@@ -765,7 +780,7 @@ fn print_device(device: &WdfDeviceDetail) {
             target.kind.to_string(),
             io_target_state_text(&target.state),
             ui::addr_opt(target.target_device),
-            if target.is_default { "default" } else { "" }.to_string(),
+            yes_no(target.is_default).to_string(),
         ]);
     }
     print_padded_table(builder);
@@ -785,53 +800,52 @@ fn io_target_state_text(state: &WdfEnumValue) -> String {
 }
 
 fn print_requests(title: &str, requests: &[WdfRequestRef], stopped: &Option<String>) {
-    outln!("{} ({})", ui::label(title), requests.len());
+    print_section(&format!("{title} ({})", requests.len()));
     for request in requests {
         outln!(
-            "   WDFREQUEST {}  FxRequest {}  IRP {}",
+            "  WDFREQUEST {}  FxRequest {}  IRP {}",
             ui::addr(request.handle),
             ui::addr(request.address.0),
             ui::addr_opt(request.irp)
         );
     }
-    print_stopped("   ", "list", stopped);
+    print_stopped("  ", "list", stopped);
 }
 
 fn print_queue(queue: &WdfQueueDetail) {
-    field("WDFQUEUE", ui::addr(queue.handle));
+    outln!("{} {}", ui::label("WDFQUEUE"), ui::addr(queue.handle));
     field("FxIoQueue", ui::addr(queue.address.0));
-    field("Driver", name_text(&queue.driver));
-    field("Device", object_ref_text(&queue.device));
-    field("Dispatch type", enum_text(&queue.dispatch_type));
+    field("driver", name_text(&queue.driver));
+    field("device", object_ref_text(&queue.device));
+    field("dispatch type", enum_text(&queue.dispatch_type));
+    field("state", flags_text(queue.state, &queue.state_names));
+    field("power state", enum_text(&queue.power_state));
+    field("power managed", yes_no(queue.power_managed));
     field(
-        "State",
-        format!("{:#x}  {}", queue.state, queue.state_names.join(" ")),
+        "zero-length requests",
+        yes_no(queue.allow_zero_length_requests),
     );
-    field("Power state", enum_text(&queue.power_state));
-    field("Power managed", queue.power_managed);
-    field("Zero-length requests", queue.allow_zero_length_requests);
     if queue.deleted {
-        field("Deleted", true);
+        field("deleted", true);
     }
-    field("Execution level", enum_text(&queue.execution_level));
-    field("Synchronization", enum_text(&queue.synchronization_scope));
-    field("Max parallel", queue.max_parallel_requests);
-    field("Pending", queue.pending_count);
-    field("Driver cancelable", queue.driver_cancelable_count);
-    field("Driver owned", queue.driver_owned_count);
-    field("Two-phase completions", queue.two_phase_completions);
+    field("execution level", enum_text(&queue.execution_level));
+    field("synchronization", enum_text(&queue.synchronization_scope));
+    field("max parallel", queue.max_parallel_requests);
+    field("pending", queue.pending_count);
+    field("driver cancelable", queue.driver_cancelable_count);
+    field("driver owned", queue.driver_owned_count);
+    field("two-phase completions", queue.two_phase_completions);
     for callback in &queue.callbacks {
         field(callback.name, callback_text(callback));
     }
-    outln!();
-    print_requests("Pending requests", &queue.pending, &queue.pending_stopped);
+    print_requests("pending requests", &queue.pending, &queue.pending_stopped);
     print_requests(
-        "Driver cancelable requests",
+        "driver cancelable requests",
         &queue.driver_cancelable,
         &queue.driver_cancelable_stopped,
     );
     print_requests(
-        "Driver owned requests",
+        "driver owned requests",
         &queue.driver_owned,
         &queue.driver_owned_stopped,
     );
@@ -890,21 +904,21 @@ fn cancelable_text(request: &WdfRequestDetail) -> String {
 }
 
 fn print_request(request: &WdfRequestDetail) {
-    field("WDFREQUEST", ui::addr(request.handle));
+    outln!("{} {}", ui::label("WDFREQUEST"), ui::addr(request.handle));
     field("FxRequest", ui::addr(request.address.0));
     field(
-        "Driver",
+        "driver",
         format!(
             "{}  (globals {})",
             name_text(&request.driver),
             ui::addr(request.globals.0)
         ),
     );
-    field("Reference count", request.refcount);
-    field("Object state", enum_text(&request.object_state));
-    field("Parent", object_ref_text(&request.parent));
+    field("reference count", request.refcount);
+    field("object state", enum_text(&request.object_state));
+    field("parent", object_ref_text(&request.parent));
     if request.irp.is_zero() {
-        field("IRP", ui::muted("none"));
+        field("IRP", ui::muted("-"));
     } else {
         field(
             "IRP",
@@ -918,7 +932,7 @@ fn print_request(request: &WdfRequestDetail) {
         match &irp.current {
             Some(location) => {
                 field(
-                    "Current location",
+                    "current location",
                     format!(
                         "{} of {}: {}",
                         location.number,
@@ -927,7 +941,7 @@ fn print_request(request: &WdfRequestDetail) {
                     ),
                 );
                 field(
-                    "  Device",
+                    "  device",
                     format!(
                         "{}  {}  {}",
                         ui::addr_opt(location.device_object),
@@ -936,23 +950,23 @@ fn print_request(request: &WdfRequestDetail) {
                     ),
                 );
                 if let Some(text) = parameters_text(&location.parameters) {
-                    field("  Parameters", text);
+                    field("  parameters", text);
                 }
                 if !location.file_object.is_zero() {
-                    field("  File object", ui::addr(location.file_object.0));
+                    field("  file object", ui::addr(location.file_object.0));
                 }
             }
             None => field(
-                "Current location",
+                "current location",
                 ui::muted(&format!(
-                    "none: CurrentLocation {} of {}, the IRP has left the stack",
+                    "- (CurrentLocation {} of {}: the IRP has left the stack)",
                     irp.current_location, irp.stack_count
                 )),
             ),
         }
         for (label, address) in [
-            ("  System buffer", irp.system_buffer),
-            ("  User buffer", irp.user_buffer),
+            ("  system buffer", irp.system_buffer),
+            ("  user buffer", irp.user_buffer),
             ("  MDL", irp.mdl_address),
         ] {
             if !address.is_zero() {
@@ -962,19 +976,19 @@ fn print_request(request: &WdfRequestDetail) {
     }
     field("IRP allocated by", enum_text(&request.irp_allocation));
     field("IRP references", request.irp_reference_count);
-    field("Completed", yes_no(request.completed));
-    field("Canceled", yes_no(request.canceled));
-    field("Presented", yes_no(request.presented));
-    field("Completion state", enum_text(&request.completion_state));
+    field("completed", yes_no(request.completed));
+    field("canceled", yes_no(request.canceled));
+    field("presented", yes_no(request.presented));
+    field("completion state", enum_text(&request.completion_state));
     let queue = object_ref_text(&request.queue);
     field(
-        "Queue",
+        "queue",
         match request.queue {
             Some(_) => format!("{queue}  {}", ui::muted("(!wdfkd.wdfqueue)")),
             None => queue,
         },
     );
-    field("Cancelable", cancelable_text(request));
+    field("cancelable", cancelable_text(request));
     if let Some(callback) = &request.cancel_routine {
         field(callback.name, callback_text(callback));
     }
@@ -987,49 +1001,41 @@ fn print_request(request: &WdfRequestDetail) {
         },
     );
     if let Some(callback) = &request.completion_routine {
-        field("Completion routine", callback_text(callback));
-        field("Completion context", ui::addr(request.completion_context.0));
+        field("completion routine", callback_text(callback));
+        field("completion context", ui::addr(request.completion_context.0));
     }
     field(
-        "Target flags",
-        format!(
-            "{:#x}  {}",
-            request.target_flags,
-            request.target_flag_names.join(" ")
-        ),
+        "target flags",
+        flags_text(request.target_flags, &request.target_flag_names),
     );
     if request.verifier_flags != 0 {
         field(
-            "Verifier flags",
-            format!(
-                "{:#x}  {}",
-                request.verifier_flags,
-                request.verifier_flag_names.join(" ")
-            ),
+            "verifier flags",
+            flags_text(request.verifier_flags, &request.verifier_flag_names),
         );
     }
 }
 
 fn print_target_requests(title: &str, requests: &[WdfTargetRequest], stopped: &Option<String>) {
-    outln!("{} ({})", ui::label(title), requests.len());
+    print_section(&format!("{title} ({})", requests.len()));
     for request in requests {
         let handle = request
             .handle
-            .map_or_else(|| ui::muted("none (the framework's own)"), ui::addr);
+            .map_or_else(|| ui::muted("- (the framework's own)"), ui::addr);
         outln!(
-            "   WDFREQUEST {handle}  FxRequest {}  IRP {}",
+            "  WDFREQUEST {handle}  FxRequest {}  IRP {}",
             ui::addr(request.address.0),
             ui::addr_opt(request.irp)
         );
     }
-    print_stopped("   ", "list", stopped);
+    print_stopped("  ", "list", stopped);
 }
 
 fn print_io_target(target: &WdfIoTargetDetail) {
-    field("WDFIOTARGET", ui::addr(target.handle));
+    outln!("{} {}", ui::label("WDFIOTARGET"), ui::addr(target.handle));
     field("FxIoTarget", ui::addr(target.address.0));
     field(
-        "Driver",
+        "driver",
         format!(
             "{}  (globals {})",
             name_text(&target.driver),
@@ -1037,7 +1043,7 @@ fn print_io_target(target: &WdfIoTargetDetail) {
         ),
     );
     field(
-        "Kind",
+        "kind",
         format!(
             "{}{}  ({})",
             target.kind,
@@ -1049,22 +1055,22 @@ fn print_io_target(target: &WdfIoTargetDetail) {
             target.type_name
         ),
     );
-    field("State", enum_text(&target.state));
+    field("state", enum_text(&target.state));
     if let Some(state) = &target.open_state {
-        field("Open state", enum_text(state));
+        field("open state", enum_text(state));
     }
     let device = object_ref_text(&target.device);
     field(
-        "Device",
+        "device",
         match target.device {
             Some(_) => format!("{device}  {}", ui::muted("(!wdfkd.wdfdevice)")),
             None => device,
         },
     );
-    field("In stack", yes_no(target.in_stack));
-    field("In-stack device", ui::addr_opt(target.in_stack_device));
+    field("in stack", yes_no(target.in_stack));
+    field("in-stack device", ui::addr_opt(target.in_stack_device));
     field(
-        "Target device",
+        "target device",
         if target.target_device.is_zero() {
             ui::addr_opt(target.target_device)
         } else {
@@ -1076,10 +1082,10 @@ fn print_io_target(target: &WdfIoTargetDetail) {
             )
         },
     );
-    field("Target PDO", ui::addr_opt(target.target_pdo));
+    field("target PDO", ui::addr_opt(target.target_pdo));
     if !target.file_object.is_zero() {
         field(
-            "File object",
+            "file object",
             format!(
                 "{}  {}",
                 ui::addr(target.file_object.0),
@@ -1088,15 +1094,14 @@ fn print_io_target(target: &WdfIoTargetDetail) {
         );
     }
     field("I/O count", target.io_count);
-    field("Stack size", target.stack_size);
-    outln!();
-    print_target_requests("Sent requests", &target.sent, &target.sent_stopped);
+    field("stack size", target.stack_size);
+    print_target_requests("sent requests", &target.sent, &target.sent_stopped);
     print_target_requests(
-        "Requests sent ignoring the target state",
+        "requests sent ignoring the target state",
         &target.ignored,
         &target.ignored_stopped,
     );
-    print_target_requests("Pended requests", &target.pended, &target.pended_stopped);
+    print_target_requests("pended requests", &target.pended, &target.pended_stopped);
 }
 
 /// An IFR record as one line: its sequence number, its time when it has
@@ -1105,7 +1110,8 @@ fn print_io_target(target: &WdfIoTargetDetail) {
 pub fn ifr_entry_line(entry: &WdfLogEntry) -> String {
     let record = &entry.record;
     let time = record
-        .timestamp_utc()
+        .timestamp
+        .and_then(filetime_to_iso_precise)
         .map(|time| format!("{time} "))
         .unwrap_or_default();
     match &entry.text {
@@ -1158,7 +1164,6 @@ fn print_log(log: &WdfLogDump) {
             ))
         ),
     }
-    outln!();
 }
 
 fn print_dump_drivers(drivers: &[WdfDumpDriver]) {
@@ -1172,7 +1177,7 @@ fn print_dump_drivers(drivers: &[WdfDumpDriver]) {
                 .unwrap_or_else(|| "<missing name>".into()),
             format!("v{}.{}({:04})", driver.major, driver.minor, driver.build),
             if driver.globals.0 == 0 {
-                String::new()
+                "-".to_string()
             } else {
                 ui::addr(driver.globals.0).to_string()
             },
@@ -1180,5 +1185,4 @@ fn print_dump_drivers(drivers: &[WdfDumpDriver]) {
     }
     print_padded_table(builder);
     outln!("{}", ui::muted(&format!("({} drivers)", drivers.len())));
-    outln!();
 }

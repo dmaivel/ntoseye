@@ -35,29 +35,26 @@ pub const STATUS_BREAKPOINT: u32 = 0x8000_0003;
 
 pub use crate::session::context::refresh_windows_thread_context_for_backend_thread;
 
-/// One-line summary: `thread Idle  state Running  ethread <addr>  pid 0  tid 0`.
-/// The leading `thread` label distinguishes it from the break line above,
-/// which names the process context (via CR3), not the thread's owner.
+/// One-line summary in `!thread`'s words: `thread <addr>  TID 0  PID 0
+/// process Idle  state Running`. The leading `thread` label distinguishes it
+/// from the break line above, which names the process context (via CR3),
+/// not the thread's owner.
 fn format_windows_thread(thread: &ThreadInfo) -> String {
     let process = thread.process_name.as_deref().unwrap_or("unknown");
-    let mut line = format!("{} {}", ui::muted("thread"), process);
+    let mut line = format!("{} {}", ui::muted("thread"), ui::addr(thread.ethread.0));
+    if let Some(tid) = thread.tid {
+        line.push_str(&format!("  {} {tid}", ui::muted("TID")));
+    }
+    if let Some(pid) = thread.pid {
+        line.push_str(&format!("  {} {pid}", ui::muted("PID")));
+    }
+    line.push_str(&format!("  {} {process}", ui::muted("process")));
     if let Some(state) = thread.state {
         line.push_str(&format!(
             "  {} {}",
             ui::muted("state"),
             kthread_state_name(state)
         ));
-    }
-    line.push_str(&format!(
-        "  {} {}",
-        ui::muted("ethread"),
-        ui::addr(thread.ethread.0)
-    ));
-    if let Some(pid) = thread.pid {
-        line.push_str(&format!("  {} {pid}", ui::muted("pid")));
-    }
-    if let Some(tid) = thread.tid {
-        line.push_str(&format!("  {} {tid}", ui::muted("tid")));
     }
     line
 }
@@ -276,8 +273,7 @@ pub fn print_break_context_for_bugcheck(session: &mut Session, info: Option<&Bug
 /// Windows hypervisor: its registers (the general-purpose ones only when
 /// they were recovered), the NT code it left off at, and its stack.
 fn print_saved_vtl0_context(session: &Session, saved: &HashMap<String, u64>) {
-    print_section("registers (saved VTL0)");
-    print_sparse_registers(saved, session.target.arch(), None, 2);
+    print_known_registers(saved, session.target.arch(), "registers (saved VTL0)");
     let (trace, rip, stack) = saved_vtl0_code(session, saved);
     print_disasm_context(session, &trace, rip, NextStep::default());
     print_stacktrace_data(

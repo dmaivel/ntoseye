@@ -36,7 +36,9 @@ use crate::base::diagnostics;
 use crate::base::error::Error;
 use crate::base::error::Result;
 #[cfg(feature = "cli")]
-use crate::base::output::{self, drop_trailing_blank_lines, log_input_line, prompting};
+use crate::base::output::{
+    self, drop_leading_blank_lines, drop_trailing_blank_lines, log_input_line, prompting,
+};
 #[cfg(feature = "cli")]
 use crate::base::time::filetime_to_iso;
 #[cfg(feature = "cli")]
@@ -223,11 +225,21 @@ pub fn print_backend_capability_warning(capabilities: &[BackendCapability]) {
 }
 
 pub fn print_padded_table(builder: Builder) {
+    print_indented_table(builder, "");
+}
+
+/// [`print_padded_table`] `indent` in, under a heading that is.
+pub fn print_indented_table(builder: Builder, indent: &str) {
     let mut table = builder.build();
     table
         .with(tabled::settings::Style::empty())
         .with(Padding::new(0, 2, 0, 0));
-    outln!("{table}\n");
+    // tabled pads the last column too: its rows end without the spaces.
+    for line in table.to_string().lines() {
+        outln!("{indent}{}", line.trim_end());
+    }
+    // Apart from what follows; dropped when nothing does.
+    outln!();
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -775,7 +787,7 @@ struct KernelSummary {
 /// What a user-mode minidump captured, as the session opens with it.
 #[cfg(feature = "cli")]
 struct UserDumpSummary {
-    /// `charmap.exe (pid 1234)`.
+    /// `charmap.exe (PID 1234)`.
     process: String,
     /// `Windows 10.0.26100 AMD64`, with the build string when recorded.
     system: String,
@@ -1152,6 +1164,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                 }
 
                 log_input_line(command);
+                drop_leading_blank_lines();
                 state.line = command.to_string();
                 // A Ctrl+C that ended the last command's step is spent.
                 state.ctx.target.interrupt.store(false, Ordering::SeqCst);
@@ -1204,6 +1217,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                     Signal::Success(buffer) => {
                         if !buffer.trim().is_empty() {
                             log_input_line(buffer.trim());
+                            drop_leading_blank_lines();
                             state.line = buffer.trim().to_string();
                             // A Ctrl+C that ended the last command's step is spent.
                             state.ctx.target.interrupt.store(false, Ordering::SeqCst);

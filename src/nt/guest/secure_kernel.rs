@@ -173,7 +173,7 @@ fn discover(
     let runs = phys.ram_runs();
     if runs.is_empty() {
         return Err(Error::SecureKernel(
-            "direct host RAM is required; KD-only memory and NT dumps do not expose VTL1"
+            "reading VTL1 needs direct host RAM: the memory or gdb backend, or kd/kdnet with --memory-source host; KD memory reads and NT dumps do not expose VTL1"
                 .to_string(),
         ));
     }

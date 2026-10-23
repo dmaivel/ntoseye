@@ -60,39 +60,41 @@ A request that a driver has not completed is on a list of its queue or of the I/
 ```text
 !wdfkd.wdfqueue 00004d757979dfd8
 ...
-Driver cancelable requests (1)
-   WDFREQUEST 00004d7578be4348  FxRequest ffffb28a8741bcb0  IRP ffffb28a8c811a30
-Driver owned requests (1)
-   WDFREQUEST 00004d7578be4348  FxRequest ffffb28a8741bcb0  IRP ffffb28a8c811a30
+
+driver cancelable requests (1)
+  WDFREQUEST 00004d7578be4348  FxRequest ffffb28a8741bcb0  IRP ffffb28a8c811a30
+
+driver owned requests (1)
+  WDFREQUEST 00004d7578be4348  FxRequest ffffb28a8741bcb0  IRP ffffb28a8c811a30
 ```
 
 {command}`!wdfkd.wdfrequest` shows the request. For its IRP, it shows the current stack location with the major function, the device object, and the buffer lengths of a read, a write, or a device control. To see all of the stack locations of the IRP, pass the IRP to {command}`!irp`. The command also shows the queue that the request came from and whether the request can be canceled: here the balloon driver marked its request cancelable, and the cancel routine is the driver's own:
 
 ```text
 !wdfkd.wdfrequest 00004d7578be4348
-WDFREQUEST             00004d7578be4348
-FxRequest              ffffb28a8741bcb0
-Driver                 BALLOON  (globals ffffb28a86827dd0)
-Reference count        2
-Object state           FxObjectStateCreated (0x1)
-Parent                 none
-IRP                    ffffb28a8c811a30  (!irp)
-Current location       3 of 3: IRP_MJ_WRITE
-  Device               ffffb28a86861a30  \Driver\BALLOON  (!devobj)
-  Parameters           length 0x64
-  File object          ffffb28a8a8787e0
-  System buffer        ffffb28a8ccdc780
-IRP allocated by       REQUEST_ALLOCATED_FROM_IO (0x0)
-IRP references         0
-Completed              no
-Canceled               no
-Presented              yes
-Completion state       FxRequestCompletionStateQueue (0x1)
-Queue                  ffffb28a86862020  handle 00004d757979dfd8  FX_TYPE_QUEUE  (!wdfkd.wdfqueue)
-Cancelable             yes, the driver marked it cancelable
-EvtRequestCancel       fffff807c3142bd0  balloon!BalloonEvtRequestCancel
-I/O target             none
-Target flags           0x0
+WDFREQUEST 00004d7578be4348
+  FxRequest              ffffb28a8741bcb0
+  driver                 BALLOON  (globals ffffb28a86827dd0)
+  reference count        2
+  object state           FxObjectStateCreated (0x1)
+  parent                 -
+  IRP                    ffffb28a8c811a30  (!irp)
+  current location       3 of 3: IRP_MJ_WRITE
+    device               ffffb28a86861a30  \Driver\BALLOON  (!devobj)
+    parameters           length 0x64
+    file object          ffffb28a8a8787e0
+    system buffer        ffffb28a8ccdc780
+  IRP allocated by       REQUEST_ALLOCATED_FROM_IO (0x0)
+  IRP references         0
+  completed              no
+  canceled               no
+  presented              yes
+  completion state       FxRequestCompletionStateQueue (0x1)
+  queue                  ffffb28a86862020  handle 00004d757979dfd8  FX_TYPE_QUEUE  (!wdfkd.wdfqueue)
+  cancelable             yes, the driver marked it cancelable
+  EvtRequestCancel       fffff807c3142bd0  balloon!BalloonEvtRequestCancel
+  I/O target             -
+  target flags           0x0
 ```
 
 A request that the driver forwarded or sent down shows the I/O target that it went to, the completion routine that the driver set, and the context of that routine. The current stack location is then the one of the driver below, which has the request now.
@@ -101,8 +103,8 @@ A request that the driver forwarded or sent down shows the I/O target that it we
 
 ```text
 I/O targets
-WDFIOTARGET       FxIoTarget        Kind   State    Target device
-00004d75797c0f88  ffffb28a8683f070  local  Started  ffffb28a8610dbd0  default
+WDFIOTARGET       FxIoTarget        Kind   State    Target device     Default
+00004d75797c0f88  ffffb28a8683f070  local  Started  ffffb28a8610dbd0  yes
 ```
 
 {command}`!wdfkd.wdfiotarget` shows a target: whether it is local, in the device's own stack, or remote, opened by the driver with `WdfIoTargetOpen`, and its state. It also shows the device object that the target sends to and the driver of that device object, and then the requests on its lists:
@@ -115,22 +117,24 @@ Each request shows its WDFREQUEST handle and IRP. A request without a handle is 
 
 ```text
 !wdfkd.wdfiotarget 00004d75797c0f88
-WDFIOTARGET            00004d75797c0f88
-FxIoTarget             ffffb28a8683f070
-Driver                 BALLOON  (globals ffffb28a86827dd0)
-Kind                   local, the default I/O target  (FX_TYPE_IO_TARGET)
-State                  WdfIoTargetStarted (0x1)
-Device                 ffffb28a86828520  handle 00004d75797d7ad8  FX_TYPE_DEVICE  (!wdfkd.wdfdevice)
-In stack               yes
-In-stack device        ffffb28a86861a30
-Target device          ffffb28a8610dbd0  \Driver\ACPI  (!devobj)
-Target PDO             ffffb28a8610d060
-I/O count              1
-Stack size             2
+WDFIOTARGET 00004d75797c0f88
+  FxIoTarget             ffffb28a8683f070
+  driver                 BALLOON  (globals ffffb28a86827dd0)
+  kind                   local, the default I/O target  (FX_TYPE_IO_TARGET)
+  state                  WdfIoTargetStarted (0x1)
+  device                 ffffb28a86828520  handle 00004d75797d7ad8  FX_TYPE_DEVICE  (!wdfkd.wdfdevice)
+  in stack               yes
+  in-stack device        ffffb28a86861a30
+  target device          ffffb28a8610dbd0  \Driver\ACPI  (!devobj)
+  target PDO             ffffb28a8610d060
+  I/O count              1
+  stack size             2
 
-Sent requests (0)
-Requests sent ignoring the target state (0)
-Pended requests (0)
+sent requests (0)
+
+requests sent ignoring the target state (0)
+
+pended requests (0)
 ```
 
 A request on a list of a target must name that target as the target that it was sent to, and a list stops at the first request that does not, with the reason.
@@ -164,10 +168,10 @@ The IFR above holds KMDF's own messages. A driver's own WPP trace messages go to
 {command}`!rcdrkd.rcdrloglist` without an argument lists the drivers the recorder serves:
 
 ```text
-Context           Driver            Image                               Logs
-ffffa08e683bfa40  usbxhci           fffff807d8890000  usbxhci           10
-ffffa08e683bed50  ucx01000          fffff807d8960000  ucx01000          1
-ffffa08e619bee20  pci               fffff80624dd0000  pci               35
+Context           Driver    Image             Module    Logs
+ffffa08e683bfa40  usbxhci   fffff807d8890000  usbxhci   10
+ffffa08e683bed50  ucx01000  fffff807d8960000  ucx01000  1
+ffffa08e619bee20  pci       fffff80624dd0000  pci       35
 ```
 
 With a driver, by its name with or without `.sys`, it lists that driver's logs. A driver can create a log per device or per queue, and each log has a normal partition and an error partition, which keeps the messages logged at error level for longer:
@@ -176,7 +180,7 @@ With a driver, by its name with or without `.sys`, it lists that driver's logs. 
 !rcdrkd.rcdrloglist usbxhci
 WPP recorder logs of usbxhci  context ffffa08e683bfa40  image fffff807d8890000  usbxhci
 Log               Identifier      Size   Partitions                                            Notes
-ffffa08e688f31e0                  0x0    normal 0x0/0x0 of 0x0, error 0x0/0x0 of 0x0           default timestamps
+ffffa08e688f31e0  -               0x0    normal 0x0/0x0 of 0x0, error 0x0/0x0 of 0x0           default timestamps
 ffffa08e68966ae0  00 1b36 000d    0x400  normal 0x258/0x234 of 0x338, error 0x48/0x24 of 0xc8  timestamps
 ffffa08e68a3c9f0  00 CMD          0x400  normal 0x198/0x15c of 0x338, error 0x0/0x0 of 0xc8    timestamps
 ```
@@ -186,9 +190,9 @@ ffffa08e68a3c9f0  00 CMD          0x400  normal 0x198/0x15c of 0x338, error 0x0/
 ```text
 !rcdrkd.rcdrlogdump usbxhci
 WPP recorder log of usbxhci (10 logs, sequence 1364)
-386: [00 1b36 000d error] 2026-10-09 23:52:21.5923790 Velocity for Feature_RetryStopEpOnSuccessWithStateNotStopped (60982130) is enabled
-865: [00 INT00] 2026-10-09 23:52:21.9650709 [  1] SlotId  1 EndpointId  0 ED 0 Pointer 27fff9a00        Length 0        CC_SUCCESS TT_COMMAND_COMPLETION_EVENT
-896: [00 CMD] 2026-10-09 23:52:21.9978283 Completed Crb 0xFFFFA08E68F6FE30 found: TT_ADDRESS_DEVICE_COMMAND CC_SUCCESS CycleBit 1 SlotId 1
+386: [00 1b36 000d error] 2026-10-09T23:52:21.5923790Z Velocity for Feature_RetryStopEpOnSuccessWithStateNotStopped (60982130) is enabled
+865: [00 INT00] 2026-10-09T23:52:21.9650709Z [  1] SlotId  1 EndpointId  0 ED 0 Pointer 27fff9a00        Length 0        CC_SUCCESS TT_COMMAND_COMPLETION_EVENT
+896: [00 CMD] 2026-10-09T23:52:21.9978283Z Completed Crb 0xFFFFA08E68F6FE30 found: TT_ADDRESS_DEVICE_COMMAND CC_SUCCESS CycleBit 1 SlotId 1
 ```
 
 `-a <log>` shows one log only. As with {command}`!wdfkd.wdflogdump`, the messages come from the TMF annotations in a loaded PDB: some of Microsoft's public PDBs carry them, as usbxhci's does, and for your own driver, add its private PDB to the symbol path. A record without one shows its message GUID, number, and argument bytes.
@@ -203,7 +207,7 @@ When Windows writes a crash dump, KMDF adds two blocks of its own to the dump's 
 
 ```text
 IFR log of wtd (IFR header ffff9888a1377000, 0xfb8 bytes, sequence 1, timestamps)
-1: 2026-10-06 06:43:00.2720777 FxIFRStart - FxIFR logging started
+1: 2026-10-06T06:43:00.2720777Z FxIFRStart - FxIFR logging started
 (1 records; reached the first record written)
 ```
 

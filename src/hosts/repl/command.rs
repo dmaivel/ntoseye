@@ -67,11 +67,10 @@ impl Render for () {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {}
 }
 
-/// A result that is one line of text (a path the command wrote): the line
-/// and a blank one.
+/// A result that is one line of text (a path the command wrote).
 impl Render for String {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
-        outln!("{self}\n");
+        outln!("{self}");
     }
 }
 

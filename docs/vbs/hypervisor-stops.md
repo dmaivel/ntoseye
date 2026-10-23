@@ -40,7 +40,7 @@ A vCPU can also stop on the first instruction of the hypervisor's VM-exit handle
 
 The NT thread that runs on that processor also starts from the same saved state everywhere that ntoseye shows this thread:
 
-- {command}`!thread` shows the stack of the thread from this point (`k-stack (saved VTL0 context)`).
+- {command}`!thread` shows the stack of the thread from this point (`stack (saved VTL0 context)`).
 - {command}`.thread` selects this state as the register context of the thread.
 - The SDK's `Thread.backtrace()` also starts from this state.
 - For running threads, the stacks that {command}`!running` `-t`, {command}`!stacks`, {command}`!process`, and {command}`!analyze` `-hang` show also start from this state.

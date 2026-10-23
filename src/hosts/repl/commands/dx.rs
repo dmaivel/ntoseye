@@ -274,7 +274,6 @@ fn child_text(line: &DxLine, indent: usize) -> String {
 fn print_dx(root: &DxLine) {
     outln!("{}", root_text(root));
     print_dx_children(&root.children, 4);
-    outln!();
 }
 
 /// A collection as a grid (`dx -g`), framed as WinDbg's console frames it:
@@ -352,7 +351,6 @@ fn print_dx_grid(root: &DxLine) {
         outln!("{}", line(row, "-"));
     }
     outln!("{border}");
-    outln!();
 }
 
 fn print_dx_children(lines: &[DxLine], indent: usize) {
@@ -444,7 +442,7 @@ impl ReplState<'_> {
         match root {
             Ok(root) if args.grid => print_dx_grid(&root),
             Ok(root) => print_dx(&root),
-            Err(error) => error!("dx: {error}"),
+            Err(error) => error!("{error}"),
         }
         Ok(())
     }

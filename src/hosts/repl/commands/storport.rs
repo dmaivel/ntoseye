@@ -10,13 +10,13 @@ use ntoseye_macros::{command, grammar};
 use tabled::builder::Builder;
 
 use crate::base::error::{Error, Result};
+use crate::base::time::filetime_to_iso_precise;
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::target::Target;
 use crate::nt::target::classpnp::{ClassDevice, ClassDeviceDetail, ClassDevices};
-use crate::nt::target::etw::format_filetime_precise;
 use crate::nt::target::srb::{Srb, srb_function_name, srb_status_text};
 use crate::nt::target::storport::{
     StorAdapter, StorAdapterEntry, StorDrivers, StorEnumValue, StorLog, StorLogEntry, StorUnit,
@@ -416,7 +416,7 @@ const DEFAULT_LOG_ENTRIES: u64 = 50;
 
 /// A request's command, from the operation code alone.
 fn opcode_text(opcode: u8) -> String {
-    scsi_command(&[opcode]).unwrap_or_default()
+    scsi_command(&[opcode]).unwrap_or_else(|| "-".to_string())
 }
 
 /// What a log entry records: the request for an entry of storport's
@@ -472,18 +472,18 @@ fn print_log(
         );
     }
     if shown.is_empty() {
-        outln!("{}\n", ui::muted("no entries"));
+        outln!("{}", ui::muted("no entries"));
         return;
     }
     let mut builder = Builder::default();
-    builder.push_record(["Entry", "Time (UTC)", "Event", "Details"]);
+    builder.push_record(["Entry", "Time", "Event", "Details"]);
     for entry in shown {
         let event = entry
             .event()
             .unwrap_or_else(|| format!("{:#x}", entry.event_value()));
         builder.push_record([
             format!("{:#x}", entry.number),
-            format_filetime_precise(entry.time).unwrap_or_else(|| format!("{:#x}", entry.time)),
+            filetime_to_iso_precise(entry.time).unwrap_or_else(|| format!("{:#x}", entry.time)),
             event,
             log_details(target, entry),
         ]);
@@ -491,10 +491,10 @@ fn print_log(
     print_padded_table(builder);
 }
 
-/// An address, or a muted `none` for a null pointer.
+/// An address, or a muted `-` for a null pointer.
 fn addr_or_none(value: VirtAddr) -> String {
     if value.is_zero() {
-        ui::muted("none")
+        ui::muted("-")
     } else {
         ui::addr(value.0)
     }
@@ -510,12 +510,12 @@ fn cdb_text(cdb: &[u8]) -> String {
         .join(" ");
     match scsi_command(cdb) {
         Some(command) => format!("{command}  {}", ui::muted(&format!("(CDB {bytes})"))),
-        None => ui::muted("none"),
+        None => ui::muted("-"),
     }
 }
 
 fn print_srb(srb: &Srb) {
-    field(
+    heading(
         "SRB",
         format!(
             "{}  ({})",
@@ -528,7 +528,7 @@ fn print_srb(srb: &Srb) {
         ),
     );
     field(
-        "Function",
+        "function",
         match srb_function_name(srb.function) {
             Some(name) => format!("{name} ({:#x})", srb.function),
             None => format!("{:#x}", srb.function),
@@ -542,13 +542,13 @@ fn print_srb(srb: &Srb) {
     if let Some(scsi) = srb.scsi_status {
         status.push_str(&format!(", SCSI {}", scsi_status(scsi)));
     }
-    field("Status", status);
+    field("status", status);
     if !srb.cdb.is_empty() {
-        field("Command", cdb_text(&srb.cdb));
+        field("command", cdb_text(&srb.cdb));
     }
     if let (Some(path), Some(target), Some(lun)) = (srb.path, srb.target, srb.lun) {
         field(
-            "Address",
+            "address",
             match srb.port {
                 Some(port) => format!("port {port}, path {path}, target {target}, LUN {lun}"),
                 None => format!("path {path}, target {target}, LUN {lun}"),
@@ -556,12 +556,12 @@ fn print_srb(srb: &Srb) {
         );
     }
     field(
-        "Data",
+        "data",
         if srb.data_buffer.is_zero() {
             format!(
-                "{:#x} bytes, {}",
+                "{:#x} bytes, DataBuffer {}",
                 srb.data_transfer_length,
-                ui::muted("DataBuffer null")
+                ui::muted("-")
             )
         } else {
             format!(
@@ -574,19 +574,19 @@ fn print_srb(srb: &Srb) {
     field("IRP", addr_or_none(srb.original_request));
     let flags = srb.flag_names();
     field(
-        "Flags",
+        "flags",
         if flags.is_empty() {
             format!("{:#x}", srb.flags)
         } else {
-            format!("{:#x} ({})", srb.flags, flags.join(" "))
+            format!("{:#x} ({})", srb.flags, flags.join(" | "))
         },
     );
-    field("Timeout", format!("{} s", srb.timeout));
+    field("timeout", format!("{} s", srb.timeout));
     if let (Some(tag), Some(priority)) = (srb.request_tag, srb.priority) {
-        field("Tag", format!("{tag:#x}, priority {priority}"));
+        field("tag", format!("{tag:#x}, priority {priority}"));
     }
     field(
-        "Sense",
+        "sense",
         if srb.sense_buffer.is_zero() {
             ui::muted("no buffer")
         } else {
@@ -605,7 +605,7 @@ fn print_srb(srb: &Srb) {
         (srb.class_context, srb.port_context, srb.miniport_context)
     {
         field(
-            "Contexts",
+            "contexts",
             format!(
                 "class {}, port {}, miniport {}",
                 addr_or_none(class),
@@ -614,10 +614,9 @@ fn print_srb(srb: &Srb) {
             ),
         );
     }
-    field("Next SRB", addr_or_none(srb.next_srb));
+    field("next SRB", addr_or_none(srb.next_srb));
     if !srb.ex_data.is_empty() {
-        outln!();
-        outln!("{} ({})", ui::label("Extended data"), srb.ex_data.len());
+        print_section(&format!("extended data ({})", srb.ex_data.len()));
         let mut builder = Builder::default();
         builder.push_record(["Address", "Type", "Length"]);
         for data in &srb.ex_data {
@@ -628,8 +627,6 @@ fn print_srb(srb: &Srb) {
             ]);
         }
         print_padded_table(builder);
-    } else {
-        outln!();
     }
 }
 
@@ -668,22 +665,19 @@ fn print_class_devices(list: &ClassDevices) {
                 || ui::muted(&format!("private {:x}", device.private_data.0)),
                 |fdo| ui::addr(fdo.0),
             ),
-            device.driver.clone().unwrap_or_else(|| "?".into()),
+            device.driver.clone().unwrap_or_else(|| "-".into()),
             device
                 .device_number
                 .map(|number| number.to_string())
-                .unwrap_or_default(),
-            device.bus_type.clone().unwrap_or_default(),
-            class_product(device),
+                .unwrap_or_else(|| "-".to_string()),
+            device.bus_type.clone().unwrap_or_else(|| "-".to_string()),
+            or_dash(class_product(device)),
             packets_text(device),
-            notes.join(" "),
+            or_dash(notes.join(" ")),
         ]);
     }
     if list.devices.is_empty() && list.unreadable.is_empty() {
-        outln!(
-            "{}\n",
-            ui::muted("no class devices on classpnp!AllFdosList")
-        );
+        outln!("{}", ui::muted("no class devices on classpnp!AllFdosList"));
     } else {
         print_padded_table(builder);
     }
@@ -717,8 +711,8 @@ fn size_text(bytes: u64) -> String {
 
 fn print_class_device(detail: &ClassDeviceDetail) {
     let device = &detail.device;
-    field(
-        "Class device",
+    heading(
+        "class device",
         format!(
             "FDO {}  extension {}  private data {}",
             device
@@ -732,7 +726,7 @@ fn print_class_device(detail: &ClassDeviceDetail) {
     );
     if let Some(driver) = &device.driver {
         field(
-            "Driver",
+            "driver",
             match device.device_number {
                 Some(number) => format!("{driver}, device number {number}"),
                 None => driver.clone(),
@@ -742,7 +736,7 @@ fn print_class_device(detail: &ClassDeviceDetail) {
     let product = class_product(device);
     if !product.is_empty() {
         field(
-            "Device",
+            "device",
             match &device.serial {
                 Some(serial) => format!("{product}  serial {serial}"),
                 None => product,
@@ -750,10 +744,10 @@ fn print_class_device(detail: &ClassDeviceDetail) {
         );
     }
     field(
-        "Bus",
+        "bus",
         format!(
             "{}{}{}",
-            device.bus_type.as_deref().unwrap_or("?"),
+            device.bus_type.as_deref().unwrap_or("-"),
             if device.removable { ", removable" } else { "" },
             if device.boot_device {
                 ", boot device"
@@ -764,7 +758,7 @@ fn print_class_device(detail: &ClassDeviceDetail) {
     );
     if device.extension.is_some() {
         field(
-            "Lower devices",
+            "lower devices",
             format!(
                 "next {}  PDO {}",
                 addr_or_none(detail.lower_device),
@@ -772,7 +766,7 @@ fn print_class_device(detail: &ClassDeviceDetail) {
             ),
         );
         field(
-            "Capacity",
+            "capacity",
             format!(
                 "{} ({:#x} bytes), {}-byte sectors",
                 size_text(detail.length),
@@ -781,22 +775,22 @@ fn print_class_device(detail: &ClassDeviceDetail) {
             ),
         );
         field(
-            "Timeout",
+            "timeout",
             format!("{} s, up to {} retries", detail.timeout, detail.max_retries),
         );
-        field("Error count", detail.error_count);
+        field("error count", detail.error_count);
     } else {
         field(
-            "Note",
+            "note",
             ui::muted("no transfer packet names the FDO, so its extension is not read"),
         );
     }
-    field("Transfer packets", packets_text(device));
-    outln!();
+    field("transfer packets", packets_text(device));
     if device.in_flight.is_empty() {
+        outln!();
         outln!("{}", ui::muted("no requests in flight"));
     } else {
-        outln!("{}", ui::label("Requests in flight"));
+        print_section("requests in flight");
         let mut builder = Builder::default();
         builder.push_record([
             "Packet",
@@ -810,10 +804,10 @@ fn print_class_device(detail: &ClassDeviceDetail) {
         for packet in &device.in_flight {
             let (command, status) = match &packet.request {
                 Ok(srb) => (
-                    scsi_command(&srb.cdb).unwrap_or_default(),
+                    scsi_command(&srb.cdb).unwrap_or_else(|| "-".to_string()),
                     srb_status_text(srb.srb_status),
                 ),
-                Err(error) => (ui::muted(error), String::new()),
+                Err(error) => (ui::muted(error), "-".to_string()),
             };
             builder.push_record([
                 ui::addr(packet.address.0),
@@ -834,20 +828,26 @@ fn print_class_device(detail: &ClassDeviceDetail) {
     for stopped in &device.packets_stopped {
         outln!("{}", ui::muted(&format!("({stopped})")));
     }
-    outln!();
+    // A table already ends with a blank line.
+    let after_table = !device.in_flight.is_empty() && device.packets_stopped.is_empty();
     if detail.errors.is_empty() {
-        outln!("{}\n", ui::muted("no errors logged"));
+        if !after_table {
+            outln!();
+        }
+        outln!("{}", ui::muted("no errors logged"));
         return;
     }
-    outln!(
-        "{} ({}, oldest first)",
-        ui::label("Error log"),
-        detail.errors.len()
-    );
+    let title = format!("error log ({}, oldest first)", detail.errors.len());
+    if after_table {
+        outln!("{}", ui::label(&title));
+    } else {
+        print_section(&title);
+    }
     let mut builder = Builder::default();
     builder.push_record([
         "Age",
-        "P/T/L",
+        "Port",
+        "B/T/L",
         "Command",
         "SRB status",
         "SCSI status",
@@ -873,20 +873,35 @@ fn print_class_device(detail: &ClassDeviceDetail) {
                 || format!("tick {:#x}", error.tick),
                 |age| format!("{age:.1} s ago"),
             ),
-            format!("{port}/{}/{}/{}", error.path, error.target, error.lun),
-            scsi_command(&error.cdb).unwrap_or_default(),
+            port,
+            format!("{}/{}/{}", error.path, error.target, error.lun),
+            scsi_command(&error.cdb).unwrap_or_else(|| "-".to_string()),
             srb_status_text(error.srb_status),
             scsi_status(error.scsi_status),
-            error.sense.clone().unwrap_or_default(),
-            notes.join(" "),
+            error.sense.clone().unwrap_or_else(|| "-".to_string()),
+            or_dash(notes.join(" ")),
         ]);
     }
     print_padded_table(builder);
 }
 
-/// A labeled line of a detail view.
+/// A table cell, or `-` when it is empty.
+fn or_dash(text: String) -> String {
+    if text.is_empty() {
+        "-".to_string()
+    } else {
+        text
+    }
+}
+
+/// The first line of a detail view, naming the object.
+fn heading(label: &str, value: impl Display) {
+    outln!("{} {value}", ui::label(label));
+}
+
+/// A labeled line of a detail view, under its heading.
 fn field(label: &str, value: impl Display) {
-    outln!("{} {value}", ui::label(&format!("{label:<20}")));
+    outln!("  {}  {value}", ui::label(&format!("{label:<19}")));
 }
 
 /// An enum value by name without the prefix its type gives every name
@@ -955,7 +970,7 @@ fn print_adapters(drivers: &StorDrivers) {
         }
     }
     if drivers.drivers.is_empty() {
-        outln!("{}\n", ui::muted("no StorPort drivers"));
+        outln!("{}", ui::muted("no StorPort drivers"));
     } else {
         print_padded_table(builder);
     }
@@ -966,8 +981,8 @@ fn print_adapters(drivers: &StorDrivers) {
 }
 
 fn print_adapter(adapter: &StorAdapter) {
-    field(
-        "Adapter",
+    heading(
+        "adapter",
         format!(
             "{}  {}  {} (port {})",
             ui::addr(adapter.extension.0),
@@ -980,7 +995,7 @@ fn print_adapter(adapter: &StorAdapter) {
         ),
     );
     field(
-        "Driver",
+        "driver",
         format!(
             "{}  DRIVER_OBJECT {}  _RAID_DRIVER_EXTENSION {}",
             adapter.driver_name,
@@ -988,9 +1003,9 @@ fn print_adapter(adapter: &StorAdapter) {
             ui::addr_opt(adapter.driver)
         ),
     );
-    field("State", enum_text(&adapter.state, "DeviceState"));
+    field("state", enum_text(&adapter.state, "DeviceState"));
     field(
-        "Power",
+        "power",
         format!(
             "{}, system {}",
             enum_text(&adapter.device_power, "PowerDevice"),
@@ -998,7 +1013,7 @@ fn print_adapter(adapter: &StorAdapter) {
         ),
     );
     field(
-        "Device objects",
+        "device objects",
         format!(
             "FDO {}  PDO {}  lower {}",
             ui::addr_opt(adapter.fdo),
@@ -1006,14 +1021,14 @@ fn print_adapter(adapter: &StorAdapter) {
             ui::addr_opt(adapter.lower)
         ),
     );
-    field("Location", location_text(adapter));
+    field("location", location_text(adapter));
     if let Some(id) = &adapter.adapter_id {
-        field("Adapter ID", id);
+        field("adapter ID", id);
     }
     field(
-        "Miniport extension",
+        "miniport extension",
         if adapter.hw_device_extension.is_zero() {
-            ui::muted("none")
+            ui::muted("-")
         } else {
             format!(
                 "{}{}",
@@ -1026,21 +1041,21 @@ fn print_adapter(adapter: &StorAdapter) {
         },
     );
     if let Some(size) = adapter.lu_extension_size {
-        field("Unit extension size", format!("{size:#x} bytes"));
+        field("unit extension size", format!("{size:#x} bytes"));
     }
     field(
-        "Paths",
+        "paths",
         format!(
             "paging {}, crash dump {}, hibernation {}",
             adapter.paging_paths, adapter.dump_paths, adapter.hiber_paths
         ),
     );
     field(
-        "Flags",
+        "flags",
         if adapter.flags.is_empty() {
-            ui::muted("none")
+            ui::muted("-")
         } else {
-            adapter.flags.join(" ")
+            adapter.flags.join(" | ")
         },
     );
     field(
@@ -1054,7 +1069,7 @@ fn print_adapter(adapter: &StorAdapter) {
     );
     for gateway in &adapter.gateways {
         field(
-            "Gateway",
+            "gateway",
             format!(
                 "{}  outstanding {} of {}, waiting {}, busy {}, paused {}",
                 ui::addr(gateway.address.0),
@@ -1067,9 +1082,8 @@ fn print_adapter(adapter: &StorAdapter) {
         );
     }
     if let Some(error) = &adapter.gateways_error {
-        field("Gateway", ui::muted(error));
+        field("gateway", ui::muted(error));
     }
-    outln!();
     print_units(&adapter.units);
     stopped_line("unit list", &adapter.units_stopped);
 }
@@ -1085,10 +1099,11 @@ fn product_text(unit: &StorUnit) -> String {
 
 fn print_units(units: &[StorUnitEntry]) {
     if units.is_empty() {
-        outln!("{}\n", ui::muted("no units"));
+        outln!();
+        outln!("{}", ui::muted("no units"));
         return;
     }
-    outln!("{}", ui::label("Units"));
+    print_section("units");
     let mut builder = Builder::default();
     builder.push_record(["B/T/L", "Unit", "PDO", "State", "Product", "I/O"]);
     let mut problems = Vec::new();
@@ -1112,8 +1127,8 @@ fn print_units(units: &[StorUnitEntry]) {
 }
 
 fn print_unit(target: &Target, unit: &StorUnit) {
-    field(
-        "Unit",
+    heading(
+        "unit",
         format!(
             "{}  {}  {}",
             ui::addr(unit.extension.0),
@@ -1122,30 +1137,30 @@ fn print_unit(target: &Target, unit: &StorUnit) {
         ),
     );
     field(
-        "Address",
+        "address",
         format!(
             "bus {}, target {}, LUN {}",
             unit.path, unit.target, unit.lun
         ),
     );
-    field("Adapter", ui::addr_opt(unit.adapter));
-    field("Device object", ui::addr_opt(unit.device_object));
-    field("State", enum_text(&unit.state, "DeviceState"));
-    field("Power", enum_text(&unit.device_power, "PowerDevice"));
+    field("adapter", ui::addr_opt(unit.adapter));
+    field("device object", ui::addr_opt(unit.device_object));
+    field("state", enum_text(&unit.state, "DeviceState"));
+    field("power", enum_text(&unit.device_power, "PowerDevice"));
     field(
-        "Miniport extension",
+        "miniport extension",
         if unit.lu_extension.is_zero() {
-            ui::muted("none")
+            ui::muted("-")
         } else {
             ui::addr(unit.lu_extension.0)
         },
     );
     field(
-        "Flags",
+        "flags",
         if unit.flags.is_empty() {
-            ui::muted("none")
+            ui::muted("-")
         } else {
-            unit.flags.join(" ")
+            unit.flags.join(" | ")
         },
     );
     let queue = &unit.queue;
@@ -1161,7 +1176,7 @@ fn print_unit(target: &Target, unit: &StorUnit) {
         }
     }
     field(
-        "Queue",
+        "queue",
         format!(
             "depth {} (unit maximum {}){}",
             queue.depth,
@@ -1174,7 +1189,7 @@ fn print_unit(target: &Target, unit: &StorUnit) {
         ),
     );
     field(
-        "Counts",
+        "counts",
         format!(
             "pause {}, busy {}, bypass {}, waiting {}, waiting to bypass {}",
             queue.pause_count,
@@ -1191,16 +1206,16 @@ fn print_unit(target: &Target, unit: &StorUnit) {
             ui::muted(&format!("(waiting count stopped: {stopped})"))
         );
     }
-    outln!();
     if unit.requests.is_empty() {
+        outln!();
         outln!("{}", ui::muted("no requests with the miniport"));
     } else {
-        outln!("{}", ui::label("Requests with the miniport"));
+        print_section("requests with the miniport");
         let mut builder = Builder::default();
         builder.push_record(["XRB", "IRP", "SRB", "CPU", "Command"]);
         for request in &unit.requests {
             let command = if request.srb.is_zero() {
-                String::new()
+                "-".to_string()
             } else {
                 match target.decode_srb(request.srb) {
                     Ok(srb) => scsi_command(&srb.cdb).unwrap_or_else(|| {
@@ -1223,5 +1238,4 @@ fn print_unit(target: &Target, unit: &StorUnit) {
     for stopped in &unit.requests_stopped {
         outln!("{}", ui::muted(&format!("(pending queue: {stopped})")));
     }
-    outln!();
 }

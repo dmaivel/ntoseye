@@ -113,7 +113,7 @@ pub struct PhysicalWritten {
 
 impl Render for PhysicalWritten {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
-        outln!("wrote {} bytes to physical {:#x}\n", self.len, self.address);
+        outln!("wrote {} bytes to physical {:#x}", self.len, self.address);
     }
 }
 
@@ -205,7 +205,7 @@ fn pointer_value(
 /// by one bit. WinDbg's !search uses the same rules. Each hit shows its PFN,
 /// its offset, and the value, and from the PFN database, the PTE that maps
 /// the page and the virtual address that this PTE maps. The virtual address
-/// is blank when the PTE is not in the self-map. The command skips and
+/// is `-` when the PTE is not in the self-map. The command skips and
 /// counts the pages that it cannot read, and the search stops after 4096
 /// hits or when you press Ctrl+C.
 #[command(
@@ -238,7 +238,7 @@ impl Render for PhysicalSearchResult {
         );
         if !self.hits.is_empty() {
             outln!(
-                "{:<10} {:<6} {:<16} {:<16} {:<16}",
+                "{:<10} {:<6} {:<16} {:<16} {}",
                 "Pfn",
                 "Offset",
                 "Hit",
@@ -248,10 +248,10 @@ impl Render for PhysicalSearchResult {
             let page = PAGE_SIZE as u64;
             for hit in &self.hits {
                 let optional = |address: Option<VirtAddr>| {
-                    address.map_or_else(|| format!("{:16}", ""), |address| ui::addr(address.0))
+                    address.map_or_else(|| format!("{:<16}", "-"), |address| ui::addr(address.0))
                 };
                 let value = format!("{:016x}", hit.value);
-                outln!(
+                let line = format!(
                     "{:<10x} {:<6x} {} {} {}",
                     hit.physical / page,
                     hit.physical % page,
@@ -263,11 +263,14 @@ impl Render for PhysicalSearchResult {
                     optional(hit.va),
                     optional(hit.pte)
                 );
+                // A missing PTE pads its `-` like any other cell; the row
+                // ends there, so the padding goes.
+                outln!("{}", line.trim_end());
             }
             outln!();
         }
         outln!(
-            "{} {} in {:#x} pages",
+            "{} {} in {} pages",
             self.hits.len(),
             if self.hits.len() == 1 { "hit" } else { "hits" },
             self.pages
@@ -275,10 +278,9 @@ impl Render for PhysicalSearchResult {
         if self.unreadable_pages > 0 {
             outln!(
                 "{}",
-                format!("{:#x} unreadable pages skipped", self.unreadable_pages).bright_black()
+                format!("{} unreadable pages skipped", self.unreadable_pages).bright_black()
             );
         }
         print_search_stop(self.stopped, "hits");
-        outln!();
     }
 }

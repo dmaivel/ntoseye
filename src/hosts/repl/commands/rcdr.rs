@@ -180,17 +180,20 @@ fn partitions_text(log: &RcdrLog) -> String {
 
 fn print_drivers(target: &Target, list: &RcdrDriverList) {
     let mut builder = Builder::default();
-    builder.push_record(["Context", "Driver", "Image", "Logs"]);
+    builder.push_record(["Context", "Driver", "Image", "Module", "Logs"]);
     for driver in &list.drivers {
         builder.push_record([
             ui::addr(driver.context.0),
             driver.name.clone(),
-            image_text(target, driver),
+            ui::addr(driver.image.0),
+            target
+                .module_containing(driver.image)
+                .map_or_else(|| "-".to_string(), |module| module.short_name.clone()),
             driver.logs.len().to_string(),
         ]);
     }
     if list.drivers.is_empty() && list.unreadable.is_empty() {
-        outln!("{}\n", ui::muted("the WPP recorder serves no drivers"));
+        outln!("{}", ui::muted("the WPP recorder serves no drivers"));
     } else {
         print_padded_table(builder);
     }
@@ -244,14 +247,22 @@ fn print_logs(target: &Target, logs: &RcdrLogs) {
         }
         builder.push_record([
             ui::addr(log.header.0),
-            log.identifier.clone(),
+            if log.identifier.is_empty() {
+                "-".to_string()
+            } else {
+                log.identifier.clone()
+            },
             format!("{:#x}", log.size),
             partitions_text(log),
-            notes.join(" "),
+            if notes.is_empty() {
+                "-".to_string()
+            } else {
+                notes.join(" ")
+            },
         ]);
     }
     if logs.logs.is_empty() && logs.unreadable.is_empty() {
-        outln!("{}\n", ui::muted("no logs"));
+        outln!("{}", ui::muted("no logs"));
     } else {
         print_padded_table(builder);
     }
@@ -307,5 +318,4 @@ fn print_dump(dump: &RcdrLogDump) {
         "{}",
         ui::muted(&format!("({} records)", dump.entries.len()))
     );
-    outln!();
 }

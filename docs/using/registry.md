@@ -33,30 +33,30 @@ Each line shows the hive's `_CMHIVE`, the bytes of its stable and volatile stora
 
 ```text
 !reg querykey HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters
-Key          \REGISTRY\MACHINE\SYSTEM\ControlSet001\Services\Tcpip\Parameters
-Link         \REGISTRY\MACHINE\SYSTEM\CurrentControlSet -> \Registry\Machine\SYSTEM\ControlSet001
-Hive         ffff80848b234000
-Key node     ffff80848e2b6cbc  cell 0x6abcb8
-Flags        KEY_COMP_NAME
-Last write   2026-10-11 05:20:07
+key \REGISTRY\MACHINE\SYSTEM\ControlSet001\Services\Tcpip\Parameters
+  link        \REGISTRY\MACHINE\SYSTEM\CurrentControlSet -> \Registry\Machine\SYSTEM\ControlSet001
+  hive        ffff80848b234000
+  key node    ffff80848e2b6cbc  cell 0x6abcb8
+  flags       0x20 (KEY_COMP_NAME)
+  last write  2026-10-11T05:20:07Z
 
 6 of 6 subkeys
-Key node          Last write           Subkeys  Values  Name
-ffff80848e2b71e4  2026-10-10 08:13:33  7        0       Adapters
-ffff80848e2b8024  2026-01-18 22:11:35  0        0       DNSRegisteredAdapters
-ffff80848e2b8264  2026-10-10 08:13:33  8        0       Interfaces
-ffff80848e8c092c  2024-04-01 07:26:32  0        0       NsiObjectSecurity
-ffff80848e2baf7c  2024-04-01 07:26:32  0        0       PersistentRoutes
-ffff80848e2bb024  2024-04-01 07:29:15  3        7       Winsock
+Key node          Last write            Subkeys  Values  Name
+ffff80848e2b71e4  2026-10-10T08:13:33Z  7        0       Adapters
+ffff80848e2b8024  2026-01-18T22:11:35Z  0        0       DNSRegisteredAdapters
+ffff80848e2b8264  2026-10-10T08:13:33Z  8        0       Interfaces
+ffff80848e8c092c  2024-04-01T07:26:32Z  0        0       NsiObjectSecurity
+ffff80848e2baf7c  2024-04-01T07:26:32Z  0        0       PersistentRoutes
+ffff80848e2bb024  2024-04-01T07:29:15Z  3        7       Winsock
 
 12 of 12 values
 Type           Name                      Data
 REG_EXPAND_SZ  DataBasePath              %SystemRoot%\System32\drivers\etc
-REG_SZ         Domain
+REG_SZ         Domain                    -
 REG_DWORD      ForwardBroadcasts         0x0 (0)
 REG_SZ         ICSDomain                 mshome.net
 REG_DWORD      IPEnableRouter            0x0 (0)
-REG_SZ         NameServer
+REG_SZ         NameServer                -
 REG_DWORD      SyncDomainWithMembership  0x1 (1)
 REG_SZ         NV Hostname               win11vm
 REG_SZ         Hostname                  win11vm
@@ -67,32 +67,32 @@ REG_SZ         DhcpNameServer            10.0.2.3
 (data cut short; !reg querykey <path> -v <value> shows a value in full)
 ```
 
-The path resolves as the kernel parses it. It starts at `\REGISTRY`, the root of the master hive, crosses from the key where a hive is mounted to the root of that hive, and follows symbolic links. `CurrentControlSet` is a symbolic link to the control set in use, and each `Link` line names a link that the path went through. The key shows its full path with the names as the hive stores them. Subkeys and values are listed in the order that the kernel enumerates them, which is the order of `reg query` in the guest: the stable subkeys sorted by name, then the volatile ones, and the values in the order of the key's value list.
+The path resolves as the kernel parses it. It starts at `\REGISTRY`, the root of the master hive, crosses from the key where a hive is mounted to the root of that hive, and follows symbolic links. `CurrentControlSet` is a symbolic link to the control set in use, and each `link` line names a link that the path went through. The key shows its full path with the names as the hive stores them. Subkeys and values are listed in the order that the kernel enumerates them, which is the order of `reg query` in the guest: the stable subkeys sorted by name, then the volatile ones, and the values in the order of the key's value list.
 
 Each value's data is decoded by its type: `REG_SZ`, `REG_EXPAND_SZ` (not expanded), and `REG_LINK` as text, `REG_MULTI_SZ` as its strings separated by `\0`, `REG_DWORD`, `REG_DWORD_BIG_ENDIAN`, and `REG_QWORD` in hex and decimal, and the other types as hex bytes. Long strings and data are cut short. `-v` shows one value in full, the decoded data and every byte, and `-v ""` shows the default value:
 
 ```text
 !reg q HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer -v DependOnService
-Key          \REGISTRY\MACHINE\SYSTEM\ControlSet001\Services\LanmanServer
-Link         \REGISTRY\MACHINE\SYSTEM\CurrentControlSet -> \Registry\Machine\SYSTEM\ControlSet001
-Hive         ffff80848b234000
-Key node     ffff80848e1f6d64  cell 0x4efd60
-Flags        KEY_COMP_NAME
-Last write   2026-01-18 22:11:32
+key \REGISTRY\MACHINE\SYSTEM\ControlSet001\Services\LanmanServer
+  link        \REGISTRY\MACHINE\SYSTEM\CurrentControlSet -> \Registry\Machine\SYSTEM\ControlSet001
+  hive        ffff80848b234000
+  key node    ffff80848e1f6d64  cell 0x4efd60
+  flags       0x20 (KEY_COMP_NAME)
+  last write  2026-01-18T22:11:32Z
 
-Value        DependOnService
-Type         REG_MULTI_SZ
-Length       0x18 bytes, in a cell
-Value node   ffff80848e1f6dc4  cell 0x4efdc0
-Data         2 strings
-  [0] SamSS
-  [1] Srv2
+value DependOnService
+  type        REG_MULTI_SZ (0x7)
+  length      0x18 bytes, in a cell
+  value node  ffff80848e1f6dc4  cell 0x4efdc0
+  data        2 strings
+    [0] SamSS
+    [1] Srv2
 
-  000000  53 00 61 00 6D 00 53 00 53 00 00 00 53 00 72 00  S.a.m.S.S...S.r.
-  000010  76 00 32 00 00 00 00 00                          v.2.....
+  0000  53 00 61 00 6d 00 53 00 53 00 00 00 53 00 72 00  S.a.m.S.S...S.r.
+  0010  76 00 32 00 00 00 00 00                          v.2.....
 ```
 
-A value whose data is longer than one cell holds (16,344 bytes), such as `AppCompatCache` in `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\AppCompatCache`, is stored in big data segments, which `-v` reads and joins: `Length 0x1b77a bytes, in big data segments`.
+A value whose data is longer than one cell holds (16,344 bytes), such as `AppCompatCache` in `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\AppCompatCache`, is stored in big data segments, which `-v` reads and joins: `length 0x1b77a bytes, in big data segments`.
 
 At the prompt, the Tab key completes a path one key at a time.
 
@@ -104,10 +104,10 @@ A hive is a run of bins of cells, and the hive's cell map gives the address of e
 !reg q HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion
 ...
 58 of 101 subkeys
-Key node          Last write           Subkeys  Values  Name
-000001c124ae8984  2026-10-10 08:13:36  4        0       Accessibility
+Key node          Last write            Subkeys  Values  Name
+000001c124ae8984  2026-10-10T08:13:36Z  4        0       Accessibility
 ...
-subkey cell 0x3bb8b00: the cell at 0x1c125559b00 is not in memory: Bad virtual address: 1c125559b00
+subkey cell 0x3bb8b00: the cell at 0x1c125559b00 is not in memory: bad virtual address: 0x1c125559b00
 ...
 ```
 
@@ -119,11 +119,11 @@ Once the guest reads those keys, for example with `reg query`, their pages are i
 
 ```text
 !reg cellindex ffff80848b936000 764008
-Cell         0x764008 (stable)  hive ffff80848b936000
-Map          directory 3, table 356, offset 0x8
-Map entry    ffff80848b9d4160  block 000001c122105000
-Address      000001c122105008  data at 000001c12210500c
-Size         0x28, in use
+cell 0x764008 (stable)  hive ffff80848b936000
+  map         directory 3, table 356, offset 0x8
+  map entry   ffff80848b9d4160  block 000001c122105000
+  address     000001c122105008  data at 000001c12210500c
+  size        0x28, in use
 ```
 
 The cell is in the Registry process's address space, so read its data with {command}`db` after `.process /p` selects that process.

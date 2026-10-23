@@ -4,7 +4,6 @@
 
 use tabled::builder::Builder;
 
-use super::diagnostics::diagnostic_cell;
 use ntoseye_macros::command;
 
 use crate::base::error::Result;
@@ -38,7 +37,15 @@ fn print_control_area(detail: &ControlAreaDetail) {
         detail.flags,
         detail.flag_names.join(" ")
     );
-    outln!("      {}", diagnostic_cell(&detail.file_name));
+    match &detail.file_name {
+        DiagnosticValue::Available(name) => outln!("      {name}"),
+        DiagnosticValue::Unavailable(error) => {
+            outln!(
+                "      {}",
+                ui::muted(&format!("file name unavailable: {error}"))
+            )
+        }
+    }
     outln!();
     match &detail.segment_detail {
         DiagnosticValue::Available(segment) => {
@@ -55,10 +62,8 @@ fn print_control_area(detail: &ControlAreaDetail) {
             );
         }
         DiagnosticValue::Unavailable(error) => {
-            outln!(
-                "Segment @ {}: <unavailable: {error}>",
-                ui::addr(detail.segment.0)
-            );
+            outln!("Segment @ {}", ui::addr(detail.segment.0));
+            outln!("  {}", ui::muted(&format!("segment unavailable: {error}")));
         }
     }
     outln!();
@@ -66,10 +71,10 @@ fn print_control_area(detail: &ControlAreaDetail) {
     builder.push_record([
         "#",
         "Subsection",
-        "Base Pte",
-        "Ptes",
+        "Base PTE",
+        "PTEs",
         "Unused",
-        "Starting Sector",
+        "Starting sector",
         "Sectors",
         "Protection",
     ]);
@@ -87,41 +92,56 @@ fn print_control_area(detail: &ControlAreaDetail) {
     }
     print_padded_table(builder);
     if let Some(stopped) = &detail.subsections_stopped {
-        outln!("  subsections stopped: {stopped}\n");
+        outln!("  subsections stopped: {stopped}");
     }
 }
 
 fn print_vpb(detail: &VpbDetail) {
     let device = |address: VirtAddr, name: &Option<String>| {
-        format!("{}  {}", ui::addr(address.0), name.as_deref().unwrap_or(""))
+        format!(
+            "{}  {}",
+            ui::addr(address.0),
+            name.as_deref().unwrap_or("-")
+        )
     };
-    outln!("Vpb @ {}", ui::addr(detail.address.0));
+    let label = if detail.volume_label.is_empty() {
+        "-"
+    } else {
+        detail.volume_label.as_str()
+    };
+    outln!("VPB {}", ui::addr(detail.address.0));
+    if detail.flag_names.is_empty() {
+        outln!("  Flags          : {:#x}", detail.flags);
+    } else {
+        outln!(
+            "  Flags          : {:#x} ({})",
+            detail.flags,
+            detail.flag_names.join(" | ")
+        );
+    }
     outln!(
-        "  Flags         {:x}  {}",
-        detail.flags,
-        detail.flag_names.join(" ")
-    );
-    outln!(
-        "  DeviceObject  {}",
+        "  DeviceObject   : {}",
         device(detail.device_object, &detail.device_name)
     );
     outln!(
-        "  RealDevice    {}",
+        "  RealDevice     : {}",
         device(detail.real_device, &detail.real_device_name)
     );
-    outln!("  RefCount      {}", detail.reference_count);
-    outln!("  Serial        {:08x}", detail.serial_number);
-    outln!("  Volume Label  {}", detail.volume_label);
-    outln!();
+    outln!("  ReferenceCount : {}", detail.reference_count);
+    outln!("  SerialNumber   : {:#010x}", detail.serial_number);
+    outln!("  VolumeLabel    : {label}");
 }
 
 fn print_file_cache(detail: &FileCacheDetail) {
-    const KB: u64 = 1024;
+    const KIB: u64 = 1024;
+    let free = match &detail.free_vacbs {
+        DiagnosticValue::Available(free) => format!(", {free} free"),
+        DiagnosticValue::Unavailable(_) => String::new(),
+    };
     outln!(
-        "File cache: {} VACB arrays, {} VACBs in use, {} free",
+        "file cache: {} VACB arrays, {} VACBs in use{free}",
         detail.vacb_arrays,
         detail.active_vacbs,
-        diagnostic_cell(&detail.free_vacbs)
     );
     let listed = if (detail.files.len() as u64) < detail.file_count {
         format!(" (the first {} listed)", detail.files.len())
@@ -129,9 +149,9 @@ fn print_file_cache(detail: &FileCacheDetail) {
         String::new()
     };
     outln!(
-        "  {} KB mapped, {} KB present, in {} files{listed}{}",
-        detail.mapped_bytes / KB,
-        detail.valid_bytes / KB,
+        "  {} KiB mapped, {} KiB present, in {} files{listed}{}",
+        detail.mapped_bytes / KIB,
+        detail.valid_bytes / KIB,
         detail.file_count,
         if detail.interrupted {
             " (interrupted)"
@@ -139,30 +159,44 @@ fn print_file_cache(detail: &FileCacheDetail) {
             ""
         }
     );
+    if let DiagnosticValue::Unavailable(error) = &detail.free_vacbs {
+        outln!(
+            "  {}",
+            ui::muted(&format!("free VACBs unavailable: {error}"))
+        );
+    }
     outln!();
     let mut builder = Builder::default();
     builder.push_record([
         "SharedCacheMap",
-        "Present KB",
-        "Mapped KB",
+        "Present KiB",
+        "Mapped KiB",
         "Dirty",
-        "File Size",
+        "File size",
         "Opens",
         "Name",
     ]);
     for file in &detail.files {
         let hex = |value: &DiagnosticValue<u64>| match value {
-            DiagnosticValue::Available(value) => format!("{value:x}"),
-            DiagnosticValue::Unavailable(_) => "?".to_string(),
+            DiagnosticValue::Available(value) => format!("{value:#x}"),
+            DiagnosticValue::Unavailable(_) => "-".to_string(),
+        };
+        let count = |value: &DiagnosticValue<u64>| match value {
+            DiagnosticValue::Available(value) => value.to_string(),
+            DiagnosticValue::Unavailable(_) => "-".to_string(),
+        };
+        let name = match &file.file_name {
+            DiagnosticValue::Available(name) if !name.is_empty() => name.clone(),
+            _ => "-".to_string(),
         };
         builder.push_record([
             ui::addr(file.shared_cache_map.0).to_string(),
-            (file.valid_bytes / KB).to_string(),
+            (file.valid_bytes / KIB).to_string(),
             (file.mapped_vacbs * 256).to_string(),
-            hex(&file.dirty_pages),
+            count(&file.dirty_pages),
             hex(&file.file_size),
-            hex(&file.open_count),
-            diagnostic_cell(&file.file_name),
+            count(&file.open_count),
+            name,
         ]);
     }
     print_padded_table(builder);
@@ -172,8 +206,8 @@ fn print_flt_instance(instance: &FltInstanceDetail, indent: &str, with_volume: b
     let volume = if with_volume {
         format!(
             "  {} {}",
-            instance.filter_name.as_deref().unwrap_or("?"),
-            instance.volume_name.as_deref().unwrap_or("?")
+            instance.filter_name.as_deref().unwrap_or("-"),
+            instance.volume_name.as_deref().unwrap_or("-")
         )
     } else {
         String::new()
@@ -315,7 +349,6 @@ impl Render for FltFilters {
             print_stopped("   ", &frame.stopped);
         }
         print_stopped("", &self.stopped);
-        outln!();
     }
 }
 
@@ -362,7 +395,6 @@ impl Render for FltInstances {
             print_stopped("   ", &frame.stopped);
         }
         print_stopped("", &self.stopped);
-        outln!();
     }
 }
 
@@ -392,7 +424,7 @@ impl Render for FltVolumes {
                     "   FLT_VOLUME: {} \"{}\"  {}",
                     ui::addr(volume.address.0),
                     volume.device_name,
-                    volume.file_system.as_deref().unwrap_or("")
+                    volume.file_system.as_deref().unwrap_or("-")
                 );
                 for instance in &volume.instances {
                     print_flt_instance(instance, "      ", false);
@@ -402,6 +434,5 @@ impl Render for FltVolumes {
             print_stopped("   ", &frame.stopped);
         }
         print_stopped("", &self.stopped);
-        outln!();
     }
 }

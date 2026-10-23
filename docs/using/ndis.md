@@ -32,34 +32,33 @@ The list includes virtual miniports, such as Hyper-V's adapters, which have no d
 {command}`!ndiskd.miniport` `<miniport>` shows one miniport. Without an address, it lists the miniports as {command}`!ndiskd.miniports` does.
 
 ```text
-Miniport             ffffc88843a491a0  Intel(R) 82574L Gigabit Network Connection #2
-Device name          \DEVICE\{1C0BA63B-C03E-46A8-9486-643BBA448622}
-Instance ID          PCI\VEN_8086&DEV_10D3&SUBSYS_00008086&REV_00\4&12829b10&0&0014
-NDIS version         6.50
-Driver               ffffc888439f2800  e1i68x64 (e1i68x64.sys) v12.19
-DRIVER_OBJECT        ffffc888439f1b60
-Adapter context      ffffc88843b9d000  (dt e1i68x64!<adapter type> ffffc88843b9d000)
-Device objects       FDO ffffc88843a49050  PDO ffffc888430f5060
+miniport ffffc88843a491a0  Intel(R) 82574L Gigabit Network Connection #2
+  device name          \DEVICE\{1C0BA63B-C03E-46A8-9486-643BBA448622}
+  instance ID          PCI\VEN_8086&DEV_10D3&SUBSYS_00008086&REV_00\4&12829b10&0&0014
+  NDIS version         6.50
+  driver               ffffc888439f2800  e1i68x64 (e1i68x64.sys) v12.19
+  DRIVER_OBJECT        ffffc888439f1b60
+  adapter context      ffffc88843b9d000  (dt e1i68x64!<adapter type> ffffc88843b9d000)
+  device objects       FDO ffffc88843a49050  PDO ffffc888430f5060
+  state                Running
+  PnP state            Started
+  power                D0
+  media                Connected, Full duplex, medium 802_3, physical 802_3
+  link speed           1 Gbps transmit, 1 Gbps receive
+  interface            IfIndex 6, NetLuid 0x6008006000000, UP
+  references           12
+  resets               internal 0, miniport 0, last status 0x00000000
+  pending OID          -
+  pending return NBLs  0
+  flags                0x2c450218, PnP flags 0x210021
 
-State                Running
-PnP state            Started
-Power                D0
-Media                Connected, Full duplex, medium 802_3, physical 802_3
-Link speed           1 Gbps transmit, 1 Gbps receive
-Interface            IfIndex 6, NetLuid 0x6008006000000, UP
-References           12
-Resets               internal 0, miniport 0, last status 0x0
-Pending OID          none
-Pending return NBLs  0
-Flags                0x2c450218, PnP flags 0x210021
-
-Filters (3, top first)
+filters (3, top first)
 Filter            State    Driver       Context           Name
 ffffc8884407f300  Running  wfplwfs.sys  ffffc888440809f0  Intel(R) 82574L Gigabit Network Connection #2-WFP 802.3 MAC Layer LightWeight Filter-0000
 ffffc8884407d410  Running  pacer.sys    ffffc8884403e490  Intel(R) 82574L Gigabit Network Connection #2-QoS Packet Scheduler-0000
 ffffc8884407b7d0  Running  wfplwfs.sys  ffffc8884407d010  Intel(R) 82574L Gigabit Network Connection #2-WFP Native MAC Layer LightWeight Filter-0000
 
-Protocol bindings (5, NumOpens 5)
+protocol bindings (5, NumOpens 5)
 Open              Protocol  Protocol block    Context
 ffffc8884711e460  LLTDIO    ffffc888471daa90  ffffc888470a55d0
 ffffc8884711f010  RSPNDR    ffffc888471dba20  ffffc888471dc620
@@ -104,14 +103,14 @@ ffffc8884332c630  VMSNPXY   VmsProxyHNic.sys  6.83  1.1      0
 NDIS is the NDIS version that the driver registered with, and Version is the driver's own version from its miniport characteristics. With the address of a driver block, the command shows the driver and its miniports:
 
 ```text
-Driver block         ffffc888439f2800
-Service              e1i68x64
-Image                e1i68x64.sys  (module e1i68x64)
-DRIVER_OBJECT        ffffc888439f1b60
-NDIS version         6.50
-Driver version       12.19
+driver block ffffc888439f2800
+  service              e1i68x64
+  image                e1i68x64.sys  (module e1i68x64)
+  DRIVER_OBJECT        ffffc888439f1b60
+  NDIS version         6.50
+  driver version       12.19
 
-Miniports (1)
+miniports (1)
 Miniport          Driver    State    Media             Power  IfIndex  Name
 ffffc88843a491a0  e1i68x64  Running  Connected 1 Gbps  D0     6        Intel(R) 82574L Gigabit Network Connection #2
 ```
@@ -132,19 +131,18 @@ ffffa08e68f1f4e0  Running  wfplwfs.sys   ffffa08e6898d1a0  Intel(R) 82574L Gigab
 With the address of a filter module, it shows the module:
 
 ```text
-Filter               ffffa08e68eaf010  Intel(R) 82574L Gigabit Network Connection #2-QoS Packet Scheduler-0000
-Filter driver        ffffa08e686cac40  QoS Packet Scheduler (pacer.sys)
-Miniport             ffffa08e6898d1a0  Intel(R) 82574L Gigabit Network Connection #2
-Module context       ffffa08e68ac3ce0  (dt pacer!<context type> ffffa08e68ac3ce0)
-Stack                higher ffffa08e68eb3550, lower ffffa08e68f1f4e0
-
-State                Running
-Link                 Connected, 1 Gbps transmit, 1 Gbps receive
-IfIndex              26
-References           1
-Dropped              0 receive NBLs, 0 send NBLs, 0 status indications
-Pending OID          none
-Flags                0x10
+filter ffffa08e68eaf010  Intel(R) 82574L Gigabit Network Connection #2-QoS Packet Scheduler-0000
+  filter driver        ffffa08e686cac40  QoS Packet Scheduler (pacer.sys)
+  miniport             ffffa08e6898d1a0  Intel(R) 82574L Gigabit Network Connection #2
+  module context       ffffa08e68ac3ce0  (dt pacer!<context type> ffffa08e68ac3ce0)
+  stack                higher ffffa08e68eb3550, lower ffffa08e68f1f4e0
+  state                Running
+  link                 Connected, 1 Gbps transmit, 1 Gbps receive
+  IfIndex              26
+  references           1
+  dropped              0 receive NBLs, 0 send NBLs, 0 status indications
+  pending OID          -
+  flags                0x10
 ```
 
 - **Module context** is the context that your filter driver passed to `NdisFSetAttributes`, the `FilterModuleContext` that NDIS gives back to each of your handlers. Read it with your driver's private PDB and {command}`dt`.
@@ -159,15 +157,15 @@ Flags                0x10
 {command}`!ndiskd.protocol` lists the protocol drivers, such as TCPIP and TCPIP6, with the number of miniports each has bound to. With the address of a protocol block, it shows the protocol and its bindings:
 
 ```text
-Protocol block       ffffa08e6830fa40  TCPIP
-Image                tcpip.sys
-NDIS version         6.89
-Driver version       0.0
-Driver context       fffff806264a7dd0
-BindAdapterHandlerEx fffff806263824f0  tcpip!FlBindAdapter
-Flags                0x0
+protocol block ffffa08e6830fa40  TCPIP
+  image                tcpip.sys
+  NDIS version         6.89
+  driver version       0.0
+  driver context       fffff806264a7dd0
+  BindAdapterHandlerEx fffff806263824f0  tcpip!FlBindAdapter
+  flags                0x0
 
-Bindings (2)
+bindings (2)
 Open              Miniport          Context           Name
 ffffa08e6c6638a0  ffffa08e6f0a5000  ffffa08e6cefb010  Hyper-V Virtual Ethernet Adapter
 ffffa08e68f1c8a0  ffffa08e6898d1a0  ffffa08e68f6b850  Intel(R) 82574L Gigabit Network Connection #2
@@ -182,7 +180,7 @@ Each binding is an `_NDIS_OPEN_BLOCK`, with the miniport that the protocol opene
 {command}`!ndiskd.oid` reads the pending OID request of every miniport and every filter module. For each one that has not completed, it shows whether a miniport or a filter module owns it, the owner's address and name, and the request as {command}`!ndiskd.miniport` shows it: the `_NDIS_OID_REQUEST`, its type, the OID by its `ntddndis.h` name, and its buffer. When nothing is pending, it says how many it checked:
 
 ```text
-No pending OID requests on 3 miniports and 7 filter modules.
+no pending OID requests on 3 miniports and 7 filter modules
 ```
 
 NDIS passes each miniport and filter one OID request at a time, apart from direct OID requests, so a request that stays in this list holds up the ones behind it, and a pause or a reset of that adapter waits for it.
@@ -192,15 +190,15 @@ NDIS passes each miniport and filter one OID request at a time, apart from direc
 {command}`!ndiskd.nbl` decodes a `_NET_BUFFER_LIST`, for example the one in `rdx` at a breakpoint on `ndis!NdisMIndicateReceiveNetBufferLists` or on your driver's send handler:
 
 ```text
-NBL                  ffffa08e68bc69f0
-Next                 none
-Parent               none
-Source               ffffa08e6898d1a0  miniport Intel(R) 82574L Gigabit Network Connection #2
-Pool                 ffffa08e68bc3a00
-Context              none
-Flags                0x200010c, NblFlags 0x0
-Status               0x0 (STATUS_SUCCESS)
-Child references     0
+NBL ffffa08e68bc69f0
+  next                 -
+  parent               -
+  source               ffffa08e6898d1a0  miniport Intel(R) 82574L Gigabit Network Connection #2
+  pool                 ffffa08e68bc3a00
+  context              -
+  flags                0x200010c, NblFlags 0x0
+  status               0x00000000 (STATUS_SUCCESS)
+  child references     0
 
 NET_BUFFERs (1)
 NET_BUFFER        Length  Offset  Current MDL       MDL offset  MDL chain
@@ -212,7 +210,7 @@ ffffa08e68bc6b70  0xdb    0x0     ffffa08e68b8a250  0x0         ffffa08e68b8a250
 `-chain` lists every NBL on the `Next` chain from the address, with its NET_BUFFERs, bytes, status, and source. `-data` dumps each NET_BUFFER's data by offset into the frame, up to 64 KiB of it:
 
 ```text
-Data of NET_BUFFER ffffa08e68bc6b70 (0xdb bytes)
+data of NET_BUFFER ffffa08e68bc6b70 (0xdb bytes)
 0000  52 54 00 a5 ee 27 52 55 0a 00 02 02 08 00 45 00  RT...'RU......E.
 0010  00 cd 18 6d 00 00 40 11 49 a2 0a 00 02 03 0a 00  ...m..@.I.......
 ```

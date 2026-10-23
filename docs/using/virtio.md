@@ -7,7 +7,7 @@
 {command}`!virtio` without an argument lists the virtio PCI functions that pci.sys knows, with the device type and the service that drives each. It reads only guest memory, so it works on every backend, including the `memory` backend and crash dumps. This sample was taken while the guest wrote to the virtio-blk disk:
 
 ```text
-0a:00.0  net  1af4:1041  netkvm  pdo 0xffffa002d58e1060
+0a:00.0  net  1af4:1041  netkvm  PDO ffffa002d58e1060
   virtio_device ffffa002d481c0f0 (netkvm), packed rings, event index, MSI-X
   #  Queue    Size  Avail  Used  Driver  Free  Moved  State                virtqueue
   0  rx 0     256   80     -     80      0     +0/+0  256 with the device  ffffa002dc253000
@@ -16,7 +16,7 @@
 
   Moved: positions filled/taken back since the last look, 10.1 s of guest time ago
 
-0b:00.0  block  1af4:1042  viostor  pdo 0xffffa002d8df6060
+0b:00.0  block  1af4:1042  viostor  PDO ffffa002d8df6060
   virtio_device ffffa002d7e8c010 (viostor), split rings, event index, MSI-X
   #  Queue      Size  Avail  Used  Driver  Free  Moved      State                           virtqueue
   0  request 0  256   2233   2233  2233    256   +215/+215  idle                            ffffb482a58cc000
@@ -86,7 +86,7 @@ This sample was taken with QEMU throttling the virtio-blk disk's writes to one b
 {command}`!vring` on the queue then shows the two requests the device holds, a 4 KiB write and a 64 KiB write with their headers:
 
 ```text
-Buffers with the device
+buffers with the device
   avail[1801] head 0: [0] 0x279172528 len 0x30 I (3 descriptors, out 0x1010, in 0x1)
   avail[1802] head 1: [1] 0x279177528 len 0x120 I (18 descriptors, out 0x10010, in 0x1)
 ```
@@ -99,14 +99,15 @@ Let the guest run for a few seconds between the looks. The commands read a runni
 
 ```text
 virtqueue ffffb48255252180  queue 2 (request 2)  size 256
-  desc ffffb4825524d000  avail ffffb4825524e000  used ffffb4825524e240
-  avail idx 1262  used idx 1262  driver: published 1262  taken back to 1261  255 free  0 not kicked
-  interrupts: after used idx 1261 (event index); one was due for the returned buffers
-  notifications: after avail idx 1262 (event index)
-  state: 1 returned, not yet taken back
-  moved since the last look 0.0 s of guest time ago: avail +0, used +0, taken back +0
+  rings          desc ffffb4825524d000  avail ffffb4825524e000  used ffffb4825524e240
+  indexes        avail idx 1262  used idx 1262
+  driver         published 1262  taken back to 1261  255 free  0 not kicked
+  interrupts     after used idx 1261 (event index); one was due for the returned buffers
+  notifications  after avail idx 1262 (event index)
+  state          1 returned, not yet taken back
+  moved          avail +0, used +0, taken back +0  (since the last look 0.0 s of guest time ago)
 
-Returned, not yet taken back
+returned, not yet taken back
   used[1261] wrote 0x1 head 1: [1] 0x27916c528 len 0x30 I (3 descriptors, out 0x92010, in 0x1)
       blk write sector 0xafaf8, 584 KiB -> OK
 ```
@@ -163,14 +164,14 @@ A device and driver can agree on packed rings instead of split rings, for exampl
 
 ```text
 virtqueue ffffa002dc253000  queue 0 (rx 0)  size 256  packed
-  desc ffffb482a542f000  driver event ffffb482a5430000  device event ffffb482a5430004
-  driver: next avail 80 (lap 0)  taken back to 80 (lap 1)  0 free
-  interrupts: at position 80 in lap 1
-  notifications: off (the device disabled them)
-  state: 256 with the device
-  moved since the last look 0.1 s of guest time ago: filled +0, taken back +0
+  rings          desc ffffb482a542f000  driver event ffffb482a5430000  device event ffffb482a5430004
+  driver         next avail 80 (lap 0)  taken back to 80 (lap 1)  0 free
+  interrupts     at position 80 in lap 1
+  notifications  off (the device disabled them)
+  state          256 with the device
+  moved          filled +0, taken back +0  (since the last look 0.1 s of guest time ago)
 
-Buffers with the device
+buffers with the device
   [80] id 13 0x27991f000 len 0x10 I (1 descriptor, out 0x0, in 0x5fa)
   [81] id 67 0x278c0d000 len 0x10 I (1 descriptor, out 0x0, in 0x5fa)
 ```

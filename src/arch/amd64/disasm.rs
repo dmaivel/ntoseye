@@ -236,6 +236,9 @@ fn disasm_formatter() -> NasmFormatter {
     options.set_space_after_operand_separator(true);
     options.set_hex_prefix("0x");
     options.set_hex_suffix("");
+    // Lowercase as every other number ntoseye prints, and as ARM64's
+    // operands already are.
+    options.set_uppercase_hex(false);
     options.set_first_operand_char_index(5);
     options.set_memory_size_options(MemorySizeOptions::Always);
     options.set_show_branch_size(false);

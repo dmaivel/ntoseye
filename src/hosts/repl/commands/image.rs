@@ -25,6 +25,17 @@ fn resolve_image(cx: &ArgCx<'_, '_>, text: &str) -> Result<ImageRef> {
     })
 }
 
+/// `command`'s argument error. An invalid argument's message already says
+/// what is wrong with the word, so it goes without the `invalid argument: `
+/// prefix its error type adds.
+fn image_error(command: &str, error: Error) -> ArgError {
+    let message = match error {
+        Error::InvalidArgument(message) => message,
+        other => other.to_string(),
+    };
+    ArgError::Message(format!("{command}: {message}"))
+}
+
 /// `!dh`'s options, read from every word without taking any. No words, or
 /// `-h`/`-?` alone, print the help.
 fn dh_options(cursor: &ArgCursor<'_>) -> std::result::Result<DhParts, ArgError> {
@@ -74,18 +85,18 @@ fn dh_image(
 ) -> std::result::Result<ImageRef, ArgError> {
     let image = match cursor.remaining() {
         0 => Err(Error::InvalidArgument(
-            "!dh needs a module name or an address".into(),
+            "give a module name or an address".into(),
         )),
         1 => {
             let text = cursor.word().unwrap_or_default();
             resolve_image(cx, &text)
         }
         _ => Err(Error::InvalidArgument(format!(
-            "!dh takes one module or address, got '{}'",
+            "takes one module or address, got '{}'",
             cursor.rest()
         ))),
     };
-    image.map_err(|error| ArgError::Message(format!("!dh: {error}")))
+    image.map_err(|error| image_error("!dh", error))
 }
 
 /// Show the headers of a mapped PE image.
@@ -146,7 +157,7 @@ fn lmi_image(
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<ImageRef, ArgError> {
     let text = cursor.word().ok_or(ArgError::Missing)?;
-    resolve_image(cx, &text).map_err(|error| ArgError::Message(format!("!lmi: {error}")))
+    resolve_image(cx, &text).map_err(|error| image_error("!lmi", error))
 }
 
 /// Show the image identity, debug directory, and symbol state of a loaded
@@ -201,11 +212,16 @@ fn print_module_image_info(detail: &ModuleImageInfo) {
     outln!("     Time Stamp: {:x}", file.time_date_stamp);
     outln!("           Size: {:x}", optional.size_of_image);
     outln!("       CheckSum: {:x}", optional.checksum);
-    outln!(
-        "Characteristics: {:x}  {}",
-        file.characteristics,
-        file.characteristics_names().join(", ")
-    );
+    let names = file.characteristics_names();
+    if names.is_empty() {
+        outln!("Characteristics: {:#x}", file.characteristics);
+    } else {
+        outln!(
+            "Characteristics: {:#x} ({})",
+            file.characteristics,
+            names.join(" | ")
+        );
+    }
     print_debug_directory(&detail.debug);
     let symbols = &detail.symbols;
     let source = symbols
@@ -218,7 +234,7 @@ fn print_module_image_info(detail: &ModuleImageInfo) {
         symbols
             .status
             .as_ref()
-            .map_or("unknown", ModuleSymbolStatus::label)
+            .map_or("-", ModuleSymbolStatus::label)
     );
     if let Some(ModuleSymbolStatus::Failed(reason)) = &symbols.status {
         outln!("                 {reason}");
@@ -233,7 +249,6 @@ fn print_module_image_info(detail: &ModuleImageInfo) {
     if let Some(path) = &detail.symbol_file {
         outln!("    Symbol File: {path}");
     }
-    outln!();
 }
 
 fn print_image_headers(detail: &ImageHeaders, parts: DhParts) {
@@ -321,7 +336,7 @@ fn print_file_headers(detail: &ImageHeaders) {
         optional.address_of_entry_point,
         detail
             .entry_point()
-            .map_or_else(|| "none".to_string(), ui::addr)
+            .map_or_else(|| "-".to_string(), ui::addr)
     );
     outln!("{:>8X} base of code", optional.base_of_code);
     if let Some(base_of_data) = optional.base_of_data {

@@ -10,7 +10,7 @@ use crate::nt::target::DiagnosticValue;
 use crate::nt::target::heap::{
     BlockMatch, HeapBlock, HeapBlockSearch, HeapDetail, HeapKind, HeapSelector, HeapSummaryDetail,
     NT_ENTRY_EXTRA_PRESENT, NT_ENTRY_FILL_PATTERN, NT_ENTRY_LAST, NT_ENTRY_VIRTUAL_ALLOC, NtEntry,
-    NtHeapDetail, RangeKind, SegmentHeapDetail, SegmentRangeDetail, SegmentSubsegment, VsChunk,
+    NtHeapDetail, RangeKind, SegmentHeapDetail, SegmentRangeDetail, SegmentSubsegment,
 };
 use crate::session::Session;
 use ntoseye_macros::{command, grammar};
@@ -178,17 +178,72 @@ fn flag_names(flags: u32) -> String {
     if names.is_empty() {
         format!("{flags:#x}")
     } else {
-        format!("{flags:#x} ({})", names.join("|"))
+        format!("{flags:#x} ({})", names.join(" | "))
     }
 }
 
-fn nt_entry_line(entry: &NtEntry) -> String {
-    let mut flags = Vec::new();
-    if entry.busy() {
-        flags.push("busy");
-    } else {
-        flags.push("free");
+/// `1 segment`, `4 segments`.
+fn plural(count: u64, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
+/// `heap 0` or `heaps 0, 2`: the heaps a warning is about, by PEB index.
+fn heap_indexes(indexes: &[usize]) -> String {
+    let list: Vec<String> = indexes.iter().map(usize::to_string).collect();
+    format!(
+        "{} {}",
+        if indexes.len() == 1 { "heap" } else { "heaps" },
+        list.join(", ")
+    )
+}
+
+/// Groups per-heap failures by their text, in first-seen order, so each
+/// distinct reason is reported once with every heap it hit: one missing
+/// layout field fails every heap of a kind the same way.
+fn group_failures<'a>(
+    failures: impl IntoIterator<Item = (usize, &'a str)>,
+) -> Vec<(&'a str, Vec<usize>)> {
+    let mut groups: Vec<(&str, Vec<usize>)> = Vec::new();
+    for (index, error) in failures {
+        match groups.iter_mut().find(|(text, _)| *text == error) {
+            Some((_, indexes)) => indexes.push(index),
+            None => groups.push((error, vec![index])),
+        }
     }
+    groups
+}
+
+/// Prints `fields` one per line under a heading, indented `indent` spaces,
+/// with each value starting in the column after the longest label.
+fn print_fields(indent: usize, fields: &[(&str, String)]) {
+    let width = fields
+        .iter()
+        .map(|(label, _)| label.len())
+        .max()
+        .unwrap_or(0);
+    for (label, value) in fields {
+        outln!("{:indent$}{label:<width$}  {value}", "");
+    }
+}
+
+/// The kind of a heap in prose. An unknown heap's signature is left to the
+/// error that reports it.
+fn kind_name(kind: &HeapKind) -> &'static str {
+    match kind {
+        HeapKind::Nt => "NT heap",
+        HeapKind::Segment => "segment heap",
+        HeapKind::Unknown(_) => "unknown heap",
+    }
+}
+
+fn state_name(busy: bool) -> &'static str {
+    if busy { "busy" } else { "free" }
+}
+
+/// The state and header flags of an NT heap entry, such as `busy | extra`,
+/// with a badge when the header checksum is wrong.
+fn nt_entry_flags(entry: &NtEntry) -> String {
+    let mut flags = vec![state_name(entry.busy())];
     if entry.flags & NT_ENTRY_EXTRA_PRESENT != 0 {
         flags.push("extra");
     }
@@ -201,60 +256,75 @@ fn nt_entry_line(entry: &NtEntry) -> String {
     if entry.flags & NT_ENTRY_LAST != 0 {
         flags.push("last");
     }
-    let mut line = format!(
-        "{}  size {:<7} prev {:<7} {:<10} unused {:#x}",
+    let mut text = flags.join(" | ");
+    if !entry.checksum_ok {
+        text.push_str(&format!("  {}", ui::badge("bad checksum")));
+    }
+    text
+}
+
+// The flags come last in the entry and block lines: their width varies
+// the most, and the numeric columns before them stay aligned.
+fn nt_entry_line(entry: &NtEntry) -> String {
+    format!(
+        "{}  size {:<7} prev {:<7} unused {:<6} {}",
         ui::addr(entry.address.0),
         format!("{:#x}", entry.size),
         format!("{:#x}", entry.previous_size),
-        flags.join("|"),
-        entry.unused_bytes
-    );
-    if !entry.checksum_ok {
-        line.push_str(&format!("  {}", ui::badge("bad checksum")));
-    }
-    line
-}
-
-fn vs_chunk_line(chunk: &VsChunk) -> String {
-    let mut line = format!(
-        "{}  size {:<7} prev {:<7} {}",
-        ui::addr(chunk.address.0),
-        format!("{:#x}", chunk.size),
-        format!("{:#x}", chunk.previous_size),
-        if chunk.busy { "busy" } else { "free" }
-    );
-    if let Some(unused) = chunk.unused_bytes {
-        line.push_str(&format!("  unused {unused:#x}"));
-    }
-    line
+        format!("{:#x}", entry.unused_bytes),
+        nt_entry_flags(entry)
+    )
 }
 
 fn heap_block_line(block: &HeapBlock) -> String {
-    let mut line = format!(
-        "{}  size {:<7}",
+    format!(
+        "{}  size {:<7} prev {:<7} unused {:<6} {}",
         ui::addr(block.address.0),
-        format!("{:#x}", block.size)
-    );
-    if let Some(previous_size) = block.previous_size {
-        line.push_str(&format!("  prev {:<7}", format!("{previous_size:#x}")));
-    }
-    line.push_str(&format!("  {}", block.state));
-    if let Some(unused_bytes) = block.unused_bytes {
-        line.push_str(&format!("  unused {unused_bytes:#x}"));
-    }
-    line
+        format!("{:#x}", block.size),
+        block
+            .previous_size
+            .map_or_else(|| "-".into(), |size| format!("{size:#x}")),
+        block
+            .unused_bytes
+            .map_or_else(|| "-".into(), |unused| format!("{unused:#x}")),
+        block.state
+    )
+}
+
+/// The fields of an NT heap entry, as `!heap -x` shows them.
+fn nt_entry_fields(entry: &NtEntry) -> Vec<(&'static str, String)> {
+    vec![
+        ("entry", ui::addr(entry.address.0)),
+        ("size", format!("{:#x}", entry.size)),
+        ("prev size", format!("{:#x}", entry.previous_size)),
+        ("unused", format!("{:#x}", entry.unused_bytes)),
+        ("flags", nt_entry_flags(entry)),
+    ]
 }
 
 impl ReplState<'_> {
     fn heap_summary(&self, summary: &HeapSummaryDetail) {
+        if summary.truncated {
+            print_warning("heap list truncated at the decoder bound");
+        }
+        // Each statistics error is reported once, with the heaps it hit,
+        // rather than repeated in every row: one missing layout field
+        // fails every heap of a kind the same way.
+        let failures = group_failures(summary.heaps.iter().filter_map(|heap| match &heap.stats {
+            DiagnosticValue::Unavailable(error) => Some((heap.index, error.as_str())),
+            DiagnosticValue::Available(_) => None,
+        }));
+        for (error, heaps) in &failures {
+            print_warning(format!(
+                "{}: statistics unavailable: {error}",
+                heap_indexes(heaps)
+            ));
+        }
         outln!(
-            "{} process heap(s), PEB {}",
-            summary.heaps.len(),
+            "{}, PEB {}",
+            plural(summary.heaps.len() as u64, "process heap", "process heaps"),
             ui::addr(summary.peb.0)
         );
-        if summary.truncated {
-            outln!("heap list truncated at the decoder bound");
-        }
         if summary.heaps.is_empty() {
             return;
         }
@@ -274,9 +344,9 @@ impl ReplState<'_> {
                 DiagnosticValue::Available(stats) => {
                     let detail = match heap.kind {
                         HeapKind::Nt => format!(
-                            "{} segment(s), {} virtual block(s){}",
-                            stats.segments,
-                            stats.virtual_blocks,
+                            "{}, {}{}",
+                            plural(stats.segments, "segment", "segments"),
+                            plural(stats.virtual_blocks, "virtual block", "virtual blocks"),
                             if stats.front_end.is_some() {
                                 ", LFH"
                             } else {
@@ -284,29 +354,25 @@ impl ReplState<'_> {
                             }
                         ),
                         HeapKind::Segment => format!(
-                            "{} vs, {} lfh, {} page, {} large",
+                            "{} VS, {} LFH, {} page, {} large",
                             stats.vs_subsegments,
                             stats.lfh_subsegments,
                             stats.page_allocations,
                             stats.large_allocations
                         ),
-                        HeapKind::Unknown(_) => String::new(),
+                        HeapKind::Unknown(_) => "-".into(),
                     };
                     [
-                        format!("{:#x}", stats.flags),
+                        flag_names(stats.flags),
                         format!("{:#x}", stats.reserved),
                         format!("{:#x}", stats.committed),
                         format!("{:#x}", stats.free),
                         detail,
                     ]
                 }
-                DiagnosticValue::Unavailable(error) => [
-                    "-".into(),
-                    "-".into(),
-                    "-".into(),
-                    "-".into(),
-                    format!("<unavailable: {error}>"),
-                ],
+                DiagnosticValue::Unavailable(_) => {
+                    ["-".into(), "-".into(), "-".into(), "-".into(), "-".into()]
+                }
             };
             let [flags, reserved, committed, free, detail] = row;
             builder.push_record([
@@ -325,39 +391,54 @@ impl ReplState<'_> {
 
     fn heap_detail(&self, detail: &HeapDetail) {
         if let Some(error) = detail.error.as_deref() {
-            error!("{error}");
+            error!(
+                "heap {} ({} {:#x}) cannot be decoded: {error}",
+                detail.index,
+                kind_name(&detail.kind),
+                detail.address.0
+            );
             return;
         }
         match (&detail.nt, &detail.segment) {
             (Some(nt), None) => self.nt_detail(nt, detail.list_entries),
             (None, Some(segment)) => self.segment_detail(segment, detail.list_entries),
             _ => error!(
-                "heap {} has no decodable allocator detail",
-                ui::addr(detail.address.0)
+                "heap {:#x} has no decodable allocator detail",
+                detail.address.0
             ),
         }
     }
 
     fn nt_detail(&self, detail: &NtHeapDetail, list_entries: bool) {
         let heap = &detail.heap;
-        outln!("heap {}: NT heap", ui::addr(heap.address.0));
-        outln!(
-            "  flags {}  force flags {:#x}  encoding {}",
-            flag_names(heap.flags),
-            heap.force_flags,
-            heap.encoding
-                .map(|encoding| format!("{encoding:#x}"))
-                .unwrap_or_else(|| "off".into())
+        outln!("NT heap {}", ui::addr(heap.address.0));
+        print_fields(
+            2,
+            &[
+                ("flags", flag_names(heap.flags)),
+                ("force flags", format!("{:#x}", heap.force_flags)),
+                (
+                    "encoding",
+                    heap.encoding
+                        .map_or_else(|| "-".into(), |encoding| format!("{encoding:#x}")),
+                ),
+                ("total free", format!("{:#x}", heap.total_free_units * 16)),
+                (
+                    "virtual threshold",
+                    format!("{:#x}", heap.virtual_threshold),
+                ),
+                (
+                    "front end",
+                    match heap.front_end {
+                        Some(lfh) => {
+                            format!("LFH {} (type {})", ui::addr(lfh.0), heap.front_end_type)
+                        }
+                        None => "-".into(),
+                    },
+                ),
+            ],
         );
-        outln!(
-            "  total free {:#x}  virtual threshold {:#x}  front end {}",
-            heap.total_free_units * 16,
-            heap.virtual_threshold,
-            match heap.front_end {
-                Some(lfh) => format!("LFH {} (type {})", ui::addr(lfh.0), heap.front_end_type),
-                None => "none".into(),
-            }
-        );
+        print_section("segments");
         let mut builder = Builder::default();
         builder.push_record([
             "Segment",
@@ -365,8 +446,9 @@ impl ReplState<'_> {
             "End",
             "Pages",
             "Uncommitted",
-            "FirstEntry",
-            "LastValidEntry",
+            "Ranges",
+            "First entry",
+            "Last valid entry",
         ]);
         for segment in &detail.segments {
             let segment = &segment.segment;
@@ -375,140 +457,167 @@ impl ReplState<'_> {
                 ui::addr(segment.base.0),
                 ui::addr(segment.end().0),
                 format!("{:#x}", segment.pages),
-                format!(
-                    "{:#x} ({} range(s))",
-                    segment.uncommitted_pages,
-                    segment.uncommitted.len()
-                ),
+                format!("{:#x}", segment.uncommitted_pages),
+                segment.uncommitted.len().to_string(),
                 ui::addr(segment.first_entry.0),
                 ui::addr(segment.last_valid_entry.0),
             ]);
         }
+        // The table ends with a blank line, so the titles after it are
+        // printed without print_section's own.
         print_padded_table(builder);
         if !heap.virtual_blocks.is_empty() {
-            outln!("  virtual blocks:");
+            outln!("{}", ui::label("virtual blocks"));
+            let mut builder = Builder::default();
+            builder.push_record(["Entry", "Commit", "Reserve", "User"]);
             for block in &heap.virtual_blocks {
-                outln!(
-                    "    {}  commit {:#x}  reserve {:#x}  user {}",
+                builder.push_record([
                     ui::addr(block.entry.0),
-                    block.commit_size,
-                    block.reserve_size,
-                    ui::addr(block.user.0)
-                );
+                    format!("{:#x}", block.commit_size),
+                    format!("{:#x}", block.reserve_size),
+                    ui::addr(block.user.0),
+                ]);
             }
+            print_padded_table(builder);
         }
         if !list_entries {
             return;
         }
         for segment_detail in &detail.segments {
             let segment = &segment_detail.segment;
-            outln!("  segment {} entries:", ui::addr(segment.address.0));
+            outln!(
+                "{}",
+                ui::label(&format!(
+                    "entries of segment {}",
+                    ui::addr(segment.address.0)
+                ))
+            );
             let (mut busy, mut free) = (0usize, 0usize);
             for entry_detail in &segment_detail.entries {
                 let entry = &entry_detail.entry;
-                outln!("    {}", nt_entry_line(entry));
+                outln!("  {}", nt_entry_line(entry));
                 if entry.busy() {
                     busy += 1;
                 } else {
                     free += 1;
                 }
                 if let Some(error) = entry_detail.lfh_error.as_deref() {
-                    outln!("      LFH user blocks: <unavailable: {error}>");
+                    outln!("    LFH user blocks: -  {}", ui::muted(error));
                 }
                 if let Some(region) = &entry_detail.lfh {
                     outln!(
-                        "      LFH user blocks: subsegment {}  {} x {:#x}  {} busy",
+                        "    LFH user blocks: subsegment {}  {} x {:#x}  {} busy",
                         ui::addr(region.subsegment.0),
                         region.block_count,
                         region.block_size,
                         region.busy_count()
                     );
                     for block in &entry_detail.lfh_blocks {
-                        outln!("        {}  {}", ui::addr(block.address.0), block.state);
+                        outln!("      {}  {}", ui::addr(block.address.0), block.state);
                     }
                     if entry_detail.lfh_truncated {
-                        outln!("        <LFH block listing truncated>");
+                        outln!("      {}", ui::muted("LFH block listing truncated"));
                     }
                 }
             }
             for range in &segment.uncommitted {
                 outln!(
-                    "    {} - {}  uncommitted",
+                    "  {} - {}  uncommitted",
                     ui::addr(range.start),
                     ui::addr(range.end)
                 );
             }
             if let Some(stopped) = &segment_detail.stopped {
                 outln!(
-                    "    walk stopped at {}: {}",
-                    ui::addr(stopped.address.0),
+                    "  walk stopped at {:#x}: {}",
+                    stopped.address.0,
                     stopped.reason
                 );
             }
             outln!(
-                "    {} entries: {busy} busy, {free} free",
-                segment_detail.entries.len()
+                "  {}: {busy} busy, {free} free",
+                plural(segment_detail.entries.len() as u64, "entry", "entries")
             );
+            // Apart from the next segment's entries; dropped after the last.
+            outln!();
         }
     }
 
     fn segment_detail(&self, detail: &SegmentHeapDetail, list_entries: bool) {
         let heap = &detail.heap;
-        outln!("heap {}: segment heap", ui::addr(heap.address.0));
-        outln!(
-            "  global flags {:#x}  reserved {:#x}  committed {:#x}  free committed {:#x} (lfh {:#x}, vs {:#x})",
-            heap.global_flags,
-            heap.reserved_pages * 0x1000,
-            heap.committed_pages * 0x1000,
-            heap.free_committed_pages * 0x1000,
-            heap.lfh_free_committed_pages * 0x1000,
-            heap.vs_free_committed_pages * 0x1000
-        );
-        outln!(
-            "  large allocations {} (reserved {:#x}, committed {:#x})  keys heap {:#x} lfh {:#x}",
-            heap.large_allocations.len(),
-            heap.large_reserved_pages * 0x1000,
-            heap.large_committed_pages * 0x1000,
-            heap.encoding_keys.heap_key,
-            heap.encoding_keys.lfh_key
+        outln!("segment heap {}", ui::addr(heap.address.0));
+        print_fields(
+            2,
+            &[
+                ("global flags", format!("{:#x}", heap.global_flags)),
+                ("reserved", format!("{:#x}", heap.reserved_pages * 0x1000)),
+                ("committed", format!("{:#x}", heap.committed_pages * 0x1000)),
+                (
+                    "free committed",
+                    format!(
+                        "{:#x} (LFH {:#x}, VS {:#x})",
+                        heap.free_committed_pages * 0x1000,
+                        heap.lfh_free_committed_pages * 0x1000,
+                        heap.vs_free_committed_pages * 0x1000
+                    ),
+                ),
+                (
+                    "large allocations",
+                    format!(
+                        "{} (reserved {:#x}, committed {:#x})",
+                        heap.large_allocations.len(),
+                        heap.large_reserved_pages * 0x1000,
+                        heap.large_committed_pages * 0x1000
+                    ),
+                ),
+                ("heap key", format!("{:#x}", heap.encoding_keys.heap_key)),
+                ("LFH key", format!("{:#x}", heap.encoding_keys.lfh_key)),
+            ],
         );
         for context_detail in &detail.contexts {
             let context = &context_detail.context;
-            outln!(
-                "  context {}: {:#x}-byte units, {:#x}-byte segments, max allocation {:#x}, {} segment(s)",
-                context.index,
-                context.unit_size(),
-                context.segment_size(),
-                context.max_allocation_size,
-                context.segments.len()
+            print_section(&format!("context {}", context.index));
+            print_fields(
+                2,
+                &[
+                    ("unit size", format!("{:#x}", context.unit_size())),
+                    ("segment size", format!("{:#x}", context.segment_size())),
+                    (
+                        "max allocation",
+                        format!("{:#x}", context.max_allocation_size),
+                    ),
+                    ("segments", context.segments.len().to_string()),
+                ],
             );
             for segment in &context_detail.segments {
-                outln!("    segment {}", ui::addr(segment.segment.address.0));
+                outln!("  segment {}", ui::addr(segment.segment.address.0));
                 for range in &segment.ranges {
                     self.segment_range(range, list_entries);
                 }
             }
         }
         if !heap.large_allocations.is_empty() {
-            outln!("  large allocations:");
+            print_section("large allocations");
+            let mut builder = Builder::default();
+            builder.push_record(["Address", "Size", "Unused", "Extra"]);
             for large in &heap.large_allocations {
-                outln!(
-                    "    {}  size {:#x}  unused {:#x}{}",
+                builder.push_record([
                     ui::addr(large.address.0),
-                    large.size(),
-                    large.unused_bytes,
-                    if large.extra_present { "  extra" } else { "" }
-                );
+                    format!("{:#x}", large.size()),
+                    format!("{:#x}", large.unused_bytes),
+                    if large.extra_present { "yes" } else { "no" }.into(),
+                ]);
             }
+            print_padded_table(builder);
         }
     }
 
     fn segment_range(&self, range: &SegmentRangeDetail, list_entries: bool) {
         let range_data = &range.range;
         let head = format!(
-            "      {}  {:>4} unit(s)  {:#04x}",
+            "    {}  {:>10}  {:#04x}",
             ui::addr(range_data.address.0),
-            range_data.units,
+            plural(range_data.units, "unit", "units"),
             range_data.flags
         );
         match range_data.kind {
@@ -523,26 +632,26 @@ impl ReplState<'_> {
                 (Some(SegmentSubsegment::Vs(subsegment)), _) => {
                     let busy = subsegment.chunks.iter().filter(|chunk| chunk.busy).count();
                     outln!(
-                        "{head}  VS subsegment  {} chunk(s): {busy} busy, {} free{}",
-                        subsegment.chunks.len(),
+                        "{head}  VS subsegment  {}: {busy} busy, {} free{}",
+                        plural(subsegment.chunks.len() as u64, "chunk", "chunks"),
                         subsegment.chunks.len() - busy,
                         if subsegment.signature_ok {
-                            ""
+                            String::new()
                         } else {
-                            "  (bad signature)"
+                            format!("  {}", ui::badge("bad signature"))
                         }
                     );
                     if list_entries {
                         for block in &range.blocks {
-                            outln!("        {}", heap_block_line(block));
+                            outln!("      {}", heap_block_line(block));
                         }
                         if range.truncated {
-                            outln!("        <VS chunk listing truncated>");
+                            outln!("      {}", ui::muted("VS chunk listing truncated"));
                         }
                     }
                 }
-                (_, Some(error)) => outln!("{head}  VS subsegment  <unavailable: {error}>"),
-                _ => outln!("{head}  VS subsegment  <unavailable>"),
+                (_, Some(error)) => outln!("{head}  VS subsegment  -  {}", ui::muted(error)),
+                _ => outln!("{head}  VS subsegment  -"),
             },
             RangeKind::Lfh => match (&range.subsegment, &range.error) {
                 (Some(SegmentSubsegment::Lfh(subsegment)), _) => {
@@ -556,22 +665,23 @@ impl ReplState<'_> {
                     );
                     if list_entries {
                         for block in &range.blocks {
-                            outln!("        {}  {}", ui::addr(block.address.0), block.state);
+                            outln!("      {}  {}", ui::addr(block.address.0), block.state);
                         }
                         if range.truncated {
-                            outln!("        <LFH block listing truncated>");
+                            outln!("      {}", ui::muted("LFH block listing truncated"));
                         }
                     }
                 }
-                (_, Some(error)) => outln!("{head}  LFH subsegment  <unavailable: {error}>"),
-                _ => outln!("{head}  LFH subsegment  <unavailable>"),
+                (_, Some(error)) => outln!("{head}  LFH subsegment  -  {}", ui::muted(error)),
+                _ => outln!("{head}  LFH subsegment  -"),
             },
         }
     }
 
     fn heap_find(&self, detail: &HeapBlockSearch) {
-        // A heap that could not be searched is reported once per reason:
-        // the search still answers from the heaps it could read.
+        // A heap that could not be searched is reported once per reason, as
+        // `!heap -s` reports its statistics: the search still answers from
+        // the heaps it could read.
         let failures = group_failures(
             detail
                 .failures
@@ -612,55 +722,32 @@ impl ReplState<'_> {
             }
             return;
         };
-        outln!(
-            "{} is in heap {} ({} heap, index {})",
-            ui::addr(detail.address.0),
-            ui::addr(heap.address.0),
-            heap.kind,
-            heap.index
-        );
+        outln!("heap block containing {}", ui::addr(detail.address.0));
+        let mut fields = vec![(
+            "heap",
+            format!(
+                "{} ({}, index {})",
+                ui::addr(heap.address.0),
+                kind_name(&heap.kind),
+                heap.index
+            ),
+        )];
         if let Some(block) = &detail.block {
-            print_block(block);
+            fields.extend(block_fields(block));
         }
+        print_fields(2, &fields);
     }
 }
 
-/// `heap 0` or `heaps 0, 2`: the heaps a warning is about, by PEB index.
-fn heap_indexes(indexes: &[usize]) -> String {
-    let list: Vec<String> = indexes.iter().map(usize::to_string).collect();
-    format!(
-        "{} {}",
-        if indexes.len() == 1 { "heap" } else { "heaps" },
-        list.join(", ")
-    )
-}
-
-/// Groups per-heap failures by their text, in first-seen order, so each
-/// distinct reason is reported once with every heap it hit: one missing
-/// layout field fails every heap of a kind the same way.
-fn group_failures<'a>(
-    failures: impl IntoIterator<Item = (usize, &'a str)>,
-) -> Vec<(&'a str, Vec<usize>)> {
-    let mut groups: Vec<(&str, Vec<usize>)> = Vec::new();
-    for (index, error) in failures {
-        match groups.iter_mut().find(|(text, _)| *text == error) {
-            Some((_, indexes)) => indexes.push(index),
-            None => groups.push((error, vec![index])),
-        }
-    }
-    groups
-}
-
-fn print_block(block: &BlockMatch) {
+/// The fields `!heap -x` shows for the block it found.
+fn block_fields(block: &BlockMatch) -> Vec<(&'static str, String)> {
     match block {
         BlockMatch::NtEntry { segment, entry } => {
-            outln!("  segment {}", ui::addr(segment.0));
-            outln!("  {}", nt_entry_line(entry));
-            outln!(
-                "  user {}  user size {:#x}",
-                ui::addr(entry.user().0),
-                entry.user_size()
-            );
+            let mut fields = vec![("segment", ui::addr(segment.0))];
+            fields.extend(nt_entry_fields(entry));
+            fields.push(("user", ui::addr(entry.user().0)));
+            fields.push(("user size", format!("{:#x}", entry.user_size())));
+            fields
         }
         BlockMatch::NtLfhBlock {
             segment,
@@ -668,120 +755,131 @@ fn print_block(block: &BlockMatch) {
             region,
             index,
         } => {
-            outln!("  segment {}", ui::addr(segment.0));
-            outln!("  {}", nt_entry_line(entry));
-            outln!(
-                "  LFH user blocks {}  subsegment {}  {} x {:#x}",
-                ui::addr(region.header.0),
-                ui::addr(region.subsegment.0),
-                region.block_count,
-                region.block_size
-            );
+            let mut fields = vec![("segment", ui::addr(segment.0))];
+            fields.extend(nt_entry_fields(entry));
             let block = region.block(*index);
-            outln!(
-                "  block {index}: {}  {}  user {}",
-                ui::addr(block.0),
-                if region.is_busy(*index) {
-                    "busy"
-                } else {
-                    "free"
-                },
-                ui::addr(block.0 + entry.granule)
-            );
-        }
-        BlockMatch::NtVirtual(block) => {
-            outln!(
-                "  virtual block {}  commit {:#x}  reserve {:#x}  user {}",
-                ui::addr(block.entry.0),
-                block.commit_size,
-                block.reserve_size,
-                ui::addr(block.user.0)
-            );
-        }
-        BlockMatch::NtSegmentOnly { segment, stopped } => {
-            outln!("  segment {}", ui::addr(segment.0));
-            match stopped {
-                Some(stop) => outln!(
-                    "  not reached: the entry walk stopped at {}: {reason}",
-                    ui::addr(stop.address.0),
-                    reason = stop.reason
+            fields.extend([
+                ("LFH user blocks", ui::addr(region.header.0)),
+                ("subsegment", ui::addr(region.subsegment.0)),
+                (
+                    "blocks",
+                    format!("{} x {:#x}", region.block_count, region.block_size),
                 ),
-                None => outln!("  in an uncommitted range or the segment header"),
-            }
+                ("block", format!("{} (index {index})", ui::addr(block.0))),
+                ("state", state_name(region.is_busy(*index)).into()),
+                ("user", ui::addr(block.0 + entry.granule)),
+            ]);
+            fields
         }
-        BlockMatch::Direct(range) => {
-            outln!(
-                "  page allocation {}  size {:#x}  unused {:#x}",
-                ui::addr(range.address.0),
-                range.size(),
-                range.unused_bytes
-            );
-        }
+        BlockMatch::NtVirtual(block) => vec![
+            ("virtual block", ui::addr(block.entry.0)),
+            ("commit", format!("{:#x}", block.commit_size)),
+            ("reserve", format!("{:#x}", block.reserve_size)),
+            ("user", ui::addr(block.user.0)),
+        ],
+        BlockMatch::NtSegmentOnly { segment, stopped } => vec![
+            ("segment", ui::addr(segment.0)),
+            (
+                "entry",
+                match stopped {
+                    Some(stop) => format!(
+                        "- (not reached: the entry walk stopped at {:#x}: {})",
+                        stop.address.0, stop.reason
+                    ),
+                    None => "- (in an uncommitted range or the segment header)".into(),
+                },
+            ),
+        ],
+        BlockMatch::Direct(range) => vec![
+            ("page allocation", ui::addr(range.address.0)),
+            ("size", format!("{:#x}", range.size())),
+            ("unused", format!("{:#x}", range.unused_bytes)),
+        ],
         BlockMatch::VsChunk {
             range,
             subsegment,
             chunk,
-        } => {
-            outln!(
-                "  page range {} ({} unit(s)), VS subsegment {}",
-                ui::addr(range.address.0),
-                range.units,
-                ui::addr(subsegment.0)
-            );
-            outln!("  {}", vs_chunk_line(chunk));
-            outln!(
-                "  user {}  user size {:#x}",
-                ui::addr(chunk.user().0),
-                chunk.user_size()
-            );
-        }
+        } => vec![
+            (
+                "page range",
+                format!(
+                    "{} ({})",
+                    ui::addr(range.address.0),
+                    plural(range.units, "unit", "units")
+                ),
+            ),
+            ("VS subsegment", ui::addr(subsegment.0)),
+            ("chunk", ui::addr(chunk.address.0)),
+            ("size", format!("{:#x}", chunk.size)),
+            ("prev size", format!("{:#x}", chunk.previous_size)),
+            (
+                "unused",
+                chunk
+                    .unused_bytes
+                    .map_or_else(|| "-".into(), |unused| format!("{unused:#x}")),
+            ),
+            ("state", state_name(chunk.busy).into()),
+            ("user", ui::addr(chunk.user().0)),
+            ("user size", format!("{:#x}", chunk.user_size())),
+        ],
         BlockMatch::LfhBlock {
             range,
             subsegment,
             index,
-        } => {
-            outln!(
-                "  page range {} ({} unit(s)), LFH subsegment {}  bucket {}: {} x {:#x}",
-                ui::addr(range.address.0),
-                range.units,
-                ui::addr(subsegment.address.0),
-                subsegment.bucket,
-                subsegment.block_count,
-                subsegment.block_size
-            );
-            outln!(
-                "  block {index}: {}  {}",
-                ui::addr(subsegment.block(*index).0),
-                if subsegment.is_busy(*index) {
-                    "busy"
-                } else {
-                    "free"
-                }
-            );
-        }
-        BlockMatch::RangeOnly(range) => {
-            outln!(
-                "  page range {} ({} unit(s), flags {:#04x}): {}",
-                ui::addr(range.address.0),
-                range.units,
-                range.flags,
+        } => vec![
+            (
+                "page range",
+                format!(
+                    "{} ({})",
+                    ui::addr(range.address.0),
+                    plural(range.units, "unit", "units")
+                ),
+            ),
+            ("LFH subsegment", ui::addr(subsegment.address.0)),
+            ("bucket", subsegment.bucket.to_string()),
+            (
+                "blocks",
+                format!("{} x {:#x}", subsegment.block_count, subsegment.block_size),
+            ),
+            (
+                "block",
+                format!("{} (index {index})", ui::addr(subsegment.block(*index).0)),
+            ),
+            ("state", state_name(subsegment.is_busy(*index)).into()),
+        ],
+        BlockMatch::RangeOnly(range) => vec![
+            (
+                "page range",
+                format!(
+                    "{} ({})",
+                    ui::addr(range.address.0),
+                    plural(range.units, "unit", "units")
+                ),
+            ),
+            ("flags", format!("{:#04x}", range.flags)),
+            (
+                "state",
                 match range.kind {
                     RangeKind::Free => "free",
                     RangeKind::Unused => "unused",
                     _ => "outside the subsegment's blocks (header, bitmap, or slack)",
                 }
-            );
-        }
-        BlockMatch::Large(large) => {
-            outln!(
-                "  large allocation {}  size {:#x} ({:#x} pages)  unused {:#x}  metadata {}",
-                ui::addr(large.address.0),
-                large.size(),
-                large.pages,
-                large.unused_bytes,
-                ui::addr(large.metadata.0)
-            );
-        }
+                .into(),
+            ),
+        ],
+        BlockMatch::Large(large) => vec![
+            ("large allocation", ui::addr(large.address.0)),
+            (
+                "size",
+                format!(
+                    "{:#x} ({})",
+                    large.size(),
+                    plural(large.pages, "page", "pages")
+                ),
+            ),
+            ("unused", format!("{:#x}", large.unused_bytes)),
+            ("metadata", ui::addr(large.metadata.0)),
+        ],
     }
 }
 

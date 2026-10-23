@@ -46,7 +46,7 @@ KDTARGET: Refreshing KD connection
 
  BREAK  processor 3  notmyfaultc64. (2012) at myfault+0x1730
  ├─ stopped at nt!DbgBreakPointWithStatus
- └─ thread notmyfaultc64.  state Running  ethread ffffbe0ab9e42080  pid 2012  tid 2644
+ └─ thread ffffbe0ab9e42080  TID 2644  PID 2012  process notmyfaultc64.  state Running
 
 registers (trap frame)
   rax 0000000000000000   rbx ffffce06dc2dd010   rcx 0000000000000802
@@ -56,7 +56,7 @@ disasm
      fffff808bb46171b +0x171b  mov  rbx, rax
      fffff808bb46171e +0x171e  call qword [rip+0x2964]     myfault+0x4088
      fffff808bb461724 +0x1724  mov  cl, 2
-     fffff808bb461726 +0x1726  call qword [rip+0x28F4]     myfault+0x4020
+     fffff808bb461726 +0x1726  call qword [rip+0x28f4]     myfault+0x4020
      fffff808bb46172c +0x172c  nop  dword [rax]
 ╭▶ > fffff808bb461730 +0x1730  mov  eax, dword [rbx]
 │    fffff808bb461732 +0x1732  lea  rbx, [rbx+0x1000]
@@ -64,11 +64,11 @@ disasm
 ╰─   fffff808bb46173d +0x173d  jmp  +0x1730
 
 stack
-  #0–#5  nt!DbgBreakPointWithStatus … nt!KiPageFault+0x468
+  00–05  nt!DbgBreakPointWithStatus … nt!KiPageFault+0x468
       ┄┄ trap ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
-  #6  fffff808bb461730  myfault+0x1730
-  #7  fffff808bb461bd2  myfault+0x1bd2
-  #8  fffff808bb461d54  myfault+0x1d54
+  06  fffff808bb461730  myfault+0x1730
+  07  fffff808bb461bd2  myfault+0x1bd2
+  08  fffff808bb461d54  myfault+0x1d54
 ...
 3: kdnet>
 ```
@@ -93,20 +93,20 @@ The disassembly shows the function around the fault: a loop that reads a dword a
 ```text
 3: kdnet> !analyze
 crash analysis
-
 bugcheck 0x000000d1 DRIVER_IRQL_NOT_LESS_OR_EQUAL  driver myfault.sys
 
 failure signature
-  bugcheck:000000d1|module:myfault
-  source: bugcheck fault
+  bucket  bugcheck:000000d1|module:myfault
+  source  bugcheck fault
 
 culprit attribution
-  myfault.sys  medium confidence
-  BugcheckFaultAddress fffff808bb461730  bugcheck fault address resolves to myfault.sys
+  culprit        myfault.sys
+  confidence     medium
+  fault address  fffff808bb461730  bugcheck fault address resolves to myfault.sys
 
 loaded modules
-  ntoskrnl.exe             fffff803e9a00000-fffff803eae50000  0x1450000 bytes
-  myfault.sys              fffff808bb460000-fffff808bb46b000  0xb000 bytes
+  ntoskrnl.exe  fffff803e9a00000-fffff803eae50000  0x1450000 bytes
+  myfault.sys   fffff808bb460000-fffff808bb46b000  0xb000 bytes
   174 loaded modules total
 ```
 
@@ -130,6 +130,7 @@ To select the trap frame, give its address to {command}`.trap`. {command}`k` and
 
 ```text
 3: kdnet> k
+  # Child-SP          IP                Call Site
  00 fffffb84648d08b8  fffff803e9efdfb0  nt!DbgBreakPointWithStatus
  01 fffffb84648d08c0  fffff803e9fb3622  nt!KiBugCheckDebugBreak+0x12
  02 fffffb84648d0920  fffff803e9fb2b4e  nt!KeBugCheck2+0xb2e
@@ -204,9 +205,9 @@ power failure
     THREAD ffffb28a7f721040 (static)  waiting for work
     THREAD ffffb28a7f6f9040 (static)  waiting for work
   thread ffffb28a7f721040  IRP worker, waiting for work
-#0  fffffc01d5414800  fffff802bcdb64d6  nt!KiSwapContext+0x76
+    00  fffff802bcdb64d6  nt!KiSwapContext+0x76
 ...
-  parameter 3 (0x0) is not a readable TRIAGE_9F_POWER: Bad virtual address: 0; walked nt!PopIrpList and nt!PopIrpThreadList
+  parameter 3 (0x0) is not a readable TRIAGE_9F_POWER: bad virtual address: 0x0; walked nt!PopIrpList and nt!PopIrpThreadList
 ```
 
 A wait/wake IRP stays pending by design, and its watchdog does not run. A set-power or query-power IRP that has been pending in a driver for many seconds is the hang.

@@ -9,11 +9,11 @@ A virtual processor leaves its guest for the hypervisor with a VM exit: to make 
 ```text
 mem:1> !hvcalls
 Code    Name                                  Kind        Input   Rep in  Output  Rep out  Handler
-0x0000                                        simple                                       hv+0x2868a0
-0x0001  HvCallSwitchVirtualAddressSpace       simple      0x8                              hv+0x28fc70
-0x0003  HvCallFlushVirtualAddressList         rep         0x18    0x8                      hv+0x28dce0
+0x0000  -                                     simple      -       -       -       -        hv+0x2868a0
+0x0001  HvCallSwitchVirtualAddressSpace       simple      0x8     -       -       -        hv+0x28fc70
+0x0003  HvCallFlushVirtualAddressList         rep         0x18    0x8     -       -        hv+0x28dce0
 ...
-0x0040  HvCallCreatePartition                 simple      0x38            0x8              hv+0x2831e0
+0x0040  HvCallCreatePartition                 simple      0x38    -       0x8     -        hv+0x2831e0
 ...
 221 of 306 codes implemented; code 0's handler serves the rest
 ```

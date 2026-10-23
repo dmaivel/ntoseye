@@ -502,7 +502,6 @@ fn print_symbol_values(session: &Session, rows: &[SymbolValueRow], item_size: us
             }
         }
     }
-    outln!();
 }
 
 impl ReplState<'_> {
@@ -685,7 +684,6 @@ impl Render for Pointers {
             }
             outln!("{}", line);
         }
-        outln!();
     }
 }
 
@@ -720,14 +718,14 @@ fn dpp(
     pointers(session, &range, item_size, pointee)
 }
 
-/// The NUL-terminated string of `char_size`-wide units, quoted and escaped
-/// as `da`/`du` show it, marked when it is cut short by `max_chars` or an
-/// unreadable page.
+/// The NUL-terminated string of `char_size`-wide units, quoted, with what it
+/// cannot print shown as `.`, as `da`/`du` show it, marked when it is cut
+/// short by `max_chars` or an unreadable page.
 fn quote_terminated(read: &TerminatedRead, max_chars: usize, char_size: usize) -> String {
     let text: String = if char_size == 1 {
-        read.bytes.iter().map(|&byte| char::from(byte)).collect()
+        read.bytes.iter().map(|&byte| ascii_char(byte)).collect()
     } else {
-        utf16le_lossy(&read.bytes)
+        printable_text(&utf16le_lossy(&read.bytes))
     };
     let suffix = if read.unreadable {
         " <unreadable>".red().to_string()
@@ -736,7 +734,21 @@ fn quote_terminated(read: &TerminatedRead, max_chars: usize, char_size: usize) -
     } else {
         String::new()
     };
-    format!("\"{}\"{}", text.escape_debug(), suffix)
+    format!("\"{text}\"{suffix}")
+}
+
+/// `text` with each control character shown as `.`, as `db`'s ASCII column
+/// shows a byte it cannot print.
+fn printable_text(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_control() {
+                '.'
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 /// A NUL-terminated string `da`/`du` read.
@@ -775,7 +787,7 @@ fn terminated_string(
 impl Render for TerminatedString {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         outln!(
-            "{}  {}\n",
+            "{}  {}",
             ui::addr(self.address.0),
             quote_terminated(&self.read, self.max_chars, self.char_size)
         );
@@ -930,8 +942,8 @@ fn counted_string(
                 };
                 let (data, valid) = read_best_effort(session, MemoryKind::Virtual, &range)?;
                 let text = match kind {
-                    StringDescriptor::Unicode => utf16le_lossy(&data),
-                    StringDescriptor::Ansi => String::from_utf8_lossy(&data).into_owned(),
+                    StringDescriptor::Unicode => printable_text(&utf16le_lossy(&data)),
+                    StringDescriptor::Ansi => data.iter().map(|&byte| ascii_char(byte)).collect(),
                 };
                 CountedText::Text {
                     text,
@@ -952,13 +964,13 @@ fn counted_string(
 
 impl Render for CountedString {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
-        let unreadable = || "<unreadable>".to_string();
+        let unreadable = || "-".to_string();
         let length = self
             .length
-            .map_or_else(unreadable, |value| value.to_string());
+            .map_or_else(unreadable, |value| format!("{value:#x}"));
         let maximum_length = self
             .maximum_length
-            .map_or_else(unreadable, |value| value.to_string());
+            .map_or_else(unreadable, |value| format!("{value:#x}"));
         let buffer = self
             .buffer
             .map_or_else(unreadable, |value| ui::addr(value.0));
@@ -967,7 +979,7 @@ impl Render for CountedString {
             CountedText::Empty => "\"\"".to_string(),
             CountedText::Text { text, complete } => format!(
                 "\"{}\"{}",
-                text.escape_debug(),
+                text,
                 if *complete {
                     String::new()
                 } else {
@@ -976,7 +988,7 @@ impl Render for CountedString {
             ),
         };
         outln!(
-            "{}  Length={} MaximumLength={} Buffer={}  {}\n",
+            "{}  Length={} MaximumLength={} Buffer={}  {}",
             ui::addr(self.address.0),
             length,
             maximum_length,
@@ -1202,7 +1214,7 @@ impl Render for ValuesWritten {
             }
         };
         outln!(
-            "{} {} -> {}\n",
+            "{} {} -> {}",
             "wrote".green(),
             shown.join(" "),
             ui::addr(self.address.0)
@@ -1476,7 +1488,7 @@ pub struct StringWritten {
 impl Render for StringWritten {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         outln!(
-            "{} {} bytes -> {}\n",
+            "{} {} bytes -> {}",
             "wrote".green(),
             self.len,
             ui::addr(self.address.0)
@@ -1637,10 +1649,10 @@ fn writemem(
 impl Render for MemoryToFile {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         if self.unreadable == 0 {
-            outln!("wrote {:#x} bytes to '{}'\n", self.len, self.path);
+            outln!("wrote {:#x} bytes to '{}'", self.len, self.path);
         } else {
             outln!(
-                "wrote {:#x} bytes to '{}' ({} unreadable bytes written as zero)\n",
+                "wrote {:#x} bytes to '{}' ({} unreadable bytes written as zero)",
                 self.len,
                 self.path,
                 self.unreadable
@@ -1723,14 +1735,14 @@ impl Render for FileToMemory {
         }
         if self.unwritten == 0 {
             outln!(
-                "read {:#x} bytes from '{}' into {}\n",
+                "read {:#x} bytes from '{}' into {}",
                 self.len,
                 self.path,
                 ui::addr(self.start.0)
             );
         } else {
             outln!(
-                "read {:#x} bytes from '{}' ({} bytes not written)\n",
+                "read {:#x} bytes from '{}' ({} bytes not written)",
                 self.len,
                 self.path,
                 self.unwritten
@@ -1771,13 +1783,15 @@ fn formats(_session: &Session, #[arg(parse = formats_value)] value: u64) -> Resu
 impl Render for NumberFormats {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         let value = self.0;
-        outln!("hexadecimal: 0x{value:016x}");
-        outln!("decimal: {value} (signed {})", value as i64);
-        outln!("octal: 0o{value:o}");
-        outln!("binary: 0b{value:064b}");
-        outln!("characters: \"{}\"", format_characters(value));
-        outln!("float: {}", format_float(f32::from_bits(value as u32)));
-        outln!("double: {}", format_float(f64::from_bits(value)));
+        // The labels pad to the longest one, `time (Unix seconds)`.
+        let field = |label: &str, text: String| outln!("{label:<19}  {text}");
+        field("hexadecimal", format!("0x{value:016x}"));
+        field("decimal", format!("{value} (signed {})", value as i64));
+        field("octal", format!("0o{value:o}"));
+        field("binary", format!("0b{value:064b}"));
+        field("characters", format!("\"{}\"", format_characters(value)));
+        field("float", format_float(f32::from_bits(value as u32)));
+        field("double", format_float(f64::from_bits(value)));
 
         const FILETIME_UNIX_OFFSET_SECONDS: i64 = 11_644_473_600;
         const FILETIME_MAX_TICKS: u64 = 265_046_774_400_000_000;
@@ -1788,24 +1802,23 @@ impl Render for NumberFormats {
             && (FILETIME_UNIX_MIN_SECONDS..=FILETIME_UNIX_MAX_SECONDS)
                 .contains(&filetime_unix_seconds)
         {
-            let nanos = ((value % 10_000_000) * 100) as u32;
-            outln!(
-                "time (FILETIME): {} UTC",
-                format_unix_timestamp(filetime_unix_seconds, nanos)
+            let ticks = (value % 10_000_000) as u32;
+            field(
+                "time (FILETIME)",
+                format_unix_timestamp(filetime_unix_seconds, ticks),
             );
         } else {
-            outln!("time (FILETIME): out of range");
+            field("time (FILETIME)", "out of range".to_string());
         }
         let unix_seconds = value as i64;
         if (FILETIME_UNIX_MIN_SECONDS..=FILETIME_UNIX_MAX_SECONDS).contains(&unix_seconds) {
-            outln!(
-                "time (Unix seconds): {} UTC",
-                format_unix_timestamp(unix_seconds, 0)
+            field(
+                "time (Unix seconds)",
+                format_unix_timestamp(unix_seconds, 0),
             );
         } else {
-            outln!("time (Unix seconds): out of range");
+            field("time (Unix seconds)", "out of range".to_string());
         }
-        outln!();
     }
 }
 
@@ -1869,7 +1882,7 @@ pub struct MemoryFilled {
 impl Render for MemoryFilled {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         outln!(
-            "{} {:#x} bytes at {} with {}\n",
+            "{} {:#x} bytes at {} with {}",
             "filled".green(),
             self.len,
             ui::addr(self.address.0),
@@ -1976,7 +1989,6 @@ impl Render for CompareResult {
             );
         }
         print_search_stop(self.stopped, "differences");
-        outln!();
     }
 }
 
@@ -2002,7 +2014,7 @@ pub struct MemoryCopied {
 impl Render for MemoryCopied {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         outln!(
-            "copied {:#x} bytes from {} to {}\n",
+            "copied {:#x} bytes from {} to {}",
             self.len,
             ui::addr(self.source.0),
             ui::addr(self.destination.0)
@@ -2188,12 +2200,16 @@ impl Render for SearchResult {
     fn render(&self, repl: &mut ReplState<'_>, (): ()) {
         let hits = &self.matches;
         for &address in hits {
-            let symbol = repl
+            // A hit outside any module shows only its address, as `dqs`
+            // shows a value with no symbol.
+            match repl
                 .ctx
                 .target
                 .closest_symbol_current_context(VirtAddr(address))
-                .unwrap_or_default();
-            outln!("{}  {}", ui::addr(address), ui::symbol(&symbol));
+            {
+                Some(symbol) => outln!("{}  {}", ui::addr(address), ui::symbol(&symbol)),
+                None => outln!("{}", ui::addr(address)),
+            }
         }
         if hits.is_empty() && self.length > 0 && self.unreadable >= self.length {
             // Nothing was searched, so "no matches" would claim too much.
@@ -2203,10 +2219,10 @@ impl Render for SearchResult {
             );
         } else if hits.is_empty() {
             outln!(
-                "{} (searched {:#x} bytes at {})",
+                "{} (searched {:#x} bytes at {:#x})",
                 "no matches found".bright_black(),
                 self.length,
-                ui::addr(self.start.0)
+                self.start.0
             );
         } else {
             outln!(
@@ -2225,7 +2241,6 @@ impl Render for SearchResult {
         print_search_stop(self.stopped, "matches");
         let origin = repl.line.clone();
         repl.ctx.target.set_results(hits.clone(), origin);
-        outln!();
     }
 }
 
@@ -2244,20 +2259,20 @@ fn format_characters(value: u64) -> String {
     value.to_le_bytes().into_iter().map(ascii_char).collect()
 }
 
-/// Format a proleptic-Gregorian UTC timestamp without pulling a date/time
-/// dependency into the debugger. `seconds` is Unix time and `nanos` is the
-/// fractional second component.
-fn format_unix_timestamp(seconds: i64, nanos: u32) -> String {
+/// Format a proleptic-Gregorian UTC timestamp in ISO 8601 (`…Z`) without
+/// pulling a date/time dependency into the debugger. `seconds` is Unix time
+/// and `ticks` the fractional second in FILETIME's 100 ns units.
+fn format_unix_timestamp(seconds: i64, ticks: u32) -> String {
     let days = seconds.div_euclid(86_400);
     let day_seconds = seconds.rem_euclid(86_400);
     let hour = day_seconds / 3_600;
     let minute = (day_seconds % 3_600) / 60;
     let second = day_seconds % 60;
     let (year, month, day) = days_to_ymd(days);
-    if nanos == 0 {
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}")
+    if ticks == 0 {
+        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
     } else {
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{nanos:09}")
+        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{ticks:07}Z")
     }
 }
 

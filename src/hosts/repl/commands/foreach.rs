@@ -76,7 +76,7 @@ fn foreach(
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     if tail.is_empty() {
-        outln!("{}\n", command_help(name));
+        outln!("{}", command_help(name));
         return Ok(Flow::Continue);
     }
     let spec = match parse_foreach(&tail) {
@@ -354,7 +354,6 @@ fn for_each_frame(
             crate::hosts::repl::disasm::StackColumns::default(),
             selected,
         );
-        outln!();
         return Ok(Flow::Continue);
     }
     let flow = state.in_command_loop(name, |state| {
@@ -838,7 +837,7 @@ impl ReplState<'_> {
     /// malformed.
     fn for_each_command(&self, name: &str, tail: &str, default: &str) -> Option<String> {
         if tail == "-?" {
-            outln!("{}\n", command_help(name));
+            outln!("{}", command_help(name));
             return None;
         }
         match command_string(tail) {

@@ -50,7 +50,7 @@ impl ArgError {
 
     pub fn report(&self, name: &str) {
         match self {
-            Self::Missing => outln!("{}\n", command_help(name)),
+            Self::Missing => outln!("{}", command_help(name)),
             Self::Message(message) => error!("{message}"),
         }
     }

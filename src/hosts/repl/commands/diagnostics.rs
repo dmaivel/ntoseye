@@ -12,10 +12,11 @@ use crate::nt::target::object::{
     ExecutiveResource, FileObject, HandleEntry, HandleTable, ResourceList,
 };
 use crate::nt::target::security::Token;
+use crate::nt::target::usermode::address::human_size;
 use crate::nt::target::usermode::handles::{
     handle_attribute_names, handle_type_counts, handle_type_label,
 };
-use crate::nt::target::{DiagnosticMetric, DiagnosticValue, ListTermination, TargetKind};
+use crate::nt::target::{DiagnosticValue, ListTermination, TargetKind};
 use crate::nt::userdump::UserHandle;
 use crate::session::Session;
 use ntoseye_macros::{command, grammar};
@@ -42,55 +43,113 @@ fn memusage(
 
 impl Render for SystemMemorySummary {
     fn render(&self, _: &mut ReplState<'_>, _: ()) {
-        print_memory_use_summary(self, true);
+        print_memory_counters(self);
+        print_process_memory(self);
     }
 }
 
-pub fn diagnostic_cell<T: Display>(value: &DiagnosticValue<T>) -> String {
-    match value {
-        DiagnosticValue::Available(value) => value.to_string(),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
+/// The fields of one block that could not be read, and why. Each such field
+/// shows `-`; the block ends with one muted note naming them, the fields
+/// that failed for the same reason together.
+#[derive(Default)]
+pub struct UnavailableNotes {
+    reasons: Vec<(String, Vec<String>)>,
+}
+
+impl UnavailableNotes {
+    /// Record that `label` could not be read, and return its `-`.
+    pub fn missing(&mut self, label: &str, reason: &str) -> String {
+        match self.reasons.iter_mut().find(|(known, _)| known == reason) {
+            Some((_, labels)) => labels.push(label.to_string()),
+            None => self
+                .reasons
+                .push((reason.to_string(), vec![label.to_string()])),
+        }
+        "-".to_string()
+    }
+
+    /// A value as `Display` shows it, or `-`.
+    pub fn value<T: Display>(&mut self, label: &str, value: &DiagnosticValue<T>) -> String {
+        match value {
+            DiagnosticValue::Available(value) => value.to_string(),
+            DiagnosticValue::Unavailable(error) => self.missing(label, error),
+        }
+    }
+
+    /// A count or size in `0x` hex, or `-`.
+    pub fn hex<T: Copy + Into<u64>>(&mut self, label: &str, value: &DiagnosticValue<T>) -> String {
+        match value {
+            DiagnosticValue::Available(value) => format!("{:#x}", (*value).into()),
+            DiagnosticValue::Unavailable(error) => self.missing(label, error),
+        }
+    }
+
+    /// A pointer, `-` when it is null, or `-` when it could not be read.
+    pub fn pointer(&mut self, label: &str, value: &DiagnosticValue<VirtAddr>) -> String {
+        match value {
+            DiagnosticValue::Available(value) => ui::addr_opt(*value),
+            DiagnosticValue::Unavailable(error) => self.missing(label, error),
+        }
+    }
+
+    /// A yes/no flag, or `-`.
+    pub fn yes_no(&mut self, label: &str, value: &DiagnosticValue<bool>) -> String {
+        match value {
+            DiagnosticValue::Available(value) => yes_no(*value).to_string(),
+            DiagnosticValue::Unavailable(error) => self.missing(label, error),
+        }
+    }
+
+    /// The block's note, `indent` in: `unavailable: PageColor: <reason>`.
+    pub fn print(&self, indent: &str) {
+        for (reason, labels) in &self.reasons {
+            outln!(
+                "{indent}{}",
+                ui::muted(&format!("unavailable: {}: {reason}", labels.join(", ")))
+            );
+        }
     }
 }
 
-pub fn diagnostic_metric_cell<T: Display>(metric: &DiagnosticMetric<T>) -> String {
-    match metric.source {
-        Some(source) => format!("{} [{source}]", diagnostic_cell(&metric.value)),
-        None => diagnostic_cell(&metric.value),
+pub fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+/// A memory counter as a human-readable size in binary units.
+fn size_cell(notes: &mut UnavailableNotes, label: &str, bytes: &DiagnosticValue<u64>) -> String {
+    match bytes {
+        DiagnosticValue::Available(bytes) => human_size(*bytes),
+        DiagnosticValue::Unavailable(error) => notes.missing(label, error),
     }
 }
 
-pub fn print_memory_use_summary(summary: &SystemMemorySummary, include_process_stats: bool) {
-    outln!("system memory (page counters are pages; nonpaged pool is bytes)");
-    outln!(
-        "  physical pages     : {}",
-        diagnostic_metric_cell(&summary.physical_pages)
-    );
-    outln!(
-        "  available pages    : {}",
-        diagnostic_metric_cell(&summary.available_pages)
-    );
-    outln!(
-        "  committed pages    : {}",
-        diagnostic_metric_cell(&summary.committed_pages)
-    );
-    outln!(
-        "  commit limit pages : {}",
-        diagnostic_metric_cell(&summary.commit_limit_pages)
-    );
-    outln!(
-        "  paged pool pages   : {}",
-        diagnostic_metric_cell(&summary.paged_pool_pages)
-    );
-    outln!(
-        "  nonpaged pool bytes: {}",
-        diagnostic_metric_cell(&summary.nonpaged_pool_bytes)
-    );
-    if include_process_stats && !summary.processes.is_empty() {
+/// The system-wide counters of a memory-use summary.
+pub fn print_memory_counters(summary: &SystemMemorySummary) {
+    print_section("system memory");
+    let mut notes = UnavailableNotes::default();
+    for (label, metric) in [
+        ("physical pages", &summary.physical_pages),
+        ("available pages", &summary.available_pages),
+        ("committed pages", &summary.committed_pages),
+        ("commit limit pages", &summary.commit_limit_pages),
+        ("paged pool pages", &summary.paged_pool_pages),
+        ("nonpaged pool bytes", &summary.nonpaged_pool_bytes),
+    ] {
+        outln!("  {label:<19}  {}", notes.value(label, &metric.value));
+    }
+    notes.print("  ");
+}
+
+/// The per-process rows of a memory-use summary, last in the output: the
+/// table ends with a blank line of its own.
+pub fn print_process_memory(summary: &SystemMemorySummary) {
+    let mut notes = UnavailableNotes::default();
+    if !summary.processes.is_empty() {
+        print_section("processes");
         let mut builder = Builder::default();
         builder.push_record([
             "PID",
-            "Process",
+            "Name",
             "Virtual",
             "Working set",
             "Pagefile",
@@ -100,52 +159,24 @@ pub fn print_memory_use_summary(summary: &SystemMemorySummary, include_process_s
             builder.push_record([
                 process.process.pid.to_string(),
                 process.process.name.clone(),
-                diagnostic_cell(&process.virtual_size),
-                diagnostic_cell(&process.working_set_size),
-                diagnostic_cell(&process.pagefile_usage),
-                diagnostic_cell(&process.private_usage),
+                size_cell(&mut notes, "virtual", &process.virtual_size),
+                size_cell(&mut notes, "working set", &process.working_set_size),
+                size_cell(&mut notes, "pagefile", &process.pagefile_usage),
+                size_cell(&mut notes, "private", &process.private_usage),
             ]);
         }
         print_padded_table(builder);
     }
-    if include_process_stats && summary.truncated {
+    notes.print("");
+    if summary.truncated {
         outln!(
-            "process list bounded: displayed {} of {}",
-            summary.processes.len(),
-            summary.process_count
+            "{}",
+            ui::muted(&format!(
+                "{} of {} processes shown",
+                summary.processes.len(),
+                summary.process_count
+            ))
         );
-    }
-}
-
-pub fn diagnostic_hex<T>(value: &DiagnosticValue<T>) -> String
-where
-    T: Copy + Into<u64>,
-{
-    match value {
-        DiagnosticValue::Available(value) => format!("{:#x}", (*value).into()),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
-    }
-}
-
-fn diagnostic_status(value: &DiagnosticValue<u32>) -> String {
-    match value {
-        DiagnosticValue::Available(value) => format!("{value:#010x}"),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
-    }
-}
-
-pub fn diagnostic_addr(value: &DiagnosticValue<VirtAddr>) -> String {
-    match value {
-        DiagnosticValue::Available(value) => ui::addr(value.0).to_string(),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
-    }
-}
-
-fn diagnostic_opt_string(value: &DiagnosticValue<Option<String>>) -> String {
-    match value {
-        DiagnosticValue::Available(Some(value)) => value.clone(),
-        DiagnosticValue::Available(None) => "-".to_string(),
-        DiagnosticValue::Unavailable(error) => format!("<unavailable: {error}>"),
     }
 }
 
@@ -162,64 +193,106 @@ const SHOW_OBJECT: u64 = 0x8;
 fn print_user_handle(entry: &UserHandle, show: u64) {
     outln!("handle {:#x}", entry.handle);
     if show & SHOW_TYPE != 0 {
-        outln!("  type          : {}", handle_type_label(entry));
+        outln!("  type           {}", handle_type_label(entry));
     }
     if show & SHOW_BASIC != 0 {
-        outln!("  access        : {:#x}", entry.granted_access);
+        outln!("  access         {:#x}", entry.granted_access);
         let names = handle_attribute_names(entry.attributes);
         if names.is_empty() {
-            outln!("  attributes    : {:#x}", entry.attributes);
+            outln!("  attributes     {:#x}", entry.attributes);
         } else {
             outln!(
-                "  attributes    : {:#x} ({})",
+                "  attributes     {:#x} ({})",
                 entry.attributes,
                 names.join(" | ")
             );
         }
-        outln!("  handle count  : {}", entry.handle_count);
-        outln!("  pointer count : {}", entry.pointer_count);
+        outln!("  handle count   {}", entry.handle_count);
+        outln!("  pointer count  {}", entry.pointer_count);
     }
     if show & SHOW_NAME != 0 {
         outln!(
-            "  name          : {}",
+            "  name           {}",
             entry.object_name.as_deref().unwrap_or("-")
         );
     }
 }
 
 fn print_resource(detail: &ExecutiveResource) {
+    let mut notes = UnavailableNotes::default();
+    let field = |name: &str, value: String| outln!("  {name:<24} : {value}");
     outln!("ERESOURCE {}", ui::addr(detail.address.0));
-    outln!(
-        "  active count       : {}",
-        diagnostic_cell(&detail.active_count)
+    field(
+        "ActiveCount",
+        notes.value("ActiveCount", &detail.active_count),
     );
-    outln!("  flags              : {}", diagnostic_hex(&detail.flags));
-    outln!(
-        "  contention count   : {}",
-        diagnostic_cell(&detail.contention_count)
+    field("Flag", notes.hex("Flag", &detail.flags));
+    field(
+        "ContentionCount",
+        notes.value("ContentionCount", &detail.contention_count),
     );
-    outln!(
-        "  shared waiters     : {}",
-        diagnostic_cell(&detail.shared_waiters)
+    field(
+        "NumberOfSharedWaiters",
+        notes.value("NumberOfSharedWaiters", &detail.shared_waiters),
     );
-    outln!(
-        "  exclusive waiters  : {}",
-        diagnostic_cell(&detail.exclusive_waiters)
+    field(
+        "NumberOfExclusiveWaiters",
+        notes.value("NumberOfExclusiveWaiters", &detail.exclusive_waiters),
     );
     match &detail.owners {
-        DiagnosticValue::Available(owners) if owners.is_empty() => {
-            outln!("  owners             : none")
-        }
+        DiagnosticValue::Available(owners) if owners.is_empty() => field("Owners", "-".into()),
         DiagnosticValue::Available(owners) => {
-            outln!("  owners:");
+            outln!("  Owners");
             for owner in owners {
-                outln!("    {} count {}", ui::addr(owner.thread.0), owner.count);
+                outln!(
+                    "    THREAD {}  count {}",
+                    ui::addr(owner.thread.0),
+                    owner.count
+                );
             }
         }
-        DiagnosticValue::Unavailable(error) => {
-            outln!("  owners             : <unavailable: {error}>")
-        }
+        DiagnosticValue::Unavailable(error) => field("Owners", notes.missing("Owners", error)),
     }
+    notes.print("  ");
+}
+
+/// `!locks`'s list: one row for each resource, its owners as
+/// `thread(count)`.
+fn print_resource_table(resources: &[ExecutiveResource]) {
+    let mut notes = UnavailableNotes::default();
+    let mut builder = Builder::default();
+    builder.push_record([
+        "Resource",
+        "Active",
+        "Flags",
+        "Contention",
+        "Shared waiters",
+        "Exclusive waiters",
+        "Owners",
+    ]);
+    for resource in resources {
+        let at = |name: &str| format!("{} {name}", ui::addr(resource.address.0));
+        let owners = match &resource.owners {
+            DiagnosticValue::Available(owners) if owners.is_empty() => "-".to_string(),
+            DiagnosticValue::Available(owners) => owners
+                .iter()
+                .map(|owner| format!("{}({})", ui::addr(owner.thread.0), owner.count))
+                .collect::<Vec<_>>()
+                .join(" "),
+            DiagnosticValue::Unavailable(error) => notes.missing(&at("owners"), error),
+        };
+        builder.push_record([
+            ui::addr(resource.address.0).to_string(),
+            notes.value(&at("active"), &resource.active_count),
+            notes.hex(&at("flags"), &resource.flags),
+            notes.value(&at("contention"), &resource.contention_count),
+            notes.value(&at("shared waiters"), &resource.shared_waiters),
+            notes.value(&at("exclusive waiters"), &resource.exclusive_waiters),
+            owners,
+        ]);
+    }
+    print_padded_table(builder);
+    notes.print("");
 }
 
 /// List a limited number of handles of the selected process, or show one handle.
@@ -365,19 +438,37 @@ fn print_handle_entry(entry: &HandleEntry) {
         entry.handle,
         ui::addr(entry.entry.0)
     );
-    outln!("  object      : {}", diagnostic_addr(&entry.object));
-    outln!(
-        "  type        : {}",
-        diagnostic_opt_string(&entry.type_name)
-    );
-    outln!("  name        : {}", diagnostic_opt_string(&entry.name));
-    outln!("  access      : {}", diagnostic_hex(&entry.granted_access));
-    outln!("  attributes  : {}", diagnostic_hex(&entry.attributes));
+    let mut notes = UnavailableNotes::default();
+    let object = notes.pointer("object", &entry.object);
+    let type_name = opt_string_value(&mut notes, "type", &entry.type_name);
+    let name = opt_string_value(&mut notes, "name", &entry.name);
+    let access = notes.hex("access", &entry.granted_access);
+    let attributes = notes.hex("attributes", &entry.attributes);
+    outln!("  object      {object}");
+    outln!("  type        {type_name}");
+    outln!("  name        {name}");
+    outln!("  access      {access}");
+    outln!("  attributes  {attributes}");
+    notes.print("  ");
+}
+
+/// An optional string field: its text, or `-` when there is none or it
+/// could not be read.
+fn opt_string_value(
+    notes: &mut UnavailableNotes,
+    label: &str,
+    value: &DiagnosticValue<Option<String>>,
+) -> String {
+    match value {
+        DiagnosticValue::Available(Some(value)) => value.clone(),
+        DiagnosticValue::Available(None) => "-".to_string(),
+        DiagnosticValue::Unavailable(error) => notes.missing(label, error),
+    }
 }
 
 fn print_handle_table(table: &HandleTable) {
     outln!(
-        "handles: {} ({})  table {} level {}  scanned {}/{} slots, {} skipped{}",
+        "handles of {} (PID {}): table {}, level {}, {} of {} slots scanned, {} skipped{}",
         table.process.name,
         table.process.pid,
         ui::addr(table.table.0),
@@ -385,20 +476,27 @@ fn print_handle_table(table: &HandleTable) {
         table.scanned_handles,
         table.advertised_handles,
         table.skipped_entries,
-        if table.truncated { " (bounded)" } else { "" }
+        if table.truncated {
+            " (the scan stops there)"
+        } else {
+            ""
+        }
     );
+    let mut notes = UnavailableNotes::default();
     let mut builder = Builder::default();
     builder.push_record(["Handle", "Object", "Type", "Access", "Name"]);
     for entry in &table.entries {
+        let at = |name: &str| format!("handle {:#x} {name}", entry.handle);
         builder.push_record([
             format!("{:#x}", entry.handle),
-            diagnostic_addr(&entry.object),
-            diagnostic_opt_string(&entry.type_name),
-            diagnostic_hex(&entry.granted_access),
-            diagnostic_opt_string(&entry.name),
+            notes.pointer(&at("object"), &entry.object),
+            opt_string_value(&mut notes, &at("type"), &entry.type_name),
+            notes.hex(&at("access"), &entry.granted_access),
+            opt_string_value(&mut notes, &at("name"), &entry.name),
         ]);
     }
     print_padded_table(builder);
+    notes.print("");
 }
 
 fn print_user_handles(listing: &UserHandles) {
@@ -434,12 +532,11 @@ fn print_user_handles(listing: &UserHandles) {
             return;
         };
         print_user_handle(entry, show);
-        outln!();
         return;
     }
 
     outln!(
-        "handles: {process}, {} of {} the minidump records{}",
+        "handles of {process}: {} of {} recorded in the minidump{}",
         shown.len(),
         handles.len(),
         type_filter
@@ -447,7 +544,6 @@ fn print_user_handles(listing: &UserHandles) {
             .unwrap_or_default()
     );
     if shown.is_empty() {
-        outln!();
         return;
     }
     let mut header = vec!["Handle"];
@@ -487,6 +583,7 @@ fn print_user_handles(listing: &UserHandles) {
     for (type_name, count) in handle_type_counts(shown.iter().copied()) {
         summary.push_record([type_name, count.to_string()]);
     }
+    // The table above ends with the blank line that sets this one apart.
     outln!("{}", ui::label("by type"));
     print_padded_table(summary);
 }
@@ -508,76 +605,87 @@ impl Render for FileObject {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         let file = self;
         outln!("FILE_OBJECT {}", ui::addr(file.address.0));
-        outln!(
-            "  type / size        : {} / {}",
-            diagnostic_cell(&file.file_type),
-            diagnostic_cell(&file.size)
-        );
-        outln!(
-            "  device             : {}",
-            diagnostic_addr(&file.device_object)
-        );
-        outln!(
-            "  device type        : {}",
-            diagnostic_hex(&file.device_type)
-        );
-        outln!(
-            "  device name        : {}",
-            diagnostic_opt_string(&file.device_name)
-        );
-        outln!(
-            "  file name          : {}",
-            diagnostic_cell(&file.file_name)
-        );
-        outln!(
-            "  related file       : {}",
-            diagnostic_addr(&file.related_file_object)
-        );
-        outln!("  flags              : {}", diagnostic_hex(&file.flags));
-        outln!(
-            "  current offset     : {}",
-            diagnostic_cell(&file.current_byte_offset)
-        );
-        outln!(
-            "  fs context         : {}",
-            diagnostic_addr(&file.fs_context)
-        );
-        outln!(
-            "  fs context 2       : {}",
-            diagnostic_addr(&file.fs_context2)
-        );
-        outln!(
-            "  section object ptr : {}",
-            diagnostic_addr(&file.section_object_pointer)
-        );
-        outln!(
-            "  private cache map  : {}",
-            diagnostic_addr(&file.private_cache_map)
-        );
-        outln!(
-            "  final status       : {}",
-            diagnostic_status(&file.final_status)
-        );
-        outln!(
-            "  lock operation     : {}",
-            diagnostic_cell(&file.lock_operation)
-        );
-        outln!(
-            "  delete pending     : {}",
-            diagnostic_cell(&file.delete_pending)
-        );
-        outln!(
-            "  access R/W/D       : {}/{}/{}",
-            diagnostic_cell(&file.read_access),
-            diagnostic_cell(&file.write_access),
-            diagnostic_cell(&file.delete_access)
-        );
-        outln!(
-            "  shared R/W/D       : {}/{}/{}",
-            diagnostic_cell(&file.shared_read),
-            diagnostic_cell(&file.shared_write),
-            diagnostic_cell(&file.shared_delete)
-        );
+        let mut notes = UnavailableNotes::default();
+        // The device's type and name are not FILE_OBJECT fields: they follow
+        // its DeviceObject.
+        let device = match &file.device_object {
+            DiagnosticValue::Available(device) if !device.is_zero() => {
+                let name = opt_string_value(&mut notes, "device name", &file.device_name);
+                let kind = notes.hex("device type", &file.device_type);
+                format!("{}  {name}  type {kind}", ui::addr(device.0))
+            }
+            device => notes.pointer("DeviceObject", device),
+        };
+        let file_name = match &file.file_name {
+            DiagnosticValue::Available(name) if name.is_empty() => "-".to_string(),
+            name => notes.value("FileName", name),
+        };
+        let status = match &file.final_status {
+            DiagnosticValue::Available(status) => format!("{status:#010x}"),
+            DiagnosticValue::Unavailable(error) => notes.missing("FinalStatus", error),
+        };
+        let offset = match &file.current_byte_offset {
+            DiagnosticValue::Available(offset) => format!("{offset:#x}"),
+            DiagnosticValue::Unavailable(error) => notes.missing("CurrentByteOffset", error),
+        };
+        let small =
+            |notes: &mut UnavailableNotes, label: &str, value: &DiagnosticValue<i16>| match value {
+                DiagnosticValue::Available(value) => format!("{value:#x}"),
+                DiagnosticValue::Unavailable(error) => notes.missing(label, error),
+            };
+        let fields = [
+            ("Type", small(&mut notes, "Type", &file.file_type)),
+            ("Size", small(&mut notes, "Size", &file.size)),
+            ("DeviceObject", device),
+            ("FileName", file_name),
+            (
+                "RelatedFileObject",
+                notes.pointer("RelatedFileObject", &file.related_file_object),
+            ),
+            ("Flags", notes.hex("Flags", &file.flags)),
+            ("CurrentByteOffset", offset),
+            ("FsContext", notes.pointer("FsContext", &file.fs_context)),
+            ("FsContext2", notes.pointer("FsContext2", &file.fs_context2)),
+            (
+                "SectionObjectPointer",
+                notes.pointer("SectionObjectPointer", &file.section_object_pointer),
+            ),
+            (
+                "PrivateCacheMap",
+                notes.pointer("PrivateCacheMap", &file.private_cache_map),
+            ),
+            ("FinalStatus", status),
+            (
+                "LockOperation",
+                notes.yes_no("LockOperation", &file.lock_operation),
+            ),
+            (
+                "DeletePending",
+                notes.yes_no("DeletePending", &file.delete_pending),
+            ),
+            ("ReadAccess", notes.yes_no("ReadAccess", &file.read_access)),
+            (
+                "WriteAccess",
+                notes.yes_no("WriteAccess", &file.write_access),
+            ),
+            (
+                "DeleteAccess",
+                notes.yes_no("DeleteAccess", &file.delete_access),
+            ),
+            ("SharedRead", notes.yes_no("SharedRead", &file.shared_read)),
+            (
+                "SharedWrite",
+                notes.yes_no("SharedWrite", &file.shared_write),
+            ),
+            (
+                "SharedDelete",
+                notes.yes_no("SharedDelete", &file.shared_delete),
+            ),
+        ];
+        for (label, value) in fields {
+            outln!("  {label:<20} : {value}");
+        }
+        notes.print("  ");
     }
 }
 
@@ -626,21 +734,29 @@ impl Render for Locks {
         match self {
             Self::One(resource) => print_resource(resource),
             Self::List(list) => {
-                outln!(
-                    "executive resources: head {} entries {} termination {}",
-                    ui::addr(list.head.0),
-                    list.resources.len(),
-                    match &list.termination {
-                        ListTermination::Head => "head".to_string(),
-                        ListTermination::Null => "null (corrupt)".to_string(),
-                        ListTermination::Cycle(address) => {
-                            format!("cycle at {} (corrupt)", ui::addr(address.0))
-                        }
-                        ListTermination::Bound => "bound (truncated)".to_string(),
-                        ListTermination::Corrupt(error) => format!("read error: {error}"),
+                let count = list.resources.len();
+                let plural = if count == 1 { "" } else { "s" };
+                let walk = match &list.termination {
+                    ListTermination::Head => format!("{count} resource{plural}"),
+                    ListTermination::Null => {
+                        format!("{count} resource{plural}, then a null link (the list is corrupt)")
                     }
+                    ListTermination::Cycle(address) => format!(
+                        "{count} resource{plural}, then a cycle at {:#x} (the list is corrupt)",
+                        address.0
+                    ),
+                    ListTermination::Bound => {
+                        format!("the first {count} resource{plural} (the walk stops there)")
+                    }
+                    ListTermination::Corrupt(error) => {
+                        format!("{count} resource{plural}, then a read error: {error}")
+                    }
+                };
+                outln!(
+                    "executive resources: list head {}, {walk}",
+                    ui::addr(list.head.0)
                 );
-                list.resources.iter().for_each(print_resource);
+                print_resource_table(&list.resources);
             }
         }
     }
@@ -677,61 +793,187 @@ fn no_words(
 impl Render for Token {
     fn render(&self, _: &mut ReplState<'_>, _: ()) {
         outln!(
-            "token: {} ({})  {}",
+            "TOKEN {}  process {} (PID {})",
+            ui::addr(self.token.0),
             self.process.name,
-            self.process.pid,
-            ui::addr(self.token.0)
+            self.process.pid
         );
-        outln!("  token id           : {}", diagnostic_hex(&self.token_id));
-        outln!(
-            "  authentication id  : {}",
-            diagnostic_hex(&self.authentication_id)
+        let mut notes = UnavailableNotes::default();
+        let field = |name: &str, value: String| outln!("  {name:<18} : {value}");
+        field("TokenId", notes.hex("TokenId", &self.token_id));
+        field(
+            "AuthenticationId",
+            notes.hex("AuthenticationId", &self.authentication_id),
         );
-        outln!(
-            "  type               : {}",
-            diagnostic_cell(&self.token_type)
+        field(
+            "TokenType",
+            enum_value(&mut notes, "TokenType", &self.token_type, token_type_name),
         );
-        outln!(
-            "  impersonation      : {}",
-            diagnostic_cell(&self.impersonation_level)
-        );
-        outln!("  flags              : {}", diagnostic_hex(&self.flags));
-        match &self.user {
-            DiagnosticValue::Available(Some(user)) => outln!(
-                "  user               : {} attributes {:#x}",
-                user.sid,
-                user.attributes
+        field(
+            "ImpersonationLevel",
+            enum_value(
+                &mut notes,
+                "ImpersonationLevel",
+                &self.impersonation_level,
+                impersonation_level_name,
             ),
-            DiagnosticValue::Available(None) => outln!("  user               : none"),
-            DiagnosticValue::Unavailable(error) => {
-                outln!("  user               : <unavailable: {error}>")
-            }
-        }
+        );
+        field("TokenFlags", notes.hex("TokenFlags", &self.flags));
+        let user = match &self.user {
+            DiagnosticValue::Available(Some(user)) => format!(
+                "{}  {}",
+                user.sid,
+                flags_text(user.attributes, GROUP_ATTRIBUTES)
+            ),
+            DiagnosticValue::Available(None) => "-".to_string(),
+            DiagnosticValue::Unavailable(error) => notes.missing("User", error),
+        };
+        field("User", user);
         match &self.groups {
             DiagnosticValue::Available(groups) => {
-                outln!("  groups ({})", groups.len());
+                outln!("  Groups ({})", groups.len());
                 for group in groups {
-                    outln!("    {} attributes {:#x}", group.sid, group.attributes);
+                    outln!(
+                        "    {:<14}  {}",
+                        group.sid,
+                        flags_text(group.attributes, GROUP_ATTRIBUTES)
+                    );
                 }
             }
-            DiagnosticValue::Unavailable(error) => {
-                outln!("  groups             : <unavailable: {error}>")
-            }
+            DiagnosticValue::Unavailable(error) => field("Groups", notes.missing("Groups", error)),
         }
         match &self.privileges {
             DiagnosticValue::Available(privileges) => {
-                outln!("  privileges ({})", privileges.len());
+                outln!("  Privileges ({})", privileges.len());
                 for privilege in privileges {
                     outln!(
-                        "    LUID {:#x} attributes {:#x}",
-                        privilege.luid,
-                        privilege.attributes
+                        "    {:<4}  {:<41}  {}",
+                        format!("{:#x}", privilege.luid),
+                        privilege_name(privilege.luid).unwrap_or("-"),
+                        flags_text(privilege.attributes, PRIVILEGE_ATTRIBUTES)
                     );
                 }
             }
             DiagnosticValue::Unavailable(error) => {
-                outln!("  privileges         : <unavailable: {error}>")
+                field("Privileges", notes.missing("Privileges", error))
             }
         }
+        notes.print("  ");
     }
+}
+
+/// An enum value as `Name (0xN)`, or `0xN` for a value with no name.
+fn enum_value(
+    notes: &mut UnavailableNotes,
+    label: &str,
+    value: &DiagnosticValue<u32>,
+    name: fn(u32) -> Option<&'static str>,
+) -> String {
+    match value {
+        DiagnosticValue::Available(value) => match name(*value) {
+            Some(name) => format!("{name} ({value:#x})"),
+            None => format!("{value:#x}"),
+        },
+        DiagnosticValue::Unavailable(error) => notes.missing(label, error),
+    }
+}
+
+/// A flag set as `0x7 (A | B | C)`; the value alone when no names apply.
+fn flags_text(value: u32, names: &[(u32, &str)]) -> String {
+    let set: Vec<&str> = names
+        .iter()
+        .filter(|(bit, _)| value & bit == *bit && *bit != 0)
+        .map(|(_, name)| *name)
+        .collect();
+    if set.is_empty() {
+        format!("{value:#x}")
+    } else {
+        format!("{value:#x} ({})", set.join(" | "))
+    }
+}
+
+/// `TOKEN_TYPE`.
+fn token_type_name(value: u32) -> Option<&'static str> {
+    match value {
+        1 => Some("TokenPrimary"),
+        2 => Some("TokenImpersonation"),
+        _ => None,
+    }
+}
+
+/// `SECURITY_IMPERSONATION_LEVEL`.
+fn impersonation_level_name(value: u32) -> Option<&'static str> {
+    match value {
+        0 => Some("SecurityAnonymous"),
+        1 => Some("SecurityIdentification"),
+        2 => Some("SecurityImpersonation"),
+        3 => Some("SecurityDelegation"),
+        _ => None,
+    }
+}
+
+/// The `SE_GROUP_*` attributes of a token's user and groups.
+const GROUP_ATTRIBUTES: &[(u32, &str)] = &[
+    (0x1, "SE_GROUP_MANDATORY"),
+    (0x2, "SE_GROUP_ENABLED_BY_DEFAULT"),
+    (0x4, "SE_GROUP_ENABLED"),
+    (0x8, "SE_GROUP_OWNER"),
+    (0x10, "SE_GROUP_USE_FOR_DENY_ONLY"),
+    (0x20, "SE_GROUP_INTEGRITY"),
+    (0x40, "SE_GROUP_INTEGRITY_ENABLED"),
+    (0x2000_0000, "SE_GROUP_RESOURCE"),
+    (0xc000_0000, "SE_GROUP_LOGON_ID"),
+];
+
+/// The `SE_PRIVILEGE_*` attributes of a token's privileges.
+const PRIVILEGE_ATTRIBUTES: &[(u32, &str)] = &[
+    (0x1, "SE_PRIVILEGE_ENABLED_BY_DEFAULT"),
+    (0x2, "SE_PRIVILEGE_ENABLED"),
+    (0x4, "SE_PRIVILEGE_REMOVED"),
+    (0x8000_0000, "SE_PRIVILEGE_USED_FOR_ACCESS"),
+];
+
+/// The name of a well-known privilege LUID (`SE_*_PRIVILEGE` in ntseapi.h).
+fn privilege_name(luid: u64) -> Option<&'static str> {
+    const NAMES: [&str; 35] = [
+        "SeCreateTokenPrivilege",
+        "SeAssignPrimaryTokenPrivilege",
+        "SeLockMemoryPrivilege",
+        "SeIncreaseQuotaPrivilege",
+        "SeMachineAccountPrivilege",
+        "SeTcbPrivilege",
+        "SeSecurityPrivilege",
+        "SeTakeOwnershipPrivilege",
+        "SeLoadDriverPrivilege",
+        "SeSystemProfilePrivilege",
+        "SeSystemtimePrivilege",
+        "SeProfileSingleProcessPrivilege",
+        "SeIncreaseBasePriorityPrivilege",
+        "SeCreatePagefilePrivilege",
+        "SeCreatePermanentPrivilege",
+        "SeBackupPrivilege",
+        "SeRestorePrivilege",
+        "SeShutdownPrivilege",
+        "SeDebugPrivilege",
+        "SeAuditPrivilege",
+        "SeSystemEnvironmentPrivilege",
+        "SeChangeNotifyPrivilege",
+        "SeRemoteShutdownPrivilege",
+        "SeUndockPrivilege",
+        "SeSyncAgentPrivilege",
+        "SeEnableDelegationPrivilege",
+        "SeManageVolumePrivilege",
+        "SeImpersonatePrivilege",
+        "SeCreateGlobalPrivilege",
+        "SeTrustedCredManAccessPrivilege",
+        "SeRelabelPrivilege",
+        "SeIncreaseWorkingSetPrivilege",
+        "SeTimeZonePrivilege",
+        "SeCreateSymbolicLinkPrivilege",
+        "SeDelegateSessionUserImpersonatePrivilege",
+    ];
+    // The well-known privileges are LUIDs 2 through 36, in this order.
+    luid.checked_sub(2)
+        .and_then(|index| NAMES.get(usize::try_from(index).ok()?))
+        .copied()
 }

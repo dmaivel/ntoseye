@@ -86,7 +86,7 @@ impl BreakpointScope {
     pub fn label(&self) -> String {
         match self {
             Self::Kernel => "global".to_string(),
-            Self::Process { pid, name, .. } => format!("{name} ({pid})"),
+            Self::Process { pid, name, .. } => format!("{name} (PID {pid})"),
         }
     }
 }
@@ -122,7 +122,7 @@ impl ThreadScope {
 
     pub fn label(&self) -> String {
         match self.tid {
-            Some(tid) => format!("tid {tid}"),
+            Some(tid) => format!("TID {tid}"),
             None => format!("ethread {:#x}", self.ethread.0),
         }
     }

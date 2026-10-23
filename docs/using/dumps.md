@@ -68,20 +68,20 @@ In a live target or a full or kernel dump, the `!wmitrace` commands read the ETW
 ```text
 4 loggers in the dump's ETW data (0x294ec bytes, nt!EtwSecondaryDumpDataGuid)
 
-Id    Name                                         Mode        BufSize  Clock        Buffers  Data     StartTime
-0x0a  EventLog-System                              0x98800180  64 KB    SystemTime   2        0x13b0   2026-10-06 06:42:28.6372592
-0x0d  Microsoft-Windows-Rdp-Graphics-RdpIdd-Trace  0x80800002  64 KB    PerfCounter  8        0x240    2026-10-06 06:42:28.6498837
-0x15  WiFiSession                                  0x80800002  80 KB    PerfCounter  8        0x27cf0  2026-10-06 06:42:28.6535093
-0x1d  CldFltLog                                    0x90800002  4 KB     SystemTime   2        0x90     2026-10-06 06:42:57.0344948
+ID    Name                                         Mode        Buffer size  Clock        Buffers  Data     Start time
+0x0a  EventLog-System                              0x98800180  64 KiB       SystemTime   2        0x13b0   2026-10-06T06:42:28.6372592Z
+0x0d  Microsoft-Windows-Rdp-Graphics-RdpIdd-Trace  0x80800002  64 KiB       PerfCounter  8        0x240    2026-10-06T06:42:28.6498837Z
+0x15  WiFiSession                                  0x80800002  80 KiB       PerfCounter  8        0x27cf0  2026-10-06T06:42:28.6535093Z
+0x1d  CldFltLog                                    0x90800002  4 KiB        SystemTime   2        0x90     2026-10-06T06:42:57.0344948Z
 ```
 
 The kernel saves every buffer of the session, the same buffers that a kernel dump of the same crash holds in memory, and cuts each one after its last event. `!wmitrace.strdump <logger>` lists the buffers at their offsets in the tagged data:
 
 ```text
-Logger 0x15 'WiFiSession' in the dump's ETW data
+logger 0x15 'WiFiSession' in the dump's ETW data
   8 buffers of 0x14000 bytes
 
-Offset    State           Cpu  Sequence  Saved  Current  Data    Refs
+Offset    State           CPU  Sequence  Saved  Current  Data    Refs
 +0x172a   GeneralLogging  2    1         0x0    0x80d0   0x80d0  15
 +0x97fa   GeneralLogging  3    2         0x0    0xa468   0xa468  15
 +0x13c62  GeneralLogging  1    3         0x0    0xae68   0xae68  15
@@ -95,10 +95,10 @@ Offset    State           Cpu  Sequence  Saved  Current  Data    Refs
 {command}`!wmitrace.logdump` decodes the events of these buffers, as it decodes them in memory:
 
 ```text
-Logger 0x0a 'EventLog-System' in the dump's ETW data
+logger 0x0a 'EventLog-System' in the dump's ETW data
   18 events in 2 buffers (SystemTime clock), showing the last 1
 
-[0]0004.2358::2026-10-06 18:29:29.5234029 event {67dc0d66-3695-47c0-9642-33f76f7bd7ad} id 0 v0 opcode 0 task 0 level 5 keyword 0x0
+[0]0004.2358::2026-10-06T18:29:29.5234029Z event {67dc0d66-3695-47c0-9642-33f76f7bd7ad} id 0 v0 opcode 0 task 0 level 5 keyword 0x0
     extended SID (0xc bytes) 010100000000000512000000
     extended PROV_TRAITS (0x38 bytes) 38004d6963726f736f66742e57696e646f77732e48797065722d562e566d5377...
     extended EVENT_SCHEMA_TL (0x36 bytes) 36008000576f726b4974656d20436f6d706c6574656400576f726b6572526f75...
@@ -124,7 +124,7 @@ ntoseye --dump powershell-exception.dmp
 
 ```text
 user-mode minidump
-  process   powershell.exe (pid 4340)
+  process   powershell.exe (PID 4340)
   system    Windows 10.0.26200 AMD64 (26100.1.amd64fre.ge_release.240331-1435)
   written   2026-10-11T06:17:41Z
   captured  20 threads, 91 modules
@@ -176,20 +176,22 @@ The commands that look at one process work on the dump's own records:
 
   ```text
   exception
-    code    0xe0d7e5e1  application-defined code (customer bit set), no standard name
-    flags   0x80  EXCEPTION_SOFTWARE_ORIGINATE
-    address 00007ff946b741ca  kernelbase!RaiseException+0x8a
-    module  KERNELBASE.dll (system module)
-    thread  10f4.cc4
-    params  none
+    code     0xe0d7e5e1  application-defined code (customer bit set), no standard name
+    flags    0x80 (EXCEPTION_SOFTWARE_ORIGINATE)
+    address  00007ff946b741ca  kernelbase!RaiseException+0x8a
+    module   KERNELBASE.dll (system module)
+    thread   10f4.cc4
+    params   -
 
   failure signature
-    exception:e0d7e5e1|symbol:kernelbase!raiseexception
-    source: exception address
+    bucket  exception:e0d7e5e1|symbol:kernelbase!raiseexception
+    source  exception address
 
   culprit attribution
-    JIT-compiled code at 0x7ff89b6c6a48 (dynamic function table 0x7ff89b6c0020-0x7ff89b740000, no module)  low confidence
-    called from #4 system.core.ni+0x5ecdfa (System.Core.ni.dll)
+    culprit                 JIT-compiled code at 0x7ff89b6c6a48 (dynamic function table 0x7ff89b6c0020-0x7ff89b740000, no module)
+    confidence              low
+    called from             frame 04 system.core.ni+0x5ecdfa (System.Core.ni.dll)
+    first non-system frame  00007ff89b6c6a48  frame 01 0x7ff89b6c6a48 is the first outside the system modules, in JIT-compiled code
   ```
 
 - {command}`!teb`, {command}`!peb`, and {command}`!gle` read the selected thread's TEB, and the PEB it points to, with the layouts from ntdll's PDB. {command}`!dlls` walks the loader's module lists in the PEB.
@@ -216,12 +218,12 @@ The commands that look at one process work on the dump's own records:
 
   ```text
   target time
-    dump written 2026-10-11T06:17:41Z (0x6acb2a05)
-    local time 2026-10-10T23:17:41-07:00 (Pacific Daylight Time)
-    process created 2026-10-11T06:17:37Z
-    process uptime 0d 00:00:04 (4 seconds)
-    process CPU time user 0 s, kernel 0 s
-    system time and uptime not recorded in a user-mode minidump
+    dump written      2026-10-11T06:17:41Z (0x6acb2a05)
+    local time        2026-10-10T23:17:41-07:00 (Pacific Daylight Time)
+    process created   2026-10-11T06:17:37Z
+    process uptime    0d 00:00:04 (4 seconds)
+    process CPU time  user 0 s, kernel 0 s
+    system time       not recorded in a user-mode minidump
   ```
 
 A small dump (`MiniDumpNormal`) holds the stacks but not the TEBs, the PEB, the handles, or the region list. The commands that need them name what the dump lacks:

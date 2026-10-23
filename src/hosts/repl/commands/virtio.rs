@@ -1,6 +1,7 @@
 //! Virtio devices and virtqueues (`!virtio`, `!vring`).
 
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::time::Instant;
 
 use ntoseye_macros::{command, grammar};
@@ -98,7 +99,6 @@ impl Render for Virtio {
                 print_driver_header(driver);
                 let seen = print_queues(&driver.queues, true, &mut repl.virtio_seen, now);
                 print_moved_note(seen, driver.packed);
-                outln!();
             }
         }
     }
@@ -415,11 +415,16 @@ fn device_type_of(target: &Target, matches: impl Fn(&VirtioDriver) -> bool) -> O
 
 fn print_virtio_functions(functions: &[VirtioFunction], seen: &mut VirtioSeen, now: LookTime) {
     if functions.is_empty() {
-        outln!("{}\n", ui::muted("no virtio PCI functions"));
+        outln!("{}", ui::muted("no virtio PCI functions"));
         return;
     }
     let mut first_look = true;
+    // A queue table ends with its own blank line; other records need one.
+    let mut need_blank = false;
     for function in functions {
+        if need_blank {
+            outln!();
+        }
         let kind = if function.transitional {
             format!("{} (transitional)", virtio_type_name(function.virtio_id))
         } else {
@@ -431,7 +436,7 @@ fn print_virtio_functions(functions: &[VirtioFunction], seen: &mut VirtioSeen, n
             ui::label(&kind),
             function.device_id,
             function.service.as_deref().unwrap_or("-"),
-            ui::muted(&format!("pdo {:#x}", function.pdo.0)),
+            ui::muted(&format!("PDO {}", ui::addr(function.pdo.0))),
         );
         match (&function.driver, &function.driver_missing) {
             (Some(driver), _) => {
@@ -439,16 +444,22 @@ fn print_virtio_functions(functions: &[VirtioFunction], seen: &mut VirtioSeen, n
                 let since = print_queues(&driver.queues, false, seen, now);
                 first_look &= since.is_none();
                 print_moved_note(since, driver.packed);
-                outln!();
+                need_blank = driver.queues.is_empty() || since.is_some();
             }
-            (None, Some(why)) => outln!("  {}\n", ui::muted(&format!("no queues: {why}"))),
-            (None, None) => outln!(),
+            (None, Some(why)) => {
+                outln!("  {}", ui::muted(&format!("no queues: {why}")));
+                need_blank = true;
+            }
+            (None, None) => need_blank = true,
         }
     }
     if first_look && functions.iter().any(|function| function.driver.is_some()) {
+        if need_blank {
+            outln!();
+        }
         outln!(
-            "{}\n",
-            ui::muted("Moved compares with the previous look; run !virtio again to see it.")
+            "{}",
+            ui::muted("Moved compares with the previous look; run `!virtio` again to see it")
         );
     }
 }
@@ -539,7 +550,7 @@ fn print_queues(
             let size = run[0].size;
             builder.push_record(vec![
                 format!("  {}-{}", run[0].index, run[unused - 1].index),
-                String::new(),
+                "-".into(),
                 if run.iter().all(|queue| queue.size == size) {
                     size.to_string()
                 } else {
@@ -564,7 +575,7 @@ fn print_queues(
         }
         let mut row = vec![
             format!("  {}", queue.index),
-            queue.name.clone().unwrap_or_default(),
+            queue.name.clone().unwrap_or_else(|| "-".into()),
             queue.size.to_string(),
         ];
         let state = match (&queue.ring, &queue.packed, &queue.error) {
@@ -591,7 +602,7 @@ fn print_queues(
                     .map_or_else(|| ui::muted("packed ring"), packed_verdict)
             }
             (None, None, error) => {
-                row.extend([String::new(), String::new(), String::new(), String::new()]);
+                row.extend(["-".into(), "-".into(), "-".into(), "-".into()]);
                 ui::muted(error.as_deref().unwrap_or("unreadable"))
             }
         };
@@ -700,12 +711,17 @@ fn queue_title(queue: &VirtQueue) -> String {
     }
 }
 
+/// A labeled line of a `!vring` detail view, its value in one column.
+fn field(label: &str, value: impl Display) {
+    outln!("  {} {value}", ui::label(&format!("{label:<14}")));
+}
+
 /// What moved since the last look at the queue, for a detail view.
 fn print_movement(movement: Option<&Movement>, packed: bool) {
     let Some((seconds, moved)) = movement else {
-        outln!(
-            "  {}",
-            ui::muted("moved: this is the first look; run !vring again to see what moves")
+        field(
+            "moved",
+            ui::muted("- (this is the first look; run `!vring` again to see what moves)"),
         );
         return;
     };
@@ -718,12 +734,15 @@ fn print_movement(movement: Option<&Movement>, packed: bool) {
         parts.push(format!("used +{completed}"));
     }
     parts.push(format!("taken back +{}", moved.taken_back));
-    outln!(
-        "  moved since the last look {seconds:.1} s of guest time ago: {}",
-        parts.join(", ")
+    field(
+        "moved",
+        format!(
+            "{}  (since the last look {seconds:.1} s of guest time ago)",
+            parts.join(", ")
+        ),
     );
     if let Some(stall) = &moved.stall {
-        outln!("  {stall}");
+        field("", stall);
     }
 }
 
@@ -743,29 +762,35 @@ fn print_packed_ring(
         queue_title(queue),
         queue.size
     );
-    outln!(
-        "  desc {}  driver event {}  device event {}",
-        ui::addr(state.desc.0),
-        ui::addr(state.driver_event.0),
-        ui::addr(state.device_event.0)
+    field(
+        "rings",
+        format!(
+            "desc {}  driver event {}  device event {}",
+            ui::addr(state.desc.0),
+            ui::addr(state.driver_event.0),
+            ui::addr(state.device_event.0)
+        ),
     );
-    outln!(
-        "  driver: next avail {} (lap {})  taken back to {} (lap {})  {} free",
-        state.next_avail,
-        lap(state.avail_wrap),
-        state.last_used,
-        lap(state.used_wrap),
-        state.free
+    field(
+        "driver",
+        format!(
+            "next avail {} (lap {})  taken back to {} (lap {})  {} free",
+            state.next_avail,
+            lap(state.avail_wrap),
+            state.last_used,
+            lap(state.used_wrap),
+            state.free
+        ),
     );
-    outln!(
-        "  interrupts: {}",
-        signal_text(state.interrupts, "position", "the driver disabled them")
+    field(
+        "interrupts",
+        signal_text(state.interrupts, "position", "the driver disabled them"),
     );
-    outln!(
-        "  notifications: {}",
-        signal_text(state.notifications, "position", "the device disabled them")
+    field(
+        "notifications",
+        signal_text(state.notifications, "position", "the device disabled them"),
     );
-    outln!("  state: {}", packed_verdict(ring));
+    field("state", packed_verdict(ring));
     print_movement(movement, true);
     if let Some(why) = &ring.broken {
         outln!(
@@ -774,11 +799,9 @@ fn print_packed_ring(
         );
     }
     if buffers.is_empty() {
-        outln!();
         return;
     }
-    outln!();
-    outln!("{}", ui::label("Buffers with the device"));
+    print_section("buffers with the device");
     for buffer in buffers {
         let descriptors: Vec<String> = buffer
             .descriptors
@@ -799,7 +822,6 @@ fn print_packed_ring(
         print_request(buffer);
     }
     print_more(ring.with_device as usize, buffers.len());
-    outln!();
 }
 
 /// A split ring: its addresses and indexes, and with the driver's queue
@@ -820,52 +842,61 @@ fn print_ring(
         ),
         None => outln!("ring of {} entries", ring.size),
     }
-    outln!(
-        "  desc {}  avail {}  used {}",
-        ui::addr(ring.desc.0),
-        ui::addr(ring.avail.0),
-        ui::addr(ring.used.0)
+    field(
+        "rings",
+        format!(
+            "desc {}  avail {}  used {}",
+            ui::addr(ring.desc.0),
+            ui::addr(ring.avail.0),
+            ui::addr(ring.used.0)
+        ),
     );
     let driver = queue.and_then(|(queue, _)| queue.driver.as_ref());
-    outln!(
-        "  avail idx {}  used idx {}{}",
-        ring.avail_idx,
-        ring.used_idx,
-        driver.map_or(String::new(), |driver| format!(
-            "  driver: published {}  taken back to {}  {} free  {} not kicked",
-            driver.avail_idx, driver.last_used, driver.free, driver.unkicked
-        ))
+    field(
+        "indexes",
+        format!("avail idx {}  used idx {}", ring.avail_idx, ring.used_idx),
     );
+    if let Some(driver) = driver {
+        field(
+            "driver",
+            format!(
+                "published {}  taken back to {}  {} free  {} not kicked",
+                driver.avail_idx, driver.last_used, driver.free, driver.unkicked
+            ),
+        );
+    }
     let event_idx = queue.is_some_and(|(queue, _)| queue.event_idx);
     let signals = split_signals(ring, driver, event_idx);
-    outln!(
-        "  interrupts: {}{}",
-        signal_text(
-            signals.interrupts,
-            "used idx",
-            "the driver set NO_INTERRUPT"
+    field(
+        "interrupts",
+        format!(
+            "{}{}",
+            signal_text(
+                signals.interrupts,
+                "used idx",
+                "the driver set NO_INTERRUPT"
+            ),
+            if signals.interrupt_due {
+                "; one was due for the returned buffers"
+            } else {
+                ""
+            }
         ),
-        if signals.interrupt_due {
-            "; one was due for the returned buffers"
-        } else {
-            ""
-        }
     );
-    outln!(
-        "  notifications: {}",
+    field(
+        "notifications",
         signal_text(
             signals.notifications,
             "avail idx",
-            "the device set NO_NOTIFY"
-        )
+            "the device set NO_NOTIFY",
+        ),
     );
-    outln!("  state: {}", queue_verdict(ring, driver));
+    field("state", queue_verdict(ring, driver));
     if let Some((_, movement)) = queue {
         print_movement(movement, false);
     }
     if !with_device.is_empty() {
-        outln!();
-        outln!("{}", ui::label("Buffers with the device"));
+        print_section("buffers with the device");
         for buffer in with_device {
             print_chain(&format!("avail[{}]", buffer.position), buffer);
             print_request(buffer);
@@ -875,8 +906,7 @@ fn print_ring(
     if let Some(driver) = driver
         && !returned.is_empty()
     {
-        outln!();
-        outln!("{}", ui::label("Returned, not yet taken back"));
+        print_section("returned, not yet taken back");
         for buffer in returned {
             print_chain(
                 &format!(
@@ -893,7 +923,6 @@ fn print_ring(
             returned.len(),
         );
     }
-    outln!();
 }
 
 /// The count past the `shown` of `total` that a list left out.

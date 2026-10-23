@@ -10,22 +10,6 @@ use std::result;
 use super::Arch;
 use crate::base::error::{Error, Result};
 
-/// Whether `name`, in a recovered register set, is the second name of one of
-/// `synonyms` whose shown name the set also holds, with the same value: a
-/// listing shows that register once, under the name `r` uses.
-pub fn repeats_another_register(
-    name: &str,
-    registers: &HashMap<String, u64>,
-    synonyms: &[(&str, &str)],
-) -> bool {
-    synonyms.iter().any(|(shown, other)| {
-        *other == name
-            && registers
-                .get(*shown)
-                .is_some_and(|value| registers.get(name) == Some(value))
-    })
-}
-
 /// Give every pair of `synonyms` both its names in `registers`: the name it
 /// lacks reads the same bytes as the one it carries. Fails with the shown
 /// name of a pair it carries neither name of.

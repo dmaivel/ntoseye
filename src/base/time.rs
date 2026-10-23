@@ -31,6 +31,18 @@ pub fn filetime_to_iso(ft: u64) -> Option<String> {
     Some(format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z"))
 }
 
+/// A FILETIME as ISO-8601 UTC to its 100 ns tick,
+/// `2026-10-15T23:31:38.9602438Z`: how the REPL shows a time where the
+/// fraction matters (log records, events).
+pub fn filetime_to_iso_precise(ft: u64) -> Option<String> {
+    let seconds = filetime_to_iso(ft)?;
+    Some(format!(
+        "{}.{:07}Z",
+        seconds.trim_end_matches('Z'),
+        ft % 10_000_000
+    ))
+}
+
 /// The proleptic-Gregorian (year, month, day) `days` days after 1970-01-01,
 /// by Howard Hinnant's civil_from_days; `days` may be negative.
 pub fn days_to_ymd(mut days: i64) -> (i64, i64, i64) {

@@ -34,11 +34,14 @@ fn display(
     let expr = tail.as_str().trim();
     if expr.is_empty() {
         if state.ctx.displays.is_empty() {
-            outln!("no displays; display <expression> adds one\n");
+            outln!(
+                "{}",
+                ui::muted("no displays; `display <expression>` adds one")
+            );
             return Ok(());
         }
         let shown = evaluate(state.ctx, false);
-        show(&shown);
+        print(&shown);
         return Ok(());
     }
     if let Err(error) = Expr::parse_with_radix(expr, state.radix) {
@@ -60,7 +63,7 @@ fn display(
     });
     // Its value now, which the next stop compares with.
     let shown = evaluate(state.ctx, true);
-    show(&shown[shown.len() - 1..]);
+    print(&shown[shown.len() - 1..]);
     Ok(())
 }
 
@@ -77,14 +80,14 @@ fn undisplay(
 ) -> Result<()> {
     let args: Vec<&str> = numbers.iter().map(String::as_str).collect();
     if args.is_empty() {
-        outln!("{}\n", command_help("undisplay"));
+        outln!("{}", command_help("undisplay"));
         return Ok(());
     }
     if args == ["*"] {
         let count = state.ctx.displays.len();
         state.ctx.displays.clear();
         outln!(
-            "removed {count} display{}\n",
+            "removed {count} display{}",
             if count == 1 { "" } else { "s" }
         );
         return Ok(());
@@ -102,7 +105,6 @@ fn undisplay(
             outln!("removed display {id}");
         }
     }
-    outln!();
     Ok(())
 }
 
@@ -238,10 +240,4 @@ pub fn print(shown: &[Shown]) {
             shown.expr
         );
     }
-}
-
-/// A listing of displays, then a blank line.
-fn show(shown: &[Shown]) {
-    print(shown);
-    outln!();
 }

@@ -8,7 +8,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use tabled::builder::Builder;
-use tabled::settings::Padding;
 
 use owo_colors::OwoColorize;
 
@@ -494,7 +493,7 @@ impl Render for BreakpointsSet {
                     diagnostics::print_warning(warning);
                 }
                 outln!(
-                    "breakpoint {} set at {}{}{}\n",
+                    "breakpoint {} set at {}{}{}",
                     ui::bp_id(breakpoint.id),
                     ui::addr(address.0),
                     breakpoint
@@ -509,7 +508,7 @@ impl Render for BreakpointsSet {
                 // letting the confirmation imply an armed site.
                 if breakpoint.awaiting_page_in() {
                     outln!(
-                        "{}\n",
+                        "{}",
                         ui::muted(
                             "  site is not resident; the target writes the breakpoint when the \
                              page is paged in (`ba e1` traps a site that never pages in on its \
@@ -526,10 +525,10 @@ impl Render for BreakpointsSet {
                 if let Some(warning) = warning {
                     diagnostics::print_warning(warning);
                 }
-                outln!("symbolic breakpoint {}\n", ui::bp_id(breakpoint.id));
+                outln!("symbolic breakpoint {}", ui::bp_id(breakpoint.id));
                 if breakpoint.deferred() {
                     outln!(
-                        "  {} is deferred until '{}' resolves\n",
+                        "  {} is deferred until '{}' resolves",
                         ui::bp_id(breakpoint.id),
                         spec
                     );
@@ -537,18 +536,18 @@ impl Render for BreakpointsSet {
             }
             BreakpointsSet::Source { breakpoints, spec } => match breakpoints.as_slice() {
                 [breakpoint] if breakpoint.deferred() => outln!(
-                    "source breakpoint {} deferred until '{}' resolves\n",
+                    "source breakpoint {} deferred until '{}' resolves",
                     ui::bp_id(breakpoint.id),
                     spec
                 ),
                 [breakpoint] => outln!(
-                    "source breakpoint {} set for '{}'\n",
+                    "source breakpoint {} set for '{}'",
                     ui::bp_id(breakpoint.id),
                     spec
                 ),
                 breakpoints => {
                     outln!(
-                        "{} source breakpoints set for '{}'\n",
+                        "{} source breakpoints set for '{}'",
                         breakpoints.len(),
                         spec
                     )
@@ -564,14 +563,22 @@ impl Render for BreakpointsSet {
                     error!("bm: {error}");
                 }
                 if *count == 0 {
-                    outln!("no code symbols match '{}'\n", spec);
+                    outln!(
+                        "{}",
+                        ui::muted(&format!("no code symbols matching '{spec}'"))
+                    );
                 } else {
                     let suffix = if *limited {
                         "; results limited to 256, refine the pattern"
                     } else {
                         ""
                     };
-                    outln!("{} symbolic breakpoint(s) set{suffix}\n", count);
+                    let noun = if *count == 1 {
+                        "breakpoint"
+                    } else {
+                        "breakpoints"
+                    };
+                    outln!("{count} symbolic {noun} set{suffix}");
                 }
             }
             BreakpointsSet::Hardware {
@@ -586,7 +593,7 @@ impl Render for BreakpointsSet {
                     .map(|condition| format!(" if {condition}"))
                     .unwrap_or_default();
                 outln!(
-                    "hardware breakpoint {} ({} {}b) set at {}{}{}\n",
+                    "hardware breakpoint {} ({} {}b) set at {}{}{}",
                     ui::bp_id(breakpoint.id),
                     access.label(),
                     len,
@@ -602,7 +609,7 @@ impl Render for BreakpointsSet {
             BreakpointsSet::Hypervisor { kind, breakpoint } => {
                 if let Some(bp) = breakpoint {
                     outln!(
-                        "{kind} breakpoint {} set at {}{}{}\n",
+                        "{kind} breakpoint {} set at {}{}{}",
                         ui::bp_id(bp.id),
                         ui::addr(bp.address.0),
                         bp.symbol
@@ -636,7 +643,7 @@ fn list_breakpoints(session: &Session) -> Result<Vec<BreakpointInfo>> {
 impl Render for Vec<BreakpointInfo> {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         if self.is_empty() {
-            outln!("no breakpoints set\n");
+            outln!("{}", ui::muted("no breakpoints set"));
             return;
         }
         print_breakpoint_list(self);
@@ -677,6 +684,10 @@ fn breakpoint_commands(session: &Session) -> Result<BreakpointCommands> {
 
 impl Render for BreakpointCommands {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        if self.commands.is_empty() {
+            outln!("{}", ui::muted("no breakpoints set"));
+            return;
+        }
         for line in &self.commands {
             outln!("{line}");
         }
@@ -745,7 +756,6 @@ impl Render for BreakpointUpdates {
         }
         if changed {
             repl.caches.refresh_breakpoints(&repl.ctx.breakpoints);
-            outln!();
         }
     }
 }
@@ -834,7 +844,7 @@ fn set_condition(
         (Some(condition), expr)
     };
     state.ctx.breakpoints.set_condition(id, condition, expr)?;
-    outln!("breakpoint {} condition updated\n", ui::bp_id(id));
+    outln!("breakpoint {} condition updated", ui::bp_id(id));
     Ok(())
 }
 
@@ -863,7 +873,7 @@ fn set_condition_and_commands(
     breakpoints.set_condition(id, Some(condition), expr)?;
     breakpoints.set_action(id, action)?;
     outln!(
-        "breakpoint {} condition and commands updated\n",
+        "breakpoint {} condition and commands updated",
         ui::bp_id(id)
     );
     Ok(())
@@ -885,7 +895,7 @@ fn set_commands(
     let BreakpointId(id) = id;
     let action = (!commands.eq_ignore_ascii_case("clear")).then_some(commands);
     session.breakpoints.set_action(id, action)?;
-    outln!("breakpoint {} action updated\n", ui::bp_id(id));
+    outln!("breakpoint {} action updated", ui::bp_id(id));
     Ok(())
 }
 
@@ -906,7 +916,7 @@ fn renumber_breakpoint(
     state.ctx.breakpoints.renumber(old_id, new_id)?;
     state.caches.refresh_breakpoints(&state.ctx.breakpoints);
     outln!(
-        "breakpoint {} renumbered to {}\n",
+        "breakpoint {} renumbered to {}",
         ui::bp_id(old_id),
         ui::bp_id(new_id)
     );
@@ -928,7 +938,7 @@ fn reset_pass_count(
 ) -> Result<()> {
     let BreakpointId(id) = id;
     session.breakpoints.set_pass_count(id, passes)?;
-    outln!("breakpoint {} pass count reset\n", ui::bp_id(id));
+    outln!("breakpoint {} pass count reset", ui::bp_id(id));
     Ok(())
 }
 
@@ -1359,7 +1369,7 @@ fn print_breakpoint_list(bps: &[BreakpointInfo]) {
         "ID".to_string(),
         "Status".to_string(),
         "Address".to_string(),
-        "Pass Count".to_string(),
+        "Pass count".to_string(),
         "Process/Thread".to_string(),
         "Symbol".to_string(),
         "Condition".to_string(),
@@ -1406,11 +1416,7 @@ fn print_breakpoint_list(bps: &[BreakpointInfo]) {
         ]);
     }
 
-    let mut table = builder.build();
-    table
-        .with(tabled::settings::Style::empty())
-        .with(Padding::new(0, 2, 0, 0));
-    outln!("{table}\n");
+    print_padded_table(builder);
 }
 
 fn parse_breakpoint_id_selectors(args: &[&str]) -> Result<BreakpointIdSelection> {

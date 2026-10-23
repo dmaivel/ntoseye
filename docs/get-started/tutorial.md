@@ -25,7 +25,7 @@ target
   psmods ffffe70faa662830
 
  BREAK  processor 1  kernel at nt!DbgBreakPointWithStatus
- └─ thread System  state Running  ethread ffffe70fb1986040  pid 4  tid 588
+ └─ thread ffffe70fb1986040  TID 588  PID 4  process System  state Running
 ...
 1: kdnet>
 ```
@@ -45,14 +45,14 @@ The prompt shows the backend and the selected processor.
 ```text
 1: kdnet> vertarget
 target version
-  target Windows 10.0 build 26200 (26100.ge_release.240331-1435)
-  arch AMD64
-  kernel fffff80797200000 size 0x1450000
-  pdb ntoskrnl.pdb GUID C29EBFB06B78B3C020DCA66D99713F9E age 6
-  processors 4
-  product Workstation
-  uptime 0d 08:51:37
-  backend kdnet
+  target           Windows 10.0 build 26200 (26100.ge_release.240331-1435)
+  arch             AMD64
+  kernel           fffff80797200000 size 0x1450000
+  pdb              ntoskrnl.pdb GUID C29EBFB06B78B3C020DCA66D99713F9E age 6
+  processors       4
+  product          Workstation
+  uptime           0d 08:51:37
+  backend          kdnet
   ...
 ```
 
@@ -72,15 +72,15 @@ fffff807286c0000  fffff80728726000  kdstub                 -                load
 
 ```text
 1: kdnet> ps
-Name            PID   EPROCESS          DTB               Wow64
-System          4     ffffe70faa6df040  00000000001ae000  -
+PID  Name          EPROCESS          DTB               Wow64
+4    System        ffffe70faa6df040  00000000001ae000  -
 ...
-smss.exe        544   ffffe70fb19a4280  0000000268526000  -
-csrss.exe       704   ffffe70fb2b5c140  0000000271bd6000  -
-wininit.exe     780   ffffe70fb2d46080  000000026c398000  -
-csrss.exe       788   ffffe70fb2d4e140  0000000119154000  -
-winlogon.exe    840   ffffe70fb2d8b080  000000026188b000  -
-services.exe    932   ffffe70fb2e1b1c0  000000010ec46000  -
+544  smss.exe      ffffe70fb19a4280  0000000268526000  -
+704  csrss.exe     ffffe70fb2b5c140  0000000271bd6000  -
+780  wininit.exe   ffffe70fb2d46080  000000026c398000  -
+788  csrss.exe     ffffe70fb2d4e140  0000000119154000  -
+840  winlogon.exe  ffffe70fb2d8b080  000000026188b000  -
+932  services.exe  ffffe70fb2e1b1c0  000000010ec46000  -
 ...
 ```
 
@@ -106,7 +106,7 @@ VM running, waiting for stop (Ctrl+C to pause)...
 
  BREAK  processor 0  svchost.exe (468) at nt!NtCreateFile
  ├─ breakpoint #0
- └─ thread svchost.exe  state Running  ethread ffffe70fb280f080  pid 468  tid 4076
+ └─ thread ffffe70fb280f080  TID 4076  PID 468  process svchost.exe  state Running
 
 registers
   rax fffff80797ac7930   rbx ffffe70fb280f080   rcx 000000ef8a37ee60
@@ -124,17 +124,17 @@ disasm
    fffff80797ac7946 +0x16  mov  dword [rsp+0x68], eax
    fffff80797ac794a +0x1a  mov  qword [rsp+0x60], rax
    fffff80797ac794f +0x1f  mov  dword [rsp+0x58], eax
-   fffff80797ac7953 +0x23  mov  eax, dword [rsp+0xE0]
+   fffff80797ac7953 +0x23  mov  eax, dword [rsp+0xe0]
    fffff80797ac795a +0x2a  mov  dword [rsp+0x50], eax
 
 stack
-  #0  fffff80797ac7930  nt!NtCreateFile
-  #1  fffff807978c1d55  nt!KiSystemServiceCopyEnd+0x25
+  00  fffff80797ac7930  nt!NtCreateFile
+  01  fffff807978c1d55  nt!KiSystemServiceCopyEnd+0x25
       ┄┄ user mode ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
-  #2  00007ff855661864  ntdll!NtCreateFile+0x14
-  #3  00007ff852e36217  kernelbase!CreateFileInternal+0x373
-  #4  00007ff852e37887  kernelbase!CreateFileW+0x97
-  #5  00007ff84fbf0c85  psmserviceexthost!CrmStateMonitorSystemDiskUsageTimerCallback+0xa5
+  02  00007ff855661864  ntdll!NtCreateFile+0x14
+  03  00007ff852e36217  kernelbase!CreateFileInternal+0x373
+  04  00007ff852e37887  kernelbase!CreateFileW+0x97
+  05  00007ff84fbf0c85  psmserviceexthost!CrmStateMonitorSystemDiskUsageTimerCallback+0xa5
   ... 4 more frames
 ```
 
@@ -144,6 +144,7 @@ The disassembly shows the instructions around the stop in the function it is in,
 
 ```text
 0: kdnet> k
+  # Child-SP          IP                Call Site
  00 fffffd86b6413a68  fffff80797ac7930  nt!NtCreateFile
  01 fffffd86b6413a70  fffff807978c1d55  nt!KiSystemServiceCopyEnd+0x25
     ┄┄ user mode ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
@@ -172,7 +173,7 @@ On x64, the third argument of `NtCreateFile` is in `r8`. It is an `OBJECT_ATTRIB
 
 ```text
 0: kdnet> dt nt!_EPROCESS @$proc UniqueProcessId ImageFileName
-_EPROCESS (2112 bytes) @ ffffe70fb2ed3080
+_EPROCESS (0x840 bytes) @ ffffe70fb2ed3080
   +0x1d0 UniqueProcessId : void* = 0x1d4
   +0x338 ImageFileName : UCHAR[15] = "svchost.exe"
 ```

@@ -283,7 +283,7 @@ pub fn user_culprit_attribution(report: &TriageReport) -> Option<CulpritAttribut
         CulpritEvidence {
             kind: CulpritEvidenceKind::FirstNonSystemFrame,
             detail: format!(
-                "frame #{} {} is the first outside the system modules, in {place}",
+                "frame {:02} {} is the first outside the system modules, in {place}",
                 frame.index, frame.symbol
             ),
             address: Some(frame.ip),
