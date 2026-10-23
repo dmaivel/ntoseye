@@ -68,7 +68,7 @@ pub struct DmpArm64Context {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct DmpContext {
+pub struct DmpAmd64Context {
     pub rax: u64,
     pub rbx: u64,
     pub rcx: u64,
@@ -106,7 +106,13 @@ pub struct DmpContext {
     pub last_branch_from_rip: u64,
     pub last_exception_to_rip: u64,
     pub last_exception_from_rip: u64,
-    pub arm64: Option<DmpArm64Context>,
+}
+
+/// A crash dump's CONTEXT record, per architecture.
+#[derive(Debug, Clone)]
+pub enum DmpContext {
+    Amd64(DmpAmd64Context),
+    Arm64(DmpArm64Context),
 }
 
 /// The exception a crash dump recorded.
@@ -224,7 +230,7 @@ impl DmpContext {
 
         let has_lbr = buf.len() >= amd64::OFFSET_LAST_EXCEPTION_FROM_RIP + 8;
 
-        Self {
+        Self::Amd64(DmpAmd64Context {
             rax: read_u64(buf, amd64::OFFSET_RAX),
             rbx: read_u64(buf, amd64::OFFSET_RBX),
             rcx: read_u64(buf, amd64::OFFSET_RCX),
@@ -282,8 +288,7 @@ impl DmpContext {
             } else {
                 0
             },
-            arm64: None,
-        }
+        })
     }
 
     /// Parse the public Windows ARM64_NT_CONTEXT layout. The helper is
@@ -291,10 +296,7 @@ impl DmpContext {
     /// unavailable field instead of panicking while parsing an untrusted file.
     pub fn from_arm64_bytes(buf: &[u8]) -> Self {
         if buf.len() < arm64::CONTEXT_SIZE {
-            return Self {
-                arm64: Some(DmpArm64Context::default()),
-                ..Self::default()
-            };
+            return Self::Arm64(DmpArm64Context::default());
         }
         let mut x = [0u64; 31];
         for (i, slot) in x.iter_mut().enumerate() {
@@ -329,82 +331,93 @@ impl DmpContext {
         let pc = read_u64(buf, arm64::OFFSET_PC);
         let fpcr = read_u32(buf, arm64::OFFSET_FPCR);
         let fpsr = read_u32(buf, arm64::OFFSET_FPSR);
-        Self {
-            arm64: Some(DmpArm64Context {
-                x,
-                cpsr,
-                sp,
-                pc,
-                v,
-                fpcr,
-                fpsr,
-                bcr,
-                bvr,
-                wcr,
-                wvr,
-            }),
-            ..Self::default()
-        }
+        Self::Arm64(DmpArm64Context {
+            x,
+            cpsr,
+            sp,
+            pc,
+            v,
+            fpcr,
+            fpsr,
+            bcr,
+            bvr,
+            wcr,
+            wvr,
+        })
     }
 
-    /// The context's architecture: the struct's own fields hold AMD64
-    /// registers, ARM64's live in `arm64`.
+    /// The context's architecture.
     pub fn arch(&self) -> Arch {
-        match self.arm64 {
-            Some(_) => Arch::Arm64,
-            None => Arch::Amd64,
+        match self {
+            Self::Amd64(_) => Arch::Amd64,
+            Self::Arm64(_) => Arch::Arm64,
         }
     }
 
     pub fn instruction_pointer(&self) -> u64 {
-        self.arm64.as_ref().map_or(self.rip, |ctx| ctx.pc)
+        match self {
+            Self::Amd64(ctx) => ctx.rip,
+            Self::Arm64(ctx) => ctx.pc,
+        }
     }
 
     pub fn stack_pointer(&self) -> u64 {
-        self.arm64.as_ref().map_or(self.rsp, |ctx| ctx.sp)
+        match self {
+            Self::Amd64(ctx) => ctx.rsp,
+            Self::Arm64(ctx) => ctx.sp,
+        }
     }
 
     pub fn to_register_buffer(&self, directory_table_base: u64) -> Vec<u8> {
-        if let Some(ctx) = &self.arm64 {
-            let mut data = vec![0u8; arm64::REGISTER_BUFFER_SIZE];
-            data[arm64::OFFSET_CONTEXT_FLAGS..arm64::OFFSET_CONTEXT_FLAGS + 4]
-                .copy_from_slice(&arm64::CONTEXT_ALL.to_le_bytes());
-            data[arm64::OFFSET_CPSR..arm64::OFFSET_CPSR + 4]
-                .copy_from_slice(&ctx.cpsr.to_le_bytes());
-            for (i, &value) in ctx.x.iter().enumerate() {
-                let off = arm64::OFFSET_X0 + i * 8;
-                data[off..off + 8].copy_from_slice(&value.to_le_bytes());
-            }
-            data[arm64::OFFSET_SP..arm64::OFFSET_SP + 8].copy_from_slice(&ctx.sp.to_le_bytes());
-            data[arm64::OFFSET_PC..arm64::OFFSET_PC + 8].copy_from_slice(&ctx.pc.to_le_bytes());
-            for (i, &value) in ctx.v.iter().enumerate() {
-                let off = arm64::OFFSET_V0 + i * 16;
-                data[off..off + 16].copy_from_slice(&value.to_le_bytes());
-            }
-            data[arm64::OFFSET_FPCR..arm64::OFFSET_FPCR + 4]
-                .copy_from_slice(&ctx.fpcr.to_le_bytes());
-            data[arm64::OFFSET_FPSR..arm64::OFFSET_FPSR + 4]
-                .copy_from_slice(&ctx.fpsr.to_le_bytes());
-            for (i, &value) in ctx.bcr.iter().enumerate() {
-                let off = arm64::OFFSET_BCR0 + i * 4;
-                data[off..off + 4].copy_from_slice(&value.to_le_bytes());
-            }
-            for (i, &value) in ctx.bvr.iter().enumerate() {
-                let off = arm64::OFFSET_BVR0 + i * 8;
-                data[off..off + 8].copy_from_slice(&value.to_le_bytes());
-            }
-            for (i, &value) in ctx.wcr.iter().enumerate() {
-                let off = arm64::OFFSET_WCR0 + i * 4;
-                data[off..off + 4].copy_from_slice(&value.to_le_bytes());
-            }
-            for (i, &value) in ctx.wvr.iter().enumerate() {
-                let off = arm64::OFFSET_WVR0 + i * 8;
-                data[off..off + 8].copy_from_slice(&value.to_le_bytes());
-            }
-            data[arm64::OFFSET_CR3..arm64::OFFSET_CR3 + 8]
-                .copy_from_slice(&directory_table_base.to_le_bytes());
-            return data;
+        match self {
+            Self::Amd64(ctx) => ctx.to_register_buffer(directory_table_base),
+            Self::Arm64(ctx) => ctx.to_register_buffer(directory_table_base),
         }
+    }
+}
+
+impl DmpArm64Context {
+    pub fn to_register_buffer(&self, directory_table_base: u64) -> Vec<u8> {
+        let mut data = vec![0u8; arm64::REGISTER_BUFFER_SIZE];
+        data[arm64::OFFSET_CONTEXT_FLAGS..arm64::OFFSET_CONTEXT_FLAGS + 4]
+            .copy_from_slice(&arm64::CONTEXT_ALL.to_le_bytes());
+        data[arm64::OFFSET_CPSR..arm64::OFFSET_CPSR + 4].copy_from_slice(&self.cpsr.to_le_bytes());
+        for (i, &value) in self.x.iter().enumerate() {
+            let off = arm64::OFFSET_X0 + i * 8;
+            data[off..off + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        data[arm64::OFFSET_SP..arm64::OFFSET_SP + 8].copy_from_slice(&self.sp.to_le_bytes());
+        data[arm64::OFFSET_PC..arm64::OFFSET_PC + 8].copy_from_slice(&self.pc.to_le_bytes());
+        for (i, &value) in self.v.iter().enumerate() {
+            let off = arm64::OFFSET_V0 + i * 16;
+            data[off..off + 16].copy_from_slice(&value.to_le_bytes());
+        }
+        data[arm64::OFFSET_FPCR..arm64::OFFSET_FPCR + 4].copy_from_slice(&self.fpcr.to_le_bytes());
+        data[arm64::OFFSET_FPSR..arm64::OFFSET_FPSR + 4].copy_from_slice(&self.fpsr.to_le_bytes());
+        for (i, &value) in self.bcr.iter().enumerate() {
+            let off = arm64::OFFSET_BCR0 + i * 4;
+            data[off..off + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (i, &value) in self.bvr.iter().enumerate() {
+            let off = arm64::OFFSET_BVR0 + i * 8;
+            data[off..off + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        for (i, &value) in self.wcr.iter().enumerate() {
+            let off = arm64::OFFSET_WCR0 + i * 4;
+            data[off..off + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (i, &value) in self.wvr.iter().enumerate() {
+            let off = arm64::OFFSET_WVR0 + i * 8;
+            data[off..off + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        data[arm64::OFFSET_CR3..arm64::OFFSET_CR3 + 8]
+            .copy_from_slice(&directory_table_base.to_le_bytes());
+        data
+    }
+}
+
+impl DmpAmd64Context {
+    pub fn to_register_buffer(&self, directory_table_base: u64) -> Vec<u8> {
         let mut data = vec![0u8; amd64::REGISTER_BUFFER_SIZE];
 
         write_u64(&mut data, amd64::OFFSET_RAX, self.rax);
@@ -560,7 +573,7 @@ impl DmpMem {
         } else {
             let (ctx, _) = Context::read_from_prefix(&hdr.context_record_buffer)
                 .map_err(|_| Error::InvalidDump("context record is truncated".to_string()))?;
-            DmpContext {
+            DmpContext::Amd64(DmpAmd64Context {
                 rax: ctx.rax,
                 rbx: ctx.rbx,
                 rcx: ctx.rcx,
@@ -598,8 +611,7 @@ impl DmpMem {
                 last_branch_from_rip: ctx.last_branch_from_rip,
                 last_exception_to_rip: ctx.last_exception_to_rip,
                 last_exception_from_rip: ctx.last_exception_from_rip,
-                arm64: None,
-            }
+            })
         };
 
         let exc = &hdr.exception;
@@ -1053,7 +1065,9 @@ mod tests {
             .copy_from_slice(&0x0000_e9e1u32.to_le_bytes());
         raw[arm64::OFFSET_WVR0..arm64::OFFSET_WVR0 + 8].copy_from_slice(&0x4000u64.to_le_bytes());
         let context = DmpContext::from_arm64_bytes(&raw);
-        let arm = context.arm64.as_ref().unwrap();
+        let DmpContext::Arm64(arm) = &context else {
+            panic!("expected an ARM64 context");
+        };
         assert_eq!(arm.x[0], 0x1122_3344_5566_7788);
         assert_eq!(arm.sp, 0xffff_0000_1234_5000);
         assert_eq!(arm.pc, 0xffff_0000_0000_1000);
@@ -1092,7 +1106,7 @@ mod tests {
             triage_overflowed: false,
             triage_signature_valid: true,
             kern_base: None,
-            context: DmpContext {
+            context: DmpContext::Amd64(DmpAmd64Context {
                 rax: 0x1111111111111111,
                 rbx: 0x2222222222222222,
                 rcx: 0x3333333333333333,
@@ -1130,8 +1144,7 @@ mod tests {
                 last_branch_from_rip: 0,
                 last_exception_to_rip: 0,
                 last_exception_from_rip: 0,
-                arm64: None,
-            },
+            }),
         }
     }
 
@@ -1237,7 +1250,10 @@ mod tests {
 
         for (i, regs) in backend.per_cpu_registers.iter_mut().enumerate() {
             let (rip, rsp) = if i == 2 {
-                (info.context.rip, info.context.rsp)
+                (
+                    info.context.instruction_pointer(),
+                    info.context.stack_pointer(),
+                )
             } else {
                 (0xfffff800aaaa0000 + i as u64, 0xfffff800bbbb0000 + i as u64)
             };
@@ -1266,8 +1282,11 @@ mod tests {
         assert!(!backend.header_context_is_empty());
         let data = backend.read_registers().unwrap();
         let map = backend.register_map().clone();
-        assert_eq!(map.read_u64("rip", &data).unwrap(), info.context.rip);
-        assert_eq!(map.read_u64("rax", &data).unwrap(), info.context.rax);
+        let DmpContext::Amd64(context) = &info.context else {
+            panic!("expected an AMD64 context");
+        };
+        assert_eq!(map.read_u64("rip", &data).unwrap(), context.rip);
+        assert_eq!(map.read_u64("rax", &data).unwrap(), context.rax);
         assert_eq!(
             map.read_u64("cr3", &data).unwrap(),
             info.directory_table_base

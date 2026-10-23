@@ -10,7 +10,7 @@ use crate::base::memory::MemoryOps;
 use crate::base::types::{Arch, Dtb, VirtAddr};
 use crate::nt::layout::{FieldInfo, TypeInfo, le_uint};
 use crate::nt::target::pool::kernel_symbol_address;
-use crate::nt::target::{Arm64SavedRegisters, SavedThreadRegisters, Target};
+use crate::nt::target::{Amd64SavedRegisters, Arm64SavedRegisters, SavedThreadRegisters, Target};
 use crate::nt::unwind::{resolve_thread_trace_context, try_format_symbol};
 use ntoseye_macros::record;
 use std::sync::Arc;
@@ -392,7 +392,7 @@ fn buffer_uint(buf: &[u8], name: &str, offset: usize, size: usize) -> Result<u64
 impl From<&KtrapFrame> for SavedThreadRegisters {
     fn from(frame: &KtrapFrame) -> Self {
         match &frame.data {
-            KtrapFrameData::Amd64(frame) => Self {
+            KtrapFrameData::Amd64(frame) => Self::Amd64(Amd64SavedRegisters {
                 rip: Some(frame.rip),
                 rsp: Some(frame.rsp),
                 rax: frame.rax,
@@ -412,8 +412,7 @@ impl From<&KtrapFrame> for SavedThreadRegisters {
                 r14: None,
                 r15: None,
                 rflags: Some(u64::from(frame.eflags)),
-                arm64: None,
-            },
+            }),
             KtrapFrameData::Arm64(frame) => {
                 let mut x = [None; 31];
                 for (index, value) in frame.x.iter().copied().enumerate() {
@@ -421,17 +420,14 @@ impl From<&KtrapFrame> for SavedThreadRegisters {
                 }
                 x[29] = Some(frame.fp);
                 x[30] = Some(frame.lr);
-                Self {
-                    arm64: Some(Arm64SavedRegisters {
-                        x,
-                        sp: Some(frame.sp),
-                        pc: Some(frame.pc),
-                        cpsr: frame.cpsr,
-                        fp: Some(frame.fp),
-                        lr: Some(frame.lr),
-                    }),
-                    ..Self::default()
-                }
+                Self::Arm64(Arm64SavedRegisters {
+                    x,
+                    sp: Some(frame.sp),
+                    pc: Some(frame.pc),
+                    cpsr: frame.cpsr,
+                    fp: Some(frame.fp),
+                    lr: Some(frame.lr),
+                })
             }
         }
     }
@@ -498,7 +494,7 @@ fn decode_kswitch_frame(
         .and_then(|value| value.checked_add(8))
         .ok_or_else(|| Error::DebugInfo("KSWITCH_FRAME stack pointer overflow".into()))?;
 
-    Ok(SavedThreadRegisters {
+    Ok(SavedThreadRegisters::Amd64(Amd64SavedRegisters {
         rip: Some(rip),
         rsp: Some(rsp),
         // Only fields explicitly described by this build's PDB are exposed.
@@ -510,8 +506,8 @@ fn decode_kswitch_frame(
         r13: optional("R13"),
         r14: optional("R14"),
         r15: optional("R15"),
-        ..SavedThreadRegisters::default()
-    })
+        ..Amd64SavedRegisters::default()
+    }))
 }
 
 pub fn decode_kswitch_frame_seed(
@@ -905,7 +901,9 @@ mod tests {
         buf[0x78..0x80].copy_from_slice(&0xffff_a000_0000_2000u64.to_le_bytes());
 
         let frame = KtrapFrame::decode(&layout, 0xffff_a000_0000_1800, &buf, None).unwrap();
-        let registers = SavedThreadRegisters::from(&frame);
+        let SavedThreadRegisters::Amd64(registers) = SavedThreadRegisters::from(&frame) else {
+            panic!("expected AMD64 registers");
+        };
         assert_eq!(registers.rip, Some(0xffff_f800_0000_1000));
         assert_eq!(registers.rsp, Some(0xffff_a000_0000_2000));
         assert_eq!(registers.rbx, Some(0x44));
@@ -945,8 +943,11 @@ mod tests {
         buf[0x30..0x38].copy_from_slice(&0x1234u64.to_le_bytes());
         buf[0x38..0x40].copy_from_slice(&0xffff_f800_0000_3000u64.to_le_bytes());
 
-        let registers =
-            decode_kswitch_frame(&layout, VirtAddr(0xffff_a000_0000_1000), &buf).unwrap();
+        let SavedThreadRegisters::Amd64(registers) =
+            decode_kswitch_frame(&layout, VirtAddr(0xffff_a000_0000_1000), &buf).unwrap()
+        else {
+            panic!("expected AMD64 registers");
+        };
         assert_eq!(registers.rip, Some(0xffff_f800_0000_3000));
         assert_eq!(registers.rsp, Some(0xffff_a000_0000_1040));
         assert_eq!(registers.rbp, Some(0x1234));

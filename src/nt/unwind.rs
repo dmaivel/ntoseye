@@ -1532,24 +1532,28 @@ impl RegisterContext {
     }
 
     fn from_saved(registers: &SavedThreadRegisters) -> Option<Self> {
-        if let Some(arm64) = registers.arm64.as_ref() {
-            let mut context = Self::new(arm64.pc?, arm64.sp?);
-            for (slot, value) in context.regs.iter_mut().zip(arm64.x) {
-                *slot = value;
+        match registers {
+            SavedThreadRegisters::Arm64(arm64) => {
+                let mut context = Self::new(arm64.pc?, arm64.sp?);
+                for (slot, value) in context.regs.iter_mut().zip(arm64.x) {
+                    *slot = value;
+                }
+                context.regs[29] = context.regs[29].or(arm64.fp);
+                context.regs[30] = context.regs[30].or(arm64.lr);
+                Some(context)
             }
-            context.regs[29] = context.regs[29].or(arm64.fp);
-            context.regs[30] = context.regs[30].or(arm64.lr);
-            return Some(context);
+            SavedThreadRegisters::Amd64(amd64) => {
+                let mut context = Self::new(amd64.rip?, amd64.rsp?);
+                for (slot, name) in context
+                    .regs
+                    .iter_mut()
+                    .zip(cpu_context::amd64::ENCODED_REGISTERS)
+                {
+                    *slot = registers.get(name);
+                }
+                Some(context)
+            }
         }
-        let mut context = Self::new(registers.rip?, registers.rsp?);
-        for (slot, name) in context
-            .regs
-            .iter_mut()
-            .zip(cpu_context::amd64::ENCODED_REGISTERS)
-        {
-            *slot = registers.get(name);
-        }
-        Some(context)
     }
 
     /// An x64 register by encoding number; 4 is rsp.
@@ -1659,7 +1663,7 @@ mod tests {
     use crate::base::types::VirtAddr;
     use crate::nt::guest::ModuleInfo;
     use crate::nt::guest::hypercalls::HypervisorSymbols;
-    use crate::nt::target::{SavedThreadRegisters, SelectedFrame};
+    use crate::nt::target::{Amd64SavedRegisters, SavedThreadRegisters, SelectedFrame};
     use crate::session::{Session, session_over_memory};
     use std::path::Path;
 
@@ -2147,22 +2151,22 @@ mod tests {
 
     #[test]
     fn saved_register_context_preserves_missing_values() {
-        let registers = SavedThreadRegisters {
+        let registers = SavedThreadRegisters::Amd64(Amd64SavedRegisters {
             rip: Some(0xffff_f800_1000),
             rsp: Some(0xffff_a000_2000),
             rbp: Some(0xffff_a000_2100),
-            ..SavedThreadRegisters::default()
-        };
+            ..Amd64SavedRegisters::default()
+        });
         let context = RegisterContext::from_saved(&registers).unwrap();
         assert_eq!(context.rip, 0xffff_f800_1000);
         assert_eq!(context.rsp, 0xffff_a000_2000);
         assert_eq!(context.get(5), Some(0xffff_a000_2100));
         assert_eq!(context.get(3), None);
 
-        let missing_rsp = SavedThreadRegisters {
+        let missing_rsp = SavedThreadRegisters::Amd64(Amd64SavedRegisters {
             rip: Some(0xffff_f800_1000),
-            ..SavedThreadRegisters::default()
-        };
+            ..Amd64SavedRegisters::default()
+        });
         assert!(RegisterContext::from_saved(&missing_rsp).is_none());
     }
 }

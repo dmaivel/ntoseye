@@ -659,7 +659,7 @@ mod tests {
     use super::*;
     use crate::backend::dbg_backend::RegisterInfo;
     use crate::base::bytes::write_u64;
-    use crate::nt::dmp::DmpMem;
+    use crate::nt::dmp::{DmpContext, DmpMem};
     use std::cell::Cell;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -823,7 +823,7 @@ mod tests {
         let info = dump.info();
         assert_eq!(info.directory_table_base, metadata.directory_table_base);
         assert_eq!(info.number_processors, 1);
-        assert_eq!(info.context.rip, 0xffff_f800_1234_5678);
+        assert_eq!(info.context.instruction_pointer(), 0xffff_f800_1234_5678);
         let system_info = info.system_info.as_ref().unwrap();
         assert_eq!(system_info.major_version, metadata.major_version);
         assert_eq!(system_info.minor_version, metadata.minor_version);
@@ -918,11 +918,9 @@ mod tests {
 
         let dump = DmpMem::open(&path).unwrap();
         let info = dump.info();
-        let arm = info
-            .context
-            .arm64
-            .as_ref()
-            .expect("reopened ARM64 dump must decode an ARM64 context");
+        let DmpContext::Arm64(arm) = &info.context else {
+            panic!("reopened ARM64 dump must decode an ARM64 context");
+        };
         assert_eq!(arm.pc, 0xffff_8000_dead_0000);
         assert_eq!(arm.sp, 0xffff_8000_beef_1000);
         assert_eq!(arm.x[0], 0x5a5a_5a5a);

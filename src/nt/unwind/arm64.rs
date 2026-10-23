@@ -14,7 +14,7 @@ use crate::{
     base::types::{CodeMachine, VirtAddr},
     nt::{
         pe::{CodeLayout, PeImage},
-        target::Arm64SavedRegisters,
+        target::{Arm64SavedRegisters, SavedThreadRegisters},
         trapframe::decode_ktrap_frame_for_thread,
     },
 };
@@ -1024,9 +1024,12 @@ impl FrameMemory for StackTracer<'_> {
     }
 
     fn trap_frame(&self, address: u64) -> Option<Arm64SavedRegisters> {
-        decode_ktrap_frame_for_thread(self.target, self.trace.active_dtb, VirtAddr(address))
+        match decode_ktrap_frame_for_thread(self.target, self.trace.active_dtb, VirtAddr(address))
             .ok()?
-            .arm64
+        {
+            SavedThreadRegisters::Arm64(registers) => Some(registers),
+            SavedThreadRegisters::Amd64(_) => None,
+        }
     }
 }
 

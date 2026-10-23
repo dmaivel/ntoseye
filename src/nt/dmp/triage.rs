@@ -768,7 +768,7 @@ mod tests {
         assert_eq!(info.bug_check_code, 0x50);
         assert_eq!(info.number_processors, 1);
         assert!(info.is_triage);
-        assert_eq!(info.context.rip, 0xfffff80012345678);
+        assert_eq!(info.context.instruction_pointer(), 0xfffff80012345678);
         assert!(blocks.is_empty());
     }
 
@@ -801,7 +801,9 @@ mod tests {
             .copy_from_slice(&0x0000_e9e1u32.to_le_bytes());
 
         let (info, _) = parse_triage(&dump).unwrap();
-        let arm = info.context.arm64.as_ref().unwrap();
+        let DmpContext::Arm64(arm) = &info.context else {
+            panic!("expected an ARM64 context");
+        };
         assert_eq!(arm.pc, 0xffff_0000_0000_1000);
         assert_eq!(arm.sp, 0xffff_0000_1234_5000);
         assert_eq!(arm.bcr[0], 0x0000_e9e1);
