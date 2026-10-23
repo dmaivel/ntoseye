@@ -240,19 +240,8 @@ pub fn print(shown: &[Shown]) {
     }
 }
 
-/// A listing of displays: a table in Tern, else text rows.
+/// A listing of displays, then a blank line.
 fn show(shown: &[Shown]) {
-    #[cfg(feature = "cli")]
-    crate::hosts::repl::native::render(
-        || tern_sdk::View::new().main([crate::hosts::repl::native::frames::displays(shown)]),
-        || {
-            print(shown);
-            outln!();
-        },
-    );
-    #[cfg(not(feature = "cli"))]
-    {
-        print(shown);
-        outln!();
-    }
+    print(shown);
+    outln!();
 }

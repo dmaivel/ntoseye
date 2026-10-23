@@ -23,7 +23,7 @@ use crate::analysis::triage_report::hang::{
     ANALYZE_HANG_STACK_LIMIT, BugcheckDecoding, HangReport, HangThread, gather_hang_report,
 };
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
-use crate::hosts::repl::bugcheck::show_bugcheck_analysis;
+use crate::hosts::repl::bugcheck::print_bugcheck_analysis;
 use crate::hosts::repl::*;
 use crate::session::Session;
 use ntoseye_macros::{command, grammar};
@@ -1397,35 +1397,17 @@ enum AnalysisBody {
 impl Render for Analysis {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         if let Some(show) = &self.show {
-            show_bugcheck_analysis(&show.analysis);
+            print_bugcheck_analysis(&show.analysis);
             if let Some(finding) = &show.power {
-                #[cfg(feature = "cli")]
-                native::render(
-                    || native::analyze::power_failure(finding),
-                    || print_power_failure(finding),
-                );
-                #[cfg(not(feature = "cli"))]
                 print_power_failure(finding);
             }
         }
         match &self.body {
             Some(AnalysisBody::Hang(report)) => {
-                #[cfg(feature = "cli")]
-                native::render(
-                    || native::analyze::hang(report),
-                    || print_hang_report(report),
-                );
-                #[cfg(not(feature = "cli"))]
                 print_hang_report(report);
             }
             Some(AnalysisBody::Report(report)) => {
                 let verbose = self.verbose;
-                #[cfg(feature = "cli")]
-                native::render(
-                    || native::analyze::triage(report, verbose),
-                    || print_triage_report(report, verbose),
-                );
-                #[cfg(not(feature = "cli"))]
                 print_triage_report(report, verbose);
             }
             None => {}

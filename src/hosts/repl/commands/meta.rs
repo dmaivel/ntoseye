@@ -298,11 +298,7 @@ fn help(state: &mut ReplState<'_>, command: Option<String>) -> Result<()> {
         match command_registry().get(name) {
             None => error!("unknown command '{name}'"),
             Some(spec) => {
-                let print_text = || outln!("{}\n", spec_help(spec));
-                #[cfg(feature = "cli")]
-                native::render(|| native::help::command(spec), print_text);
-                #[cfg(not(feature = "cli"))]
-                print_text();
+                outln!("{}\n", spec_help(spec));
             }
         }
         return Ok(());
@@ -368,12 +364,6 @@ fn help(state: &mut ReplState<'_>, command: Option<String>) -> Result<()> {
                 .collect(),
         });
     }
-    #[cfg(feature = "cli")]
-    native::render(
-        || native::help::view(&listing),
-        || print_help_listing(&listing),
-    );
-    #[cfg(not(feature = "cli"))]
     print_help_listing(&listing);
     if !hidden.is_empty() {
         outln!(

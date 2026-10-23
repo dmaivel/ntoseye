@@ -865,12 +865,6 @@ impl ReplState<'_> {
             None => {
                 if let Some(variants) = self.lookup_enum(&parsed.type_name) {
                     let name = unqualified_type_name(&parsed.type_name);
-                    #[cfg(feature = "cli")]
-                    native::render(
-                        || native::types::enum_view(name, &variants),
-                        || print_enum(name, &variants),
-                    );
-                    #[cfg(not(feature = "cli"))]
                     print_enum(name, &variants);
                 } else {
                     error!(
@@ -952,9 +946,6 @@ impl ReplState<'_> {
             address: base.map(|address| address.0),
             body,
         };
-        #[cfg(feature = "cli")]
-        native::render(|| native::types::view(&dump), || print_dt(&dump));
-        #[cfg(not(feature = "cli"))]
         print_dt(&dump);
         Ok(())
     }

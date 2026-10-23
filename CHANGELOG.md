@@ -33,6 +33,10 @@ Keeping this file:
 - On an ARM64 target, `p` steps over a pointer-authenticated call (`blraa`, `blrab`, `blraaz`, `blrabz`), as it steps over `blr`, instead of into it.
 - Modules are named after their image file, as WinDbg's `lm` names them, not the loader's alias for it: `kd.dll` rather than `kdcom.dll`, `mcupdate_GenuineIntel.dll` rather than `mcupdate.dll`, in a WOW64 process's 32-bit module list too. Their `module!` prefixes follow (`kd!`, `mcupdate_genuineintel!`).
 
+### Removed
+
+- In Tern, results print as text, as in any other terminal: stops, stacks, memory dumps and the other results Tern drew as cards, tables and trees are text again. Tern's input field, with its completions and palette, stays, and so do the timer while `g` runs and the progress bars of long tasks.
+
 ## v0.51.0 (2026-10-19)
 
 ### Added

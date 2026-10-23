@@ -91,34 +91,25 @@ fn x(state: &mut ReplState<'_>, #[arg(parse = first_word)] query: String) -> Res
         state.ctx.target.set_results(Vec::new(), state.line.clone());
         return Ok(());
     }
-    let print_text = || {
-        for (address, label) in &matches {
-            outln!("{}  {}", ui::addr(*address), ui::symbol(label));
-        }
-        outln!(
-            "\n{} {}{} (in $0..${})",
-            matches.len(),
-            if matches.len() == 1 {
-                "symbol"
-            } else {
-                "symbols"
-            },
-            if truncated {
-                ", truncated; refine query"
-            } else {
-                ""
-            },
-            matches.len() - 1
-        );
-        outln!();
-    };
-    #[cfg(feature = "cli")]
-    native::render(
-        || native::lists::symbol_matches(&matches, truncated),
-        print_text,
+    for (address, label) in &matches {
+        outln!("{}  {}", ui::addr(*address), ui::symbol(label));
+    }
+    outln!(
+        "\n{} {}{} (in $0..${})",
+        matches.len(),
+        if matches.len() == 1 {
+            "symbol"
+        } else {
+            "symbols"
+        },
+        if truncated {
+            ", truncated; refine query"
+        } else {
+            ""
+        },
+        matches.len() - 1
     );
-    #[cfg(not(feature = "cli"))]
-    print_text();
+    outln!();
     let hits = matches.iter().map(|(address, _)| *address).collect();
     state.ctx.target.set_results(hits, state.line.clone());
 
@@ -950,20 +941,8 @@ impl Render<ModuleDisplay> for Vec<ModuleListing> {
         if self.is_empty() {
             outln!("{}\n", "no matching modules".bright_black());
         } else if verbose {
-            #[cfg(feature = "cli")]
-            native::render(
-                || native::lists::module_details(self, timestamp),
-                || print_module_details(self, timestamp),
-            );
-            #[cfg(not(feature = "cli"))]
             print_module_details(self, timestamp);
         } else {
-            #[cfg(feature = "cli")]
-            native::render(
-                || native::lists::modules(self, timestamp),
-                || print_modules(self, timestamp),
-            );
-            #[cfg(not(feature = "cli"))]
             print_modules(self, timestamp);
         }
     }
@@ -1079,54 +1058,45 @@ fn vars(state: &mut ReplState<'_>) -> Result<()> {
         .collect();
     let results = state.ctx.target.results.len();
     let origin = state.ctx.target.results_origin.as_deref();
-    let print_text = || {
-        if !user.is_empty() {
-            outln!("{}", ui::label("user"));
-            for (name, var) in &user {
-                outln!(
-                    "  ${:<16} {}   {}",
-                    name,
-                    ui::addr(var.value),
-                    ui::muted(&var.source)
-                );
-            }
-        }
-        if results != 0 {
-            if !user.is_empty() {
-                outln!();
-            }
-            let origin = origin
-                .map(|cmd| format!("from: {}", cmd))
-                .unwrap_or_default();
+    if !user.is_empty() {
+        outln!("{}", ui::label("user"));
+        for (name, var) in &user {
             outln!(
-                "  {}   {}",
-                ui::muted(&format!("$0..${}", results - 1)),
-                ui::muted(&origin)
+                "  ${:<16} {}   {}",
+                name,
+                ui::addr(var.value),
+                ui::muted(&var.source)
             );
         }
-        if !builtins.is_empty() {
-            if !user.is_empty() || results != 0 {
-                outln!();
-            }
-            outln!("{}", ui::label("builtins"));
-            for var in &builtins {
-                outln!(
-                    "  ${:<16} {}   {}",
-                    var.name,
-                    ui::addr(var.value),
-                    ui::muted(var.source)
-                );
-            }
+    }
+    if results != 0 {
+        if !user.is_empty() {
+            outln!();
         }
-        outln!();
-    };
-    #[cfg(feature = "cli")]
-    native::render(
-        || native::inspect::vars(&user, results, origin, &builtins),
-        print_text,
-    );
-    #[cfg(not(feature = "cli"))]
-    print_text();
+        let origin = origin
+            .map(|cmd| format!("from: {}", cmd))
+            .unwrap_or_default();
+        outln!(
+            "  {}   {}",
+            ui::muted(&format!("$0..${}", results - 1)),
+            ui::muted(&origin)
+        );
+    }
+    if !builtins.is_empty() {
+        if !user.is_empty() || results != 0 {
+            outln!();
+        }
+        outln!("{}", ui::label("builtins"));
+        for var in &builtins {
+            outln!(
+                "  ${:<16} {}   {}",
+                var.name,
+                ui::addr(var.value),
+                ui::muted(var.source)
+            );
+        }
+    }
+    outln!();
 
     Ok(())
 }
@@ -1232,25 +1202,16 @@ impl ReplState<'_> {
         }
         let last = (first as usize + count as usize - 1).min(lines.len());
         let shown = &lines[first as usize - 1..last];
-        let print_text = || {
-            outln!("{}:", path.display());
-            for (number, line) in (first as usize..).zip(shown) {
-                let mark = if Some(number as u32) == current {
-                    '>'
-                } else {
-                    ' '
-                };
-                outln!("{mark}{number:>6}: {line}");
-            }
-            outln!();
-        };
-        #[cfg(feature = "cli")]
-        native::render(
-            || native::source::view(path, shown, first, current),
-            print_text,
-        );
-        #[cfg(not(feature = "cli"))]
-        print_text();
+        outln!("{}:", path.display());
+        for (number, line) in (first as usize..).zip(shown) {
+            let mark = if Some(number as u32) == current {
+                '>'
+            } else {
+                ' '
+            };
+            outln!("{mark}{number:>6}: {line}");
+        }
+        outln!();
         let next = last as u32 + 1;
         self.source_cursor = Some((path.to_path_buf(), next));
         next

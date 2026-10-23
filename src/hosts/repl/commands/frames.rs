@@ -722,20 +722,7 @@ fn registers(
     let arch = state.ctx.target.arch();
     // A user dump's contexts record no control registers.
     let control = state.ctx.target.user_dump().is_none();
-    let print_text = || print_register_grid(register_map, &regs, arch, control);
-    #[cfg(feature = "cli")]
-    native::render(
-        || {
-            native::frames::registers(
-                &|name: &str| register_map.read_u64(name, &regs).ok(),
-                arch,
-                control,
-            )
-        },
-        print_text,
-    );
-    #[cfg(not(feature = "cli"))]
-    print_text();
+    print_register_grid(register_map, &regs, arch, control);
 
     Ok(())
 }
@@ -783,17 +770,8 @@ fn stack(
             outln!();
             return Ok(());
         }
-        let print_text = || {
-            print_stacktrace_data_with(&trace, frame_limit, false, columns);
-            outln!();
-        };
-        #[cfg(feature = "cli")]
-        native::render(
-            || native::frames::stack(&trace, frame_limit, columns, 0, None),
-            print_text,
-        );
-        #[cfg(not(feature = "cli"))]
-        print_text();
+        print_stacktrace_data_with(&trace, frame_limit, false, columns);
+        outln!();
         return Ok(());
     }
 
@@ -860,27 +838,8 @@ fn stack(
         .unwrap_or(0);
     let selected = state.ctx.target.selected_frame.as_ref().map(|_| offset);
     if !name.eq_ignore_ascii_case("kp") {
-        let print_text = || {
-            print_indexed_stacktrace(&trace, frame_limit, offset, columns, selected);
-            outln!();
-        };
-        #[cfg(feature = "cli")]
-        native::render(
-            || {
-                let plain = StackTrace {
-                    frames: trace
-                        .frames
-                        .iter()
-                        .map(|frame| frame.frame.clone())
-                        .collect(),
-                    truncated: trace.truncated,
-                };
-                native::frames::stack(&plain, frame_limit, columns, offset, selected)
-            },
-            print_text,
-        );
-        #[cfg(not(feature = "cli"))]
-        print_text();
+        print_indexed_stacktrace(&trace, frame_limit, offset, columns, selected);
+        outln!();
         return Ok(());
     }
     print_indexed_stacktrace(&trace, frame_limit, offset, columns, selected);
@@ -986,21 +945,9 @@ fn trap(
                 .unwrap_or_else(|| format!("{:#x}", frame.instruction_pointer()));
             let registers = registers_from_trap_frame(&frame);
             let selected = state.select_register_values(0, registers);
-            let print_text = || {
-                print_ktrap_frame(&frame, Some(&symbol));
-                outln!("selected trap context frame 00 at {}", ui::addr(selected));
-            };
-            #[cfg(feature = "cli")]
-            native::render(
-                || native::frames::trap(&frame, Some(&symbol), selected),
-                print_text,
-            );
-            #[cfg(not(feature = "cli"))]
-            print_text();
+            print_ktrap_frame(&frame, Some(&symbol));
+            outln!("selected trap context frame 00 at {}", ui::addr(selected));
             state.warn_if_user_frame_is_out_of_view(frame.instruction_pointer());
-            #[cfg(feature = "cli")]
-            native::omit(|| outln!());
-            #[cfg(not(feature = "cli"))]
             outln!();
         }
         Err(e) => {
@@ -1051,16 +998,10 @@ impl ReplState<'_> {
         print_frame_line(&self.frame_line(frame), frame, arch, show_registers);
     }
 
-    /// `.frame`: the selected frame, natively in Tern.
+    /// `.frame`: the selected frame.
     fn show_selected_frame(&self, frame: &SelectedFrame, show_registers: bool) {
         let line = self.frame_line(frame);
         let arch = self.ctx.target.arch();
-        #[cfg(feature = "cli")]
-        native::render(
-            || native::inspect::frame(&line, frame, arch, show_registers),
-            || print_frame_line(&line, frame, arch, show_registers),
-        );
-        #[cfg(not(feature = "cli"))]
         print_frame_line(&line, frame, arch, show_registers);
     }
 

@@ -708,9 +708,36 @@ pub fn start_plain_repl(ctx: &mut Session) -> Result<()> {
     start_repl_with_mode(ctx, true)
 }
 
+/// What the session found of the target's kernel.
+#[cfg(feature = "cli")]
+struct KernelSummary {
+    /// `NtBuildNumber`, when the kernel was found.
+    build: Option<u16>,
+    base: Option<u64>,
+    /// `PsLoadedModuleList`; zero when unavailable.
+    modules: Option<u64>,
+}
+
+/// What a user-mode minidump captured, as the session opens with it.
+#[cfg(feature = "cli")]
+struct UserDumpSummary {
+    /// `charmap.exe (pid 1234)`.
+    process: String,
+    /// `Windows 10.0.26100 AMD64`, with the build string when recorded.
+    system: String,
+    /// When the dump was written (`MINIDUMP_HEADER.TimeDateStamp`).
+    written: Option<String>,
+    threads: usize,
+    modules: usize,
+    /// Captured memory: how many ranges, how many bytes.
+    memory: String,
+    /// The exception the dump was written for, described.
+    exception: Option<String>,
+}
+
 /// The session's opening summary of the target's kernel.
 #[cfg(feature = "cli")]
-fn print_target(target: &native::session::Target) {
+fn print_target(target: &KernelSummary) {
     outln!("\n{}", ui::label("target"));
     match (target.build, target.base) {
         (Some(build), Some(base)) => {
@@ -735,7 +762,7 @@ fn print_target(target: &native::session::Target) {
 /// What a user-mode minidump captured, for the session's opening summary;
 /// `None` for a kernel target.
 #[cfg(feature = "cli")]
-fn user_dump_summary(target: &Target) -> Option<native::session::UserDump> {
+fn user_dump_summary(target: &Target) -> Option<UserDumpSummary> {
     let dump = target.user_dump()?;
     let info = dump.info();
     let system = &info.system;
@@ -750,7 +777,7 @@ fn user_dump_summary(target: &Target) -> Option<native::session::UserDump> {
         version.push_str(&format!(" ({build})"));
     }
     let captured: u64 = dump.memory_ranges().iter().map(|range| range.length).sum();
-    Some(native::session::UserDump {
+    Some(UserDumpSummary {
         process: info.process_label(),
         system: version,
         written: filetime_to_iso((u64::from(info.time_date_stamp) + 11_644_473_600) * 10_000_000),
@@ -767,7 +794,7 @@ fn user_dump_summary(target: &Target) -> Option<native::session::UserDump> {
 
 /// The session's opening summary of a user-mode minidump.
 #[cfg(feature = "cli")]
-fn print_user_dump_target(dump: &native::session::UserDump) {
+fn print_user_dump_target(dump: &UserDumpSummary) {
     outln!("\n{}", ui::label("user-mode minidump"));
     outln!("  {} {}", ui::muted("process  "), dump.process);
     outln!("  {} {}", ui::muted("system   "), dump.system);
@@ -840,33 +867,25 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     print_alias_load_failures(&alias_report);
 
     if let Some(dump) = user_dump_summary(debugger) {
-        native::render(
-            || native::session::user_dump_card(&dump),
-            || print_user_dump_target(&dump),
-        );
+        print_user_dump_target(&dump);
     } else {
         // Triage dumps may lack the ntoskrnl PE header needed for full kernel
         // discovery; a missing kernel is non-fatal and commands that need it
         // fail individually.
         let target = match debugger.startup_message_data() {
-            Ok(message_data) => native::session::Target {
+            Ok(message_data) => KernelSummary {
                 build: Some(message_data.build_number),
                 base: Some(message_data.base_address.0),
                 modules: Some(message_data.loaded_module_list.0),
             },
-            Err(Error::NtoskrnlNotFound) | Err(Error::AddressNotInDump(_)) => {
-                native::session::Target {
-                    build: None,
-                    base: debugger.kernel_base().map(|base| base.0),
-                    modules: None,
-                }
-            }
+            Err(Error::NtoskrnlNotFound) | Err(Error::AddressNotInDump(_)) => KernelSummary {
+                build: None,
+                base: debugger.kernel_base().map(|base| base.0),
+                modules: None,
+            },
             Err(e) => return Err(e),
         };
-        native::render(
-            || native::session::target_card(&target),
-            || print_target(&target),
-        );
+        print_target(&target);
     }
     let capabilities = client.capabilities();
     print_backend_capability_warning(&capabilities);

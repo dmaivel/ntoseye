@@ -639,12 +639,6 @@ impl Render for Vec<BreakpointInfo> {
             outln!("no breakpoints set\n");
             return;
         }
-        #[cfg(feature = "cli")]
-        native::render(
-            || native::lists::breakpoints(self),
-            || print_breakpoint_list(self),
-        );
-        #[cfg(not(feature = "cli"))]
         print_breakpoint_list(self);
     }
 }

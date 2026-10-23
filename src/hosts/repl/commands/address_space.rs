@@ -172,22 +172,13 @@ fn print_regions(
         outln!("{}\n", "no matching memory regions".bright_black());
         return;
     }
-    let print_text = || {
-        outln!(
-            "{} {} ({})",
-            ui::label("process"),
-            process.name,
-            ui::Value(process.pid)
-        );
-        print_padded_table(region_table(&shown, is_vad));
-    };
-    #[cfg(feature = "cli")]
-    native::render(
-        || native::lists::regions(process, &shown, is_vad),
-        print_text,
+    outln!(
+        "{} {} ({})",
+        ui::label("process"),
+        process.name,
+        ui::Value(process.pid)
     );
-    #[cfg(not(feature = "cli"))]
-    print_text();
+    print_padded_table(region_table(&shown, is_vad));
 }
 
 fn print_kernel_regions(
@@ -217,30 +208,24 @@ fn print_kernel_regions(
         outln!("no matching kernel regions\n");
         return;
     }
-    let print_text = || {
-        let mut builder = Builder::default();
+    let mut builder = Builder::default();
+    builder.push_record(vec![
+        "Start".to_string(),
+        "End".to_string(),
+        "Size".to_string(),
+        "Module".to_string(),
+        "Image".to_string(),
+    ]);
+    for module in &shown {
         builder.push_record(vec![
-            "Start".to_string(),
-            "End".to_string(),
-            "Size".to_string(),
-            "Module".to_string(),
-            "Image".to_string(),
+            ui::addr(module.base_address.0).to_string(),
+            ui::addr(module.end_address().0).to_string(),
+            format_region_size(module.size as u64).to_string(),
+            module.short_name.to_string(),
+            module.name.clone(),
         ]);
-        for module in &shown {
-            builder.push_record(vec![
-                ui::addr(module.base_address.0).to_string(),
-                ui::addr(module.end_address().0).to_string(),
-                format_region_size(module.size as u64).to_string(),
-                module.short_name.to_string(),
-                module.name.clone(),
-            ]);
-        }
-        print_padded_table(builder);
-    };
-    #[cfg(feature = "cli")]
-    native::render(|| native::lists::kernel_regions(&shown), print_text);
-    #[cfg(not(feature = "cli"))]
-    print_text();
+    }
+    print_padded_table(builder);
 }
 
 /// `!address -summary` on a user-mode minidump: only the summary. The

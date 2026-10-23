@@ -879,16 +879,10 @@ fn hvpartitions(repl: &mut ReplState<'_>) -> Result<()> {
             forest.push(repl.partition_node(partition, &partitions, &mut seen));
         }
     }
-    let print = || {
-        for node in &forest {
-            outln!("{}", partition_tree(node, 0));
-        }
-        outln!();
-    };
-    #[cfg(feature = "cli")]
-    native::render(|| native::trees::partitions(&forest), print);
-    #[cfg(not(feature = "cli"))]
-    print();
+    for node in &forest {
+        outln!("{}", partition_tree(node, 0));
+    }
+    outln!();
     Ok(())
 }
 
@@ -1618,14 +1612,7 @@ fn hvd(
         }
         offset += chunk;
     }
-    let print_text = || display_memory_with_validity(range.start, &data, Some(&valid), &mode);
-    #[cfg(feature = "cli")]
-    native::render(
-        || native::memory::dump(range.start, &data, Some(&valid), &mode),
-        print_text,
-    );
-    #[cfg(not(feature = "cli"))]
-    print_text();
+    display_memory_with_validity(range.start, &data, Some(&valid), &mode);
     Ok(())
 }
 

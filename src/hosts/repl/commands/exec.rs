@@ -354,12 +354,6 @@ impl Render for CallTrace {
                 error!("watch-trace stopped after {count} instructions: {error}")
             }
         }
-        #[cfg(feature = "cli")]
-        native::render(
-            || native::trees::call_tree(&self.root),
-            || render_trace_frame(&self.root, 0),
-        );
-        #[cfg(not(feature = "cli"))]
         render_trace_frame(&self.root, 0);
     }
 }

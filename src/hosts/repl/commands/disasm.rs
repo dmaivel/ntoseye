@@ -161,33 +161,21 @@ fn continues_listing(
 }
 
 /// A plain listing, as `u` and `ub` show it.
-fn show_listing(rows: &[DisasmRow], repl: &ReplState<'_>) {
-    let print_text = || {
-        render_rows(rows, |_| None);
-        outln!();
-    };
-    #[cfg(feature = "cli")]
-    native::render(
-        || native::frames::disasm(rows, repl.ctx.target.builtin_variable_value("ip")),
-        print_text,
-    );
-    #[cfg(not(feature = "cli"))]
-    {
-        let _ = repl;
-        print_text();
-    }
+fn show_listing(rows: &[DisasmRow]) {
+    render_rows(rows, |_| None);
+    outln!();
 }
 
 impl Render<ContinuesListing> for Vec<DisasmRow> {
     fn render(&self, repl: &mut ReplState<'_>, ContinuesListing: ContinuesListing) {
-        show_listing(self, repl);
+        show_listing(self);
         repl.disasm_cursor = DisasmCursor::after(&repl.ctx.target, self);
     }
 }
 
 impl Render for Vec<DisasmRow> {
-    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
-        show_listing(self, repl);
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        show_listing(self);
     }
 }
 
@@ -222,29 +210,10 @@ fn address_or_ip(
 }
 
 impl Render for FunctionDisassembly {
-    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
-        let print_text = || {
-            outln!("{}  {} bytes", ui::symbol(&self.symbol), self.length);
-            render_rows(&self.rows, |_| None);
-            outln!();
-        };
-        #[cfg(feature = "cli")]
-        native::render(
-            || {
-                native::frames::function(
-                    &self.symbol,
-                    self.length,
-                    &self.rows,
-                    repl.ctx.target.builtin_variable_value("ip"),
-                )
-            },
-            print_text,
-        );
-        #[cfg(not(feature = "cli"))]
-        {
-            let _ = repl;
-            print_text();
-        }
+    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+        outln!("{}  {} bytes", ui::symbol(&self.symbol), self.length);
+        render_rows(&self.rows, |_| None);
+        outln!();
     }
 }
 

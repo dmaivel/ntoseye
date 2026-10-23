@@ -32,10 +32,6 @@ struct Capture {
     /// Whether errors and warnings land here too, or pass on to an
     /// enclosing capture (or the terminal).
     diagnostics: bool,
-    /// An intermediate rendering a caller turns into another form: styling
-    /// stays, and the transcript skips it, since the caller logs the output
-    /// it finally shows.
-    styled: bool,
 }
 
 static LOG_SINK: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| Mutex::new(None));
@@ -221,10 +217,7 @@ fn append_to_capture(args: fmt::Arguments<'_>, diagnostic: bool) -> bool {
 /// Backing call for `out!`/`outln!`: append to the active capture, else
 /// print to stdout.
 pub fn write_fmt(args: fmt::Arguments<'_>) {
-    let intermediate = CAPTURES.with(|stack| stack.borrow().last().is_some_and(|c| c.styled));
-    if !intermediate {
-        log_args(args);
-    }
+    log_args(args);
     if !append_to_capture(args, false) {
         print_stdout(args);
     }
@@ -297,13 +290,12 @@ impl Drop for Restore {
     }
 }
 
-fn capture_with<R>(diagnostics: bool, styled: bool, f: impl FnOnce() -> R) -> (R, String) {
+fn capture_with<R>(diagnostics: bool, f: impl FnOnce() -> R) -> (R, String) {
     let depth = CAPTURES.with(|stack| {
         let mut stack = stack.borrow_mut();
         stack.push(Capture {
             text: Vec::new(),
             diagnostics,
-            styled,
         });
         stack.len() - 1
     });
@@ -314,13 +306,7 @@ fn capture_with<R>(diagnostics: bool, styled: bool, f: impl FnOnce() -> R) -> (R
         .map(|capture| capture.text)
         .unwrap_or_default();
     drop(restore);
-    let text = String::from_utf8_lossy(&text);
-    let text = if styled {
-        text.into_owned()
-    } else {
-        strip_ansi(&text)
-    };
-    (result, text)
+    (result, strip_ansi(&String::from_utf8_lossy(&text)))
 }
 
 /// Run `f` with this thread's REPL output, errors and warnings included,
@@ -328,21 +314,14 @@ fn capture_with<R>(diagnostics: bool, styled: bool, f: impl FnOnce() -> R) -> (R
 /// with terminal styling (ANSI CSI sequences) stripped, since a capturing
 /// host is never a terminal.
 pub fn capture<R>(f: impl FnOnce() -> R) -> (R, String) {
-    capture_with(true, false, f)
+    capture_with(true, f)
 }
 
 /// [`capture`] for a command whose output is data, not for the user
 /// (`.foreach`'s InCommands): errors and warnings skip this capture and
 /// reach whatever would have shown them without it.
 pub fn capture_output<R>(f: impl FnOnce() -> R) -> (R, String) {
-    capture_with(false, false, f)
-}
-
-/// [`capture_output`] that keeps the styling and leaves the transcript out:
-/// for a renderer that turns existing text output into another form, such
-/// as Tern-native spans, and logs what it finally shows itself.
-pub fn capture_styled<R>(f: impl FnOnce() -> R) -> (R, String) {
-    capture_with(false, true, f)
+    capture_with(false, f)
 }
 
 /// Remove ANSI escape sequences: CSI (`ESC [ … final`) and OSC (`ESC ] … BEL`

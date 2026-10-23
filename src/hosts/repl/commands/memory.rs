@@ -149,15 +149,7 @@ pub(super) fn dump_memory(
 
 impl Render for MemoryDump {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
-        let print_text =
-            || display_memory_with_validity(self.start, &self.data, Some(&self.valid), &self.mode);
-        #[cfg(feature = "cli")]
-        native::render(
-            || native::memory::dump(self.start, &self.data, Some(&self.valid), &self.mode),
-            print_text,
-        );
-        #[cfg(not(feature = "cli"))]
-        print_text();
+        display_memory_with_validity(self.start, &self.data, Some(&self.valid), &self.mode);
     }
 }
 
@@ -412,14 +404,7 @@ fn symbol_values(
 
 impl SymbolValues {
     fn show(&self) {
-        let print_text = || print_symbol_values(&self.rows, self.item_size);
-        #[cfg(feature = "cli")]
-        native::render(
-            || native::memory::symbol_values(&self.rows, self.item_size),
-            print_text,
-        );
-        #[cfg(not(feature = "cli"))]
-        print_text();
+        print_symbol_values(&self.rows, self.item_size);
     }
 }
 

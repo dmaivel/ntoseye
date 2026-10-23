@@ -224,12 +224,6 @@ pub fn print_target_reload(
             .symbols
             .format_closest_symbol_for_address(debugger.kernel_dtb(), VirtAddr(pc))
     });
-    #[cfg(feature = "cli")]
-    native::render(
-        || native::stop::reboot_card(current_thread, pc, symbol.as_deref(), coherent),
-        || print_target_reload_text(current_thread, pc, symbol.as_deref(), coherent),
-    );
-    #[cfg(not(feature = "cli"))]
     print_target_reload_text(current_thread, pc, symbol.as_deref(), coherent);
 }
 
@@ -318,9 +312,6 @@ struct StopContext {
     windows_thread: Option<ThreadInfo>,
     /// The hypervisor's saved state and notes, styled.
     notes: Vec<String>,
-    /// The stop card names a bugcheck in its chip.
-    #[cfg(feature = "cli")]
-    bugcheck: bool,
     regs: Vec<u8>,
     /// The register file of the previous stop on the same thread, when the
     /// display marks what changed since.
@@ -332,14 +323,14 @@ struct StopContext {
     saved: Option<HashMap<String, u64>>,
     trace: ThreadTraceContext,
     rip: u64,
-    /// How much of it the text renderer draws.
+    /// How much of it is drawn.
     detail: StopDetail,
 }
 
 /// How much of a stop a compact host draws (see [`Session::compact_stops`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StopDetail {
-    /// The whole card: banner, registers, code and stack.
+    /// The whole stop: banner, registers, code and stack.
     Full,
     /// After a stop on the same thread, such as a step: the banner, the
     /// registers that changed, the next few instructions, and the stack
@@ -361,7 +352,7 @@ fn function_of(symbol: &str) -> &str {
 }
 
 impl StopContext {
-    /// The lines under the banner, as the text renderer lists them.
+    /// The lines under the banner.
     fn children(&self) -> Vec<String> {
         let mut children = Vec::new();
         children.extend(self.cause.clone());
@@ -448,75 +439,6 @@ fn print_displays(shown: &[display::Shown]) {
     display::print(shown);
 }
 
-#[cfg(feature = "cli")]
-fn stop_view(session: &Session, stop: &StopContext, tone: tern_sdk::ui::Tone) -> tern_sdk::View {
-    let ran = native::take_run();
-    let lines: Vec<String> = stop.stopped_at.iter().chain(&stop.notes).cloned().collect();
-    let (registers, rows, current, stack) = match &stop.saved {
-        Some(saved) => {
-            let (trace, rip, stack) = saved_vtl0_code(session, saved);
-            let grid =
-                native::styled(|| print_sparse_registers(saved, session.target.arch(), None, 0));
-            (
-                (
-                    vec![native::span("registers (saved VTL0)", "")],
-                    native::block(&grid).into(),
-                ),
-                disasm_context_rows(session, &trace, rip),
-                rip,
-                stack,
-            )
-        }
-        None => {
-            let map = &session.register_map;
-            let read = |name: &str| map.read_u64(name, &stop.regs).ok();
-            let changed = |name: &str| {
-                read(name).is_some_and(|value| changed(map, name, value, stop.before.as_deref()))
-            };
-            let arch = session.target.arch();
-            let grid = native::frames::register_grid(&read, arch, &changed);
-            // Folded by default, the section's head names what changed.
-            let names = native::frames::changed_registers(arch, &changed);
-            let mut head = vec![native::span("registers", "")];
-            if !names.is_empty() {
-                head.push(native::span(
-                    format!("  {} changed", names.join(" ")),
-                    native::MUTED,
-                ));
-            }
-            let stack = thread_stacktrace(
-                &session.target,
-                &session.register_map,
-                &stop.regs,
-                BREAK_STACKTRACE_PROBE_LIMIT,
-            );
-            (
-                (head, grid.into()),
-                disasm_context_rows(session, &stop.trace, stop.rip),
-                stop.rip,
-                stack,
-            )
-        }
-    };
-    native::stop::stop_card(native::stop::Stop {
-        thread: &stop.thread,
-        context: &stop.context,
-        symbol: &stop.symbol,
-        tone,
-        cause: stop.cause.as_deref(),
-        bugcheck: stop.bugcheck,
-        windows_thread: stop.windows_thread.as_ref(),
-        lines: &lines,
-        registers,
-        code: rows.as_deref().map_err(|note| note.trim().to_owned()),
-        current,
-        stack: &stack,
-        stack_limit: BREAK_STACKTRACE_DISPLAY_LIMIT,
-        ran,
-        displays: (!stop.displays.is_empty()).then(|| native::frames::displays(&stop.displays)),
-    })
-}
-
 /// `cause` is an optional pre-styled tree child naming why execution stopped
 /// (e.g. `breakpoint #3`), rendered first.
 pub fn print_break_context_at(
@@ -566,12 +488,6 @@ pub fn print_break_context_at(
         .flatten()
         .and_then(|number| debugger.guest_vp_label(number))
         .unwrap_or_else(|| trace.description.clone());
-    #[cfg(feature = "cli")]
-    let tone = native::stop::tone(
-        cause.as_deref(),
-        display_rip.is_some(),
-        trace.description == HYPERVISOR_CONTEXT,
-    );
 
     // Bugcheck stops park at the break inside KeBugCheck, not at the fault
     // site the banner names.
@@ -683,8 +599,6 @@ pub fn print_break_context_at(
         stopped_at,
         windows_thread,
         notes: children,
-        #[cfg(feature = "cli")]
-        bugcheck: display_rip.is_some(),
         regs,
         before,
         displays,
@@ -693,12 +607,6 @@ pub fn print_break_context_at(
         rip: context_rip,
         detail,
     };
-    #[cfg(feature = "cli")]
-    native::render(
-        || stop_view(session, &stop, tone),
-        || print_stop_text(session, &stop),
-    );
-    #[cfg(not(feature = "cli"))]
     print_stop_text(session, &stop);
 }
 

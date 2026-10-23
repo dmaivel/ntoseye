@@ -113,12 +113,6 @@ fn process_flags(
 
 impl Render<u32> for Vec<ProcessDetail> {
     fn render(&self, repl: &mut ReplState<'_>, flags: u32) {
-        #[cfg(feature = "cli")]
-        native::render(
-            || native::lists::processes(self),
-            || print_process_briefs(self),
-        );
-        #[cfg(not(feature = "cli"))]
         print_process_briefs(self);
 
         if flags & 7 == 0 {
@@ -177,9 +171,6 @@ impl Render<Option<String>> for Vec<ProcessInfo> {
             outln!("{}\n", "no matching processes".bright_black());
             return;
         }
-        #[cfg(feature = "cli")]
-        native::render(|| native::lists::ps(&shown), || print_ps(&shown));
-        #[cfg(not(feature = "cli"))]
         print_ps(&shown);
     }
 }

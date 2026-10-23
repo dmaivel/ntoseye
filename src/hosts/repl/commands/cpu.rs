@@ -1245,9 +1245,6 @@ impl Render for Contexts {
             Self::UserThreads(threads) => print_user_threads(threads),
             Self::Vcpus(vcpus) => {
                 repl.caches.refresh_vcpus(repl.ctx.backend.as_mut());
-                #[cfg(feature = "cli")]
-                native::render(|| native::lists::vcpus(vcpus), || print_vcpus(vcpus));
-                #[cfg(not(feature = "cli"))]
                 print_vcpus(vcpus);
             }
         }

@@ -1,32 +1,17 @@
-//! Tern-native output. In Tern, Stencil's terminal, the interactive REPL
-//! draws a command's result as Tern Surface Protocol nodes (cards, tables,
-//! trees) that Tern lays out, themes and folds, instead of as text. Every
-//! other terminal, a capturing host (MCP, the Python SDK, DAP's console,
-//! `.foreach`), `--plain-repl` and `TERN_TSP=0` get the text renderers
-//! unchanged, so each converted command keeps both.
+//! Tern, Stencil's terminal: the handshake, the token styles the prompt
+//! and the palette color with, and the live surface. Commands print text in
+//! every terminal; in Tern the interactive REPL also reads them in Tern's
+//! input field ([`super::tern_prompt`]) with its palette, and shows a
+//! running target and long tasks' progress as a live `flow` surface. A
+//! capturing host (MCP, the Python SDK, DAP's console, `.foreach`),
+//! `--plain-repl` and `TERN_TSP=0` get none of it.
 //!
-//! A result is a `flow` surface opened with `listen:false`: it stays in the
-//! scrollback like output, and Tern sends nothing back about it, so reedline
-//! keeps stdin to itself. The one read is the handshake, once, before the
-//! first prompt.
+//! The live surface is opened with `listen:false`: Tern sends nothing back
+//! about it, so the prompt keeps stdin to itself. The one read is the
+//! handshake, once, before the first prompt.
 
-pub mod analyze;
-
-pub mod bugcheck;
-pub mod code;
 pub mod completions;
-pub mod frames;
-pub mod help;
-pub mod inspect;
-pub mod lists;
-pub mod memory;
 pub mod palette;
-pub mod session;
-pub mod source;
-pub mod stack;
-pub mod stop;
-pub mod trees;
-pub mod types;
 
 use std::io::{self, Write as _};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use indicatif::WeakProgressBar;
 use tern_sdk::reconcile::Doc;
-use tern_sdk::ui::{self, Basis, Bound, Extent, Gap, Row, Span, SpinnerStyle, TextNode, Wrap};
+use tern_sdk::ui::{self, Basis, Bound, Extent, Gap, Row, Span, SpinnerStyle};
 use tern_sdk::wire::{self, Close, Encoder, Frame, Message, Open, Sheet};
 use tern_sdk::{Capabilities, Mode, Node, Options, Session, View};
 
@@ -75,8 +60,8 @@ pub fn detect() {
         // running the old one, which may predate flow surfaces: without
         // this, the text looks like ntoseye ignoring Tern.
         diagnostics::print_warning(format!(
-            "Tern {} cannot draw ntoseye's views (no flow surfaces), so output stays text; \
-             update Tern, then use Restart Tern in its command palette",
+            "Tern {} cannot draw ntoseye's prompt (no flow surfaces), so the line editor is \
+             used; update Tern, then use Restart Tern in its command palette",
             capabilities.version
         ));
     }
@@ -158,63 +143,6 @@ pub fn active() -> bool {
     CAPABILITIES.get().is_some() && !output::capturing()
 }
 
-/// Show a result: `view` in Tern, else the text `text` prints. A `.logopen`
-/// transcript gets the text either way, so the text renderer must not
-/// change state the native path skips.
-pub fn render(view: impl FnOnce() -> View, text: impl FnOnce()) {
-    let Some(capabilities) = drawing() else {
-        return text();
-    };
-    let bytes = Doc::from_view(view()).and_then(|doc| {
-        let mut live = live();
-        live.tasks.clear();
-        // A result that didn't take the run leaves it in the scrollback.
-        if let Some(started) = live.started.take() {
-            live.end_with(View::new().main([ran_row(started.elapsed())]));
-        }
-        // The live surface becomes the result, so nothing is left where it
-        // was: unless text was printed since it opened, which would then
-        // show below the result.
-        match live.shown.take() {
-            Some(shown) if shown.printed == output::printed() => {
-                let mut bytes = shown.surface.next(shown.sequence + 1, &shown.doc, &doc)?;
-                bytes.extend(shown.surface.close(true)?);
-                Ok(bytes)
-            }
-            shown => {
-                if let Some(shown) = shown {
-                    write(&shown.surface.close(false)?);
-                }
-                Surface::new(capabilities).closed(&doc)
-            }
-        }
-    });
-    let bytes = match bytes {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            diagnostics::print_warning(format!("Tern view failed ({error}); showing text"));
-            return text();
-        }
-    };
-    if output::transcript_open() {
-        // Run into a capture only to log: the capture swallows the text.
-        let _ = output::capture_output(text);
-    }
-    write(&bytes);
-}
-
-/// Text only the text renderer shows, such as the blank line that sets a
-/// stop apart from the output above it: a native view brings its own
-/// spacing. A `.logopen` transcript still records it.
-pub fn omit(text: impl FnOnce()) {
-    if drawing().is_none() {
-        return text();
-    }
-    if output::transcript_open() {
-        let _ = output::capture_output(text);
-    }
-}
-
 /// Show that the target runs until the next result: a spinner and a timer
 /// Tern clocks itself, in place of the line `text` prints.
 pub fn running(text: impl FnOnce()) {
@@ -243,13 +171,6 @@ pub fn finish_running() {
     };
     let ran = View::new().main([ran_row(started.elapsed())]);
     live.end_with(ran);
-}
-
-/// How long the target ran, for a view that shows the run itself, such as
-/// the stop card; the running indicator then turns into that view. `None`
-/// when the target wasn't running.
-pub fn take_run() -> Option<Duration> {
-    live().started.take().map(|started| started.elapsed())
 }
 
 /// `ran 1.4s`: a run's frozen timer.
@@ -495,13 +416,6 @@ impl Surface {
         }
     }
 
-    /// Open it with `doc` and close it at once, kept as output.
-    fn closed(&self, doc: &Doc) -> Result<Vec<u8>, tern_sdk::Error> {
-        let mut bytes = self.open(doc)?;
-        bytes.extend(self.close(true)?);
-        Ok(bytes)
-    }
-
     /// Open it, its stylesheet, and the first frame adding `doc`.
     fn open(&self, doc: &Doc) -> Result<Vec<u8>, tern_sdk::Error> {
         let mut encoder = Encoder::new(self.limit);
@@ -562,8 +476,6 @@ impl Surface {
 pub const MUTED: &str = "muted";
 /// Quieter than muted: instruction bytes, separators.
 pub const DIM: &str = "dim";
-/// Emphasis in the primary text color.
-pub const STRONG: &str = "strong";
 /// Values: register contents, counts, ids.
 pub const NUMBER: &str = "num";
 /// A resolved function name.
@@ -572,13 +484,6 @@ pub const SYMBOL: &str = "ntSymbol";
 pub const MNEMONIC: &str = "ntMnemonic";
 /// A register name inside an instruction.
 pub const REGISTER: &str = "ntRegister";
-/// An immediate or displacement inside an instruction.
-pub const IMMEDIATE: &str = "ntNumber";
-/// A type name.
-pub const TYPE: &str = "ntType";
-/// A value that changed since the target last stopped, such as a register a
-/// step wrote: the warning color, as the text renderer's yellow.
-pub const CHANGED: &str = "warning";
 /// A quoted string.
 pub const STRING: &str = "ntString";
 
@@ -589,211 +494,5 @@ pub fn span(text: impl Into<String>, style: &str) -> Span {
         span
     } else {
         span.style(style)
-    }
-}
-
-/// An absolute address, 16 digits like the text renderers print it.
-pub fn addr(value: u64) -> Span {
-    ui::span(format!("{value:016x}"))
-}
-
-/// `module!function+0x1d`: the module quiet, the function the anchor, the
-/// offset quiet. `module+0x5d4de8` (no function) keeps the module plain,
-/// and a raw `0x…` (nothing resolved) is all quiet.
-pub fn symbol(symbol: &str) -> Vec<Span> {
-    if symbol.starts_with("0x") || symbol.is_empty() {
-        return vec![span(symbol, MUTED)];
-    }
-    let (body, offset) = match symbol.rfind("+0x") {
-        Some(at) => symbol.split_at(at),
-        None => (symbol, ""),
-    };
-    let mut spans = Vec::with_capacity(3);
-    match body.split_once('!') {
-        Some((module, function)) => {
-            spans.push(span(format!("{module}!"), MUTED));
-            spans.push(span(function, SYMBOL));
-        }
-        None => spans.push(span(body, "")),
-    }
-    if !offset.is_empty() {
-        spans.push(span(offset, MUTED));
-    }
-    spans
-}
-
-/// Text that the text renderers styled, as spans: ntoseye's few colors
-/// become the tokens of the same meaning, so a native view can reuse any
-/// existing formatter without a second palette.
-pub fn spans(styled: &str) -> Vec<Span> {
-    let mut out = Vec::new();
-    let mut style = Sgr::default();
-    let mut run = String::new();
-    let mut rest = styled;
-    while let Some(at) = rest.find('\x1b') {
-        run.push_str(&rest[..at]);
-        rest = &rest[at..];
-        // CSI: ESC [ parameters final. Only `m` (SGR) carries style; any
-        // other sequence, or a stray ESC, is dropped.
-        let Some(body) = rest.strip_prefix("\x1b[") else {
-            rest = &rest[1..];
-            continue;
-        };
-        let end = body
-            .find(|c: char| ('\x40'..='\x7e').contains(&c))
-            .unwrap_or(body.len());
-        let next = style.apply(&body[..end], body[end..].starts_with('m'));
-        if next != style && !run.is_empty() {
-            out.push(span(std::mem::take(&mut run), &style.tokens()));
-        }
-        style = next;
-        rest = body.get(end + 1..).unwrap_or("");
-    }
-    run.push_str(rest);
-    if !run.is_empty() {
-        out.push(span(run, &style.tokens()));
-    }
-    out
-}
-
-/// Multi-line output of a text renderer as one block, its columns kept.
-pub fn block(styled: &str) -> TextNode<()> {
-    ui::text(spans(styled.trim_end_matches('\n'))).wrap(Wrap::None)
-}
-
-/// What `print` writes, styled, without printing it or logging it: for a
-/// native view that reuses a text renderer's formatting.
-pub fn styled(print: impl FnOnce()) -> String {
-    output::capture_styled(print).1
-}
-
-/// The SGR state that matters for tokens.
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-struct Sgr {
-    color: Option<&'static str>,
-    bold: bool,
-    dim: bool,
-}
-
-impl Sgr {
-    fn apply(mut self, params: &str, is_sgr: bool) -> Self {
-        if !is_sgr {
-            return self;
-        }
-        if params.is_empty() {
-            return Self::default();
-        }
-        for param in params.split(';') {
-            match param.parse::<u8>().unwrap_or(0) {
-                0 => self = Self::default(),
-                1 => self.bold = true,
-                2 => self.dim = true,
-                22 => (self.bold, self.dim) = (false, false),
-                39 => self.color = None,
-                code => {
-                    if let Some(token) = color_token(code) {
-                        self.color = token;
-                    }
-                }
-            }
-        }
-        self
-    }
-
-    fn tokens(&self) -> String {
-        let mut tokens = Vec::with_capacity(3);
-        tokens.extend(self.color);
-        if self.bold {
-            tokens.push(STRONG);
-        }
-        if self.dim {
-            tokens.push(DIM);
-        }
-        tokens.join(" ")
-    }
-}
-
-/// The token for a foreground color code, as `crate::hosts::ui` uses the colors:
-/// `None` for a code that sets no foreground (a background), `Some(None)`
-/// for a foreground with no token of its own.
-fn color_token(code: u8) -> Option<Option<&'static str>> {
-    Some(match code {
-        90 => Some(MUTED),
-        31 | 91 => Some("error"),
-        32 | 92 => Some("success"),
-        33 | 93 => Some("warning"),
-        34 | 94 => Some(SYMBOL),
-        35 | 95 => Some(MNEMONIC),
-        36 => Some(NUMBER),
-        96 => Some("info"),
-        30 | 37 | 97 => None,
-        _ => return None,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use owo_colors::OwoColorize;
-
-    fn texts(spans: &[Span]) -> Vec<(String, Option<String>)> {
-        spans
-            .iter()
-            .map(|span| (span.t.clone(), span.s.clone()))
-            .collect()
-    }
-
-    #[test]
-    fn styled_text_keeps_its_meaning_as_tokens() {
-        let styled = format!(
-            "{} {}{} {}",
-            "rip".bright_black(),
-            "nt!NtClose".bright_blue(),
-            "+0x5".bright_black(),
-            "BREAK".bold()
-        );
-        assert_eq!(
-            texts(&spans(&styled)),
-            [
-                ("rip".into(), Some(MUTED.into())),
-                (" ".into(), None),
-                ("nt!NtClose".into(), Some(SYMBOL.into())),
-                ("+0x5".into(), Some(MUTED.into())),
-                (" ".into(), None),
-                ("BREAK".into(), Some(STRONG.into())),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_background_keeps_the_foreground_and_other_sequences_vanish() {
-        let styled = format!("{}\x1b[2K{}", "id".cyan().on_black(), "x");
-        assert_eq!(
-            texts(&spans(&styled)),
-            [("id".into(), Some(NUMBER.into())), ("x".into(), None)]
-        );
-    }
-
-    #[test]
-    fn symbol_quiets_the_module_and_offset() {
-        assert_eq!(
-            texts(&symbol("nt!KiIdleLoop+0x54")),
-            [
-                ("nt!".into(), Some(MUTED.into())),
-                ("KiIdleLoop".into(), Some(SYMBOL.into())),
-                ("+0x54".into(), Some(MUTED.into())),
-            ]
-        );
-        assert_eq!(
-            texts(&symbol("0xfffff80586ac0f10")),
-            [("0xfffff80586ac0f10".into(), Some(MUTED.into()))]
-        );
-        assert_eq!(
-            texts(&symbol("mscorlib.ni+0x5d4de8")),
-            [
-                ("mscorlib.ni".into(), None),
-                ("+0x5d4de8".into(), Some(MUTED.into())),
-            ]
-        );
     }
 }

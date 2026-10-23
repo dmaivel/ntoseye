@@ -491,7 +491,7 @@ pub fn display_memory_with_validity(
     outln!();
 }
 
-/// What an item of a memory row shows, for the native view's styling.
+/// What an item of a memory row shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItemKind {
     /// A value with a nonzero byte.

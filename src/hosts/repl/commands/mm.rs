@@ -383,12 +383,6 @@ fn pte(
 impl Render for PteWalk {
     fn render(&self, repl: &mut ReplState<'_>, _: ()) {
         let mask = repl.ctx.target.phys.invalid_pte_mask();
-        #[cfg(feature = "cli")]
-        native::render(
-            || native::inspect::pte(self, mask),
-            || print_pte_walk(self, mask),
-        );
-        #[cfg(not(feature = "cli"))]
         print_pte_walk(self, mask);
     }
 }
@@ -407,12 +401,6 @@ fn pool(session: &Session, address: VirtAddr) -> Result<PoolPageDetail> {
 
 impl Render for PoolPageDetail {
     fn render(&self, _: &mut ReplState<'_>, _: ()) {
-        #[cfg(feature = "cli")]
-        native::render(
-            || native::inspect::pool(self, self.target),
-            || print_pool_page(self, self.target),
-        );
-        #[cfg(not(feature = "cli"))]
         print_pool_page(self, self.target);
     }
 }
