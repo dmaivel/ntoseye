@@ -206,14 +206,6 @@ pub fn set_progress_hook(hook: ProgressHook) {
     let _ = PROGRESS_HOOK.set(hook);
 }
 
-static PROGRESS_OBSERVER: OnceLock<ProgressHook> = OnceLock::new();
-
-/// Hand each [`progress_bar`] to `observer` too, besides drawing it: the
-/// REPL reports its progress to the terminal (OSC 9;4).
-pub fn set_progress_observer(observer: ProgressHook) {
-    let _ = PROGRESS_OBSERVER.set(observer);
-}
-
 static TEXT_HOOK: OnceLock<fn()> = OnceLock::new();
 
 /// Run `hook` before each write of text to the terminal, ahead of
@@ -235,11 +227,7 @@ pub fn printed() -> u64 {
 /// terminal when it can, else by indicatif on stderr. A host capturing the
 /// output gets indicatif's.
 pub fn progress_bar(len: u64, label: &'static str) -> ProgressBar {
-    let bar = native_progress_bar(len, label).unwrap_or_else(|| ProgressBar::new(len));
-    if let Some(observe) = PROGRESS_OBSERVER.get().filter(|_| !capturing()) {
-        observe(bar.downgrade(), label);
-    }
-    bar
+    native_progress_bar(len, label).unwrap_or_else(|| ProgressBar::new(len))
 }
 
 /// A bar the REPL's terminal draws itself, labeled by its message or else

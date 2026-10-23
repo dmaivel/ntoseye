@@ -1136,7 +1136,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         virtio_seen: Default::default(),
     };
     if !plain {
-        terminal::begin(!native::active());
+        terminal::begin();
     }
     // An error ends the prompt, not the cleanup below: breakpoints left
     // planted in a guest that resumes without a debugger crash it.

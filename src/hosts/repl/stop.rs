@@ -896,7 +896,6 @@ impl ReplState<'_> {
                 native::running(print);
                 #[cfg(not(feature = "cli"))]
                 print();
-                terminal::set_running(true);
                 terminal::set_title(&title);
             }
             if interactive && !session.backend_streams_debug_output() {
@@ -917,7 +916,6 @@ impl ReplState<'_> {
         self.last_run = Some(started.elapsed());
         self.printed_debug_seq = printed.get();
         if announced.get() {
-            terminal::set_running(false);
             // A wait that ended without a stop (an error, a spent budget)
             // still stops the indicator.
             #[cfg(feature = "cli")]

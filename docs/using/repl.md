@@ -23,7 +23,7 @@ The prompt marks where each command and its output start and end, as a shell doe
 
 When the target ran for 10 seconds or more before it stopped, ntoseye asks the terminal for a desktop notification, such as `ntoseye: breakpoint #0 hit at nt!NtClose on processor 2`, so you can turn to something else while it runs. kitty shows it only while its window is out of view. Ghostty, iTerm2 and other terminals that read OSC 9 show it each time, and a terminal that reads neither shows nothing. A stop you cause yourself, with Ctrl+C or `break`, sends none.
 
-The window title names the prompt's processor and backend, and where the target stopped (`ntoseye - 3: kd - nt!NtClose+0x5`) or that it runs. ntoseye gives the title back when it exits. While the target runs, and while ntoseye downloads symbols or writes a dump, it reports progress to the terminal (OSC 9;4), which kitty, Ghostty, iTerm2 and Windows Terminal show on the window or tab.
+The window title names the prompt's processor and backend, and where the target stopped (`ntoseye - 3: kd - nt!NtClose+0x5`) or that it runs. ntoseye gives the title back when it exits.
 
 ## In Tern
 
