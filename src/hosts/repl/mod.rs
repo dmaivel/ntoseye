@@ -36,7 +36,7 @@ use crate::base::diagnostics;
 use crate::base::error::Error;
 use crate::base::error::Result;
 #[cfg(feature = "cli")]
-use crate::base::output::{log_input_line, prompting};
+use crate::base::output::{self, log_input_line, prompting};
 #[cfg(feature = "cli")]
 use crate::base::time::filetime_to_iso;
 #[cfg(feature = "cli")]
@@ -1008,17 +1008,24 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         had_content: Arc::clone(&had_content),
     };
 
+    // Under `NO_COLOR` the prompt and the completion menu are plain, and no
+    // line is suggested: without its dim style a suggestion would read as
+    // typed, and Enter would run something other than what the line shows.
+    let styled = output::stdout_styled();
     let mut line_editor = Reedline::create()
         .with_completer(completor)
         .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
-        // The rest of the newest earlier line that starts with what is
-        // typed, dim after the cursor; Right, End or Ctrl+E takes it.
-        .with_hinter(Box::new(
-            DefaultHinter::default().with_style(Style::new().fg(Color::DarkGray)),
-        ))
+        .with_ansi_colors(styled)
         .with_edit_mode(edit_mode)
         .with_highlighter(Box::new(highlighter))
         .with_history_exclusion_prefix(Some(" ".to_string()));
+    if styled {
+        // The rest of the newest earlier line that starts with what is
+        // typed, dim after the cursor; Right, End or Ctrl+E takes it.
+        line_editor = line_editor.with_hinter(Box::new(
+            DefaultHinter::default().with_style(Style::new().fg(Color::DarkGray)),
+        ));
+    }
     if let Some(history_path) = ntoseye_home().map(|root| root.join("history")) {
         match FileBackedHistory::with_file(REPL_HISTORY_SIZE, history_path.clone()) {
             Ok(history) => {

@@ -22,7 +22,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - `--kd-handshake-timeout <seconds>` sets how long the `kd` and `kdnet` backends wait for the target's first answer, as `NTOSEYE_KD_TIMEOUT` does, and wins over it; the default is still 8 seconds. MCP's `open` takes it as `kd_handshake_timeout`, DAP's attach arguments as `kdHandshakeTimeout`, and the SDK as `ntoseye.attach(kd_handshake_timeout=...)`.
 - The `gdb` backend sets as many hardware breakpoints (`ba`) as the GDB stub accepts, no longer four, so QEMU running with TCG, which emulates them, takes any number. Under KVM the processor still has four debug registers, and a fifth `ba` says the stub refused it.
 - A module whose PDB no symbol source has — a vendor driver never published — falls back to the export table of its image in the dump, as the Windows debugger does, so `k`, `ln` and `!analyze` name its functions (`myfault!nmf_fault_irql+0x35`) where they showed `module+offset`, and a deferred breakpoint on an export binds. So does a module whose image names no PDB at all (no CodeView record), once fetching the image does not name one either. A PDB acquired later (a source added, the process attached again) replaces the export symbols.
-- The prompt suggests as you type: the rest of the most recent earlier line that starts with what you've typed appears dimmed after the cursor (`b` suggests `bp nt!NtClose`), as fish does. **→**, **End** or **Ctrl+E** accepts it, **Ctrl+→** a word at a time; **Enter** runs only what you typed. Tern's prompt already did this.
+- The prompt suggests as you type: the rest of the most recent earlier line that starts with what you've typed appears dimmed after the cursor (`b` suggests `bp nt!NtClose`), as fish does. **→**, **End** or **Ctrl+E** accepts it, **Ctrl+→** a word at a time; **Enter** runs only what you typed. Tern's prompt already did this. With `NO_COLOR` set, nothing is suggested, since only its dimming sets a suggestion apart from what you typed.
 
 ### Changed
 
@@ -46,6 +46,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - A stop after `p` or `t` marks the registers the step changed even when the thread finished the step on another processor (`p1.1` before, `p1.4` after), as it often does on a busy guest. The stop marked none then, and MCP's step result showed the whole stop instead of what changed.
 - A guest's debug output (`DbgPrint`), printed as the target runs and by `!dbgprint`, shows control characters as visible symbols, such as `␛` for an escape, instead of passing them to the terminal, so a driver's output can no longer move the cursor, recolor or clear the screen, retitle the window, or plant a link. The SDK's `debug_log()` still returns the text as the guest printed it.
 - A WHEA_UNCORRECTABLE_ERROR (0x124) and a KERNEL_SECURITY_CHECK_FAILURE (0x139) are described in a full sentence, in the bugcheck stop, `!analyze -show` and the SDK's `BugcheckAnalysis.description`, instead of starting mid-sentence with "and indicates that".
+- With `NO_COLOR` set, the prompt and its completion menu are plain too, as the rest of the output already was.
 
 ### Removed
 

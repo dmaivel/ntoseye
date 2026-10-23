@@ -13,11 +13,11 @@ Command names follow WinDbg. The first name is the canonical name, and these fri
 
 The [command reference](../reference/commands/index.md) lists every command, and `.hh <command>` shows the same help in the REPL. The [expression reference](../reference/expressions.md) describes expressions, registers, and symbol syntax. You can put several commands on one line if you separate them with semicolons. As in WinDbg, a command that reports an error ends the line, and ntoseye names the commands it did not run, so `bp nt!NoSuchName; g` does not resume the target.
 
-As you type, the rest of the most recent earlier line that starts with what you've typed appears dimmed after the cursor: type `bp` and see `bp nt!NtClose` if that's the last breakpoint you set. Press **→**, **End** or **Ctrl+E** to accept it, or **Ctrl+→** to accept it a word at a time. **Enter** runs only what you typed. ntoseye keeps your history in `~/.ntoseye/history`.
+As you type, the rest of the most recent earlier line that starts with what you've typed appears dimmed after the cursor: type `bp` and see `bp nt!NtClose` if that's the last breakpoint you set. Press **→**, **End** or **Ctrl+E** to accept it, or **Ctrl+→** to accept it a word at a time. **Enter** runs only what you typed. With `NO_COLOR` set, nothing is suggested, since only its dimming sets a suggestion apart from what you typed. ntoseye keeps your history in `~/.ntoseye/history`.
 
 With `--plain-repl`, ntoseye reads commands line by line without completion or history, so you can pipe a command file into it.
 
-ntoseye shows color only when the output goes to a terminal. If you redirect the output, or if `NO_COLOR` is set, the output is plain text.
+ntoseye shows color only when the output goes to a terminal. If you redirect the output, or if `NO_COLOR` is set, the output is plain text, and so are the prompt and its completion menu.
 
 ## In Tern
 

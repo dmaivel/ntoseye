@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use owo_colors::OwoColorize;
 use std::borrow::Cow;
 
+use crate::base::output;
 use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::expr::Expr;
@@ -38,6 +39,11 @@ impl CustomPrompt {
                 ui::thread_id(thread),
                 ">".bright_black()
             )
+        };
+        let left = if output::stdout_styled() {
+            left
+        } else {
+            output::strip_ansi(&left)
         };
         CustomPrompt { left }
     }

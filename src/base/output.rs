@@ -224,6 +224,12 @@ pub fn write_fmt(args: fmt::Arguments<'_>) {
     }
 }
 
+/// Whether stdout gets styling: it is a terminal, and `NO_COLOR` is unset
+/// or empty.
+pub fn stdout_styled() -> bool {
+    *STDOUT_STYLED
+}
+
 /// Whether this thread's REPL output goes to a capture rather than the
 /// terminal.
 pub fn capturing() -> bool {
