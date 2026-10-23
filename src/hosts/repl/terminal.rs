@@ -10,21 +10,27 @@
 //! process name) has its control characters made visible first, so none
 //! can end the sequence early.
 
+#[cfg(feature = "cli")]
 use std::borrow::Cow;
-use std::io::{IsTerminal as _, Write as _};
+#[cfg(feature = "cli")]
+use std::io::IsTerminal as _;
+use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use indicatif::WeakProgressBar;
 
-use crate::base::output::{self, neutralize_controls};
+#[cfg(feature = "cli")]
+use crate::base::output;
+use crate::base::output::neutralize_controls;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 /// Whether progress is reported: not in Tern, which shows a run and the
 /// tasks' bars itself.
 static REPORT_PROGRESS: AtomicBool = AtomicBool::new(false);
 
+#[cfg(feature = "cli")]
 /// Turn the sequences on for the line editor's prompt, when stdout is a
 /// terminal: save the window title, to give back at [`end`], and report
 /// progress if `report_progress`.
@@ -41,6 +47,7 @@ pub fn begin(report_progress: bool) {
     }
 }
 
+#[cfg(feature = "cli")]
 /// Turn the sequences off as the prompt ends: no progress is left showing,
 /// and the window gets its title back.
 pub fn end() {
@@ -58,6 +65,7 @@ pub fn end() {
     write("\x1b[23;0t");
 }
 
+#[cfg(feature = "cli")]
 /// A semantic prompt mark (OSC 133), which lets a terminal tell commands
 /// apart: jump between them, select one's output. reedline writes the
 /// prompt's own (`A`, `B`); Tern's field, which draws no prompt in the
@@ -74,6 +82,7 @@ pub enum PromptMark {
     Finished { failed: bool },
 }
 
+#[cfg(feature = "cli")]
 /// Write `mark` to the terminal.
 pub fn mark(mark: PromptMark) {
     let text = match mark {
@@ -151,6 +160,7 @@ pub fn set_running(running: bool) {
     poll_progress();
 }
 
+#[cfg(feature = "cli")]
 /// Follow a long task's progress bar until it finishes or is dropped: the
 /// REPL's [`output::set_progress_observer`].
 fn follow_task(bar: WeakProgressBar, _label: &'static str) {

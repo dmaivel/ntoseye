@@ -28,13 +28,13 @@ use tabled::settings::Padding;
 
 use owo_colors::OwoColorize;
 
-use crate::backend::dbg_backend::{BackendCapability, DebugCapability};
 #[cfg(feature = "cli")]
-use crate::backend::dbg_backend::{DebugBackend, thread_label};
+use crate::backend::dbg_backend::DebugBackend;
+use crate::backend::dbg_backend::thread_label;
+use crate::backend::dbg_backend::{BackendCapability, DebugCapability};
 use crate::base::diagnostics;
 #[cfg(feature = "cli")]
-use crate::base::error::Error;
-use crate::base::error::Result;
+use crate::base::error::{Error, Result};
 #[cfg(feature = "cli")]
 use crate::base::output::{
     self, drop_leading_blank_lines, log_input_line, prompting, separate_prompt,
@@ -53,7 +53,9 @@ use crate::nt::symbols::ntoseye_home;
 use crate::nt::target::InterruptRequester;
 #[cfg(feature = "cli")]
 use crate::nt::target::Target;
-use crate::session::{Motion, Session};
+#[cfg(feature = "cli")]
+use crate::session::Motion;
+use crate::session::Session;
 
 /// Set by [`note_termination`]; polled by the prompt loops so a termination
 /// signal leaves through the same teardown as `q`.
@@ -113,6 +115,7 @@ use line_editor::{CustomPrompt, MyCompleter, TrackingHighlighter};
 pub use memory_view::*;
 pub use remote::*;
 pub use stop::*;
+#[cfg(feature = "cli")]
 use terminal::PromptMark;
 
 pub fn print_module_symbol_report(report: &ModuleSymbolLoadReport) {
