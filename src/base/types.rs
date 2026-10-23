@@ -172,6 +172,15 @@ impl CodeMachine {
             Self::Arm64 => 4,
         }
     }
+
+    /// `address` as this machine's instruction pointer holds it: 32 bits
+    /// on x86.
+    pub const fn code_address(self, address: u64) -> u64 {
+        match self {
+            Self::X86 => address & u32::MAX as u64,
+            Self::Amd64 | Self::Arm64 => address,
+        }
+    }
 }
 
 #[derive(Clone, Copy, FromBytes, IntoBytes, Immutable)]

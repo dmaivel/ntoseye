@@ -15,7 +15,7 @@ use crate::backend::dbg_backend::{
     ContinueDisposition, DebugBackend, HwBreakpointAccess, STEP_UNDER_WINDOWS_HYPERVISOR,
     StopEvent, clear_trap_flag, processor_index_from_backend_thread_id,
 };
-use crate::base::disasm::{ControlFlow, classify};
+use crate::base::disasm::{ControlFlow, classify, decode_first};
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::notice::Notice;
@@ -292,40 +292,12 @@ impl Session {
         memory.read_bytes(VirtAddr(pc), &mut bytes)?;
         self.mask_code(VirtAddr(pc), &mut bytes, active_dtb);
 
-        match self.target.arch() {
-            Arch::Amd64 => {}
-            Arch::Arm64 => {
-                let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                let Ok(instruction) = bad64::decode(word, pc) else {
-                    return Err(Error::DebugInfo(format!(
-                        "failed to decode instruction at {pc:#x}"
-                    )));
-                };
-                let mnem = instruction.op().mnem();
-                // `bl`/`blr` are the call forms; AArch64 instructions are 4 bytes.
-                return Ok(CurrentInstruction {
-                    is_call: mnem == "bl" || mnem == "blr",
-                    next_ip: pc.wrapping_add(4),
-                });
-            }
-        }
-
-        let bitness = self.target.code_bitness(VirtAddr(pc));
-        let mut decoder = Decoder::with_ip(bitness, &bytes, pc, DecoderOptions::NONE);
-        let instruction = decoder.decode();
-        if instruction.code() == Code::INVALID {
-            return Err(Error::DebugInfo(format!(
-                "failed to decode instruction at {pc:#x}"
-            )));
-        }
-        let next_ip = if bitness == 32 {
-            instruction.next_ip() & u64::from(u32::MAX)
-        } else {
-            instruction.next_ip()
-        };
+        let machine = self.target.executing_machine(VirtAddr(pc));
+        let (length, flow) = decode_first(&bytes, machine)
+            .ok_or_else(|| Error::DebugInfo(format!("failed to decode instruction at {pc:#x}")))?;
         Ok(CurrentInstruction {
-            is_call: instruction.mnemonic() == Mnemonic::Call,
-            next_ip,
+            is_call: flow == ControlFlow::Call,
+            next_ip: machine.code_address(pc.wrapping_add(length as u64)),
         })
     }
 
@@ -401,17 +373,14 @@ impl Session {
             .read_u64(arch.dtb_register(), &registers)
             .unwrap_or(0);
         let mut bytes = [0u8; 16];
-        let length = match arch {
-            Arch::Arm64 => 4,
-            Arch::Amd64 => bytes.len(),
-        };
+        let machine = self.target.executing_machine(VirtAddr(ip));
+        let length = machine.max_instruction_bytes();
         self.read_masked(VirtAddr(ip), &mut bytes[..length])?;
-        let bitness = self.target.code_bitness(VirtAddr(ip));
         let state = ControlState {
             ip,
             sp,
             dtb,
-            flow: classify(&bytes[..length], self.target.arch(), bitness),
+            flow: classify(&bytes[..length], machine),
         };
         Ok((state, registers, bytes))
     }

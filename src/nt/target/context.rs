@@ -523,9 +523,19 @@ impl Target {
             return machine;
         }
         match self.arch() {
-            Arch::Amd64 if self.code_bitness(address) == CODE_BITNESS_X86 => CodeMachine::X86,
-            Arch::Amd64 => CodeMachine::Amd64,
+            Arch::Amd64 => self.executing_machine(address),
             Arch::Arm64 => self.arm64_image_code_machine(address),
+        }
+    }
+
+    /// The instruction set the processor runs at `address`, for stepping
+    /// it: its compatibility mode's in a WOW64 process's 32-bit code, else
+    /// its own. Unlike [`Self::code_machine`], never an emulated image's.
+    pub fn executing_machine(&self, address: VirtAddr) -> CodeMachine {
+        let arch = self.arch();
+        match arch.compatibility_machine() {
+            Some(machine) if self.code_bitness(address) == CODE_BITNESS_X86 => machine,
+            _ => arch.code_machine(),
         }
     }
 

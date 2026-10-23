@@ -2,7 +2,7 @@
 //! that thread, processor, hypercall-caller, pass-count, or condition
 //! filters reject.
 
-use crate::arch::{Arch, RegisterMap};
+use crate::arch::{Arch, Family, RegisterMap};
 use crate::backend::dbg_backend::{
     ContinueDisposition, DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent,
     debug_registers, processor_index_from_backend_thread_id,
@@ -328,9 +328,9 @@ pub fn hardware_breakpoint_hit(
     // checking that here is what keeps an ordinary stop from fetching
     // registers. A transport that exposes no debug registers (a GDB stub owns
     // them) reports no exception code either, so it has no such gate to pass.
-    let status_register = match arch {
-        Arch::Amd64 => "dr6",
-        Arch::Arm64 => "bcr0",
+    let status_register = match arch.family() {
+        Family::X86 => "dr6",
+        Family::Arm => "bcr0",
     };
     let debug_registers = register_map.contains(status_register);
     if debug_registers && event.exception_code != Some(STATUS_SINGLE_STEP) {
@@ -349,9 +349,9 @@ pub fn hardware_breakpoint_hit(
             arch,
         );
     }
-    match arch {
-        Arch::Amd64 => {}
-        Arch::Arm64 => {
+    match arch.family() {
+        Family::X86 => {}
+        Family::Arm => {
             return arm64_hardware_breakpoint_hit(register_map, breakpoints, event, &regs);
         }
     }
@@ -473,10 +473,7 @@ fn execute_breakpoint_at_pc(
 
     // x86 faults an execute breakpoint again on resume unless RF is set;
     // AArch64 has no such flag.
-    let sets_resume_flag = match arch {
-        Arch::Amd64 => true,
-        Arch::Arm64 => false,
-    };
+    let sets_resume_flag = arch.family() == Family::X86;
     if hit.is_some()
         && sets_resume_flag
         && let Ok(eflags) = register_map.read_u64("eflags", regs)
@@ -743,9 +740,10 @@ pub fn rewind_thread_off_breakpoint(
     breakpoints: &BreakpointManager,
     arch: Arch,
 ) {
-    match arch {
-        Arch::Amd64 => {}
-        Arch::Arm64 => return,
+    // Only x86's `int3` leaves the program counter past the breakpoint.
+    match arch.family() {
+        Family::X86 => {}
+        Family::Arm => return,
     }
     let Ok(regs) = backend.read_registers() else {
         return;

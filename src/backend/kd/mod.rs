@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use ntoseye_macros::record;
 
-use crate::arch::{Arch, RegisterMap, arm64};
+use crate::arch::{Arch, Family, RegisterMap, arm64};
 use crate::backend::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability, DebugLog,
     DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, PciConfigAddress, ProcessorRead,
@@ -509,16 +509,16 @@ impl DebugBackend for KdBackend {
     }
 
     fn hardware_breakpoint_slots(&self) -> usize {
-        match self.arch {
-            Arch::Amd64 => usize::from(HW_BREAKPOINT_SLOTS),
-            Arch::Arm64 => arm64::MAX_BREAKPOINTS + arm64::MAX_WATCHPOINTS,
+        match self.arch.family() {
+            Family::X86 => usize::from(HW_BREAKPOINT_SLOTS),
+            Family::Arm => arm64::MAX_BREAKPOINTS + arm64::MAX_WATCHPOINTS,
         }
     }
 
     fn hardware_slot_range(&self, access: HwBreakpointAccess) -> std::ops::Range<usize> {
-        match self.arch {
-            Arch::Amd64 => 0..usize::from(HW_BREAKPOINT_SLOTS),
-            Arch::Arm64 => {
+        match self.arch.family() {
+            Family::X86 => 0..usize::from(HW_BREAKPOINT_SLOTS),
+            Family::Arm => {
                 let slots = debug_registers::arm64_slot_range(access);
                 usize::from(slots.start)..usize::from(slots.end)
             }

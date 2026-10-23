@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::arch::Arch;
+use crate::arch::Family;
 use crate::backend::dbg_backend::{PciConfigAddress, processor_index_from_backend_thread_id};
 use crate::base::error::{Error, Result};
 use crate::base::types::{MAX_PROCESSORS, VirtAddr};
@@ -119,9 +119,9 @@ impl Session {
     /// IDTR, falling back to backend register reads when PDB state is absent;
     /// each entry field preserves its own memory/symbol diagnostic.
     pub fn inspect_idt(&mut self, processor: u16, vector: Option<u16>) -> Result<Idt> {
-        match self.target.arch() {
-            Arch::Amd64 => {}
-            Arch::Arm64 => {
+        match self.target.arch().family() {
+            Family::X86 => {}
+            Family::Arm => {
                 return Err(Error::DebugInfo(
                     "!idt is not defined on ARM64 targets".into(),
                 ));
@@ -136,9 +136,9 @@ impl Session {
     /// registers when PDB state is absent; each entry field preserves its own
     /// raw/descriptor diagnostic.
     pub fn inspect_gdt(&mut self, processor: u16) -> Result<Gdt> {
-        match self.target.arch() {
-            Arch::Amd64 => {}
-            Arch::Arm64 => {
+        match self.target.arch().family() {
+            Family::X86 => {}
+            Family::Arm => {
                 return Err(Error::DebugInfo(
                     "!gdt is not defined on ARM64 targets".into(),
                 ));
@@ -190,9 +190,9 @@ impl Session {
     /// Refuse an I/O-port access the backend cannot make, saying why, or one
     /// the target cannot take while running.
     fn check_io_ports(&self) -> Result<()> {
-        match self.target.arch() {
-            Arch::Amd64 => {}
-            Arch::Arm64 => {
+        match self.target.arch().family() {
+            Family::X86 => {}
+            Family::Arm => {
                 return Err(Error::DebugInfo(
                     "ARM64 has no I/O-port space; devices are memory-mapped".into(),
                 ));
@@ -237,9 +237,9 @@ impl Session {
     /// through its MSRs, in xAPIC mode through its registers at the
     /// physical base `IA32_APIC_BASE` names, read uncached.
     pub fn local_apic(&mut self, processor: u16) -> Result<LocalApic> {
-        match self.target.arch() {
-            Arch::Amd64 => {}
-            Arch::Arm64 => {
+        match self.target.arch().family() {
+            Family::X86 => {}
+            Family::Arm => {
                 return Err(Error::DebugInfo(
                     "!apic reads an x86 local APIC; an ARM64 target has a GIC".into(),
                 ));

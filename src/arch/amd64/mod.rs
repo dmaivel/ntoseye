@@ -7,11 +7,11 @@ pub use context::*;
 
 use std::sync::LazyLock;
 
-use crate::base::types::{PageTableEntry, PageTableLevel, PteAttributes, VirtAddr};
+use crate::base::types::{CodeMachine, PageTableEntry, PageTableLevel, PteAttributes, VirtAddr};
 
 use super::registers::numbered;
 use super::{
-    Architecture, ContextFlags, IMAGE_FILE_MACHINE_AMD64, MappingPermissions, RegisterInfo,
+    Architecture, ContextFlags, Family, IMAGE_FILE_MACHINE_AMD64, MappingPermissions, RegisterInfo,
     RegisterMap, TableEntry,
 };
 
@@ -141,6 +141,18 @@ impl Architecture for Amd64 {
         } else {
             None
         }
+    }
+
+    fn family(&self) -> Family {
+        Family::X86
+    }
+
+    fn code_machine(&self) -> CodeMachine {
+        CodeMachine::Amd64
+    }
+
+    fn compatibility_machine(&self) -> Option<CodeMachine> {
+        Some(CodeMachine::X86)
     }
 
     fn is_kernel_address(&self, va: VirtAddr) -> bool {

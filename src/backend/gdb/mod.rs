@@ -4,7 +4,7 @@ use std::net::TcpStream;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
-use crate::arch::{Arch, RegisterInfo, RegisterMap, registers::push_synonyms};
+use crate::arch::{Arch, Family, RegisterInfo, RegisterMap, registers::push_synonyms};
 use crate::backend::dbg_backend::{
     DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, PciConfigAddress,
     STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent,
@@ -676,10 +676,7 @@ impl GdbClient {
     fn software_breakpoint_packet(&mut self, op: char, addr: u64) -> Result<String> {
         let packet = format!("{op}0,{addr:x},{}", self.arch.breakpoint_size());
         let response = self.send_packet(&packet)?;
-        let borrows_kernel_root = match self.arch {
-            Arch::Amd64 => true,
-            Arch::Arm64 => false,
-        };
+        let borrows_kernel_root = self.arch.family() == Family::X86;
         if !response.starts_with('E') || !borrows_kernel_root || addr < KERNEL_HALF {
             return Ok(response);
         }

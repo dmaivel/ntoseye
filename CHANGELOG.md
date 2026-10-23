@@ -28,6 +28,7 @@ Keeping this file:
 
 ### Fixed
 
+- On an ARM64 target, `p` steps over a pointer-authenticated call (`blraa`, `blrab`, `blraaz`, `blrabz`), as it steps over `blr`, instead of into it.
 - Modules are named after their image file, as WinDbg's `lm` names them, not the loader's alias for it: `kd.dll` rather than `kdcom.dll`, `mcupdate_GenuineIntel.dll` rather than `mcupdate.dll`, in a WOW64 process's 32-bit module list too. Their `module!` prefixes follow (`kd!`, `mcupdate_genuineintel!`).
 
 ## v0.51.0 (2026-10-19)

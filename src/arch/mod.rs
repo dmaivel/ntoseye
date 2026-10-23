@@ -14,7 +14,9 @@ use std::collections::HashMap;
 use std::ops::Deref;
 
 use crate::base::bytes::get_u32;
-use crate::base::types::{PageTableEntry, PageTableLevel, PhysAddr, PteAttributes, VirtAddr};
+use crate::base::types::{
+    CodeMachine, PageTableEntry, PageTableLevel, PhysAddr, PteAttributes, VirtAddr,
+};
 
 pub mod amd64;
 pub mod arm64;
@@ -183,6 +185,18 @@ pub trait Architecture: Sync {
     /// every record carries.
     fn context_group(&self, register: &str) -> Option<u32>;
 
+    /// The processor family it belongs to, which decides what its members
+    /// share whatever their width.
+    fn family(&self) -> Family;
+
+    /// The instruction set the processor runs natively.
+    fn code_machine(&self) -> CodeMachine;
+
+    /// The instruction set it also runs in a compatibility mode, for a
+    /// WOW64 process's 32-bit code (x86 on AMD64); `None` where Windows
+    /// emulates other code instead (ARM64).
+    fn compatibility_machine(&self) -> Option<CodeMachine>;
+
     /// Whether `va` lies in the kernel half of the address space.
     fn is_kernel_address(&self, va: VirtAddr) -> bool;
 
@@ -205,6 +219,20 @@ pub trait Architecture: Sync {
         level: PageTableLevel,
         address: VirtAddr,
     ) -> PteAttributes;
+}
+
+/// A processor family: what its 32- and 64-bit members share, such as how
+/// a breakpoint traps and which debug registers report it. Code that holds
+/// for a whole family matches on this rather than on [`Arch`], so a new
+/// member of a family inherits it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Family {
+    /// x86 and AMD64: DR0-DR7, `int3`, RF, descriptor tables, I/O ports and
+    /// the local APIC.
+    X86,
+    /// AArch64: BVR/BCR and WVR/WCR, `brk`, and no descriptor tables, I/O
+    /// ports or APIC (a GIC instead).
+    Arm,
 }
 
 /// What a page-table entry means at its level.

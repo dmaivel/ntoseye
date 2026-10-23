@@ -2,7 +2,7 @@
 //! `KSPECIAL_REGISTERS` as one transaction; the bit encoding is
 //! [`debug_registers`].
 
-use crate::arch::Arch;
+use crate::arch::Family;
 use crate::backend::dbg_backend::{DebugBackend, HwBreakpointAccess, debug_registers};
 use crate::base::error::{Error, Result};
 
@@ -252,8 +252,8 @@ impl KdBackend {
         if !self.supports_watchpoints() {
             return Err(Error::NotSupported);
         }
-        match self.arch {
-            Arch::Amd64 => {
+        match self.arch.family() {
+            Family::X86 => {
                 // DR state is per-processor, so program every CPU: watched code
                 // can run anywhere. The shared transaction prevents an
                 // untracked partial set.
@@ -266,7 +266,7 @@ impl KdBackend {
                     |backend| backend.apply_dr_set(slot, addr, access, len),
                 )
             }
-            Arch::Arm64 => {
+            Family::Arm => {
                 arm64_slot_registers_for_access(slot, access)?;
                 self.update_slot_on_all_processors(
                     slot,
@@ -286,8 +286,8 @@ impl KdBackend {
         }
         // A failed disable/remove must leave the manager's still-enabled entry
         // truthful, so clearing receives the same rollback guarantee as set.
-        match self.arch {
-            Arch::Amd64 => self.update_slot_on_all_processors(
+        match self.arch.family() {
+            Family::X86 => self.update_slot_on_all_processors(
                 slot,
                 "clear",
                 "hardware breakpoint",
@@ -295,7 +295,7 @@ impl KdBackend {
                 |backend, slot, state| backend.apply_dr_restore(slot, state),
                 |backend| backend.apply_dr_clear(slot),
             ),
-            Arch::Arm64 => {
+            Family::Arm => {
                 arm64_slot_registers(slot)?;
                 self.update_slot_on_all_processors(
                     slot,
