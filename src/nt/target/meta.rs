@@ -1095,17 +1095,16 @@ impl Target {
         // A user dump records its system in SystemInfoStream; it has no
         // kernel or KUSER_SHARED_DATA to ask.
         let user_system = self.user_dump_info().map(|info| &info.system);
+        // A kernel dump header's MajorVersion is 0xF (free) or 0xC (checked)
+        // and its MinorVersion the build number, not the Windows version:
+        // the kernel's KUSER_SHARED_DATA has that.
         let major = user_system
             .map(|system| u64::from(system.major_version))
-            .or_else(|| dump_info.map(|info| info.major_version as u64))
             .filter(|value| *value != 0)
             .or_else(|| kuser.nt_major_version());
         let minor = match user_system {
             Some(system) => Some(u64::from(system.minor_version)),
-            None => dump_info
-                .map(|info| info.minor_version as u64)
-                .filter(|value| *value != 0)
-                .or_else(|| kuser.nt_minor_version()),
+            None => kuser.nt_minor_version(),
         };
         let build = user_system
             .map(|system| u64::from(system.build_number))
