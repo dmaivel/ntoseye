@@ -583,27 +583,27 @@ impl<'a> ReplState<'a> {
     }
 
     /// The window title: the prompt's processor and backend, and where the
-    /// target stopped or that it runs (`ntoseye — 3: kd — nt!NtClose+0x5`).
+    /// target stopped or that it runs (`ntoseye - 3: kd - nt!NtClose+0x5`).
     pub fn window_title(&self, running: bool) -> String {
         let thread = &self.ctx.current_thread;
         let mut title = if thread.is_empty() {
             "ntoseye".to_string()
         } else {
             format!(
-                "ntoseye — {}: {}",
+                "ntoseye - {}: {}",
                 self.prompt_thread(),
                 self.prompt_backend()
             )
         };
         if running {
-            title.push_str(" — running");
+            title.push_str(" - running");
         } else if let Some(shown) = self
             .ctx
             .shown_stop
             .as_ref()
             .filter(|shown| shown.thread == *thread)
         {
-            title.push_str(&format!(" — {}", shown.symbol));
+            title.push_str(&format!(" - {}", shown.symbol));
         }
         title
     }
