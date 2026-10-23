@@ -41,6 +41,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - `dqs`, `dps`, `dds` and `kd` name the registers that point into each slot (`rsp ▶`), and mark a value that is a return address, one the code before ends in a call, `↩` before its symbol.
 - `db` splits each row's two halves with `-`, as WinDbg does, and the memory displays show zero values and unreadable items dimmer than data.
 - `~` marks the selected vCPU with `.`.
+- A command's output no longer ends with a blank line before the next prompt, as in WinDbg, gdb and lldb; some commands left one and others didn't. The blank lines between its sections stay. MCP results, gdbserver's `monitor` output, DAP's debug console and `.logopen` transcripts read the same.
 
 ### Fixed
 

@@ -9,6 +9,13 @@
 //! Transcript logging is process-wide so a `.logopen` command also records
 //! diagnostics emitted by the backend or another command context.
 //!
+//! A command's output never ends with a blank line, as in WinDbg, gdb and
+//! lldb: the prompt follows its last line. Each stream holds its blank
+//! lines back ([`BlankLines`]) and writes them only once text follows, so
+//! the blank lines between a command's sections still print; the REPL drops
+//! what is held before each prompt ([`drop_trailing_blank_lines`]), and a
+//! capture drops it when it ends.
+//!
 //! Styling reaches stdout and stderr only when the stream is a terminal,
 //! `NO_COLOR` is unset or empty, and `TERM` is not `dumb`; a redirected
 //! stream gets plain text.
@@ -34,9 +41,89 @@ struct Capture {
     /// Whether errors and warnings land here too, or pass on to an
     /// enclosing capture (or the terminal).
     diagnostics: bool,
+    blank_lines: BlankLines,
 }
 
 static LOG_SINK: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| Mutex::new(None));
+
+/// The blank lines held back from stdout and from the transcript.
+static STDOUT_BLANK_LINES: Mutex<BlankLines> = Mutex::new(BlankLines::new());
+static LOG_BLANK_LINES: Mutex<BlankLines> = Mutex::new(BlankLines::new());
+
+/// A stream's blank lines, held back until text follows them: what a
+/// stream ends with is never written.
+struct BlankLines {
+    /// Whether the stream's last line lacks its newline.
+    open: bool,
+    /// How many blank lines are held back.
+    held: usize,
+}
+
+impl BlankLines {
+    const fn new() -> Self {
+        Self {
+            open: false,
+            held: 0,
+        }
+    }
+
+    /// Pass `text`, the next piece of the stream, on to `write`, holding
+    /// back the blank lines it ends with and writing those held before it.
+    fn pass(&mut self, text: &str, write: &mut impl FnMut(&str)) {
+        let body = text.trim_end_matches('\n');
+        let mut newlines = text.len() - body.len();
+        if !body.is_empty() {
+            for _ in 0..self.held {
+                write("\n");
+            }
+            self.held = 0;
+            write(body);
+            self.open = true;
+        }
+        // The first newline ends the open line; the rest are blank lines.
+        if self.open && newlines > 0 {
+            write("\n");
+            self.open = false;
+            newlines -= 1;
+        }
+        self.held += newlines;
+    }
+
+    /// Write the blank lines held back: text follows them on another stream.
+    fn release(&mut self, write: &mut impl FnMut(&str)) {
+        for _ in 0..self.held {
+            write("\n");
+        }
+        self.held = 0;
+    }
+}
+
+/// [`BlankLines`] as a [`fmt::Write`], so formatted text passes through it
+/// piece by piece without being collected first.
+struct HoldBlankLines<'a, W: FnMut(&str)> {
+    blank_lines: &'a mut BlankLines,
+    write: W,
+}
+
+impl<W: FnMut(&str)> fmt::Write for HoldBlankLines<'_, W> {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        self.blank_lines.pass(text, &mut self.write);
+        Ok(())
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Drop the blank lines the last command's output ended with: the prompt
+/// follows it.
+pub fn drop_trailing_blank_lines() {
+    lock(&STDOUT_BLANK_LINES).held = 0;
+    lock(&LOG_BLANK_LINES).held = 0;
+}
 
 static NO_COLOR: LazyLock<bool> =
     LazyLock::new(|| std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()));
@@ -133,11 +220,21 @@ fn print_stdout(args: fmt::Arguments<'_>) {
     PRINTED.fetch_add(1, Ordering::Relaxed);
     // A failed write is dropped, not a panic like `print!`'s: a terminal
     // that went away must not stop the teardown that releases the guest.
-    let mut stdout = io::stdout();
+    let mut stdout = io::stdout().lock();
+    let mut write = |text: &str| {
+        let _ = stdout.write_all(text.as_bytes());
+    };
+    let mut blank_lines = lock(&STDOUT_BLANK_LINES);
     if *STDOUT_STYLED {
-        let _ = stdout.write_fmt(args);
+        let _ = fmt::write(
+            &mut HoldBlankLines {
+                blank_lines: &mut blank_lines,
+                write,
+            },
+            args,
+        );
     } else {
-        let _ = stdout.write_all(strip_ansi(&args.to_string()).as_bytes());
+        blank_lines.pass(&strip_ansi(&args.to_string()), &mut write);
     }
 }
 
@@ -146,6 +243,14 @@ fn print_stderr(args: fmt::Arguments<'_>) {
         hook();
     }
     PRINTED.fetch_add(1, Ordering::Relaxed);
+    // What stdout held back comes before this text.
+    {
+        let mut stdout = io::stdout().lock();
+        lock(&STDOUT_BLANK_LINES).release(&mut |text: &str| {
+            let _ = stdout.write_all(text.as_bytes());
+        });
+        let _ = stdout.flush();
+    }
     let mut stderr = io::stderr();
     if *STDERR_STYLED {
         let _ = stderr.write_fmt(args);
@@ -191,7 +296,9 @@ fn log_text(text: &str) {
     // A failed transcript must never interfere with debugger output. Keep the
     // sink installed so a transient error does not silently redirect later
     // output elsewhere, and flush each write so `.logclose` is optional.
-    let _ = file.write_all(text.as_bytes());
+    lock(&LOG_BLANK_LINES).pass(text, &mut |text: &str| {
+        let _ = file.write_all(text.as_bytes());
+    });
     let _ = file.flush();
 }
 
@@ -205,7 +312,9 @@ fn log_args(args: fmt::Arguments<'_>) {
     let mut text = String::new();
     let _ = fmt::write(&mut text, args);
     let clean = strip_ansi(&text);
-    let _ = file.write_all(clean.as_bytes());
+    lock(&LOG_BLANK_LINES).pass(&clean, &mut |text: &str| {
+        let _ = file.write_all(text.as_bytes());
+    });
     let _ = file.flush();
 }
 
@@ -233,8 +342,14 @@ fn append_to_capture(args: fmt::Arguments<'_>, diagnostic: bool) -> bool {
         else {
             return false;
         };
-        // Vec<u8> writes cannot fail.
-        let _ = capture.text.write_fmt(args);
+        let text = &mut capture.text;
+        let _ = fmt::write(
+            &mut HoldBlankLines {
+                blank_lines: &mut capture.blank_lines,
+                write: |piece: &str| text.extend_from_slice(piece.as_bytes()),
+            },
+            args,
+        );
         true
     })
 }
@@ -327,6 +442,7 @@ fn capture_with<R>(diagnostics: bool, f: impl FnOnce() -> R) -> (R, String) {
         stack.push(Capture {
             text: Vec::new(),
             diagnostics,
+            blank_lines: BlankLines::new(),
         });
         stack.len() - 1
     });
@@ -456,6 +572,26 @@ mod tests {
             assert_eq!(inner, "data\n");
         });
         assert_eq!(outer, "error: bad\n");
+    }
+
+    #[test]
+    fn capture_keeps_blank_lines_between_text_and_drops_the_trailing_ones() {
+        let (_, text) = capture(|| {
+            outln!("registers");
+            outln!();
+            out!("stack");
+            out!("\n\n");
+            outln!("  #0\n");
+            outln!();
+        });
+        assert_eq!(text, "registers\n\nstack\n\n  #0\n");
+        let (_, text) = capture(|| {
+            outln!("listing\n");
+            write_diagnostic_fmt(format_args!("error: cut short\n"), true);
+        });
+        assert_eq!(text, "listing\n\nerror: cut short\n");
+        let (_, text) = capture(|| outln!());
+        assert_eq!(text, "");
     }
 
     #[test]
