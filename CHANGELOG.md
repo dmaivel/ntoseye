@@ -59,6 +59,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - `vertarget` reads `Windows 10.0`, from the shared user data page, instead of `Windows 15.26200`, which took the dump header's build-type marker for a version.
 - On a processor whose context a dump did not capture, `k` says so; it showed a frame at address 0.
 - `!error` no longer names a code it does not know with a made-up constant (`STATUS_UNKNOWN`, `ERROR_UNKNOWN`), and says when a value can't be a Win32 error. The SDK's `ErrorCode.name` is empty for such a code.
+- The working-set sizes of `!vm` and `!memusage`, and the SDK's `ProcessMemoryUsage.working_set_size`, are in bytes, as the other counters are. They were page counts.
 
 ### Removed
 

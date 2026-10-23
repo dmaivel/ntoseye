@@ -235,11 +235,21 @@ impl Target {
         eprocess: VirtAddr,
         field: &str,
     ) -> DiagnosticValue<u64> {
+        // `_MMSUPPORT` counts the working set in pages; the record holds bytes.
+        let in_pages = matches!(field, "WorkingSetSize" | "PeakWorkingSetSize");
+        let bytes = |value: u64| -> Result<u64> {
+            if !in_pages {
+                return Ok(value);
+            }
+            value.checked_mul(PAGE_SIZE as u64).ok_or_else(|| {
+                Error::DebugInfo(format!("_MMSUPPORT.{field} overflows a byte count"))
+            })
+        };
         DiagnosticValue::from_result((|| -> Result<u64> {
             let vm = eprocess + eprocess_layout.field_offset("Vm")?;
 
             if let Ok(value) = self.read_kernel_layout_field(vm_layout, vm, field) {
-                return Ok(value);
+                return bytes(value);
             }
             if let Ok(value) = self.read_kernel_layout_field(eprocess_layout, eprocess, field) {
                 return Ok(value);
@@ -263,7 +273,7 @@ impl Target {
                     vm + u64::from(container_field.offset),
                     field,
                 ) {
-                    return Ok(value);
+                    return bytes(value);
                 }
             }
 
