@@ -2,6 +2,7 @@
 
 mod context;
 pub mod debug_registers;
+pub mod disasm;
 pub mod paging;
 
 pub use context::*;

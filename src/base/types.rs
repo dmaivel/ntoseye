@@ -2,6 +2,9 @@ use std::fmt;
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 
 use crate::arch::Arch;
+use crate::arch::amd64::disasm::X86;
+use crate::arch::arm64::Arm64;
+use crate::base::disasm::InstructionSet;
 use ntoseye_macros::record;
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
@@ -162,6 +165,15 @@ impl CodeMachine {
             Self::X86 => "x86",
             Self::Amd64 => "AMD64",
             Self::Arm64 => "ARM64",
+        }
+    }
+
+    /// How its code decodes.
+    pub fn instruction_set(self) -> &'static dyn InstructionSet {
+        match self {
+            Self::X86 => &X86::CODE32,
+            Self::Amd64 => &X86::CODE64,
+            Self::Arm64 => &Arm64,
         }
     }
 
