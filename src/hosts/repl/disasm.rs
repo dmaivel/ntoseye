@@ -93,90 +93,6 @@ pub fn wrap_prose(text: &str, col: usize) -> Vec<String> {
         .collect()
 }
 
-pub fn format_rflags(flags: u64) -> String {
-    const FLAGS: &[(u64, &str)] = &[
-        (0, "CF"),
-        (2, "PF"),
-        (4, "AF"),
-        (6, "ZF"),
-        (7, "SF"),
-        (8, "TF"),
-        (9, "IF"),
-        (10, "DF"),
-        (11, "OF"),
-        (14, "NT"),
-        (16, "RF"),
-        (17, "VM"),
-        (18, "AC"),
-        (19, "VIF"),
-        (20, "VIP"),
-        (21, "ID"),
-    ];
-
-    let mut names = FLAGS
-        .iter()
-        .filter_map(|(bit, name)| ((flags & (1u64 << bit)) != 0).then_some(*name))
-        .collect::<Vec<_>>();
-
-    let iopl = (flags >> 12) & 0x3;
-    if iopl != 0 {
-        names.push(match iopl {
-            1 => "IOPL1",
-            2 => "IOPL2",
-            _ => "IOPL3",
-        });
-    }
-
-    if names.is_empty() {
-        String::new()
-    } else {
-        format!(" [{}]", names.join(" "))
-    }
-}
-
-/// AArch64 condition-flag summary aligned beneath the 16-hex-digit `cpsr`
-/// value: each flag letter sits under the hex digit that contains its bit
-/// (NZCV under the digit for bits 31-28, DAIF under the digits for bits 11-8
-/// and 7-4). Multiple flags in one digit are joined in bit order, pushing any
-/// later column right.
-fn format_cpsr(flags: u64) -> String {
-    const FLAGS: &[(u32, &str)] = &[
-        (31, "N"),
-        (30, "Z"),
-        (29, "C"),
-        (28, "V"),
-        (9, "D"),
-        (8, "A"),
-        (7, "I"),
-        (6, "F"),
-    ];
-    // Per hex-digit columns; digit 0 covers bits 63-60, digit 15 bits 3-0.
-    let mut columns: [Vec<&str>; 16] = std::array::from_fn(|_| Vec::new());
-    for (bit, name) in FLAGS {
-        if flags & (1u64 << bit) != 0 {
-            columns[15 - (bit / 4) as usize].push(name);
-        }
-    }
-    let mut line = vec![' '; 16];
-    for (idx, names) in columns.iter().enumerate() {
-        if names.is_empty() {
-            continue;
-        }
-        let text: String = names.concat();
-        let len = text.len();
-        if idx + len > line.len() {
-            continue;
-        }
-        for i in (idx..line.len() - len).rev() {
-            line[i + len] = line[i];
-        }
-        for (i, ch) in text.chars().enumerate() {
-            line[idx + i] = ch;
-        }
-    }
-    line.into_iter().collect()
-}
-
 /// The general-purpose registers in `regs`, as a grid, under `heading` as
 /// a section when given (indented, as the stop shows it), flush left
 /// without (as `r` does). With `before`, the register file of the previous
@@ -233,75 +149,46 @@ fn print_register_grid(arch: Arch, heading: Option<&str>, read: impl Fn(&str) ->
             RegisterCell::Unsaved | RegisterCell::Unavailable => ui::muted(&format!("{:<16}", "-")),
         }
     };
-    let cell = |name: &str, ends: bool| {
-        format!(
-            "{} {}",
-            ui::muted(&format!("{name:<3}")),
-            styled_value(name, ends)
-        )
-    };
-
     let indent = if heading.is_some() { "  " } else { "" };
     if let Some(heading) = heading {
         print_section(heading);
     }
 
-    let row_line = |row: &[&str], ends: bool| {
-        row.iter()
-            .enumerate()
-            .map(|(index, name)| cell(name, ends && index + 1 == row.len()))
-            .collect::<Vec<_>>()
-            .join("   ")
-    };
-    let [names @ .., flags] = arch.general_registers() else {
+    // Rows as wide as the architecture lays them out; the flags register,
+    // last, closes the grid with the flags it has set named after it.
+    let registers = arch.general_registers();
+    let Some(&flags) = registers.last() else {
         return;
     };
-    let flags_value = match read(flags) {
-        RegisterCell::Value(value) | RegisterCell::Changed(value) => value,
-        RegisterCell::Unsaved | RegisterCell::Unavailable => 0,
-    };
-    match arch {
-        // Rows of 3, the flags (as `rfl`, decoded) closing the last one.
-        Arch::Amd64 => {
-            let rows: Vec<&[&str]> = names.chunks(3).collect();
-            let Some((last, rows)) = rows.split_last() else {
-                return;
-            };
-            for row in rows {
-                outln!("{indent}{}", row_line(row, true));
-            }
-            let decoded = format_rflags(flags_value);
-            outln!(
-                "{indent}{}   {} {}{decoded}",
-                row_line(last, false),
-                ui::muted("rfl"),
-                styled_value(flags, decoded.is_empty())
-            );
-        }
-        // Rows of 4 through sp, then pc and the flags, decoded below them.
-        Arch::Arm64 => {
-            let [grid @ .., pc] = names else {
-                return;
-            };
-            for row in grid.chunks(4) {
-                outln!("{indent}{}", row_line(row, true));
-            }
-            outln!(
-                "{indent}{}   {} {}",
-                cell(pc, false),
-                ui::muted(flags),
-                styled_value(flags, true)
-            );
-            let decoded = format_cpsr(flags_value);
-            if !decoded.is_empty() {
-                // Align under the cpsr hex value: cell("pc") (4 + 16 chars) +
-                // the "   cpsr " label, i.e. 28 columns.
-                outln!(
-                    "{}",
-                    format!("{indent}                            {decoded}").trim_end()
-                );
-            }
-        }
+    for row in registers.chunks(arch.register_columns()) {
+        let cells: Vec<String> = row
+            .iter()
+            .enumerate()
+            .map(|(index, &name)| {
+                let ends = index + 1 == row.len();
+                let label = ui::muted(&format!("{:<3}", arch.shown_register_name(name)));
+                let set_flags = match read(name) {
+                    RegisterCell::Value(value) | RegisterCell::Changed(value) if name == flags => {
+                        flags_text(arch, value)
+                    }
+                    _ => String::new(),
+                };
+                let value = styled_value(name, ends && set_flags.is_empty());
+                format!("{label} {value}{set_flags}")
+            })
+            .collect();
+        outln!("{indent}{}", cells.join("   "));
+    }
+}
+
+/// The flags `flags` has set, by `arch`'s names, as they follow the flags
+/// register's value (` [ZF IF]`); empty when none is set.
+pub fn flags_text(arch: Arch, flags: u64) -> String {
+    let names = arch.flag_names(flags);
+    if names.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", names.join(" "))
     }
 }
 
@@ -902,13 +789,6 @@ mod tests {
     use super::*;
     use crate::base::output::strip_ansi;
     use crate::nt::symbols::LocalSource;
-
-    #[test]
-    fn cpsr_flags_align_under_hex_digits() {
-        assert_eq!(format_cpsr(0x6000_0044), "        ZC    F ");
-        assert_eq!(format_cpsr(0x8000_01c4), "        N    AIF");
-        assert_eq!(format_cpsr(0x0000_0000), "                ");
-    }
 
     #[test]
     fn source_location_labels_recorded_and_local_paths() {

@@ -460,7 +460,7 @@ impl Target {
                 None
             }
             LocalVariableLocation::RegisterRelative { register, offset } => {
-                let base = lookup_register(registers, register)?;
+                let base = lookup_register(self.arch(), registers, register)?;
                 Some(base.wrapping_add_signed(i64::from(*offset)))
             }
             LocalVariableLocation::FrameRelative { offset } => {
@@ -469,7 +469,9 @@ impl Target {
                     .as_ref()
                     .and_then(|frame| frame.frame_base)
                     .or_else(|| frame_base_for_register_values(self, registers))
-                    .or_else(|| lookup_register(registers, self.arch().sp_register()))?;
+                    .or_else(|| {
+                        lookup_register(self.arch(), registers, self.arch().sp_register())
+                    })?;
                 Some(frame_base.wrapping_add_signed(i64::from(*offset)))
             }
         }
@@ -497,7 +499,7 @@ impl Target {
         let registers = self.registers.as_ref()?;
         match &local.location {
             LocalVariableLocation::Register { register } => {
-                let value = lookup_register(registers, register)?;
+                let value = lookup_register(self.arch(), registers, register)?;
                 Some(if size == 8 {
                     value
                 } else {

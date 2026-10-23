@@ -11,10 +11,10 @@ use std::sync::LazyLock;
 
 use crate::base::types::CodeMachine;
 
-use super::registers::numbered;
+use super::registers::{numbered, push_synonyms};
 use super::{
     Architecture, ArgumentLocation, ContextFlags, DebugRegisters, Family, IMAGE_FILE_MACHINE_AMD64,
-    Paging, RegisterInfo, RegisterMap,
+    Paging, RegisterInfo, RegisterMap, ShownRegister, Subregister,
 };
 
 pub struct Amd64;
@@ -77,7 +77,7 @@ impl Architecture for Amd64 {
     }
 
     fn register_synonyms(&self) -> &'static [(&'static str, &'static str)] {
-        &[]
+        &REGISTER_SYNONYMS
     }
 
     fn context_size(&self) -> usize {
@@ -185,7 +185,162 @@ impl Architecture for Amd64 {
     fn debug_registers(&self) -> &'static dyn DebugRegisters {
         &Amd64
     }
+
+    fn runs_code(&self, machine: CodeMachine) -> bool {
+        matches!(machine, CodeMachine::Amd64 | CodeMachine::X86)
+    }
+
+    fn irql_name(&self, irql: u64) -> &'static str {
+        match irql {
+            0 => "PASSIVE_LEVEL",
+            1 => "APC_LEVEL",
+            2 => "DISPATCH_LEVEL",
+            5 => "CMCI_LEVEL",
+            13 => "CLOCK_LEVEL",
+            14 => "IPI_LEVEL",
+            15 => "HIGH_LEVEL",
+            _ => "DIRQL",
+        }
+    }
+
+    fn flag_names(&self, flags: u64) -> Vec<&'static str> {
+        const FLAGS: [(u64, &str); 16] = [
+            (0, "CF"),
+            (2, "PF"),
+            (4, "AF"),
+            (6, "ZF"),
+            (7, "SF"),
+            (8, "TF"),
+            (9, "IF"),
+            (10, "DF"),
+            (11, "OF"),
+            (14, "NT"),
+            (16, "RF"),
+            (17, "VM"),
+            (18, "AC"),
+            (19, "VIF"),
+            (20, "VIP"),
+            (21, "ID"),
+        ];
+        let mut names: Vec<&str> = FLAGS
+            .iter()
+            .filter_map(|&(bit, name)| (flags & (1 << bit) != 0).then_some(name))
+            .collect();
+        // The I/O privilege level is a two-bit field, not a flag.
+        match (flags >> 12) & 0x3 {
+            0 => {}
+            1 => names.push("IOPL1"),
+            2 => names.push("IOPL2"),
+            _ => names.push("IOPL3"),
+        }
+        names
+    }
+
+    fn register_columns(&self) -> usize {
+        3
+    }
+
+    fn control_registers(&self) -> &'static [&'static [ShownRegister]] {
+        CONTROL_REGISTERS
+    }
+
+    fn subregister(&self, name: &str) -> Option<Subregister> {
+        if let Some(&(_, register, shift, bits)) =
+            SUBREGISTERS.iter().find(|(alias, ..)| *alias == name)
+        {
+            return Some(Subregister {
+                register,
+                shift,
+                bits,
+            });
+        }
+        // r8d, r8w and r8b through r15.
+        let rest = name.strip_prefix('r')?;
+        let (number, suffix) = rest.split_at_checked(rest.len().checked_sub(1)?)?;
+        let bits = match suffix {
+            "d" => 32,
+            "w" => 16,
+            "b" => 8,
+            _ => return None,
+        };
+        let index = number
+            .parse::<usize>()
+            .ok()
+            .filter(|index| (8..16).contains(index))?;
+        Some(Subregister {
+            register: ENCODED_REGISTERS[index],
+            shift: 0,
+            bits,
+        })
+    }
+
+    fn selector_registers(&self) -> &'static [&'static [ShownRegister]] {
+        SELECTOR_REGISTERS
+    }
 }
+
+/// The named parts of the general registers: `(name, register, shift, bits)`.
+const SUBREGISTERS: [(&str, &str, u32, u32); 29] = [
+    ("eax", "rax", 0, 32),
+    ("ax", "rax", 0, 16),
+    ("al", "rax", 0, 8),
+    ("ah", "rax", 8, 8),
+    ("ebx", "rbx", 0, 32),
+    ("bx", "rbx", 0, 16),
+    ("bl", "rbx", 0, 8),
+    ("bh", "rbx", 8, 8),
+    ("ecx", "rcx", 0, 32),
+    ("cx", "rcx", 0, 16),
+    ("cl", "rcx", 0, 8),
+    ("ch", "rcx", 8, 8),
+    ("edx", "rdx", 0, 32),
+    ("dx", "rdx", 0, 16),
+    ("dl", "rdx", 0, 8),
+    ("dh", "rdx", 8, 8),
+    ("esi", "rsi", 0, 32),
+    ("si", "rsi", 0, 16),
+    ("sil", "rsi", 0, 8),
+    ("edi", "rdi", 0, 32),
+    ("di", "rdi", 0, 16),
+    ("dil", "rdi", 0, 8),
+    ("esp", "rsp", 0, 32),
+    ("sp", "rsp", 0, 16),
+    ("spl", "rsp", 0, 8),
+    ("ebp", "rbp", 0, 32),
+    ("bp", "rbp", 0, 16),
+    ("bpl", "rbp", 0, 8),
+    ("eip", "rip", 0, 32),
+];
+
+const CONTROL_REGISTERS: &[&[ShownRegister]] = &[
+    &[
+        ShownRegister::new("cr0", "cr0", 16),
+        ShownRegister::new("cr2", "cr2", 16),
+        ShownRegister::new("cr3", "cr3", 16),
+    ],
+    &[
+        ShownRegister::new("cr4", "cr4", 16),
+        ShownRegister::new("cr8", "cr8", 16),
+    ],
+];
+
+/// The segment selectors, 16 bits wide.
+const SELECTOR_REGISTERS: &[&[ShownRegister]] = &[
+    &[
+        ShownRegister::new("cs", "cs", 4),
+        ShownRegister::new("ds", "ds", 4),
+        ShownRegister::new("es", "es", 4),
+    ],
+    &[
+        ShownRegister::new("fs", "fs", 4),
+        ShownRegister::new("gs", "gs", 4),
+        ShownRegister::new("ss", "ss", 4),
+    ],
+];
+
+/// Pairs of names for one register: the one a listing shows, then the one
+/// the `CONTEXT` names it by.
+const REGISTER_SYNONYMS: [(&str, &str); 1] = [("rfl", "eflags")];
 
 /// The register map over a [`REGISTER_BUFFER_SIZE`] buffer: the CONTEXT's
 /// registers, then the synthetic control and descriptor-table slots behind it.
@@ -263,6 +418,8 @@ fn build_register_map() -> RegisterMap {
     ];
 
     let mut registers = registers;
+    push_synonyms(&mut registers, &REGISTER_SYNONYMS)
+        .expect("CONTEXT carries every register with a synonym");
     for i in 0..16 {
         let offset = OFFSET_XMM0 + i * 16;
         registers.push(next_reg(&format!("xmm{i}"), offset, 16));

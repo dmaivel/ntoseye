@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::arch::{Arch, RegisterMap};
+use crate::arch::{Arch, RegisterMap, ShownRegister};
 use crate::backend::dbg_backend::processor_index_from_backend_thread_id;
 use crate::base::diagnostics;
 use crate::nt::bugchecks::{bugcheck_trap_frame_address, looks_like_kernel_pointer};
@@ -629,12 +629,15 @@ fn registers(
             // Named registers print as plain `r rip` prints them, with no
             // heading; one the selection lacks is named in the error.
             let mut shown = Vec::new();
+            let arch = state.ctx.target.arch();
             for name in register_list(tail) {
-                match lookup_register(&frame.registers, &name) {
+                // A part of a register, or its other name, names one too.
+                let known = state.ctx.register_map.contains(&name)
+                    || arch.subregister(&name).is_some()
+                    || arch.other_register_name(&name).is_some();
+                match lookup_register(arch, &frame.registers, &name) {
                     Some(value) => shown.push(format!("{name}={}", ui::addr(value))),
-                    None if state.ctx.register_map.contains(&name) => {
-                        error!("register '{name}' not recovered in {source}")
-                    }
+                    None if known => error!("register '{name}' not recovered in {source}"),
                     None => error!("register '{name}' not found"),
                 }
             }
@@ -1246,58 +1249,44 @@ fn exception_flags(flags: u32) -> String {
 /// and segment registers.
 fn print_register_grid(register_map: &RegisterMap, regs: &[u8], arch: Arch, control: bool) {
     print_registers(register_map, arch, regs, None, None);
-    // Control registers match the GP-register cluster's
-    // styling; segment selectors are 16-bit, so render
-    // them as 4 digits rather than padding to 64-bit
-    let read_cr = |name: &str| -> String {
-        register_map
-            .read_u64(name, regs)
-            .map(ui::addr)
-            .unwrap_or_else(|_| "N/A".to_string())
+    let control = if control {
+        arch.control_registers()
+    } else {
+        &[]
     };
-    let read_seg = |name: &str| -> String {
-        register_map
-            .read_u64(name, regs)
-            .map(|v| format!("{:04x}", v))
-            .unwrap_or_else(|_| "N/A".to_string())
-    };
-
-    outln!();
-    // The rows below line up with the general-purpose grid's columns. The
-    // ARM64 maps answer `cr3` with TTBR1_EL1, the kernel's root.
-    match arch {
-        Arch::Amd64 => {}
-        Arch::Arm64 => {
-            if control {
-                outln!("ttbr0 {}   ttbr1 {}", read_cr("ttbr0"), read_cr("cr3"));
-                outln!("esr   {}   far   {}", read_cr("esr"), read_cr("far"));
-            }
-            return;
-        }
-    }
-    if control {
-        outln!(
-            "cr0 {}   cr2 {}   cr3 {}",
-            read_cr("cr0"),
-            read_cr("cr2"),
-            read_cr("cr3")
-        );
-        outln!("cr4 {}   cr8 {}", read_cr("cr4"), read_cr("cr8"));
+    let blocks = [control, arch.selector_registers()];
+    for block in blocks.into_iter().filter(|block| !block.is_empty()) {
         outln!();
+        print_shown_registers(register_map, regs, block);
     }
+}
 
-    outln!(
-        "cs  {}   ds  {}   es  {}",
-        read_seg("cs"),
-        read_seg("ds"),
-        read_seg("es")
-    );
-    outln!(
-        "fs  {}   gs  {}   ss  {}",
-        read_seg("fs"),
-        read_seg("gs"),
-        read_seg("ss")
-    );
+/// `rows` of registers below the general ones, their values in the columns
+/// of the grid above: labels at least as wide as its names.
+fn print_shown_registers(register_map: &RegisterMap, regs: &[u8], rows: &[&[ShownRegister]]) {
+    let width = rows
+        .iter()
+        .flat_map(|row| row.iter())
+        .map(|register| register.label.len())
+        .max()
+        .unwrap_or(0)
+        .max(3);
+    for row in rows {
+        let cells: Vec<String> = row
+            .iter()
+            .enumerate()
+            .map(|(index, register)| {
+                let digits = register.digits;
+                let value = match register_map.read_u64(register.name, regs) {
+                    Ok(value) => format!("{value:0digits$x}"),
+                    Err(_) if index + 1 == row.len() => "-".to_string(),
+                    Err(_) => format!("{:<digits$}", "-"),
+                };
+                format!("{:<width$} {value}", register.label)
+            })
+            .collect();
+        outln!("{}", cells.join("   "));
+    }
 }
 
 pub fn print_indexed_stacktrace(

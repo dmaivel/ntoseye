@@ -14,7 +14,7 @@ use crate::base::types::CodeMachine;
 use super::registers::{numbered, push_synonyms};
 use super::{
     Architecture, ArgumentLocation, ContextFlags, DebugRegisters, Family, IMAGE_FILE_MACHINE_ARM64,
-    Paging, RegisterInfo, RegisterMap,
+    Paging, RegisterInfo, RegisterMap, ShownRegister, Subregister,
 };
 
 pub struct Arm64;
@@ -183,7 +183,84 @@ impl Architecture for Arm64 {
     fn debug_registers(&self) -> &'static dyn DebugRegisters {
         &Arm64
     }
+
+    // Windows on ARM runs x64 and x86 code under emulation.
+    fn runs_code(&self, machine: CodeMachine) -> bool {
+        matches!(
+            machine,
+            CodeMachine::Arm64 | CodeMachine::Amd64 | CodeMachine::X86
+        )
+    }
+
+    fn irql_name(&self, irql: u64) -> &'static str {
+        match irql {
+            0 => "PASSIVE_LEVEL",
+            1 => "APC_LEVEL",
+            2 => "DISPATCH_LEVEL",
+            13 => "CLOCK_LEVEL",
+            14 => "IPI_LEVEL",
+            15 => "HIGH_LEVEL",
+            _ => "DIRQL",
+        }
+    }
+
+    // The condition flags, then the exception masks.
+    fn flag_names(&self, flags: u64) -> Vec<&'static str> {
+        const FLAGS: [(u64, &str); 8] = [
+            (31, "N"),
+            (30, "Z"),
+            (29, "C"),
+            (28, "V"),
+            (9, "D"),
+            (8, "A"),
+            (7, "I"),
+            (6, "F"),
+        ];
+        FLAGS
+            .iter()
+            .filter_map(|&(bit, name)| (flags & (1 << bit) != 0).then_some(name))
+            .collect()
+    }
+
+    fn register_columns(&self) -> usize {
+        4
+    }
+
+    fn control_registers(&self) -> &'static [&'static [ShownRegister]] {
+        CONTROL_REGISTERS
+    }
+
+    // w0 through w30, the low halves of x0 through x30.
+    fn subregister(&self, name: &str) -> Option<Subregister> {
+        let index = name
+            .strip_prefix('w')?
+            .parse::<usize>()
+            .ok()
+            .filter(|index| *index < ENCODED_REGISTERS.len())?;
+        Some(Subregister {
+            register: ENCODED_REGISTERS[index],
+            shift: 0,
+            bits: 32,
+        })
+    }
+
+    fn selector_registers(&self) -> &'static [&'static [ShownRegister]] {
+        &[]
+    }
 }
+
+/// The translation table roots, then the fault syndrome and address. The
+/// ARM64 maps answer `cr3` with TTBR1_EL1, the kernel's root.
+const CONTROL_REGISTERS: &[&[ShownRegister]] = &[
+    &[
+        ShownRegister::new("ttbr0", "ttbr0", 16),
+        ShownRegister::new("ttbr1", "cr3", 16),
+    ],
+    &[
+        ShownRegister::new("esr", "esr", 16),
+        ShownRegister::new("far", "far", 16),
+    ],
+];
 
 /// The register map over a [`REGISTER_BUFFER_SIZE`] buffer: the CONTEXT's
 /// registers with their ABI aliases, then the synthetic page-table-root,

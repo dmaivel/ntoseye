@@ -1073,12 +1073,8 @@ fn print_user_triage_report(
             let cells: Vec<String> = row
                 .iter()
                 .map(|register| {
-                    // Named and laid out as `r` and the stop display show
-                    // them, which call the flags register `rfl`.
-                    let name = match register.name.as_str() {
-                        "eflags" => "rfl",
-                        name => name,
-                    };
+                    // Named as `r` and the stop display name them.
+                    let name = arch.shown_register_name(&register.name);
                     format!("{name:<3} {}", ui::addr(register.value))
                 })
                 .collect();

@@ -706,9 +706,11 @@ pub fn kthread_state_name(state: u8) -> &'static str {
     }
 }
 
-/// Case-insensitive lookup, including subregisters named by PDB locations.
-/// Never reconstruct a wider register from a narrower recovered value.
-pub fn lookup_register(registers: &HashMap<String, u64>, name: &str) -> Option<u64> {
+/// Case-insensitive lookup in a recovered register set, also under a
+/// register's other name (`rfl` for `eflags`) and of a part of one (`eax`,
+/// `w0`), as PDB locations name them. Never reconstruct a wider register from
+/// a narrower recovered value.
+pub fn lookup_register(arch: Arch, registers: &HashMap<String, u64>, name: &str) -> Option<u64> {
     let direct = |name: &str| {
         registers.get(name).copied().or_else(|| {
             registers
@@ -717,68 +719,13 @@ pub fn lookup_register(registers: &HashMap<String, u64>, name: &str) -> Option<u
                 .map(|(_, value)| *value)
         })
     };
-    if let Some(value) = direct(name) {
-        return Some(value);
-    }
-    const ALIASES: &[(&str, &str, u32, u32)] = &[
-        ("eax", "rax", 0, 32),
-        ("ax", "rax", 0, 16),
-        ("al", "rax", 0, 8),
-        ("ah", "rax", 8, 8),
-        ("ebx", "rbx", 0, 32),
-        ("bx", "rbx", 0, 16),
-        ("bl", "rbx", 0, 8),
-        ("bh", "rbx", 8, 8),
-        ("ecx", "rcx", 0, 32),
-        ("cx", "rcx", 0, 16),
-        ("cl", "rcx", 0, 8),
-        ("ch", "rcx", 8, 8),
-        ("edx", "rdx", 0, 32),
-        ("dx", "rdx", 0, 16),
-        ("dl", "rdx", 0, 8),
-        ("dh", "rdx", 8, 8),
-        ("esi", "rsi", 0, 32),
-        ("si", "rsi", 0, 16),
-        ("sil", "rsi", 0, 8),
-        ("edi", "rdi", 0, 32),
-        ("di", "rdi", 0, 16),
-        ("dil", "rdi", 0, 8),
-        ("esp", "rsp", 0, 32),
-        ("sp", "rsp", 0, 16),
-        ("spl", "rsp", 0, 8),
-        ("ebp", "rbp", 0, 32),
-        ("bp", "rbp", 0, 16),
-        ("bpl", "rbp", 0, 8),
-        ("eip", "rip", 0, 32),
-    ];
-    if let Some((_, parent, shift, width)) = ALIASES
-        .iter()
-        .find(|(alias, ..)| alias.eq_ignore_ascii_case(name))
-    {
-        return direct(parent).map(|value| (value >> shift) & ((1u64 << width) - 1));
-    }
-    // r8d/r8w/r8b through r15, and ARM64 w0 through w30.
-    let bytes = name.as_bytes();
-    if bytes.len() >= 3 && bytes[0].eq_ignore_ascii_case(&b'r') {
-        let suffix = bytes[bytes.len() - 1].to_ascii_lowercase();
-        let width = match suffix {
-            b'd' => 32,
-            b'w' => 16,
-            b'b' => 8,
-            _ => return None,
-        };
-        let number = name[1..name.len() - 1].parse::<u8>().ok()?;
-        if (8..=15).contains(&number) {
-            return direct(&name[..name.len() - 1]).map(|value| value & ((1u64 << width) - 1));
-        }
-    }
-    if bytes.len() >= 2 && bytes[0].eq_ignore_ascii_case(&b'w') {
-        let number = name[1..].parse::<u8>().ok()?;
-        if number <= 30 {
-            return direct(&format!("x{number}")).map(|value| value & 0xffff_ffff);
-        }
-    }
-    None
+    let name = name.to_ascii_lowercase();
+    direct(&name)
+        .or_else(|| direct(arch.other_register_name(&name)?))
+        .or_else(|| {
+            let part = arch.subregister(&name)?;
+            direct(part.register).map(|value| part.of(value))
+        })
 }
 
 pub fn wait_reason_name(reason: u8) -> &'static str {

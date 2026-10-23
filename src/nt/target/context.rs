@@ -404,7 +404,7 @@ impl Target {
         if self.in_secure_scope() {
             return None;
         }
-        lookup_register(self.registers.as_ref()?, name)
+        lookup_register(self.arch(), self.registers.as_ref()?, name)
     }
 
     /// Enumerate processes matching `filter` (see [`process_matches`]); `None`

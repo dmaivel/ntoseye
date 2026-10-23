@@ -1251,7 +1251,7 @@ pub fn frame_base_for_register_values(
     debugger: &Target,
     values: &HashMap<String, u64>,
 ) -> Option<u64> {
-    let lookup = |name: &str| lookup_register(values, name);
+    let lookup = |name: &str| lookup_register(debugger.arch(), values, name);
     let context = RegisterContext::from_lookup(debugger.arch(), lookup);
     let dtb = lookup(debugger.arch().dtb_register())
         .filter(|dtb| *dtb != 0)
@@ -1269,7 +1269,7 @@ pub fn return_address_for_register_values(
     debugger: &Target,
     values: &HashMap<String, u64>,
 ) -> Option<u64> {
-    let lookup = |name: &str| lookup_register(values, name);
+    let lookup = |name: &str| lookup_register(debugger.arch(), values, name);
     lookup(debugger.arch().pc_register())?;
     let mut context = RegisterContext::from_lookup(debugger.arch(), lookup);
     let dtb = lookup(debugger.arch().dtb_register())
@@ -1484,7 +1484,7 @@ impl RegisterContext {
             lookup(arch.sp_register()).unwrap_or(0),
         );
         for (slot, name) in context.regs.iter_mut().zip(arch.encoded_registers()) {
-            *slot = lookup(name).or_else(|| lookup(other_name(arch, name)?));
+            *slot = lookup(name).or_else(|| lookup(arch.other_register_name(name)?));
         }
         context
     }
@@ -1500,7 +1500,7 @@ impl RegisterContext {
                 continue;
             };
             values.push((*name, value));
-            if let Some(other) = other_name(arch, name) {
+            if let Some(other) = arch.other_register_name(name) {
                 others.push((other, value));
             }
         }
@@ -1535,20 +1535,6 @@ impl RegisterContext {
             *slot = Some(value);
         }
     }
-}
-
-/// The other name `arch` gives the register it lists as `name`: ARM64's `fp`
-/// for `x29`, `lr` for `x30`.
-fn other_name(arch: Arch, name: &str) -> Option<&'static str> {
-    arch.register_synonyms().iter().find_map(|&(shown, other)| {
-        if name == other {
-            Some(shown)
-        } else if name == shown {
-            Some(other)
-        } else {
-            None
-        }
-    })
 }
 
 impl ThreadTraceContext {

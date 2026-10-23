@@ -51,6 +51,30 @@ impl Arch {
             .find(|arch| arch.gdb_architecture() == name)
     }
 
+    /// The other name of the register `name` names, by
+    /// [`Architecture::register_synonyms`]: ARM64's `fp` for `x29`, `x29`
+    /// for `fp`.
+    pub fn other_register_name(self, name: &str) -> Option<&'static str> {
+        self.register_synonyms().iter().find_map(|&(shown, other)| {
+            if name == other {
+                Some(shown)
+            } else if name == shown {
+                Some(other)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// The name a listing shows the register `name` names under: AMD64's
+    /// `rfl` for `eflags`.
+    pub fn shown_register_name(self, name: &str) -> &str {
+        self.register_synonyms()
+            .iter()
+            .find_map(|&(shown, other)| (other == name).then_some(shown))
+            .unwrap_or(name)
+    }
+
     /// Bytes in [`Architecture::breakpoint_instruction`]: how far the
     /// program counter must move to step past one, and the kind an RSP `Z0`
     /// packet names.
@@ -219,6 +243,70 @@ pub trait Architecture: Sync {
 
     /// Its hardware breakpoint registers.
     fn debug_registers(&self) -> &'static dyn DebugRegisters;
+
+    /// Whether a Windows target on this processor runs code of `machine`:
+    /// its own, a WOW64 process's x86, or what Windows emulates (x64 and x86
+    /// on ARM64).
+    fn runs_code(&self, machine: CodeMachine) -> bool;
+
+    /// The name Windows gives interrupt request level `irql` on this
+    /// processor (`DISPATCH_LEVEL`); a level devices interrupt at is
+    /// `DIRQL`.
+    fn irql_name(&self, irql: u64) -> &'static str;
+
+    /// The names of the flags `flags`, the value of the last of
+    /// [`Self::general_registers`] (`rfl`, `cpsr`), has set.
+    fn flag_names(&self, flags: u64) -> Vec<&'static str>;
+
+    /// How many of [`Self::general_registers`] a row of the register grid
+    /// shows: three for AMD64, four for ARM64, as WinDbg lays them out.
+    fn register_columns(&self) -> usize;
+
+    /// The system registers `r` shows below the general ones when the
+    /// backend reads them, row by row.
+    fn control_registers(&self) -> &'static [&'static [ShownRegister]];
+
+    /// The segment selectors `r` shows below the general ones, row by row.
+    fn selector_registers(&self) -> &'static [&'static [ShownRegister]];
+
+    /// The part of a wider register `name` (lowercase) names: x86's `eax`
+    /// and `r8d`, ARM64's `w0`.
+    fn subregister(&self, name: &str) -> Option<Subregister>;
+}
+
+/// Bits of a register under a name of their own: `bits` wide, `shift`
+/// above the bottom of `register` (`ah` is 8 bits 8 up in `rax`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Subregister {
+    pub register: &'static str,
+    pub shift: u32,
+    pub bits: u32,
+}
+
+impl Subregister {
+    /// Its value within `value`, the whole register's.
+    pub fn of(self, value: u64) -> u64 {
+        (value >> self.shift) & (u64::MAX >> (64 - self.bits))
+    }
+}
+
+/// A register `r` shows beside the general ones: under `label`, the
+/// register the map knows as `name`, in `digits` hex digits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShownRegister {
+    pub label: &'static str,
+    pub name: &'static str,
+    pub digits: usize,
+}
+
+impl ShownRegister {
+    pub const fn new(label: &'static str, name: &'static str, digits: usize) -> Self {
+        Self {
+            label,
+            name,
+            digits,
+        }
+    }
 }
 
 /// Where a function's argument is on entry, by the calling convention.

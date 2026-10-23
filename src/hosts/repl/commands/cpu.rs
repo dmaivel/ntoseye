@@ -5,7 +5,7 @@ use ntoseye_macros::{command, grammar};
 use owo_colors::OwoColorize;
 use tabled::builder::Builder;
 
-use crate::arch::Arch;
+use crate::arch::{Arch, Family};
 use crate::backend::dbg_backend::{processor_index_from_backend_thread_id, thread_label};
 use crate::base::error::{Error, Result};
 use crate::base::output;
@@ -149,12 +149,12 @@ fn print_pcr(detail: &Pcr, arch: Arch) {
         "KdVersionBlock",
         gaps.cell("KdVersionBlock", &detail.kd_version_block, pointer_text),
     )];
-    match arch {
-        Arch::Amd64 => fields.push((
+    // An x86-family KPCR points at its KPRCB; an ARM64 one holds it.
+    if arch.family() == Family::X86 {
+        fields.push((
             "CurrentPrcb",
             gaps.cell("CurrentPrcb", &detail.current_prcb, address_text),
-        )),
-        Arch::Arm64 => {}
+        ));
     }
     fields.push(("Irql", gaps.cell("Irql", &detail.irql, decimal_text)));
     fields.push(("Self", gaps.cell("Self", &detail.self_pcr, address_text)));
@@ -175,16 +175,14 @@ fn print_pcr(detail: &Pcr, arch: Arch) {
             gaps.cell("IdleThread", &detail.idle_thread, address_text),
         ),
     ];
-    match arch {
-        Arch::Amd64 => {
-            fields.push(("IDTR", gaps.cell("IDTR", &detail.idtr, descriptor_text)));
-            fields.push(("GDTR", gaps.cell("GDTR", &detail.gdtr, descriptor_text)));
-            fields.push((
-                "TssBase",
-                gaps.cell("TssBase", &detail.tss_base, address_text),
-            ));
-        }
-        Arch::Arm64 => {}
+    // Descriptor tables and the TSS are the x86 family's.
+    if arch.family() == Family::X86 {
+        fields.push(("IDTR", gaps.cell("IDTR", &detail.idtr, descriptor_text)));
+        fields.push(("GDTR", gaps.cell("GDTR", &detail.gdtr, descriptor_text)));
+        fields.push((
+            "TssBase",
+            gaps.cell("TssBase", &detail.tss_base, address_text),
+        ));
     }
     print_struct_fields("    ", 18, &fields);
     gaps.print("  ");
@@ -858,13 +856,13 @@ fn idt(
     #[arg(receiver, parse = current_processor)] processor: Option<Processor>,
     #[arg(parse = idt_vector, positional)] vector: Option<u16>,
 ) -> Result<Idt> {
-    match session.target.arch() {
-        Arch::Amd64 => {}
-        Arch::Arm64 => {
-            return Err(Error::DebugInfo(
-                "!idt is not defined on ARM64 targets".into(),
-            ));
-        }
+    let arch = session.target.arch();
+    // Only an x86-family processor dispatches interrupts through an IDT.
+    if arch.family() != Family::X86 {
+        return Err(Error::DebugInfo(format!(
+            "!idt is not defined on {} targets",
+            arch.label()
+        )));
     }
     let processor = session.processor(processor)?;
     session
@@ -881,13 +879,13 @@ impl Render for Idt {
 /// The GDT of `processor`, for `!gdt` and `dg`, which `name` the error on an
 /// ARM64 target.
 fn read_gdt(session: &mut Session, processor: Option<Processor>, name: &str) -> Result<Gdt> {
-    match session.target.arch() {
-        Arch::Amd64 => {}
-        Arch::Arm64 => {
-            return Err(Error::DebugInfo(format!(
-                "{name} is not defined on ARM64 targets"
-            )));
-        }
+    let arch = session.target.arch();
+    // Only an x86-family processor has a GDT.
+    if arch.family() != Family::X86 {
+        return Err(Error::DebugInfo(format!(
+            "{name} is not defined on {} targets",
+            arch.label()
+        )));
     }
     let processor = session.processor(processor)?;
     session

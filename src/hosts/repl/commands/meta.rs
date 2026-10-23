@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal;
 
-use crate::arch::Arch;
 use crate::base::bytes::utf16le_nul_terminated;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
@@ -127,17 +126,10 @@ fn effmach(
 ) -> Result<()> {
     if let Some(machine) = machine {
         let machine = machine.to_ascii_lowercase();
-        session.target.effmach = match machine.as_str() {
+        let effective = match machine.as_str() {
             "x86" => Some(CodeMachine::X86),
             "amd64" => Some(CodeMachine::Amd64),
-            "arm64" => match session.target.arch() {
-                Arch::Arm64 => Some(CodeMachine::Arm64),
-                Arch::Amd64 => {
-                    return Err(Error::DebugInfo(
-                        "an AMD64 target runs no ARM64 code; use x86, amd64, or auto".to_string(),
-                    ));
-                }
-            },
+            "arm64" => Some(CodeMachine::Arm64),
             "." | "auto" => None,
             _ => {
                 return Err(Error::DebugInfo(format!(
@@ -145,6 +137,17 @@ fn effmach(
                 )));
             }
         };
+        let arch = session.target.arch();
+        if let Some(effective) = effective
+            && !arch.runs_code(effective)
+        {
+            return Err(Error::DebugInfo(format!(
+                "an {} target runs no {} code; use one it runs, or auto",
+                arch.label(),
+                effective.label()
+            )));
+        }
+        session.target.effmach = effective;
     }
 
     match session.target.effmach {
@@ -152,10 +155,7 @@ fn effmach(
         // Auto picks a machine per address, so the target's own is the one
         // in effect for its native code.
         None => {
-            let native = match session.target.arch() {
-                Arch::Amd64 => CodeMachine::Amd64,
-                Arch::Arm64 => CodeMachine::Arm64,
-            };
+            let native = session.target.arch().code_machine();
             outln!(
                 "effective machine  auto ({} target; by context and image)",
                 native.label()

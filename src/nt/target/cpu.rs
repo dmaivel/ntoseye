@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::arch::Arch;
+use crate::arch::Family;
 use crate::base::bytes::before_nul;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
@@ -769,7 +769,7 @@ impl Target {
         let value = DiagnosticValue::from_result(value);
         let level_name = match &value {
             DiagnosticValue::Available(value) => {
-                DiagnosticValue::Available(irql_name(self.arch(), *value).to_string())
+                DiagnosticValue::Available(self.arch().irql_name(*value).to_string())
             }
             DiagnosticValue::Unavailable(error) => DiagnosticValue::unavailable(error.clone()),
         };
@@ -786,13 +786,12 @@ impl Target {
     /// fields carry individual byte/symbol failures; `truncated` reports a
     /// descriptor shorter than the full bounded table.
     pub fn inspect_idt(&self, processor: u16, vector: Option<u16>) -> Result<Idt> {
-        match self.arch() {
-            Arch::Amd64 => {}
-            Arch::Arm64 => {
-                return Err(Error::DebugInfo(
-                    "!idt is not defined on ARM64 targets".into(),
-                ));
-            }
+        // Only an x86-family processor dispatches interrupts through an IDT.
+        if self.arch().family() != Family::X86 {
+            return Err(Error::DebugInfo(format!(
+                "!idt is not defined on {} targets",
+                self.arch().label()
+            )));
         }
         validate_idt_vector(vector)?;
         let location = cpu_location(self, processor)?;
@@ -937,30 +936,6 @@ impl Target {
             feature_bits,
             triage_fallback,
         })
-    }
-}
-
-fn irql_name(arch: Arch, irql: u64) -> &'static str {
-    match arch {
-        Arch::Amd64 => match irql {
-            0 => "PASSIVE_LEVEL",
-            1 => "APC_LEVEL",
-            2 => "DISPATCH_LEVEL",
-            5 => "CMCI_LEVEL",
-            13 => "CLOCK_LEVEL",
-            14 => "IPI_LEVEL",
-            15 => "HIGH_LEVEL",
-            _ => "DIRQL",
-        },
-        Arch::Arm64 => match irql {
-            0 => "PASSIVE_LEVEL",
-            1 => "APC_LEVEL",
-            2 => "DISPATCH_LEVEL",
-            13 => "CLOCK_LEVEL",
-            14 => "IPI_LEVEL",
-            15 => "HIGH_LEVEL",
-            _ => "DIRQL",
-        },
     }
 }
 

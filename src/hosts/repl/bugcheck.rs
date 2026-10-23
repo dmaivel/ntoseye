@@ -1,5 +1,6 @@
 use owo_colors::OwoColorize;
 
+use crate::arch::Arch;
 use crate::backend::dbg_backend::BugcheckInfo;
 use crate::hosts::ui;
 use crate::nt::bugchecks::{
@@ -15,7 +16,7 @@ pub use crate::nt::bugchecks::{
 };
 pub use crate::nt::trapframe::KtrapFrame;
 
-use super::disasm::{format_rflags, print_event_children, wrapped_dim_tail};
+use super::disasm::{flags_text, print_event_children, wrapped_dim_tail};
 
 fn print_unresolved_bugcheck_data(failure: &CurrentBugcheckFailure) {
     fn slots_line(label: &str, data: &[u64; BUGCHECK_DATA_SLOTS]) -> String {
@@ -191,7 +192,7 @@ pub fn print_ktrap_frame(frame: &KtrapFrame, rip_symbol: Option<&str>) {
                 "  r11 {}   rfl {}{}",
                 saved(frame.r11),
                 ui::addr(frame.eflags as u64),
-                format_rflags(frame.eflags as u64)
+                flags_text(Arch::Amd64, frame.eflags as u64)
             );
             let irql = frame
                 .previous_irql
