@@ -12,6 +12,7 @@
 //! Styling reaches stdout and stderr only when the stream is a terminal and
 //! `NO_COLOR` is unset or empty; a redirected stream gets plain text.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fmt;
 use std::fs::OpenOptions;
@@ -362,6 +363,29 @@ pub fn strip_ansi(text: &str) -> String {
     out
 }
 
+/// Text from the target (a driver's `DbgPrint`), made safe to print on a
+/// terminal: each control character but tab, newline and carriage return
+/// becomes its visible picture (`ESC` as `␛`), and each C1 control the
+/// replacement character, so the target cannot move the cursor, recolor
+/// the screen, retitle the window or plant a link. Text without one is
+/// returned as is.
+pub fn neutralize_controls(text: &str) -> Cow<'_, str> {
+    let control = |c: char| c.is_control() && !matches!(c, '\t' | '\n' | '\r');
+    if !text.chars().any(control) {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(
+        text.chars()
+            .map(|c| match c {
+                c if !control(c) => c,
+                '\u{7f}' => '\u{2421}',
+                c if c < ' ' => char::from_u32(0x2400 + c as u32).unwrap_or('\u{fffd}'),
+                _ => '\u{fffd}',
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,5 +434,22 @@ mod tests {
         assert_eq!(strip_ansi("a\x1b]0;title\x1b\\b"), "ab");
         assert_eq!(strip_ansi("a\x1b"), "a");
         assert_eq!(strip_ansi("plain"), "plain");
+    }
+
+    /// A target's text cannot drive the terminal: a link, a color, a title
+    /// or a C1 CSI comes out as visible characters, while the layout a
+    /// print uses (tabs, line ends) and other text pass through.
+    #[test]
+    fn neutralize_controls_shows_escapes_and_keeps_layout() {
+        assert_eq!(
+            neutralize_controls("\x1b]8;;ntoseye://eb\x1b\\click\x1b]8;;\x1b\\"),
+            "\u{241b}]8;;ntoseye://eb\u{241b}\\click\u{241b}]8;;\u{241b}\\"
+        );
+        assert_eq!(
+            neutralize_controls("\x1b[31mred\x07"),
+            "\u{241b}[31mred\u{2407}"
+        );
+        assert_eq!(neutralize_controls("\u{9b}2J\x7f"), "\u{fffd}2J\u{2421}");
+        assert_eq!(neutralize_controls("a\tb\r\nüñ"), "a\tb\r\nüñ");
     }
 }

@@ -4,6 +4,7 @@ use crate::backend::dbg_backend::{BugcheckInfo, DebugLog};
 use crate::backend::kd::framing::{KdFraming, PACKET_TYPE_KD_DEBUG_IO};
 use crate::base::bytes::{read_u16, read_u32, write_u16, write_u32};
 use crate::base::error::Result;
+use crate::base::output::neutralize_controls;
 
 use super::{
     DBGKD_DEBUG_IO_HEADER_SIZE, DBGKD_DEBUG_IO_MIN_HEADER_SIZE, DBGKD_GET_STRING_API,
@@ -171,7 +172,7 @@ pub fn handle_debug_io_with_output<T: Read + Write, W: Write>(
                 suppress_output = suppress_bugcheck_text && capture.should_suppress_output();
             }
             if !suppress_output {
-                output.write_all(text)?;
+                output.write_all(neutralize_controls(&String::from_utf8_lossy(text)).as_bytes())?;
             }
             kd_refresh_seen = detect_kd_refresh
                 && text
@@ -186,7 +187,7 @@ pub fn handle_debug_io_with_output<T: Read + Write, W: Write>(
             processor,
             prompt,
         }) => {
-            output.write_all(prompt)?;
+            output.write_all(neutralize_controls(&String::from_utf8_lossy(prompt)).as_bytes())?;
             let response = get_string_auto_response(prompt);
             send_debug_io_response(framing, processor_level, processor, response)?;
         }

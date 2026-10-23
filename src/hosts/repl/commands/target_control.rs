@@ -358,7 +358,7 @@ fn dbgprint(state: &mut ReplState<'_>, #[arg(parse = dbgprint_count)] count: usi
         outln!(
             "{} {}",
             ui::muted(&fmt_timestamp(line.timestamp_ms)),
-            line.text
+            output::neutralize_controls(&line.text)
         );
     }
     outln!();
@@ -415,7 +415,7 @@ fn print_kernel_print_buffer(state: &mut ReplState<'_>, count: usize) -> Result<
         lines.len().saturating_sub(count)
     };
     for line in &lines[start..] {
-        outln!("{line}");
+        outln!("{}", output::neutralize_controls(line));
     }
     outln!();
     Ok(())

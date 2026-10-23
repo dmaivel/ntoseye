@@ -9,6 +9,7 @@ use crate::backend::dbg_backend::{
 };
 use crate::base::diagnostics::print_notice;
 use crate::base::error::{Error, Result};
+use crate::base::output::neutralize_controls;
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::commands::display;
 use crate::hosts::ui;
@@ -757,7 +758,7 @@ impl ReplState<'_> {
                 let page = session.read_debug_output(printed.get());
                 printed.set(page.next_seq);
                 for line in page.lines {
-                    eprintln!("{}", line.text);
+                    eprintln!("{}", neutralize_controls(&line.text));
                 }
             }
             for notice in session.take_notices() {
