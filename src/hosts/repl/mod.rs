@@ -4,8 +4,8 @@ use libc::{SIGHUP, SIGTERM, c_int, sigaction, sigemptyset, sighandler_t};
 use nu_ansi_term::{Color, Style};
 #[cfg(feature = "cli")]
 use reedline::{
-    DescriptionMode, Emacs, FileBackedHistory, IdeMenu, KeyCode, KeyModifiers, MenuBuilder,
-    ReedlineEvent, ReedlineMenu, default_emacs_keybindings,
+    DefaultHinter, DescriptionMode, Emacs, FileBackedHistory, IdeMenu, KeyCode, KeyModifiers,
+    MenuBuilder, ReedlineEvent, ReedlineMenu, default_emacs_keybindings,
 };
 #[cfg(feature = "cli")]
 use reedline::{Reedline, Signal};
@@ -1010,6 +1010,11 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     let mut line_editor = Reedline::create()
         .with_completer(completor)
         .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
+        // The rest of the newest earlier line that starts with what is
+        // typed, dim after the cursor; Right, End or Ctrl+E takes it.
+        .with_hinter(Box::new(
+            DefaultHinter::default().with_style(Style::new().fg(Color::DarkGray)),
+        ))
         .with_edit_mode(edit_mode)
         .with_highlighter(Box::new(highlighter))
         .with_history_exclusion_prefix(Some(" ".to_string()));
