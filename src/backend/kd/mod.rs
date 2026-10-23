@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 
 use ntoseye_macros::record;
 
+use crate::arch::{Arch, RegisterMap};
 use crate::backend::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability, DebugLog,
     DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, PciConfigAddress, ProcessorRead,
-    RegisterMap, StopEvent, TebPath, TrapState, debug_registers,
+    StopEvent, TebPath, TrapState, debug_registers,
 };
 use crate::backend::debugger_data::DebuggerDataCandidate;
 use crate::backend::kd::framing::KdFraming;
@@ -17,7 +18,7 @@ use crate::base::bytes;
 use crate::base::error::{Error, Result};
 use crate::base::memory::TranslationCache;
 use crate::base::notice::Notice;
-use crate::base::types::{Arch, Dtb, KernelLocation, VirtAddr};
+use crate::base::types::{Dtb, KernelLocation, VirtAddr};
 
 macro_rules! kd_trace {
     ($($arg:tt)*) => {

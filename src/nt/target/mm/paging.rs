@@ -4,9 +4,10 @@
 use std::collections::HashSet;
 
 use super::{PteLevel, PteWalk, PtovDetail, PtovMapping, VtopDetail};
+use crate::arch::Arch;
 use crate::base::error::{Error, Result};
 use crate::base::memory::{AddressSpace, DTB_IDENTITY, MemoryOps, PAGE_SIZE, Residency};
-use crate::base::types::{Arch, Dtb, PFN_MASK, PageTableEntry, PageTableLevel, VirtAddr};
+use crate::base::types::{Dtb, PFN_MASK, PageTableEntry, PageTableLevel, VirtAddr};
 use crate::nt::target::Target;
 
 const MAX_PTOV_TABLE_PAGES: usize = 65_536;

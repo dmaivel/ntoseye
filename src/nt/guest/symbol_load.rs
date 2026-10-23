@@ -6,6 +6,7 @@ use super::{
     Guest, ModuleInfo, ModuleSymbolDiagnostic, ModuleSymbolLoadReport, PdbRecovery, ProcessInfo,
     SessionSpace,
 };
+use crate::arch::Arch;
 use crate::{
     backend::phys::PhysMem,
     base::{

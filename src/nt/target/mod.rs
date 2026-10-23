@@ -65,6 +65,7 @@ pub use vtl::{
     SavedVtlContext, ServedVp, VP_STATE_REGISTERS, exit_registers,
 };
 
+use crate::arch::Arch;
 use crate::{
     backend::{
         debugger_data::{DebuggerDataBlock, MetadataSource, MetadataValue},
@@ -73,7 +74,7 @@ use crate::{
     base::{
         error::{Error, Result},
         memory::DTB_IDENTITY,
-        types::{Arch, CodeMachine, Dtb, VirtAddr},
+        types::{CodeMachine, Dtb, VirtAddr},
     },
     nt::{
         breakpoints::SiteJournal,

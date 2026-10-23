@@ -5,8 +5,10 @@ use std::rc::Rc;
 use super::memory::MAX_DISASSEMBLE_INSTRUCTIONS;
 use super::variables::VARIABLES_BASE;
 use super::*;
-use crate::backend::cpu_context::amd64::{OFFSET_RIP, OFFSET_RSP};
-use crate::base::types::Arch;
+use crate::arch::{
+    Arch,
+    amd64::{OFFSET_RIP, OFFSET_RSP},
+};
 use crate::nt::expr::Expr;
 use crate::nt::guest::ProcessInfo;
 use crate::nt::layout::{FieldInfo, TypeInfo};

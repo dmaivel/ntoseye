@@ -8,11 +8,12 @@ use std::sync::Arc;
 use pelite::pe64::{Pe, PeView, image::IMAGE_SCN_MEM_EXECUTE};
 
 use super::{CachedModule, OwnedModule, StackPage, StackTracer, ThreadTraceContext};
+use crate::arch::Arch;
 use crate::{
     base::{
         error::{Error, Result},
         memory::{MemoryOps, PAGE_SIZE, read_page_chunks},
-        types::{Arch, CodeMachine, VirtAddr},
+        types::{CodeMachine, VirtAddr},
     },
     nt::{
         guest::{Image, ModuleInfo},

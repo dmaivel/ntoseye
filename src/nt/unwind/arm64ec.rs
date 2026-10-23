@@ -15,7 +15,7 @@
 //! unwinding the x64 callee returns into the thunk.
 
 use super::{REGISTER_SLOTS, RegisterContext, StackTracer, Unwound};
-use crate::backend::cpu_context::amd64::VOLATILE_REGISTERS;
+use crate::arch::amd64::VOLATILE_REGISTERS;
 
 /// The ARM64 register each x64 register lives in during ARM64EC code, by
 /// x64 unwind number (rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8–r15). rsp

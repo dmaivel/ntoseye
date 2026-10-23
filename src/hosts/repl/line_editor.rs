@@ -10,11 +10,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use owo_colors::OwoColorize;
 use std::borrow::Cow;
 
+use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::expr::Expr;
 use crate::nt::layout::ParsedType;
-
-use crate::hosts::repl::*;
 
 /// The most symbols or types one completion search returns: past it the
 /// completer stops looking, so a list this long may leave matches out.

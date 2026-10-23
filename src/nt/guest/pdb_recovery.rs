@@ -13,10 +13,11 @@
 //! pointer say it is a data file's, and a rebuilt file only when its MSF
 //! header bounds it and its PDB identity is the one the image records.
 
+use crate::arch::Arch;
 use crate::backend::phys::PhysMem;
 use crate::base::bytes::utf16le_lossy;
 use crate::base::memory::{AddressSpace, MemoryOps};
-use crate::base::types::{Arch, PageTableEntry, PhysAddr, VirtAddr};
+use crate::base::types::{PageTableEntry, PhysAddr, VirtAddr};
 use crate::nt::layout::{ParsedType, TypeInfo};
 use crate::nt::symbols::{PdbIdentity, SymbolStore, download::pdb_bytes_identity};
 use std::sync::Arc;

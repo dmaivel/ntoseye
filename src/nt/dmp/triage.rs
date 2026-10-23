@@ -1,11 +1,11 @@
-use crate::backend::cpu_context::{amd64, arm64};
+use crate::arch::{Arch, amd64, arm64};
+#[cfg(test)]
+use crate::arch::{IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64};
 use crate::backend::debugger_data::KdDebuggerData64;
 use crate::base::bytes::utf16le_nul_terminated;
 use crate::base::bytes::{c_string_lossy, read_u16, read_u32, read_u64};
 use crate::base::error::{Error, Result};
-use crate::base::types::{Arch, VirtAddr};
-#[cfg(test)]
-use crate::base::types::{IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64};
+use crate::base::types::VirtAddr;
 use crate::nt::dmp::structs::{ExceptionRecord64, Header64};
 use crate::nt::dmp::tagged::tagged_blocks_at;
 use crate::nt::dmp::{

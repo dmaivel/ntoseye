@@ -5,12 +5,13 @@ use super::{
     AttachReport, CODE_BITNESS_AMD64, CODE_BITNESS_X86, SelectedFrame, Target, TargetSelection,
     ThreadInfo, lookup_register, process_matches,
 };
+use crate::arch::Arch;
 use crate::{
     base::{
         bytes::c_string_lossy,
         error::{Error, Result},
         memory::{DTB_IDENTITY, MemoryOps},
-        types::{Arch, CodeMachine, Dtb, VirtAddr},
+        types::{CodeMachine, Dtb, VirtAddr},
     },
     nt::{
         bugchecks::looks_like_kernel_pointer,

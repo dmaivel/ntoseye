@@ -191,8 +191,17 @@ mod layers {
 
     use super::tree::{self, Child, test_only};
 
-    /// The layers, bottom to top.
-    pub const LAYERS: [&str; 6] = ["base", "backend", "nt", "session", "analysis", "hosts"];
+    /// The layers, bottom to top, each the top-level modules in it: `arch`,
+    /// what ntoseye knows about each CPU architecture, is part of the base,
+    /// which reads page tables and decodes instructions through it.
+    pub const LAYERS: [&[&str]; 6] = [
+        &["base", "arch"],
+        &["backend"],
+        &["nt"],
+        &["session"],
+        &["analysis"],
+        &["hosts"],
+    ];
 
     /// The layer of the crate root's own items: the session's.
     const ROOT: usize = 3;
@@ -234,15 +243,15 @@ mod layers {
                     violation.at,
                     violation.module,
                     violation.target,
-                    LAYERS[violation.to],
-                    LAYERS[violation.from],
+                    LAYERS[violation.to].join("/"),
+                    LAYERS[violation.from].join("/"),
                 )
             })
             .collect();
         panic!(
             "a module uses a later layer (layers, bottom to top: {}; see build.rs and \
              docs/internals/architecture.md):{lines}",
-            LAYERS.join(", "),
+            LAYERS.map(|layer| layer.join("/")).join(", "),
         );
     }
 
@@ -307,7 +316,11 @@ mod layers {
     /// root's.
     fn rank(path: &[String]) -> usize {
         path.get(1)
-            .and_then(|name| LAYERS.iter().position(|layer| layer == name))
+            .and_then(|name| {
+                LAYERS
+                    .iter()
+                    .position(|layer| layer.contains(&name.as_str()))
+            })
             .unwrap_or(ROOT)
     }
 

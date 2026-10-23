@@ -2,10 +2,11 @@
 
 use std::sync::Arc;
 
+use crate::arch::Arch;
 use crate::base::bytes::before_nul;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
-use crate::base::types::{Arch, VirtAddr};
+use crate::base::types::VirtAddr;
 use crate::nt::cpu_state;
 use crate::nt::guest::Image;
 use crate::nt::layout::{FieldInfo, ParsedType, TypeInfo, le_uint};

@@ -14,9 +14,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
 use crate::TargetSpec;
+use crate::arch::RegisterMap;
 use crate::backend::dbg_backend::{
     BackendCapability, BugcheckInfo, DebugBackend, DebugCapability, DebugLog, DebugOutputPage,
-    LastEvent, ModuleEvent, RegisterMap, StopEvent, processor_index_from_backend_thread_id,
+    LastEvent, ModuleEvent, StopEvent, processor_index_from_backend_thread_id,
 };
 use crate::base::disasm::ControlFlow;
 use crate::base::error::{Error, Result};

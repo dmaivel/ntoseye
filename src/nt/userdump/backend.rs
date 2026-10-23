@@ -5,13 +5,10 @@
 use std::time::Duration;
 
 use super::{UserDumpInfo, register_buffer};
-use crate::backend::cpu_context::{amd64, arm64};
-use crate::backend::dbg_backend::{
-    BackendCapability, DebugBackend, DebugCapability, RegisterMap, StopEvent,
-};
+use crate::arch::{Arch, RegisterMap};
+use crate::backend::dbg_backend::{BackendCapability, DebugBackend, DebugCapability, StopEvent};
 use crate::base::error::{Error, Result};
 use crate::base::notice::Notice;
-use crate::base::types::Arch;
 
 /// A captured thread as the backend selects it.
 struct DumpThread {
@@ -34,8 +31,8 @@ impl UserDumpBackend {
     /// when the dump records one, else on the first thread.
     pub fn new(info: &UserDumpInfo) -> Self {
         let register_map = match info.arch {
-            Arch::Amd64 => amd64::build_register_map(),
-            Arch::Arm64 => arm64::build_register_map(),
+            Arch::Amd64 => Arch::Amd64.register_map(),
+            Arch::Arm64 => Arch::Arm64.register_map(),
         };
         let threads: Vec<DumpThread> = info
             .threads

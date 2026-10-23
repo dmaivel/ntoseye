@@ -11,14 +11,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ntoseye_macros::record;
 
-use crate::nt::dmp::structs::{ExceptionRecord64, Header64};
-
-use crate::backend::cpu_context::{amd64, arm64};
-use crate::backend::dbg_backend::RegisterMap;
+use crate::arch::{Arch, RegisterMap, amd64, arm64};
 use crate::base::bytes::{write_u32, write_u64};
 use crate::base::error::{Error, Result};
 use crate::base::memory::{MemoryOps, PAGE_SIZE};
-use crate::base::types::{Arch, MAX_PROCESSORS, PhysAddr};
+use crate::base::types::{MAX_PROCESSORS, PhysAddr};
+use crate::nt::dmp::structs::{ExceptionRecord64, Header64};
 use crate::nt::layout::{FieldInfo, ParsedType};
 use crate::nt::target::Target;
 
@@ -45,12 +43,12 @@ static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub fn context_from_registers(arch: Arch, source: &RegisterMap, registers: &[u8]) -> Vec<u8> {
     let (layout, flags_offset, flags) = match arch {
         Arch::Amd64 => (
-            amd64::build_register_map(),
+            Arch::Amd64.register_map(),
             amd64::OFFSET_CONTEXT_FLAGS,
             amd64::CONTEXT_CONTROL | amd64::CONTEXT_INTEGER | amd64::CONTEXT_SEGMENTS,
         ),
         Arch::Arm64 => (
-            arm64::build_register_map(),
+            Arch::Arm64.register_map(),
             arm64::OFFSET_CONTEXT_FLAGS,
             arm64::CONTEXT_CONTROL | arm64::CONTEXT_INTEGER,
         ),
@@ -649,7 +647,7 @@ pub fn physical_runs(target: &Target) -> Result<Vec<(u64, u64)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::dbg_backend::RegisterInfo;
+    use crate::arch::RegisterInfo;
     use crate::base::bytes::write_u64;
     use crate::nt::dmp::{DmpContext, DmpMem};
     use std::cell::Cell;
@@ -686,7 +684,7 @@ mod tests {
         let converted = context_from_registers(Arch::Amd64, &stub, &registers);
 
         assert_eq!(converted.len(), amd64::CONTEXT_SIZE);
-        let layout = amd64::build_register_map();
+        let layout = Arch::Amd64.register_map();
         assert_eq!(
             layout.read_u64("rip", &converted).unwrap(),
             0xffff_f805_aed1_950f

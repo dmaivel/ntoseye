@@ -12,13 +12,12 @@ use crate::analysis::blackbox::{
 use crate::base::error::{Error, Result};
 use crate::base::time::filetime_to_iso;
 use crate::base::types::VirtAddr;
+use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
+use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::dmp::tagged::{TaggedBlock, known_tag};
 use crate::nt::target::etw::{GuidStyle, format_guid, parse_guid};
 use crate::session::Session;
-
-use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
-use crate::hosts::repl::*;
 use ntoseye_macros::{command, grammar};
 
 /// How many 16-byte lines `.enumtag` shows of each block without a tag.

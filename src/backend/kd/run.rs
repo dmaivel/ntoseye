@@ -6,10 +6,10 @@ use std::io::ErrorKind;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use crate::backend::dbg_backend::{ContinueDisposition, ModuleEvent, RegisterMap, StopEvent};
+use crate::arch::{Arch, RegisterMap};
+use crate::backend::dbg_backend::{ContinueDisposition, ModuleEvent, StopEvent};
 use crate::base::bytes;
 use crate::base::error::{Error, Result};
-use crate::base::types::Arch;
 
 use super::breakpoints::{
     breakpoint_instruction_at, reclaimed_breakpoints_notice, restore_unowned_breakpoint_handles,

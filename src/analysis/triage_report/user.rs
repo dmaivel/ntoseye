@@ -11,11 +11,11 @@ use ntoseye_macros::record;
 use super::culprit::{is_user_system_module, user_culprit_attribution};
 use super::signature::user_failure_signature;
 use super::{TRIAGE_BACKTRACE_LIMIT, TriageReport};
-use crate::backend::cpu_context;
+use crate::arch::Arch;
 use crate::base::memory::MemoryOps;
 use crate::base::ntstatus::ntstatus_name;
 use crate::base::time::unix_time_to_iso;
-use crate::base::types::{Arch, VirtAddr};
+use crate::base::types::VirtAddr;
 use crate::nt::dmp::{DmpException, UnloadedDriver};
 use crate::nt::guest::ModuleInfo;
 use crate::nt::target::mm::{memory_state_name, memory_type_name, page_protection_name};
@@ -717,7 +717,7 @@ fn frame_where(
 /// The general-purpose registers `-v` shows from the exception's context,
 /// in the register grid's order.
 fn general_registers(arch: Arch, values: &HashMap<String, u64>) -> Vec<RegisterValue> {
-    cpu_context::general_registers(arch)
+    arch.general_registers()
         .iter()
         .filter_map(|name| {
             let value = *values.get(*name)?;

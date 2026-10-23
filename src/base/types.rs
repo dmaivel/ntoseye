@@ -1,10 +1,9 @@
 use std::fmt;
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 
+use crate::arch::Arch;
 use ntoseye_macros::record;
 use zerocopy::{FromBytes, Immutable, IntoBytes};
-
-use crate::base::bytes::read_u64;
 
 /// x64 page-table entry physical-address field: bits 51:12 (MAXPHYADDR = 52).
 pub const PFN_MASK: u64 = 0x000F_FFFF_FFFF_F000;
@@ -172,157 +171,6 @@ impl CodeMachine {
             Self::X86 | Self::Amd64 => 15,
             Self::Arm64 => 4,
         }
-    }
-}
-
-/// Guest CPU architecture. Determines page-table descriptor interpretation and
-/// register-file layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Arch {
-    Amd64,
-    Arm64,
-}
-
-impl Arch {
-    /// Every architecture, in the order kernel discovery tries them (AMD64,
-    /// the historical default, first). A new variant goes here too: the
-    /// reverse lookups below and discovery read this list.
-    pub const ALL: [Self; 2] = [Self::Amd64, Self::Arm64];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Amd64 => "AMD64",
-            Self::Arm64 => "ARM64",
-        }
-    }
-
-    /// Register holding the current address space's page-table base.
-    pub const fn dtb_register(self) -> &'static str {
-        match self {
-            Self::Amd64 => "cr3",
-            Self::Arm64 => "ttbr0",
-        }
-    }
-
-    /// Register holding the address of the next instruction.
-    pub const fn pc_register(self) -> &'static str {
-        match self {
-            Self::Amd64 => "rip",
-            Self::Arm64 => "pc",
-        }
-    }
-
-    /// Register holding the stack pointer.
-    pub const fn sp_register(self) -> &'static str {
-        match self {
-            Self::Amd64 => "rsp",
-            Self::Arm64 => "sp",
-        }
-    }
-
-    /// Register a frame-pointer chain links through (`rbp`, ARM64's `fp`).
-    pub const fn frame_register(self) -> &'static str {
-        match self {
-            Self::Amd64 => "rbp",
-            Self::Arm64 => "fp",
-        }
-    }
-
-    /// Register holding the processor's status flags (`eflags`, `cpsr`).
-    pub const fn flags_register(self) -> &'static str {
-        match self {
-            Self::Amd64 => "eflags",
-            Self::Arm64 => "cpsr",
-        }
-    }
-
-    /// Bits of the DTB register that select the page-table base frame (PCID,
-    /// ASID, and reserved/canonical bits masked out), for comparing address
-    /// spaces.
-    pub const fn dtb_page_mask(self) -> u64 {
-        match self {
-            Self::Amd64 => 0x000F_FFFF_FFFF_F000,
-            Self::Arm64 => 0x0000_FFFF_FFFF_F000,
-        }
-    }
-
-    /// The software breakpoint instruction a site holds: x86 `int3`, or
-    /// AArch64 `brk #0xF000` (`0xD43E0000`, little-endian), the opcode the
-    /// kernel debugger uses so the guest reports it as a KD break.
-    pub const fn breakpoint_instruction(self) -> &'static [u8] {
-        match self {
-            Self::Amd64 => &[0xcc],
-            Self::Arm64 => &[0x00, 0x00, 0x3e, 0xd4],
-        }
-    }
-
-    /// Bytes in [`Arch::breakpoint_instruction`]: how far the program
-    /// counter must move to step past one, and the kind an RSP `Z0` packet
-    /// names.
-    pub const fn breakpoint_size(self) -> u8 {
-        self.breakpoint_instruction().len() as u8
-    }
-
-    /// Bytes in a kernel pointer: a `LIST_ENTRY` link, a slot of a pointer
-    /// array, a stack slot.
-    pub const fn pointer_size(self) -> u64 {
-        match self {
-            Self::Amd64 | Self::Arm64 => 8,
-        }
-    }
-
-    /// The kernel pointer at the start of `bytes`, which holds at least
-    /// [`Arch::pointer_size`] bytes. Panics when it does not: the caller
-    /// sized the buffer from the layout.
-    #[track_caller]
-    pub fn decode_pointer(self, bytes: &[u8]) -> VirtAddr {
-        match self {
-            Self::Amd64 | Self::Arm64 => VirtAddr(read_u64(bytes, 0)),
-        }
-    }
-
-    /// The PE and dump-header machine type (`IMAGE_FILE_MACHINE_*`).
-    pub const fn machine_type(self) -> u16 {
-        match self {
-            Self::Amd64 => IMAGE_FILE_MACHINE_AMD64,
-            Self::Arm64 => IMAGE_FILE_MACHINE_ARM64,
-        }
-    }
-
-    pub fn from_machine_type(machine: u16) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|arch| arch.machine_type() == machine)
-    }
-
-    /// The `<architecture>` a GDB target description names it by.
-    pub const fn gdb_architecture(self) -> &'static str {
-        match self {
-            Self::Amd64 => "i386:x86-64",
-            Self::Arm64 => "aarch64",
-        }
-    }
-
-    pub fn from_gdb_architecture(name: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|arch| arch.gdb_architecture() == name)
-    }
-}
-
-pub const IMAGE_FILE_MACHINE_I386: u16 = 0x014c;
-pub const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
-pub const IMAGE_FILE_MACHINE_ARM64: u16 = 0xaa64;
-
-/// A machine type as kernel dumps and `vertarget` name it: `I386`, `AMD64`,
-/// `ARM64`, or `Unknown`. A PE header's richer naming is
-/// [`crate::nt::pe::headers::machine_name`].
-pub fn machine_name(machine: u16) -> &'static str {
-    match machine {
-        IMAGE_FILE_MACHINE_I386 => "I386",
-        IMAGE_FILE_MACHINE_AMD64 => "AMD64",
-        IMAGE_FILE_MACHINE_ARM64 => "ARM64",
-        _ => "Unknown",
     }
 }
 

@@ -8,8 +8,9 @@ use std::fmt::Write as _;
 
 use ntoseye_macros::record;
 
+use crate::arch::Arch;
 use crate::base::bytes::before_nul;
-use crate::base::types::{Arch, CodeMachine};
+use crate::base::types::CodeMachine;
 
 /// Control-flow class for the instruction at the start of a byte buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

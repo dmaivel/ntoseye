@@ -3,13 +3,14 @@
 
 use std::time::Duration;
 
+use crate::arch::Arch;
 use crate::backend::dbg_backend::{
     ContinueDisposition, DebugBackend, LastEvent, ModuleEvent, StopEvent, clear_trap_flag,
     processor_index_from_backend_thread_id,
 };
 use crate::base::error::Result;
 use crate::base::memory::MemoryOps;
-use crate::base::types::{Arch, VirtAddr};
+use crate::base::types::VirtAddr;
 use crate::nt::breakpoints::{BreakpointInfo, BreakpointManager};
 use crate::nt::guest::{ModuleInfo, ProcessInfo};
 use crate::nt::target::{BreakpointStop, HYPERVISOR_CONTEXT, ThreadInfo};

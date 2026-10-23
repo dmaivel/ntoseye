@@ -369,7 +369,8 @@ impl BreakpointManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::base::types::{Arch, VirtAddr};
+    use crate::arch::Arch;
+    use crate::base::types::VirtAddr;
     use crate::nt::breakpoints::install::BreakpointBackend;
     use crate::nt::breakpoints::test_backend::SlotRecorder;
     use crate::nt::breakpoints::{BreakpointHitResult, BreakpointManager, BreakpointSpec};

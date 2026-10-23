@@ -742,7 +742,7 @@ mod tests {
     use super::*;
     use std::io::{Cursor, Read, Write};
 
-    use crate::backend::cpu_context::amd64;
+    use crate::arch::amd64;
     use crate::backend::kd::framing::{KdFraming, PACKET_TYPE_KD_ACKNOWLEDGE};
 
     #[test]

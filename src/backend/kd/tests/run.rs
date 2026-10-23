@@ -74,7 +74,7 @@ fn resume_does_not_step_past_a_breakpoint_it_does_not_own() {
     const PC: u64 = 0xffff_f800_0011_2233;
 
     for owned_by_us in [true, false] {
-        let register_map = amd64::build_register_map();
+        let register_map = Arch::Amd64.register_map();
         let mut guest_context = vec![0u8; amd64::CONTEXT_SIZE];
         register_map
             .write_u64("rip", &mut guest_context, PC)
@@ -365,7 +365,7 @@ fn an_arm64_step_on_another_processor_fails_without_resuming() {
     let worker = serve_state_changes(kernel, Vec::new());
     let mut backend = kd_backend_with_framing(host);
     backend.arch = Arch::Arm64;
-    backend.register_map = arm64::build_register_map();
+    backend.register_map = Arch::Arm64.register_map();
     backend.link.halt();
     backend.exit_prepared = true;
     backend.processor_count = 4;

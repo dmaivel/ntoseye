@@ -2,10 +2,11 @@
 //! the `vars` inventory of them, and the result slots commands fill.
 
 use super::{BuiltinVar, Target, ThreadInfo};
+use crate::arch::Arch;
 use crate::{
     base::{
         memory::{MemoryOps, PAGE_SIZE},
-        types::{Arch, VirtAddr},
+        types::VirtAddr,
     },
     nt::unwind::return_address_for_register_values,
 };

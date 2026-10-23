@@ -226,7 +226,7 @@ fn apply(session: &mut Session, ctx: &Context) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{Context, in_context};
-    use crate::backend::cpu_context::amd64::REGISTER_BUFFER_SIZE;
+    use crate::arch::amd64::REGISTER_BUFFER_SIZE;
     use crate::backend::partition_backend::PartitionVp;
     use crate::session::session_over_memory;
     use crate::session::tests::{MockBackend, session_with_mock};

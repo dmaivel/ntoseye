@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::backend::cpu_context::{amd64, arm64};
+use crate::arch::{Arch, amd64, arm64};
 use crate::backend::dbg_backend::{ContinueDisposition, processor_index_from_backend_thread_id};
 use crate::base::bytes;
 use crate::base::disasm::{
@@ -16,7 +16,7 @@ use crate::base::error::{Error, Result};
 use crate::base::memory::{
     self, MemoryOps, PAGE_SIZE, ScanFault, TerminatedRead, read_page_chunks,
 };
-use crate::base::types::{Arch, CodeMachine, Dtb, VirtAddr};
+use crate::base::types::{CodeMachine, Dtb, VirtAddr};
 use crate::nt::bugchecks::{
     BugcheckAnalysis, analyze_bugcheck, bugcheck_from_dump_info, current_bugcheck,
 };
@@ -91,8 +91,8 @@ impl Session {
     /// changing the selected backend context (`.cxr`).
     pub fn read_context_record(&self, address: VirtAddr) -> Result<HashMap<String, u64>> {
         let (size, map) = match self.target.arch() {
-            Arch::Amd64 => (amd64::CONTEXT_SIZE, amd64::build_register_map()),
-            Arch::Arm64 => (arm64::CONTEXT_SIZE, arm64::build_register_map()),
+            Arch::Amd64 => (amd64::CONTEXT_SIZE, Arch::Amd64.register_map()),
+            Arch::Arm64 => (arm64::CONTEXT_SIZE, Arch::Arm64.register_map()),
         };
         let mut bytes = vec![0u8; size];
         self.read_record_bytes(address, &mut bytes)?;

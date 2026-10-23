@@ -4,6 +4,7 @@ use tern_sdk::View;
 use tern_sdk::ui::{self, Column, Node, Span, TableRow, TextAlign, Truncate};
 
 use super::{MUTED, NUMBER, STRONG, addr, block, span, styled, symbol};
+use crate::arch::Arch;
 use crate::base::types::{PageTableEntry, PageTableLevel, VirtAddr};
 use crate::hosts::repl::commands::frames::FrameLine;
 use crate::hosts::repl::print_sparse_registers;
@@ -15,7 +16,7 @@ const PICK: &str = "\u{25b8} ";
 
 /// `.frame`: the selected frame as a one-row stack table, marked, then its
 /// frame base and (with `/r`) its recovered registers.
-pub fn frame(line: &FrameLine, frame: &SelectedFrame, show_registers: bool) -> View {
+pub fn frame(line: &FrameLine, frame: &SelectedFrame, arch: Arch, show_registers: bool) -> View {
     let table = ui::table()
         .col(Column::new("n", "#").align(TextAlign::End).priority(4.0))
         .col(Column::new("sp", "Child-SP").priority(2.0))
@@ -45,7 +46,7 @@ pub fn frame(line: &FrameLine, frame: &SelectedFrame, show_registers: bool) -> V
         nodes.push(Node::from(ui::kv().item("frame base", addr(base))));
     }
     if show_registers {
-        let registers = styled(|| print_sparse_registers(&frame.registers, None, 0));
+        let registers = styled(|| print_sparse_registers(&frame.registers, arch, None, 0));
         nodes.push(Node::from(
             ui::section()
                 .head("registers")

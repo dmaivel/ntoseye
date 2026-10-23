@@ -7,13 +7,14 @@ use super::{
     DownloadJob, LoadedModule, ModuleSymbolDiscovery, ModuleSymbolLoad, ModuleSymbolSource,
     ModuleSymbolStatus, PdbIdentity, SymbolStore,
 };
+use crate::arch::Arch;
 use crate::{
     base::{
         error::{Error, Result},
         memory,
         memory::MemoryOps,
         output,
-        types::{Arch, Dtb, PhysAddr, VirtAddr},
+        types::{Dtb, PhysAddr, VirtAddr},
     },
     nt::{
         guest::{Image, ModuleInfo},

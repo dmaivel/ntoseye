@@ -7,9 +7,8 @@
 
 use std::time::Duration;
 
-use crate::backend::dbg_backend::{
-    BackendCapability, DebugBackend, DebugCapability, RegisterMap, StopEvent,
-};
+use crate::arch::RegisterMap;
+use crate::backend::dbg_backend::{BackendCapability, DebugBackend, DebugCapability, StopEvent};
 use crate::base::error::{Error, Result};
 
 /// One VP of the partition: its thread ID (`p<partition>.<VP index + 1>`,

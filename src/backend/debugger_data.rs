@@ -4,10 +4,11 @@ use std::fmt;
 use std::mem::{offset_of, size_of};
 use zerocopy::{FromBytes, Immutable, KnownLayout};
 
+use crate::arch::Arch;
 use crate::base::bytes::{get_u64, read_u32};
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
-use crate::base::types::{Arch, VirtAddr};
+use crate::base::types::VirtAddr;
 
 const KDBG_OWNER_TAG: u32 = 0x4742_444b;
 const KDBG_HEADER_SIZE: usize = size_of::<DbgKdDebugDataHeader64>();

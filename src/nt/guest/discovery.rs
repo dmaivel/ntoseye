@@ -3,6 +3,7 @@
 //! dumps.
 
 use super::Image;
+use crate::arch::Arch;
 use crate::{
     backend::phys::PhysMem,
     base::{

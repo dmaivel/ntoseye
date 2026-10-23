@@ -6,16 +6,13 @@ use std::sync::{Arc, OnceLock};
 use ntoseye_macros::record;
 use pelite::pe64::{Pe, PeView, image::IMAGE_DIRECTORY_ENTRY_EXCEPTION};
 
+use crate::arch::{self, Arch, RegisterMap};
 use crate::{
-    backend::{
-        cpu_context::{self, encoded_registers},
-        dbg_backend::RegisterMap,
-        phys::PhysMem,
-    },
+    backend::phys::PhysMem,
     base::{
         error::{Error, Result},
         memory::{AddressSpace, DTB_IDENTITY, MemoryOps},
-        types::{Arch, CodeMachine, Dtb, Keyed, VirtAddr},
+        types::{CodeMachine, Dtb, Keyed, VirtAddr},
     },
     nt::{
         breakpoints::BreakpointManager,
@@ -71,7 +68,7 @@ const MAX_UNWIND_FRAMES: usize = 1024;
 /// ABI names for ARM64 registers, which a frame answers to as well.
 const ARM64_REGISTER_ALIASES: [(&str, usize); 2] = [("fp", 29), ("lr", 30)];
 /// Register slots a walk tracks: the most any architecture numbers.
-const REGISTER_SLOTS: usize = cpu_context::arm64::ENCODED_REGISTERS.len();
+const REGISTER_SLOTS: usize = arch::arm64::ENCODED_REGISTERS.len();
 
 #[derive(Debug, Clone)]
 pub struct ThreadTraceContext {
@@ -233,8 +230,11 @@ pub struct ThreadRecoveredStack {
 }
 
 /// A frame's registers during a walk. `regs` is indexed by architectural
-/// number, in [`encoded_registers`] order: x64 encoding order or ARM64 x0–x30.
-/// `rip` and `rsp` are the program counter and stack pointer on either.
+/// number, in [`Architecture::encoded_registers`] order: x64 encoding order
+/// or ARM64 x0–x30. `rip` and `rsp` are the program counter and stack
+/// pointer on either.
+///
+/// [`Architecture::encoded_registers`]: crate::arch::Architecture::encoded_registers
 #[derive(Clone, Debug)]
 struct RegisterContext {
     rip: u64,
@@ -1483,7 +1483,7 @@ impl RegisterContext {
             lookup(arch.pc_register()).unwrap_or(0),
             lookup(arch.sp_register()).unwrap_or(0),
         );
-        for (slot, name) in context.regs.iter_mut().zip(encoded_registers(arch)) {
+        for (slot, name) in context.regs.iter_mut().zip(arch.encoded_registers()) {
             *slot = lookup(name);
         }
         match arch {
@@ -1505,14 +1505,14 @@ impl RegisterContext {
         let mut values = Vec::new();
         match arch {
             Arch::Amd64 => {
-                for (register, name) in cpu_context::amd64::ENCODED_REGISTERS.iter().enumerate() {
+                for (register, name) in arch::amd64::ENCODED_REGISTERS.iter().enumerate() {
                     if let Some(value) = self.get(register as u8) {
                         values.push((*name, value));
                     }
                 }
             }
             Arch::Arm64 => {
-                for (value, name) in self.regs.iter().zip(cpu_context::arm64::ENCODED_REGISTERS) {
+                for (value, name) in self.regs.iter().zip(arch::arm64::ENCODED_REGISTERS) {
                     if let Some(value) = value {
                         values.push((name, *value));
                     }
@@ -1544,11 +1544,7 @@ impl RegisterContext {
             }
             SavedThreadRegisters::Amd64(amd64) => {
                 let mut context = Self::new(amd64.rip?, amd64.rsp?);
-                for (slot, name) in context
-                    .regs
-                    .iter_mut()
-                    .zip(cpu_context::amd64::ENCODED_REGISTERS)
-                {
+                for (slot, name) in context.regs.iter_mut().zip(arch::amd64::ENCODED_REGISTERS) {
                     *slot = registers.get(name);
                 }
                 Some(context)
@@ -1630,7 +1626,7 @@ impl StackTracer<'_> {
                     // Crossing a machine frame lands where an interrupt or
                     // trap stopped the code, not after a call.
                     context.after_call = !stack_switch;
-                    for index in cpu_context::amd64::VOLATILE_REGISTERS {
+                    for index in arch::amd64::VOLATILE_REGISTERS {
                         context.regs[index] = None;
                     }
                 }
@@ -1659,7 +1655,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{FrameSource, RegisterContext, build_stacktrace_with_register_values};
-    use crate::backend::cpu_context::amd64::build_register_map;
+    use crate::arch::Arch;
     use crate::base::types::VirtAddr;
     use crate::nt::guest::ModuleInfo;
     use crate::nt::guest::hypercalls::HypervisorSymbols;
@@ -1765,7 +1761,7 @@ mod tests {
                 VirtAddr(IMAGE),
                 IMAGE_SIZE as u32,
             )]);
-        session.register_map = build_register_map();
+        session.register_map = Arch::Amd64.register_map();
         session
     }
 
@@ -2059,7 +2055,7 @@ mod tests {
                 VirtAddr(IMAGE),
                 IMAGE_SIZE as u32,
             )]);
-        session.register_map = build_register_map();
+        session.register_map = Arch::Amd64.register_map();
         let dtb = session.target.kernel_dtb();
         session
             .target

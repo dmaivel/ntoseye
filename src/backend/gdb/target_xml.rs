@@ -1,7 +1,7 @@
 //! The GDB stub's target description (`qXfer:features:read`): the XML that
 //! names the stub's architecture and lays out its `g`/`G` register packet.
 
-use crate::backend::dbg_backend::{RegisterInfo, RegisterMap};
+use crate::arch::{RegisterInfo, RegisterMap};
 use crate::base::error::{Error, Result};
 
 /// The `<architecture>` a target description declares, such as

@@ -278,7 +278,7 @@ pub fn print_break_context_for_bugcheck(session: &mut Session, info: Option<&Bug
 /// they were recovered), the NT code it left off at, and its stack.
 fn print_saved_vtl0_context(session: &Session, saved: &HashMap<String, u64>) {
     print_section("registers (saved VTL0)");
-    print_sparse_registers(saved, None, 2);
+    print_sparse_registers(saved, session.target.arch(), None, 2);
     let (trace, rip, stack) = saved_vtl0_code(session, saved);
     print_disasm_context(session, &trace, rip);
     print_stacktrace_data(&stack, BREAK_STACKTRACE_DISPLAY_LIMIT, true);
@@ -455,7 +455,8 @@ fn stop_view(session: &Session, stop: &StopContext, tone: tern_sdk::ui::Tone) ->
     let (registers, rows, current, stack) = match &stop.saved {
         Some(saved) => {
             let (trace, rip, stack) = saved_vtl0_code(session, saved);
-            let grid = native::styled(|| print_sparse_registers(saved, None, 0));
+            let grid =
+                native::styled(|| print_sparse_registers(saved, session.target.arch(), None, 0));
             (
                 (
                     vec![native::span("registers (saved VTL0)", "")],

@@ -10,6 +10,7 @@ use ntoseye_macros::{command, grammar};
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError, words};
+use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::breakpoints::BreakpointManager;
 use crate::nt::expr::{Expr, ExprValue};
@@ -22,8 +23,6 @@ use crate::nt::symbols::{
 use crate::nt::target::{ReloadScope, Target, UserVar};
 use crate::session::Session;
 use crate::session::typeview::TypeView;
-
-use crate::hosts::repl::*;
 
 /// The first word; `x` ignores the words after it, as it always did.
 #[grammar(usage = "[module!]<query>", complete = Symbol)]

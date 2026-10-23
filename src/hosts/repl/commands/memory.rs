@@ -14,6 +14,7 @@ use crate::base::memory::{
 use crate::base::time::days_to_ymd;
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
+use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::expr::Expr;
 use crate::nt::guest::ProcessInfo;
@@ -25,8 +26,6 @@ use crate::nt::target::{
 };
 use crate::nt::unwind::{resolve_thread_trace_context, try_format_symbol};
 use crate::session::Session;
-
-use crate::hosts::repl::*;
 
 pub const MAX_DISPLAY_BYTES: usize = 1024 * 1024;
 pub const MAX_DISASSEMBLY_INSTRUCTIONS: usize = 4096;

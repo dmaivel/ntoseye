@@ -8,9 +8,10 @@ use std::ops::Range;
 use iced_x86::{Decoder, DecoderOptions, OpKind};
 
 use super::Target;
+use crate::arch::Arch;
 use crate::base::disasm::function_extent;
 use crate::base::memory::MemoryOps;
-use crate::base::types::{Arch, CodeMachine, VirtAddr};
+use crate::base::types::{CodeMachine, VirtAddr};
 use crate::nt::unwind::{ThreadTraceContext, function_range, resolve_thread_trace_context};
 
 /// The trap handlers a breakpoint or single-step trap enters, and the

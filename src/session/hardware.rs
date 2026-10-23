@@ -5,9 +5,10 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use crate::arch::Arch;
 use crate::backend::dbg_backend::{PciConfigAddress, processor_index_from_backend_thread_id};
 use crate::base::error::{Error, Result};
-use crate::base::types::{Arch, MAX_PROCESSORS, VirtAddr};
+use crate::base::types::{MAX_PROCESSORS, VirtAddr};
 use crate::nt::cpu_state;
 use crate::nt::target::DiagnosticValue;
 use crate::nt::target::apic::{IA32_APIC_BASE, LocalApic, apic_read_error};

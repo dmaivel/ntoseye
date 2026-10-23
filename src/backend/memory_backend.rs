@@ -1,8 +1,7 @@
 use std::time::Duration;
 
-use crate::backend::dbg_backend::{
-    BackendCapability, DebugBackend, DebugCapability, RegisterMap, StopEvent,
-};
+use crate::arch::RegisterMap;
+use crate::backend::dbg_backend::{BackendCapability, DebugBackend, DebugCapability, StopEvent};
 use crate::base::error::{Error, Result};
 
 #[derive(Default)]

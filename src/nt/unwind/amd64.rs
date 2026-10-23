@@ -11,7 +11,7 @@ use pelite::pe64::image::{
 };
 
 use super::{RegisterContext, StackTracer, Unwound, image_u32, runtime_functions};
-use crate::backend::cpu_context::amd64::ENCODED_REGISTERS;
+use crate::arch::amd64::ENCODED_REGISTERS;
 use crate::backend::phys::PhysMem;
 use crate::base::memory::{AddressSpace, MemoryOps};
 use crate::base::types::{CodeMachine, VirtAddr};

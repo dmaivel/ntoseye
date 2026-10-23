@@ -7,15 +7,13 @@ use super::stepping::{
     RELEASE_BUDGET, RunPast, site_successors, stack_floor, step_over_current_breakpoint,
 };
 use super::*;
-use crate::backend::cpu_context::amd64::{REGISTER_BUFFER_SIZE, build_register_map};
-use crate::backend::cpu_context::arm64;
+use crate::arch::{Arch, RegisterInfo, amd64::REGISTER_BUFFER_SIZE, arm64};
 use crate::backend::dbg_backend::{
-    ContinueDisposition, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, RegisterInfo, TrapState,
-    clear_trap_flag,
+    ContinueDisposition, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, TrapState, clear_trap_flag,
 };
 use crate::backend::partition_backend::PartitionVp;
 use crate::base::memory::PAGE_SIZE;
-use crate::base::types::{Arch, VirtAddr};
+use crate::base::types::VirtAddr;
 use crate::nt::breakpoints::{
     BreakpointConfig, BreakpointInfo, HardwareBreakpoint, HypercallFilter, PartitionFilter,
     StepFrame, ThreadScope,
@@ -160,7 +158,7 @@ struct Landing {
 impl Default for MockBackend {
     fn default() -> Self {
         Self {
-            register_map: build_register_map(),
+            register_map: Arch::Amd64.register_map(),
             regs: vec![0u8; REGISTER_BUFFER_SIZE],
             writes: 0,
             fail_writes: false,
@@ -700,7 +698,7 @@ fn module_change_event() -> StopEvent {
 pub fn session_with_mock(backend: MockBackend) -> Session {
     let mut session = session_over_memory(0x1000, &[0; 0x100]);
     session.backend = Box::new(backend);
-    session.register_map = build_register_map();
+    session.register_map = Arch::Amd64.register_map();
     session
 }
 
@@ -739,7 +737,7 @@ fn bugcheck_exception_record_uses_bugcheck_code() {
 #[test]
 fn a_sparse_context_walks_with_its_missing_registers_unknown() {
     let mut session = session_over_memory(0x1000, &[0; 0x100]);
-    session.register_map = build_register_map();
+    session.register_map = Arch::Amd64.register_map();
     let supplied = HashMap::from([
         ("rip".to_string(), 0x1010),
         ("rsp".to_string(), 0x1080),
@@ -829,7 +827,7 @@ fn page_in_result_reads_arm64_pc_and_first_argument() {
     assert_eq!(session.target.arch(), Arch::Arm64);
 
     let mut backend = MockBackend {
-        register_map: arm64::build_register_map(),
+        register_map: Arch::Arm64.register_map(),
         regs: vec![0; arm64::REGISTER_BUFFER_SIZE],
         ..MockBackend::default()
     };
@@ -1465,7 +1463,7 @@ fn successors_follow_privilege_and_far_transfers() {
 fn stepping_session(code: &[u8], backend: MockBackend) -> Session {
     let mut session = session_over_memory(0x1000, code);
     session.backend = Box::new(backend);
-    session.register_map = build_register_map();
+    session.register_map = Arch::Amd64.register_map();
     session
 }
 
@@ -3452,7 +3450,7 @@ fn hardware_breakpoint_hit_claims_matching_dr6_bit_and_clears_status() {
     backend.set("dr6", (1 << 2) | DR6_BS);
     backend.set("eflags", EFLAGS_BASE);
 
-    let map = build_register_map();
+    let map = Arch::Amd64.register_map();
     let hit = hardware_breakpoint_hit(
         &mut backend,
         &map,
@@ -3482,7 +3480,7 @@ fn hardware_breakpoint_hit_sets_resume_flag_only_for_execute_watches() {
         backend.set("dr6", 1);
         backend.set("eflags", EFLAGS_BASE);
 
-        let map = build_register_map();
+        let map = Arch::Amd64.register_map();
         let hit = hardware_breakpoint_hit(
             &mut backend,
             &map,
@@ -3508,7 +3506,7 @@ fn hardware_breakpoint_hit_propagates_required_register_write_failure() {
     backend.set("eflags", EFLAGS_BASE);
     backend.fail_writes = true;
 
-    let map = build_register_map();
+    let map = Arch::Amd64.register_map();
     assert!(
         hardware_breakpoint_hit(
             &mut backend,
@@ -3530,7 +3528,7 @@ fn hardware_breakpoint_hit_ignores_non_single_step_stops() {
     let mut backend = MockBackend::default();
     backend.set("dr6", 1); // would match slot 0 if the gate were open
     let before = backend.regs.clone();
-    let map = build_register_map();
+    let map = Arch::Amd64.register_map();
 
     let mut event = single_step_event();
     event.exception_code = Some(0x8000_0003);
@@ -3723,7 +3721,7 @@ fn a_stub_with_no_debug_registers_attributes_an_execute_breakpoint_by_the_stoppe
 
 #[test]
 fn hardware_breakpoint_hit_requires_an_enabled_hardware_breakpoint() {
-    let map = build_register_map();
+    let map = Arch::Amd64.register_map();
     let mut backend = MockBackend::default();
     backend.set("dr6", 1);
     let before = backend.regs.clone();
@@ -3765,7 +3763,7 @@ fn hardware_breakpoint_hit_clears_stale_dr6_bits_for_unregistered_slots() {
     let mut backend = MockBackend::default();
     backend.set("dr6", (1 << 3) | DR6_BS);
 
-    let map = build_register_map();
+    let map = Arch::Amd64.register_map();
     assert!(
         hardware_breakpoint_hit(
             &mut backend,
@@ -3787,7 +3785,7 @@ fn clear_trap_flag_clears_tf_and_dr6_status_in_one_write() {
     backend.set("eflags", TF | EFLAGS_BASE);
     backend.set("dr6", 0b1011 | DR6_BS);
 
-    let map = build_register_map();
+    let map = Arch::Amd64.register_map();
     clear_trap_flag(Arch::Amd64, &mut backend, &map).unwrap();
 
     assert_eq!(backend.get("eflags"), EFLAGS_BASE);
@@ -3800,7 +3798,7 @@ fn clear_trap_flag_trusts_a_stop_that_reports_no_residue() {
     let mut backend = MockBackend::default().reporting_trap_state(EFLAGS_BASE, DR6_BS);
     backend.set("eflags", TF | EFLAGS_BASE);
     backend.set("dr6", 0b1011 | DR6_BS);
-    let map = build_register_map();
+    let map = Arch::Amd64.register_map();
 
     clear_trap_flag(Arch::Amd64, &mut backend, &map).unwrap();
 
@@ -3815,7 +3813,7 @@ fn clear_trap_flag_still_writes_when_the_stop_reports_residue() {
     let mut backend = MockBackend::default().reporting_trap_state(TF | EFLAGS_BASE, DR6_BS);
     backend.set("eflags", TF | EFLAGS_BASE);
     backend.set("dr6", 0b1011 | DR6_BS);
-    let map = build_register_map();
+    let map = Arch::Amd64.register_map();
 
     clear_trap_flag(Arch::Amd64, &mut backend, &map).unwrap();
 
@@ -3830,7 +3828,7 @@ fn clear_trap_flag_skips_the_write_when_nothing_is_set() {
     backend.set("dr6", DR6_BS);
     let before = backend.regs.clone();
 
-    let map = build_register_map();
+    let map = Arch::Amd64.register_map();
     clear_trap_flag(Arch::Amd64, &mut backend, &map).unwrap();
 
     assert_eq!(backend.writes, 0);

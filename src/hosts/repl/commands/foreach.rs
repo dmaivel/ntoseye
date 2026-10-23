@@ -11,12 +11,11 @@ use std::sync::atomic::Ordering;
 
 use crate::base::error::Result;
 use crate::base::output;
+use crate::hosts::repl::commands::frames::print_indexed_stacktrace;
 use crate::nt::expr::Expr;
 use crate::nt::guest::ModuleInfo;
 use crate::nt::symbols::ModuleSymbolStatus;
 use crate::nt::target::{SelectedFrame, ThreadInfo};
-
-use crate::hosts::repl::commands::frames::print_indexed_stacktrace;
 use ntoseye_macros::command;
 
 use crate::hosts::repl::*;

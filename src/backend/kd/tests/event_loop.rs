@@ -253,7 +253,7 @@ fn continue_drains_in_place_rebreak_stale_breakin_and_retired_breakpoint_trap() 
             managed.iter().copied().collect(),
             HashSet::from([breakin]),
             HashSet::from([retired]),
-            amd64::build_register_map(),
+            Arch::Amd64.register_map(),
             None,
         )
     };
@@ -358,7 +358,7 @@ fn pump_absorbs_rebreak_after_continue_and_reports_real_stop() {
         HashSet::new(),
         HashSet::new(),
         HashSet::new(),
-        amd64::build_register_map(),
+        Arch::Amd64.register_map(),
         None,
     );
     let (tx, rx) = mpsc::channel();

@@ -14,12 +14,13 @@ use super::{
     modules::module_info_from_record,
     trustlet_layout::{MAX_FUNCTION_BYTES, TrustletLayout},
 };
+use crate::arch::Arch;
 use crate::{
     backend::phys::PhysMem,
     base::{
         error::{Error, Result},
         memory::{AddressSpace, MemoryOps, PAGE_SIZE},
-        types::{Arch, Dtb, PFN_MASK, PhysAddr, VirtAddr},
+        types::{Dtb, PFN_MASK, PhysAddr, VirtAddr},
     },
     nt::{symbols::SymbolStore, target::bounded_list_walk},
 };

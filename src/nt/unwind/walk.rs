@@ -7,8 +7,9 @@ use super::{
     FrameSource, MAX_UNWIND_FRAMES, RecoveredFrame, RecoveredStackTrace, RegisterContext,
     StackTracer, ThreadTraceContext, Unwound, expand_frame,
 };
+use crate::arch::Arch;
 use crate::{
-    base::types::{Arch, Dtb, VirtAddr},
+    base::types::{Dtb, VirtAddr},
     nt::{
         guest::{Guest, ModuleInfo},
         target::Target,

@@ -10,14 +10,13 @@ use crate::base::memory::PAGE_SIZE;
 use crate::base::types::{CodeMachine, VirtAddr};
 #[cfg(feature = "python")]
 use crate::hosts::python::command::PyArg;
+use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError, virtual_memory};
+use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::symbols::glob_matches;
 use crate::nt::target::MemoryKind;
 use crate::nt::unwind::{format_symbol, resolve_thread_trace_context};
 use crate::session::Session;
-
-use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError, virtual_memory};
-use crate::hosts::repl::*;
 
 use super::memory::MAX_DISASSEMBLY_INSTRUCTIONS;
 

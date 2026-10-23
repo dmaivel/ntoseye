@@ -13,12 +13,11 @@ use ntoseye_macros::command;
 
 use crate::base::diagnostics::print_warning;
 use crate::base::error::Result;
+use crate::hosts::repl::commands::foreach::{substitute, take_delimited};
+use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::expr::{Expr, NumberRadix};
 use crate::nt::target::{Target, UserVar};
-
-use crate::hosts::repl::commands::foreach::{substitute, take_delimited};
-use crate::hosts::repl::*;
 
 /// How often `.sleep` looks for Ctrl+C.
 const SLEEP_POLL: Duration = Duration::from_millis(50);

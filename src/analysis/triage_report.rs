@@ -13,6 +13,7 @@ mod whea;
 
 use ntoseye_macros::record;
 
+use crate::base::types::VirtAddr;
 use crate::nt::bugchecks::{
     BugcheckAnalysis, bugcheck_trap_frame_on_stack, fault_at_trap_frame, module_filename,
     trap_on_stack_is_the_fault,
@@ -20,8 +21,6 @@ use crate::nt::bugchecks::{
 use crate::nt::dmp::triage::TriagePrcbInfo;
 use crate::nt::dmp::{DmpException, DmpInfo, DmpSystemInfo, UnloadedDriver};
 use crate::nt::guest::ModuleInfo;
-
-use crate::base::types::VirtAddr;
 use crate::nt::unwind::{StackTrace, resolve_thread_trace_context};
 use crate::session::{RunStatus, Session};
 use blackbox::blackbox_findings;
@@ -674,8 +673,8 @@ fn names_match(left: &str, right: &str) -> bool {
 mod tests {
     use super::user::UserExceptionKind;
     use super::*;
-    use crate::backend::cpu_context::amd64::REGISTER_BUFFER_SIZE;
-    use crate::base::types::{Arch, VirtAddr};
+    use crate::arch::{Arch, amd64::REGISTER_BUFFER_SIZE};
+    use crate::base::types::VirtAddr;
     use crate::nt::bugchecks::{BugcheckArg, BugcheckFault};
     use crate::nt::dmp::DmpContext;
     use crate::nt::dmp::triage::TriageDriver;

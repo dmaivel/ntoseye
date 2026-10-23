@@ -4,9 +4,10 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use crate::arch::RegisterMap;
 use crate::backend::dbg_backend::{
     BackendCapability, ContinueDisposition, DebugBackend, DebugOutputPage, HwBreakpointAccess,
-    PciConfigAddress, ProcessorRead, RegisterMap, StopEvent, TebPath, TrapState,
+    PciConfigAddress, ProcessorRead, StopEvent, TebPath, TrapState,
 };
 use crate::backend::debugger_data::DebuggerDataCandidate;
 use crate::backend::phys::PhysMem;

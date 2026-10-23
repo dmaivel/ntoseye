@@ -6,12 +6,13 @@ use pelite::{PeView, image::IMAGE_SCN_MEM_EXECUTE};
 
 use super::journal::site_window;
 use super::{BreakpointInfo, BreakpointManager, BreakpointScope};
+use crate::arch::Arch;
 use crate::backend::dbg_backend::{DebugBackend, DebugCapability};
 use crate::backend::kd::api::DBGKD_WRITE_PHYSICAL_MEMORY;
 use crate::backend::phys::PhysMem;
 use crate::base::error::{Error, Result};
 use crate::base::memory::{AddressSpace, MemoryOps, PAGE_SIZE};
-use crate::base::types::{Arch, Dtb, VirtAddr};
+use crate::base::types::{Dtb, VirtAddr};
 use crate::nt::bugchecks::looks_like_kernel_pointer;
 use crate::nt::guest::ModuleInfo;
 use crate::nt::pe::read_pe_header_page;
@@ -649,7 +650,8 @@ fn user_patch_error(debugger: &Target, address: VirtAddr, error: Error) -> Error
 mod tests {
     use std::fs;
 
-    use crate::base::types::{Arch, VirtAddr};
+    use crate::arch::Arch;
+    use crate::base::types::VirtAddr;
     use crate::nt::breakpoints::test_backend::SlotRecorder;
     use crate::nt::breakpoints::{
         BreakpointConfig, BreakpointManager, BreakpointScope, SiteJournal,

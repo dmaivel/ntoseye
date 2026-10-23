@@ -2,6 +2,7 @@
 //! names, WOW64 PEBs, and mapping a user root back to its process.
 
 use super::{Guest, ProcessInfo};
+use crate::arch::Arch;
 use crate::{
     base::{
         bytes::{before_nul, read_u64},

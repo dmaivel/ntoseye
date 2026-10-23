@@ -357,7 +357,7 @@ fn amd64_contexts_are_checked_and_thread_streams_merge_by_thread_id() {
     let dump = open(&builder.finish()).unwrap();
     let threads = &dump.info().threads;
 
-    let map = amd64::build_register_map();
+    let map = Arch::Amd64.register_map();
     let registers = register_buffer(Arch::Amd64, threads[0].context.as_ref().unwrap());
     assert_eq!(map.read_u64("rip", &registers).unwrap(), 0x7ff9_4651_1344);
     assert_eq!(map.read_u64("rsp", &registers).unwrap(), 0xf3_5cfa_f788);
@@ -411,7 +411,7 @@ fn arm64_threads_and_the_exception_stream_carry_their_contexts() {
     let info = dump.info();
 
     assert_eq!(info.arch, Arch::Arm64);
-    let map = arm64::build_register_map();
+    let map = Arch::Arm64.register_map();
     let thread = register_buffer(Arch::Arm64, info.threads[0].context.as_ref().unwrap());
     assert_eq!(map.read_u64("pc", &thread).unwrap(), 0x7ffa_0000_1000);
 
@@ -713,7 +713,7 @@ fn an_arm64_stack_unwinds_through_jit_code_and_recursion() {
         ("lr".to_string(), RETURN),
     ]);
     let trace =
-        build_stacktrace_with_register_values(&target, &arm64::build_register_map(), &values, 8);
+        build_stacktrace_with_register_values(&target, &Arch::Arm64.register_map(), &values, 8);
     let frames: Vec<_> = trace
         .frames
         .iter()

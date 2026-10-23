@@ -3,9 +3,8 @@
 
 use std::collections::HashMap;
 
-use crate::backend::dbg_backend::{
-    DebugCapability, RegisterMap, processor_index_from_backend_thread_id,
-};
+use crate::arch::RegisterMap;
+use crate::backend::dbg_backend::{DebugCapability, processor_index_from_backend_thread_id};
 use crate::base::error::{Error, Result};
 use crate::base::memory::DTB_IDENTITY;
 use crate::base::types::VirtAddr;

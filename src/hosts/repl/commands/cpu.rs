@@ -5,10 +5,11 @@ use ntoseye_macros::{command, grammar};
 use owo_colors::OwoColorize;
 use tabled::builder::Builder;
 
+use crate::arch::Arch;
 use crate::backend::dbg_backend::processor_index_from_backend_thread_id;
 use crate::base::error::{Error, Result};
 use crate::base::output;
-use crate::base::types::{Arch, VirtAddr};
+use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError, FromArg};
 use crate::hosts::repl::*;
 use crate::hosts::ui;

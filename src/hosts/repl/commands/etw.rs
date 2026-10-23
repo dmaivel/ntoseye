@@ -8,6 +8,8 @@ use ntoseye_macros::{command, grammar};
 
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
+use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
+use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::target::etw::dump::{EtwDumpData, EtwDumpLogger};
 use crate::nt::target::etw::{
@@ -17,9 +19,6 @@ use crate::nt::target::etw::{
     format_guid, logger_mode_names,
 };
 use crate::session::Session;
-
-use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
-use crate::hosts::repl::*;
 
 /// Payload bytes `!wmitrace.logdump` prints per event.
 const PAYLOAD_DISPLAY_BYTES: usize = 256;

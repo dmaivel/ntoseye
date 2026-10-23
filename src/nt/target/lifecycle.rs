@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::{ExpressionScope, ReloadReport, StartupMessage, Target, UserProcess};
+use crate::arch::Arch;
 use crate::{
     backend::{
         debugger_data::{
@@ -17,7 +18,7 @@ use crate::{
         error::{Error, Result},
         memory::{DTB_IDENTITY, MemoryOps},
         notice::Notice,
-        types::{Arch, Dtb, KernelLocation, VirtAddr},
+        types::{Dtb, KernelLocation, VirtAddr},
     },
     nt::{
         dmp::DmpInfo,

@@ -4,10 +4,11 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
+use crate::arch::Arch;
 use crate::base::bytes;
 use crate::base::error::{Error, Result};
 use crate::base::memory::PAGE_SIZE;
-use crate::base::types::{Arch, Dtb, PhysAddr, VirtAddr};
+use crate::base::types::{Dtb, PhysAddr, VirtAddr};
 
 use super::registers::KSPECIAL_REGISTERS_CR3_OFFSET;
 use super::{KD_REQUEST_TIMEOUT, KdBackend, api, with_framing_read_timeout};

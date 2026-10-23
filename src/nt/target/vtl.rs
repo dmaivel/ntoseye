@@ -8,13 +8,14 @@ use std::sync::Arc;
 use pelite::PeView;
 
 use super::{SelectedFrame, Target};
+use crate::arch::Arch;
 use crate::{
     backend::{dbg_backend::processor_index_from_backend_thread_id, phys::PhysMem},
     base::{
         disasm::{self, DisasmRow},
         error::{Error, Result},
         memory::{AddressSpace, MemoryOps, PAGE_SIZE},
-        types::{Arch, CodeMachine, Dtb, Keyed, PhysAddr, VirtAddr},
+        types::{CodeMachine, Dtb, Keyed, PhysAddr, VirtAddr},
     },
     nt::{
         cpu_state::kpcr_for_processor,

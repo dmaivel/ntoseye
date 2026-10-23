@@ -4,12 +4,13 @@ This page is for contributors. It describes how one definition serves the REPL, 
 
 ## Layers
 
-The crate is six layers. `src/lib.rs` declares them bottom to top, and each is a folder with a layer file (`src/nt.rs` declares the modules in `src/nt/`). A module may use its own layer and the layers before it, never a later one:
+The crate is six layers. `src/lib.rs` declares them bottom to top, and each is a folder with a layer file (`src/nt.rs` declares the modules in `src/nt/`), except that the base layer has a second folder, `src/arch/`: the base reads page tables and decodes instructions through it, so the two use each other. A module may use its own layer and the layers before it, never a later one:
 
 | Layer | Modules | What it is |
 | --- | --- | --- |
 | `base` | `bytes`, `error`, `notice`, `output`, `diagnostics`, `types`, `ntstatus`, `time`, `memory`, `disasm` | Byte and text helpers, errors, notices and output, the core types, memory access, the disassembler |
-| `backend` | `dbg_backend`, `kd`, `gdb`, `host`, `phys`, `memory_backend`, `partition_backend`, `cpu_context`, `debugger_data` | The debug transports and memory sources, and the register and debugger-data formats they speak |
+| `base` (`arch`) | `arch`, with `amd64`, `arm64` and `registers` inside it | What ntoseye knows about each CPU architecture, behind the `Architecture` trait; the register map |
+| `backend` | `dbg_backend`, `kd`, `gdb`, `host`, `phys`, `memory_backend`, `partition_backend`, `debugger_data` | The debug transports and memory sources, and the debugger-data format they speak |
 | `nt` | `target`, `guest`, `layout`, `symbols`, `pe`, `unwind`, `trapframe`, `cpu_state`, `kuser_shared`, `wpp`, `dmp`, `userdump`, `dump_writer`, `breakpoints`, `bugchecks`, `expr` | The Windows model over a backend, with its dump formats, breakpoints and expressions |
 | `session` | `session`, with `exception_policy`, `typeview` and `dump` inside it | A debugging session: run control, stops, inspection |
 | `analysis` | `blackbox`, `triage_report` | Reports built over a session (`!analyze`, `!blackbox`) |

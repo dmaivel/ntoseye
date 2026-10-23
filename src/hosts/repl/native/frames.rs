@@ -4,10 +4,9 @@ use tern_sdk::View;
 use tern_sdk::ui::{self, Align, Column, Gap, Node, Span, Table, TableRow, Wrap};
 
 use super::{CHANGED, MUTED, addr, code, span, stack, symbol};
-use crate::backend::cpu_context::general_registers;
+use crate::arch::Arch;
 use crate::base::disasm::DisasmRow;
 use crate::base::output::strip_ansi;
-use crate::base::types::Arch;
 use crate::hosts::repl::commands::display;
 use crate::hosts::repl::{StackColumns, format_rflags};
 use crate::nt::trapframe::{KtrapFrame, KtrapFrameData, TrapKind};
@@ -123,7 +122,7 @@ pub fn register_grid(
             .collect()
     };
 
-    let [names @ .., flag_register] = general_registers(arch) else {
+    let [names @ .., flag_register] = arch.general_registers() else {
         return register_table(&[]);
     };
     let flag_register = *flag_register;
@@ -210,7 +209,7 @@ pub fn displays(shown: &[display::Shown]) -> Node {
 /// The general-purpose registers `changed` since the last stop, in the
 /// grid's order.
 pub fn changed_registers(arch: Arch, changed: &dyn Fn(&str) -> bool) -> Vec<&'static str> {
-    general_registers(arch)
+    arch.general_registers()
         .iter()
         .copied()
         .filter(|name| changed(name))

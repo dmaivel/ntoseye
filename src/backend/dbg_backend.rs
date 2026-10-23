@@ -5,15 +5,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ntoseye_macros::record;
 
+use crate::arch::{Arch, RegisterMap};
 use crate::backend::debugger_data::DebuggerDataCandidate;
 use crate::backend::phys::PhysMem;
 use crate::base::error::{Error, Result};
-use crate::base::types::{Arch, KernelLocation, VirtAddr};
+use crate::base::types::{KernelLocation, VirtAddr};
 
 pub mod debug_registers;
-mod registers;
-
-pub use registers::{RegisterInfo, RegisterMap, push_arm64_aliases, repeats_another_register};
 
 /// A captured line of guest debug output (DbgPrint, kernel printf).
 #[record]

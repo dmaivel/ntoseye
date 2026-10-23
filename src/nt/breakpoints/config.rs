@@ -8,8 +8,9 @@ use super::{
     BreakpointConfig, BreakpointInfo, BreakpointManager, BreakpointScope, HypercallFilter,
     PartitionFilter, ThreadScope,
 };
+use crate::arch::Arch;
 use crate::base::error::{Error, Result};
-use crate::base::types::{Arch, VirtAddr};
+use crate::base::types::VirtAddr;
 use crate::nt::expr::Expr;
 use crate::nt::guest::{
     ProcessInfo,

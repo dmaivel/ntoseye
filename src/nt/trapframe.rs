@@ -5,9 +5,10 @@
 //! parameters. The layout is taken from the PDB rather than hardcoded, so
 //! decoding tracks whatever build the guest is running.
 
+use crate::arch::Arch;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
-use crate::base::types::{Arch, Dtb, VirtAddr};
+use crate::base::types::{Dtb, VirtAddr};
 use crate::nt::layout::{FieldInfo, TypeInfo, le_uint};
 use crate::nt::target::pool::kernel_symbol_address;
 use crate::nt::target::{Amd64SavedRegisters, Arm64SavedRegisters, SavedThreadRegisters, Target};

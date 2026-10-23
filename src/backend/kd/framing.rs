@@ -7,9 +7,8 @@ use std::io::{ErrorKind, Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::base::error::{Error, Result};
-
 use crate::base::bytes::{read_u16, read_u32};
+use crate::base::error::{Error, Result};
 
 pub const DATA_PACKET_LEADER: u32 = 0x30303030;
 pub const CONTROL_PACKET_LEADER: u32 = 0x69696969;

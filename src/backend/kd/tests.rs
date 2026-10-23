@@ -4,7 +4,7 @@ use std::io::{Cursor, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::thread::{JoinHandle, spawn};
 
-use crate::backend::cpu_context::{amd64, arm64};
+use crate::arch::{amd64, arm64};
 use crate::backend::kd::connect::MEMORY_OVER_KD_CHOSEN;
 use crate::backend::kd::framing::{
     HEADER_SIZE, Header, INITIAL_PACKET_ID, PACKET_TYPE_KD_ACKNOWLEDGE,
@@ -174,7 +174,7 @@ fn kd_backend_with_pump(pump: PumpHandle, breakin_clone: UnixStream) -> KdBacken
         link: Link::RunningPumped(pump),
         breakin_clone: breakin_clone.into(),
         backend_name: "kd",
-        register_map: amd64::build_register_map(),
+        register_map: Arch::Amd64.register_map(),
         arch: Arch::Amd64,
         kernel_dtb_override: 0,
         teb_path: None,
@@ -224,7 +224,7 @@ fn kd_backend_with_framing(host: UnixStream) -> KdBackend {
         link: Link::RunningInline(KdFraming::new(host.into())),
         breakin_clone: breakin_clone.into(),
         backend_name: "kd",
-        register_map: amd64::build_register_map(),
+        register_map: Arch::Amd64.register_map(),
         arch: Arch::Amd64,
         kernel_dtb_override: 0,
         teb_path: None,

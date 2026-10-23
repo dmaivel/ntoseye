@@ -148,6 +148,9 @@ impl TargetSpec {
 #[macro_use]
 pub mod base;
 
+/// What ntoseye knows about each CPU architecture: part of the base layer.
+pub mod arch;
+
 /// The debug transports: KD, the GDB stub, host and partition memory.
 pub mod backend;
 

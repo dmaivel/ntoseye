@@ -2,6 +2,7 @@
 //! header and section reads, the export directory, version resources, and
 //! mapping an on-disk image file to its in-memory layout.
 
+use crate::arch::{IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64, IMAGE_FILE_MACHINE_I386};
 use crate::base::{
     bytes::{get_u16, get_u32, read_u16, read_u32},
     error::{Error, Result},

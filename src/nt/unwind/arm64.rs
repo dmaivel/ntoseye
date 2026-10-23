@@ -10,7 +10,7 @@ use ntoseye_macros::record;
 use super::amd64::{DynamicCode, EntryLookup, RuntimeFunction, Unwind, UnwindBytes, UnwindHandler};
 use super::{RegisterContext, StackTracer, Unwound, image_u32, runtime_functions};
 use crate::{
-    backend::cpu_context::arm64::{OFFSET_PC, OFFSET_SP, OFFSET_X0},
+    arch::arm64::{OFFSET_PC, OFFSET_SP, OFFSET_X0},
     base::types::{CodeMachine, VirtAddr},
     nt::{
         pe::{CodeLayout, PeImage},

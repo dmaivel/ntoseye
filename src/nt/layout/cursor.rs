@@ -3,11 +3,12 @@ use std::sync::Arc;
 use zerocopy::{FromBytes, IntoBytes};
 
 use super::{ParsedType, TypeInfo, le_uint};
+use crate::arch::Arch;
 use crate::backend::phys::PhysMem;
 use crate::base::bytes::utf16le_lossy;
 use crate::base::error::{Error, Result};
 use crate::base::memory::{AddressSpace, MemoryOps};
-use crate::base::types::{Arch, Dtb, VirtAddr};
+use crate::base::types::{Dtb, VirtAddr};
 use crate::nt::symbols::SymbolStore;
 use crate::nt::target::ListCursor;
 

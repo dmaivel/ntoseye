@@ -4,9 +4,10 @@
 #[cfg(test)]
 use super::BreakpointScope;
 use super::{BreakpointHitDisposition, BreakpointHitResult, BreakpointManager};
+use crate::arch::Arch;
 use crate::backend::dbg_backend::DebugBackend;
 use crate::base::error::{Error, Result};
-use crate::base::types::{Arch, VirtAddr};
+use crate::base::types::VirtAddr;
 use crate::nt::target::Target;
 
 impl BreakpointManager {
@@ -124,8 +125,9 @@ impl BreakpointManager {
 
 #[cfg(test)]
 mod tests {
+    use crate::arch::Arch;
     use crate::backend::dbg_backend::HwBreakpointAccess;
-    use crate::base::types::{Arch, VirtAddr};
+    use crate::base::types::VirtAddr;
     use crate::nt::breakpoints::install::{BreakpointBackend, BreakpointPatch};
     use crate::nt::breakpoints::test_backend::SlotRecorder;
     use crate::nt::breakpoints::{

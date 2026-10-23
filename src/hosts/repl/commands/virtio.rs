@@ -9,6 +9,7 @@ use tabled::builder::Builder;
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
+use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::target::Target;
 use crate::nt::target::virtio::{
@@ -19,8 +20,6 @@ use crate::nt::target::virtio::{
 };
 use crate::nt::target::virtio_request::{RequestKind, request_kind, request_kind_named};
 use crate::session::Session;
-
-use crate::hosts::repl::*;
 
 /// List the virtio devices and the state of their virtqueues.
 ///

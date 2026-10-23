@@ -2,13 +2,13 @@
 //! that thread, processor, hypercall-caller, pass-count, or condition
 //! filters reject.
 
+use crate::arch::{Arch, RegisterMap};
 use crate::backend::dbg_backend::{
-    ContinueDisposition, DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, RegisterMap,
-    StopEvent, debug_registers, processor_index_from_backend_thread_id,
+    ContinueDisposition, DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, StopEvent,
+    debug_registers, processor_index_from_backend_thread_id,
 };
 use crate::base::error::{Error, Result};
 use crate::base::notice::Notice;
-use crate::base::types::Arch;
 use crate::nt::breakpoints::{
     BreakpointHitDisposition, BreakpointHitResult, BreakpointInfo, BreakpointManager, ThreadScope,
 };

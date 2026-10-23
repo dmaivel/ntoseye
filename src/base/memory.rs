@@ -1,3 +1,4 @@
+use crate::arch::Arch;
 use crate::base::error::{Error, Result};
 use crate::base::types::*;
 use std::collections::HashMap;

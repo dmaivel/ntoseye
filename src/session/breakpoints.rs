@@ -4,6 +4,7 @@
 use std::mem::take;
 use std::sync::Arc;
 
+use crate::arch::Arch;
 use crate::backend::dbg_backend::{
     BugcheckInfo, DebugCapability, HwBreakpointAccess, ModuleEvent, WatchpointAccess,
 };
@@ -11,7 +12,7 @@ use crate::backend::partition_backend::PartitionBackend;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::notice::Notice;
-use crate::base::types::{Arch, VirtAddr};
+use crate::base::types::VirtAddr;
 use crate::nt::breakpoints::{
     BreakpointConfig, BreakpointInfo, BreakpointManager, BreakpointScope, BreakpointSpec,
     HypercallFilter, ThreadScope, lift_target_site, plant_target_site,

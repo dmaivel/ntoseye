@@ -2,10 +2,10 @@
 //! `KSPECIAL_REGISTERS` as one transaction; the bit encoding is
 //! [`debug_registers`].
 
+use crate::arch::Arch;
 use crate::backend::dbg_backend::{DebugBackend, HwBreakpointAccess, debug_registers};
 use crate::base::bytes;
 use crate::base::error::{Error, Result};
-use crate::base::types::Arch;
 
 use super::KdBackend;
 use super::registers::{

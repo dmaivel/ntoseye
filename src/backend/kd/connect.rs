@@ -6,13 +6,14 @@ use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::arch::{Arch, machine_name};
 use crate::backend::dbg_backend::DebugLog;
 use crate::backend::debugger_data::{DebuggerDataCandidate, MetadataSource};
 use crate::backend::kd::framing::KdFraming;
 use crate::base::bytes;
 use crate::base::error::{Error, Result};
 use crate::base::memory::{AddressSpace, MemoryOps, TranslationCache};
-use crate::base::types::{Arch, Dtb, PhysAddr, VirtAddr, machine_name};
+use crate::base::types::{Dtb, PhysAddr, VirtAddr};
 
 use super::breakpoints::{
     breakpoint_instruction_at, reclaimed_breakpoints_notice, restore_unowned_breakpoint_handles,
@@ -28,7 +29,6 @@ use super::{
     kd_initial_timeout, kd_socket_connect_error, poll_for_initial_break, probe_initial_request,
     with_framing_read_timeout,
 };
-use crate::backend::cpu_context::{amd64, arm64};
 
 /// [`KdBackend::running_reason`] when the operator picked `--memory-source kd`.
 pub(super) const MEMORY_OVER_KD_CHOSEN: &str = "Guest memory is read over KD on this session, and KD only \
@@ -132,8 +132,8 @@ impl KdBackend {
         };
         let arch = detect_arch(version.machine_type)?;
         let register_map = match arch {
-            Arch::Amd64 => amd64::build_register_map(),
-            Arch::Arm64 => arm64::build_register_map(),
+            Arch::Amd64 => Arch::Amd64.register_map(),
+            Arch::Arm64 => Arch::Arm64.register_map(),
         };
         // The first state-change often arrives with KD's SYNC bit set. That is
         // the baseline connection, not a target reload for the REPL to surface.

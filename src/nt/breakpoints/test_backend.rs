@@ -2,7 +2,8 @@
 
 use std::time::Duration;
 
-use crate::backend::dbg_backend::{DebugBackend, RegisterMap, StopEvent};
+use crate::arch::RegisterMap;
+use crate::backend::dbg_backend::{DebugBackend, StopEvent};
 use crate::base::error::{Error, Result};
 
 /// Backend stub that records which backend slots `clear_hardware_breakpoint`

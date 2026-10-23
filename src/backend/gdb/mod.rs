@@ -4,13 +4,13 @@ use std::net::TcpStream;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
+use crate::arch::{Arch, RegisterInfo, RegisterMap, registers::push_synonyms};
 use crate::backend::dbg_backend::{
-    DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, PciConfigAddress, RegisterInfo,
-    RegisterMap, STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent, push_arm64_aliases,
+    DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, PciConfigAddress,
+    STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent,
 };
 use crate::backend::phys::HaltClock;
 use crate::base::error::{Error, Result};
-use crate::base::types::Arch;
 
 mod target_xml;
 
@@ -1253,7 +1253,7 @@ impl GdbClient {
     /// Only the registers the `g` packet actually carries can be addressed by
     /// offset into its reply, so the description is cut to that length and
     /// the few system registers ntoseye needs are appended behind it, read
-    /// individually. ARM64 also gets the x64 spellings the shared code uses.
+    /// individually. Each register also answers to its synonyms.
     fn build_register_map(&mut self, description: &RegisterMap) -> Result<RegisterMap> {
         let g_bytes = GdbClient::read_registers(self)?.len();
         let mut registers: Vec<RegisterInfo> = description
@@ -1262,16 +1262,16 @@ impl GdbClient {
             .filter(|reg| reg.offset + reg.size <= g_bytes)
             .cloned()
             .collect();
+        push_synonyms(&mut registers, self.arch.register_synonyms()).map_err(|missing| {
+            Error::UnsupportedArchitecture(format!(
+                "the stub's {} description has no `{missing}` register",
+                self.arch.label()
+            ))
+        })?;
 
         match self.arch {
             Arch::Amd64 => {}
             Arch::Arm64 => {
-                push_arm64_aliases(&mut registers).map_err(|missing| {
-                    Error::UnsupportedArchitecture(format!(
-                        "the stub's AArch64 description has no `{missing}` register"
-                    ))
-                })?;
-
                 let mut offset = g_bytes;
                 for (name, system_register) in ARM64_SYSTEM_REGISTERS {
                     let Some(source) = description
@@ -1612,10 +1612,11 @@ mod tests {
         GdbClient, HaltCache, PacketReadState, RegisterMap, StopReply, StubFeatures, append_packet,
         description_arch, holds_stop_reply,
     };
-    use crate::backend::dbg_backend::{DebugBackend, HwBreakpointAccess, RegisterInfo};
+    use crate::arch::{Arch, RegisterInfo};
+    use crate::backend::dbg_backend::{DebugBackend, HwBreakpointAccess};
     use crate::backend::phys::HaltClock;
     use crate::base::error::Error;
-    use crate::base::types::{Arch, VirtAddr};
+    use crate::base::types::VirtAddr;
     use crate::nt::breakpoints::{BreakpointConfig, BreakpointManager};
     use crate::session::{hits::hardware_breakpoint_hit, session_over_memory};
 

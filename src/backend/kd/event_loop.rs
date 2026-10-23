@@ -8,7 +8,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::transport::KdTransport;
-use crate::backend::dbg_backend::{DebugLog, RegisterMap};
+use crate::arch::{Arch, RegisterMap, amd64, arm64};
+use crate::backend::dbg_backend::DebugLog;
 use crate::backend::kd::api;
 use crate::backend::kd::framing::{
     KdFraming, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO, PACKET_TYPE_KD_STATE_CHANGE64,
@@ -16,7 +17,7 @@ use crate::backend::kd::framing::{
 use crate::backend::kd::trace_enabled;
 use crate::base::bytes::{read_u16, read_u32, read_u64};
 use crate::base::error::{Error, Result};
-use crate::base::types::{Arch, VirtAddr};
+use crate::base::types::VirtAddr;
 
 use super::breakpoints::breakpoint_instruction_at;
 use super::registers::{
@@ -29,7 +30,6 @@ use super::{
     KD_RECONNECT_BREAKIN_INTERVAL, KD_RECONNECT_BREAKIN_TRACE_EVERY, KD_REQUEST_TIMEOUT, PUMP_POLL,
     STATUS_BREAKPOINT, StateChange, handle_debug_io_with_output, handle_file_io,
 };
-use crate::backend::cpu_context::{amd64, arm64};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitialHandshakeStimulus {
@@ -939,7 +939,7 @@ mod tests {
 
     #[test]
     fn advance_pc_refuses_a_program_counter_that_moved_since_the_decision() {
-        let register_map = amd64::build_register_map();
+        let register_map = Arch::Amd64.register_map();
         let mut guest_context = vec![0u8; amd64::CONTEXT_SIZE];
         register_map
             .write_u64("rip", &mut guest_context, 0xffff_f800_0011_2233)

@@ -11,6 +11,8 @@ use ntoseye_macros::{command, grammar};
 
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
+use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError, FromArg};
+use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::target::irpfind::{IrpCriteria, IrpCriteriaKind, IrpFindDetail, IrpPool};
 use crate::nt::target::object::{
@@ -20,9 +22,6 @@ use crate::nt::target::object::{
 };
 use crate::nt::target::{Target, irp_major_function_name, irp_minor_function_name};
 use crate::session::Session;
-
-use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError, FromArg};
-use crate::hosts::repl::*;
 
 /// A kernel address as its nearest symbol (styled), or the bare address
 /// when nothing resolves.

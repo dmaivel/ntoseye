@@ -11,6 +11,8 @@ use ntoseye_macros::{command, grammar};
 use crate::base::error::{Error, Result};
 use crate::base::memory::PAGE_SIZE;
 use crate::base::types::VirtAddr;
+use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
+use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::expr::Expr;
 use crate::nt::guest::{ModuleInfo, ProcessInfo};
@@ -23,9 +25,6 @@ use crate::nt::target::usermode::address::{
     state_label, type_label,
 };
 use crate::nt::target::{MemoryKind, TargetKind};
-
-use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
-use crate::hosts::repl::*;
 use crate::session::Session;
 
 pub const PAGE_SHIFT: u32 = PAGE_SIZE.trailing_zeros();

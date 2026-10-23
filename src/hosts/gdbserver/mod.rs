@@ -46,10 +46,10 @@ use gdbstub::target::ext::section_offsets::SectionOffsetsOps;
 use gdbstub::target::ext::target_description_xml_override::TargetDescriptionXmlOverrideOps;
 
 use crate::TargetSpec;
+use crate::arch::Arch;
 use crate::backend::dbg_backend::DebugCapability;
 use crate::backend::gdb::{append_packet, trace_packet};
 use crate::base::error::{Error, Result};
-use crate::base::types::Arch;
 use crate::hosts::repl::{ReplStore, open_session, supports_capability};
 use crate::hosts::termination;
 use crate::session::{Cancel, Motion, Session, Stop};

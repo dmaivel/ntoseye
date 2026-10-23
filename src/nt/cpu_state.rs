@@ -4,7 +4,7 @@
 
 use std::mem::offset_of;
 
-use crate::backend::cpu_context::{amd64, arm64};
+use crate::arch::{amd64, arm64};
 use crate::backend::dbg_backend::TebPath;
 use crate::backend::debugger_data::KdDebuggerData64;
 use crate::base::error::{Error, Result};

@@ -1,11 +1,11 @@
 //! Register access on the halted processors: the `CONTEXT`, the
 //! `KSPECIAL_REGISTERS` control space and MSRs, cached per halt.
 
-use crate::backend::cpu_context::{amd64, arm64};
+use crate::arch::{Arch, amd64, arm64};
 use crate::backend::dbg_backend::{TebPath, debug_registers};
 use crate::base::bytes;
 use crate::base::error::{Error, Result};
-use crate::base::types::{Arch, VirtAddr};
+use crate::base::types::VirtAddr;
 
 use super::{
     KD_REQUEST_TIMEOUT, KdBackend, STATUS_SINGLE_STEP, api, trace_enabled,

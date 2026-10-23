@@ -9,9 +9,8 @@
 
 use std::fmt::Write as _;
 
-use crate::backend::dbg_backend::RegisterMap;
+use crate::arch::{Arch, RegisterMap};
 use crate::base::error::{Error, Result};
-use crate::base::types::Arch;
 
 struct WireRegister {
     name: String,
@@ -328,8 +327,7 @@ fn arm64() -> Vec<WireRegister> {
 #[cfg(test)]
 mod tests {
     use super::Layout;
-    use crate::backend::cpu_context::amd64::{REGISTER_BUFFER_SIZE, build_register_map};
-    use crate::base::types::Arch;
+    use crate::arch::{Arch, amd64::REGISTER_BUFFER_SIZE};
 
     /// Byte offset of a register on the wire: its position in the AMD64
     /// description (rax..r15, rip, eflags, six segments, eight x87 stack
@@ -377,7 +375,7 @@ mod tests {
     /// into every register after the first mismatch.
     #[test]
     fn kd_register_file_encodes_at_gdb_offsets() {
-        let map = build_register_map();
+        let map = Arch::Amd64.register_map();
         let mut file = vec![0u8; REGISTER_BUFFER_SIZE];
         map.write_u64("rip", &mut file, 0xffff_f800_1234_5678)
             .unwrap();
@@ -413,7 +411,7 @@ mod tests {
     /// offsets and widths, skipping what the transport lacks.
     #[test]
     fn register_payload_round_trips_through_the_kd_file() {
-        let map = build_register_map();
+        let map = Arch::Amd64.register_map();
         let mut file = vec![0u8; REGISTER_BUFFER_SIZE];
         map.write_u64("rsp", &mut file, 0xffff_8000_0000_1000)
             .unwrap();
@@ -440,7 +438,7 @@ mod tests {
     /// stays and reads as unavailable.
     #[test]
     fn optional_registers_the_transport_lacks_are_not_described() {
-        let map = build_register_map();
+        let map = Arch::Amd64.register_map();
         let xml = Layout::new(Arch::Amd64, &map).target_xml().to_string();
         for absent in ["\"fs_base\"", "\"gs_base\"", "\"k_gs_base\""] {
             assert!(!xml.contains(absent), "{absent} described");

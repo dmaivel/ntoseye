@@ -14,7 +14,7 @@ use gdbstub::target::ext::target_description_xml_override::TargetDescriptionXmlO
 use gdbstub::target::{TargetError, TargetResult};
 use pelite::PeView;
 
-use crate::base::types::Arch;
+use crate::arch::Arch;
 use crate::nt::guest::ModuleInfo;
 use crate::nt::pe::{HeaderPage, image_base};
 use crate::session::VcpuInfo;
@@ -389,7 +389,7 @@ impl SectionOffsets for GdbTarget<'_> {
 #[cfg(test)]
 mod tests {
     use super::{address_layout, library_list_xml, memory_map_xml, proc_maps};
-    use crate::base::types::Arch;
+    use crate::arch::Arch;
 
     /// IDA subtracts 0x1000 from an x86 library's segment address before
     /// rebasing (gdb's PE convention) and takes ARM64's as the image base. A

@@ -14,10 +14,9 @@ use super::{
     UserDumpInfo, UserException, UserHandle, UserModule, UserSystemInfo, UserThreadInfo,
     UserThreadTimes, UserTimeZone,
 };
-use crate::backend::cpu_context::{amd64, arm64};
+use crate::arch::{Arch, amd64, arm64};
 use crate::base::bytes::{utf16le_lossy, utf16le_nul_terminated};
 use crate::base::error::{Error, Result};
-use crate::base::types::Arch;
 use crate::nt::pe::headers::{MAX_CODEVIEW_BYTES, decode_codeview};
 
 /// `MINIDUMP_SIGNATURE`: "MDMP" read as a little-endian `u32`.

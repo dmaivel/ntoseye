@@ -4,10 +4,10 @@
 
 use std::collections::HashSet;
 
+use crate::arch::Arch;
 use crate::backend::kd::framing::KdFraming;
 use crate::base::error::{Error, Result};
 use crate::base::notice::Notice;
-use crate::base::types::Arch;
 
 use super::transport::KdTransport;
 use super::{

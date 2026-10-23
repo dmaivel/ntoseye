@@ -6,9 +6,9 @@ use std::time::Duration;
 use memmap2::Mmap;
 use zerocopy::FromBytes;
 
-use crate::backend::cpu_context::{amd64, arm64};
+use crate::arch::{Arch, RegisterMap, amd64, arm64, machine_name};
 use crate::backend::dbg_backend::{
-    BackendCapability, DebugBackend, DebugCapability, RegisterMap, StopEvent,
+    BackendCapability, DebugBackend, DebugCapability, StopEvent,
     processor_index_from_backend_thread_id,
 };
 use crate::backend::debugger_data::{DebuggerDataCandidate, MetadataSource};
@@ -18,7 +18,7 @@ use crate::base::memory::{MemoryOps, PAGE_SIZE};
 use crate::base::notice::Notice;
 use crate::base::ntstatus::exception_code_name;
 use crate::base::time::filetime_to_iso;
-use crate::base::types::{Arch, MAX_PROCESSORS, PhysAddr, VirtAddr, machine_name};
+use crate::base::types::{MAX_PROCESSORS, PhysAddr, VirtAddr};
 
 pub mod parse;
 pub mod structs;
@@ -785,8 +785,8 @@ impl DmpBackend {
     pub fn new(info: &DmpInfo) -> Self {
         let arch = info.context.arch();
         let register_map = match arch {
-            Arch::Arm64 => arm64::build_register_map(),
-            Arch::Amd64 => amd64::build_register_map(),
+            Arch::Arm64 => Arch::Arm64.register_map(),
+            Arch::Amd64 => Arch::Amd64.register_map(),
         };
         let n = info.number_processors.max(1) as usize;
 
@@ -1026,7 +1026,7 @@ impl DebugBackend for DmpBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base::types::{
+    use crate::arch::{
         IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64, IMAGE_FILE_MACHINE_I386,
     };
 
@@ -1068,7 +1068,7 @@ mod tests {
         assert_eq!(arm.bcr[0], 0x0000_e9e1);
         assert_eq!(arm.wvr[0], 0x4000);
 
-        let map = arm64::build_register_map();
+        let map = Arch::Arm64.register_map();
         let data = context.to_register_buffer(0x1234_5000);
         assert_eq!(map.read_u64("x0", &data).unwrap(), arm.x[0]);
         assert_eq!(map.read_u64("pc", &data).unwrap(), arm.pc);

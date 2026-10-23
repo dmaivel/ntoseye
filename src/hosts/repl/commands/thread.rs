@@ -12,15 +12,14 @@ use ntoseye_macros::{command, grammar};
 use crate::backend::dbg_backend::processor_index_from_backend_thread_id;
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
+use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError, Current, FromArg};
+use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::bugchecks::looks_like_kernel_pointer;
 use crate::nt::target::sched::ThreadDetail;
 use crate::nt::target::{ThreadInfo, kthread_state_name, wait_reason_name};
 use crate::nt::unwind::ThreadStackSource;
 use crate::session::{Session, ThreadContext};
-
-use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError, Current, FromArg};
-use crate::hosts::repl::*;
 
 use super::process::{display_decimal, display_pointer};
 
@@ -350,6 +349,7 @@ impl ReplState<'_> {
                     if let Some(frame) = self.ctx.target.selected_frame.as_ref() {
                         print_sparse_registers(
                             &frame.registers,
+                            self.ctx.target.arch(),
                             Some(&format!("registers ({source}):")),
                             4,
                         );

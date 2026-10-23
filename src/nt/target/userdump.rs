@@ -7,13 +7,13 @@
 use std::collections::HashMap;
 
 use super::Target;
+use crate::arch::{Arch, RegisterMap};
 use crate::{
-    backend::dbg_backend::RegisterMap,
     base::{
         error::{Error, Result},
         memory::MemoryOps,
         ntstatus::ntstatus_name,
-        types::{Arch, VirtAddr},
+        types::VirtAddr,
     },
     nt::{
         guest::ModuleInfo,

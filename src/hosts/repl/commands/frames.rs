@@ -2,14 +2,17 @@ use std::collections::HashMap;
 
 use owo_colors::OwoColorize;
 
-use crate::backend::dbg_backend::{RegisterMap, processor_index_from_backend_thread_id};
+use crate::arch::{Arch, RegisterMap};
+use crate::backend::dbg_backend::processor_index_from_backend_thread_id;
 use crate::base::diagnostics;
 use crate::nt::bugchecks::{bugcheck_trap_frame_address, looks_like_kernel_pointer};
 use ntoseye_macros::{command, grammar};
 
 use crate::base::error::{Error, Result};
 use crate::base::ntstatus::exception_code_name;
-use crate::base::types::{Arch, VirtAddr};
+use crate::base::types::VirtAddr;
+use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError, virtual_memory};
+use crate::hosts::repl::*;
 use crate::nt::target::{MemoryKind, SavedThreadRegisters, SelectedFrame, lookup_register};
 use crate::nt::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current, trap_frame_rip_symbol};
 use crate::nt::unwind::{
@@ -19,9 +22,6 @@ use crate::nt::unwind::{
 };
 use crate::session::effects::{Effects, Writes};
 use crate::session::{ExceptionRecord, Session};
-
-use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError, virtual_memory};
-use crate::hosts::repl::*;
 
 const MAX_FRAME_INDEX: usize = 4095;
 
@@ -53,7 +53,7 @@ pub struct FrameLine {
 
 /// The `.frame` text: the frame row, its frame base, and with
 /// `show_registers` the frame's registers.
-fn print_frame_line(line: &FrameLine, frame: &SelectedFrame, show_registers: bool) {
+fn print_frame_line(line: &FrameLine, frame: &SelectedFrame, arch: Arch, show_registers: bool) {
     let tag = if line.inline {
         format!("  {}", inline_tag())
     } else {
@@ -75,7 +75,7 @@ fn print_frame_line(line: &FrameLine, frame: &SelectedFrame, show_registers: boo
         outln!("  frame base {}", ui::addr(base));
     }
     if show_registers {
-        print_sparse_registers(&frame.registers, Some("  registers:"), 4);
+        print_sparse_registers(&frame.registers, arch, Some("  registers:"), 4);
     }
     outln!();
 }
@@ -620,7 +620,7 @@ fn registers(
                 outln!("{}", shown.join("  "));
             }
         } else {
-            print_sparse_registers(&frame.registers, None, 2);
+            print_sparse_registers(&frame.registers, state.ctx.target.arch(), None, 2);
         }
         outln!();
         return Ok(());
@@ -1047,19 +1047,21 @@ impl ReplState<'_> {
     }
 
     pub fn print_selected_frame(&self, frame: &SelectedFrame, show_registers: bool) {
-        print_frame_line(&self.frame_line(frame), frame, show_registers);
+        let arch = self.ctx.target.arch();
+        print_frame_line(&self.frame_line(frame), frame, arch, show_registers);
     }
 
     /// `.frame`: the selected frame, natively in Tern.
     fn show_selected_frame(&self, frame: &SelectedFrame, show_registers: bool) {
         let line = self.frame_line(frame);
+        let arch = self.ctx.target.arch();
         #[cfg(feature = "cli")]
         native::render(
-            || native::inspect::frame(&line, frame, show_registers),
-            || print_frame_line(&line, frame, show_registers),
+            || native::inspect::frame(&line, frame, arch, show_registers),
+            || print_frame_line(&line, frame, arch, show_registers),
         );
         #[cfg(not(feature = "cli"))]
-        print_frame_line(&line, frame, show_registers);
+        print_frame_line(&line, frame, arch, show_registers);
     }
 
     /// What `.frame` shows for `frame`: its symbol, inline tag and source line.

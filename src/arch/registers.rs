@@ -1,40 +1,47 @@
 //! Register files as byte buffers: the layout every transport describes its
-//! `read_registers` buffer with, and the ARM64 ABI aliases users type.
+//! `read_registers` buffer with, and the second names an architecture's
+//! registers answer to ([`Architecture::register_synonyms`]).
+//!
+//! [`Architecture::register_synonyms`]: super::Architecture::register_synonyms
 
 use std::collections::HashMap;
 use std::result;
 
 use crate::base::error::{Error, Result};
 
-/// ARM64 ABI names users type, each paired with the architectural register
-/// it aliases.
-const ARM64_ALIASES: [(&str, &str); 3] = [("fp", "x29"), ("lr", "x30"), ("pstate", "cpsr")];
-
-/// A name in a recovered register set that repeats another register, which
-/// a listing shows once under the name `r` uses: `x29`, `x30`, `pstate` are
-/// shown as `fp`, `lr`, `cpsr`.
-pub fn repeats_another_register(name: &str, registers: &HashMap<String, u64>) -> bool {
-    const SHOWN_AS: [(&str, &str); 3] = [("x29", "fp"), ("x30", "lr"), ("pstate", "cpsr")];
-    SHOWN_AS.iter().any(|(repeat, shown)| {
-        *repeat == name
+/// Whether `name`, in a recovered register set, is the second name of one of
+/// `synonyms` whose shown name the set also holds, with the same value: a
+/// listing shows that register once, under the name `r` uses.
+pub fn repeats_another_register(
+    name: &str,
+    registers: &HashMap<String, u64>,
+    synonyms: &[(&str, &str)],
+) -> bool {
+    synonyms.iter().any(|(shown, other)| {
+        *other == name
             && registers
                 .get(*shown)
                 .is_some_and(|value| registers.get(name) == Some(value))
     })
 }
 
-/// Append every ARM64 alias to `registers`, each reading the same bytes as
-/// the register it names. Fails with the architectural name `registers`
-/// does not carry.
-pub fn push_arm64_aliases(registers: &mut Vec<RegisterInfo>) -> result::Result<(), &'static str> {
-    for (alias, canonical) in ARM64_ALIASES {
-        let register = registers
-            .iter()
-            .find(|reg| reg.name == canonical)
-            .ok_or(canonical)?
-            .clone();
+/// Give every pair of `synonyms` both its names in `registers`: the name it
+/// lacks reads the same bytes as the one it carries. Fails with the shown
+/// name of a pair it carries neither name of.
+pub fn push_synonyms(
+    registers: &mut Vec<RegisterInfo>,
+    synonyms: &[(&'static str, &'static str)],
+) -> result::Result<(), &'static str> {
+    for &(shown, other) in synonyms {
+        let carried = |name: &str| registers.iter().find(|reg| reg.name == name).cloned();
+        let (register, missing) = match (carried(shown), carried(other)) {
+            (Some(_), Some(_)) => continue,
+            (Some(register), None) => (register, other),
+            (None, Some(register)) => (register, shown),
+            (None, None) => return Err(shown),
+        };
         registers.push(RegisterInfo {
-            name: alias.to_string(),
+            name: missing.to_string(),
             ..register
         });
     }

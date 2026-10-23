@@ -2,11 +2,10 @@ use std::collections::HashMap;
 
 use owo_colors::OwoColorize;
 
-use crate::backend::cpu_context::general_registers;
-use crate::backend::dbg_backend::{RegisterMap, repeats_another_register};
+use crate::arch::{Arch, RegisterMap, registers::repeats_another_register};
 use crate::base::error::Error;
 use crate::base::memory::MemoryOps;
-use crate::base::types::{Arch, CodeMachine, VirtAddr};
+use crate::base::types::{CodeMachine, VirtAddr};
 #[cfg(feature = "cli")]
 use crate::hosts::repl::native;
 use crate::hosts::ui;
@@ -182,20 +181,18 @@ fn format_cpsr(flags: u64) -> String {
     line.into_iter().collect()
 }
 
-/// Print the general-purpose register grid. `embedded` is true inside the
-/// break/status dump (`registers` section header, 2-space indent); standalone
-/// `registers` passes false so it reads flush-left with no header, matching
-/// `disasm`. The row layout follows the register map's architecture.
 /// Print a recovered (partial) register set sorted by name, one row per
-/// register at `indent` columns, under an optional heading line.
+/// register at `indent` columns, under an optional heading line. A register
+/// the set holds under two of `arch`'s names shows once.
 pub fn print_sparse_registers(
     registers: &HashMap<String, u64>,
+    arch: Arch,
     heading: Option<&str>,
     indent: usize,
 ) {
     let mut names: Vec<_> = registers
         .keys()
-        .filter(|name| !repeats_another_register(name, registers))
+        .filter(|name| !repeats_another_register(name, registers, arch.register_synonyms()))
         .collect();
     names.sort();
     if let Some(heading) = heading {
@@ -208,7 +205,9 @@ pub fn print_sparse_registers(
 
 /// The general-purpose registers in `regs`, as a grid. With `before`, the
 /// register file of the previous stop on the same thread, the values that
-/// changed since stand out.
+/// changed since stand out. `embedded` is true inside the break/status dump
+/// (`registers` section header, 2-space indent); standalone `registers`
+/// passes false so it reads flush-left with no header, matching `disasm`.
 pub fn print_registers(
     register_map: &RegisterMap,
     arch: Arch,
@@ -245,7 +244,7 @@ pub fn print_registers(
             .collect::<Vec<_>>()
             .join("   ")
     };
-    let [names @ .., flags] = general_registers(arch) else {
+    let [names @ .., flags] = arch.general_registers() else {
         return;
     };
     match arch {
@@ -305,7 +304,8 @@ pub fn print_changed_registers(
     regs: &[u8],
     before: Option<&[u8]>,
 ) {
-    let pairs: Vec<String> = general_registers(arch)
+    let pairs: Vec<String> = arch
+        .general_registers()
         .iter()
         .copied()
         .filter_map(|name| {

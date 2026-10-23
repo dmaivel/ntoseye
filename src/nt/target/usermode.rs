@@ -1,9 +1,10 @@
 use std::fs;
 
+use crate::arch::Arch;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::ntstatus::{ntstatus_name, win32_error_name};
-use crate::base::types::{Arch, Dtb, VirtAddr};
+use crate::base::types::{Dtb, VirtAddr};
 use crate::nt::guest::{
     ModuleInfo, ProcessInfo, ProcessModulesDetail, UNKNOWN_MODULE_NAME, merge_wow64_modules,
     walk_loader_list, walk_loader_list32,

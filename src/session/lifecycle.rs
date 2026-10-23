@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use single_instance::SingleInstance;
 
+use crate::arch::Arch;
 use crate::backend::dbg_backend::{BugcheckInfo, DebugBackend, DebugCapability};
 use crate::backend::gdb::GdbClient;
 use crate::backend::kd::{KdBackend, KdMemorySource};
@@ -15,17 +16,16 @@ use crate::backend::phys::{HaltClock, PhysMem};
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::notice::Notice;
+use crate::base::types::VirtAddr;
 use crate::nt::breakpoints::{BreakpointManager, SiteJournal};
 use crate::nt::bugchecks::plausible_bugcheck_code;
 use crate::nt::cpu_state;
 use crate::nt::dmp::{DmpBackend, DmpInfo};
-use crate::nt::target::hang::bugcheck_processor_from_freeze_states;
-use crate::session::exception_policy::ExceptionPolicyTable;
-
-use crate::base::types::{Arch, VirtAddr};
 use crate::nt::symbols::ntoseye_home;
+use crate::nt::target::hang::bugcheck_processor_from_freeze_states;
 use crate::nt::target::{Target, TargetKind};
 use crate::nt::userdump::{self, UserDump, UserDumpBackend};
+use crate::session::exception_policy::ExceptionPolicyTable;
 use crate::session::{ContinueOutcome, Session, StopResolution};
 use crate::{Backend, TargetSpec};
 

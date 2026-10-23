@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal;
 
+use crate::arch::Arch;
 use crate::base::bytes::utf16le_nul_terminated;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::output;
 use crate::base::time::filetime_to_iso;
-use crate::base::types::{Arch, CodeMachine, VirtAddr};
+use crate::base::types::{CodeMachine, VirtAddr};
 #[cfg(feature = "python")]
 use crate::hosts::python::embed;
 use crate::nt::expr::{Expr, NumberRadix};

@@ -15,11 +15,10 @@ use std::path::Path;
 use memmap2::Mmap;
 use ntoseye_macros::record;
 
-use crate::backend::cpu_context::{amd64, arm64};
-use crate::backend::dbg_backend::RegisterMap;
+use crate::arch::{Arch, RegisterMap, amd64, arm64};
 use crate::base::bytes::get_u32;
 use crate::base::error::{Error, Result};
-use crate::base::types::{Arch, VirtAddr};
+use crate::base::types::VirtAddr;
 use crate::nt::guest::ModuleInfo;
 use crate::nt::pe::headers::CodeView;
 use crate::nt::target::mm::{memory_state_name, memory_type_name, page_protection_name};
