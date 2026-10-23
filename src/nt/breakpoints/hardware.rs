@@ -5,9 +5,8 @@ use super::install::BreakpointBackend;
 use super::{
     BreakpointConfig, BreakpointInfo, BreakpointManager, BreakpointScope, HardwareBreakpoint,
 };
-use crate::backend::dbg_backend::{
-    DebugBackend, HwBreakpointAccess, WatchpointAccess, validate_hw_breakpoint,
-};
+use crate::arch::{HardwareWatch, HwBreakpointAccess};
+use crate::backend::dbg_backend::{DebugBackend, WatchpointAccess};
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
 use crate::nt::target::Target;
@@ -83,7 +82,11 @@ impl BreakpointManager {
             }
         }
         let condition_expr = Self::configured_condition(&config)?;
-        validate_hw_breakpoint(access, len, address.0)?;
+        debugger.arch().debug_registers().validate(HardwareWatch {
+            address: address.0,
+            access,
+            len,
+        })?;
         self.retire_one_shot_hits_at(client, debugger, address, true)?;
         self.ensure_site_available(address, true, None)?;
         let slot = self.free_hardware_slot(client, access)?;
@@ -200,7 +203,7 @@ impl BreakpointManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::dbg_backend::HwBreakpointAccess;
+    use crate::arch::HwBreakpointAccess;
     use crate::base::types::VirtAddr;
     use crate::nt::breakpoints::test_backend::SlotRecorder;
     use crate::nt::breakpoints::{BreakpointConfig, BreakpointManager, HardwareBreakpoint};

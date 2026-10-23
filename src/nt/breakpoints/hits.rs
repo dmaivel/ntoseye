@@ -126,7 +126,7 @@ impl BreakpointManager {
 #[cfg(test)]
 mod tests {
     use crate::arch::Arch;
-    use crate::backend::dbg_backend::HwBreakpointAccess;
+    use crate::arch::HwBreakpointAccess;
     use crate::base::types::VirtAddr;
     use crate::nt::breakpoints::install::{BreakpointBackend, BreakpointPatch};
     use crate::nt::breakpoints::test_backend::SlotRecorder;

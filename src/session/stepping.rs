@@ -10,10 +10,10 @@ use iced_x86::{
     Mnemonic, OpAccess, OpKind, Register,
 };
 
-use crate::arch::{Arch, RegisterMap};
+use crate::arch::{Arch, HwBreakpointAccess, RegisterMap};
 use crate::backend::dbg_backend::{
-    ContinueDisposition, DebugBackend, HwBreakpointAccess, STEP_UNDER_WINDOWS_HYPERVISOR,
-    StopEvent, clear_trap_flag, processor_index_from_backend_thread_id,
+    ContinueDisposition, DebugBackend, STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent, clear_trap_flag,
+    processor_index_from_backend_thread_id,
 };
 use crate::base::disasm::{ControlFlow, classify, decode_first};
 use crate::base::error::{Error, Result};

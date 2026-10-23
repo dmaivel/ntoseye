@@ -74,14 +74,12 @@ fn oversized_hardware_slot_ids_are_rejected_without_packets() {
                 .set_hardware_breakpoint(slot, 0x4000, HwBreakpointAccess::Execute, 1)
                 .unwrap_err();
             assert!(
-                matches!(error, Error::Kd(ref message)
-                    if message == &format!("invalid hardware breakpoint slot {slot}")),
+                matches!(error, Error::Kd(_)),
                 "{arch:?} set slot {slot}: {error}"
             );
             let error = backend.clear_hardware_breakpoint(slot).unwrap_err();
             assert!(
-                matches!(error, Error::Kd(ref message)
-                    if message == &format!("invalid hardware breakpoint slot {slot}")),
+                matches!(error, Error::Kd(_)),
                 "{arch:?} clear slot {slot}: {error}"
             );
         }

@@ -12,7 +12,7 @@ use tabled::settings::Padding;
 
 use owo_colors::OwoColorize;
 
-use crate::backend::dbg_backend::HwBreakpointAccess;
+use crate::arch::HwBreakpointAccess;
 use crate::base::diagnostics;
 use crate::base::error::{Error, Result};
 use crate::hosts::ui;

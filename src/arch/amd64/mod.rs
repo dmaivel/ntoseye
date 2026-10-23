@@ -1,6 +1,7 @@
 //! AMD64 (x64).
 
 mod context;
+pub mod debug_registers;
 pub mod paging;
 
 pub use context::*;
@@ -11,7 +12,8 @@ use crate::base::types::CodeMachine;
 
 use super::registers::numbered;
 use super::{
-    Architecture, ContextFlags, Family, IMAGE_FILE_MACHINE_AMD64, Paging, RegisterInfo, RegisterMap,
+    Architecture, ContextFlags, DebugRegisters, Family, IMAGE_FILE_MACHINE_AMD64, Paging,
+    RegisterInfo, RegisterMap,
 };
 
 pub struct Amd64;
@@ -155,6 +157,10 @@ impl Architecture for Amd64 {
     }
 
     fn paging(&self) -> &'static dyn Paging {
+        &Amd64
+    }
+
+    fn debug_registers(&self) -> &'static dyn DebugRegisters {
         &Amd64
     }
 }

@@ -5,7 +5,8 @@ use std::result;
 
 use serde_json::{Value, json};
 
-use crate::backend::dbg_backend::{DebugCapability, WatchpointAccess, validate_hw_breakpoint};
+use crate::arch::HardwareWatch;
+use crate::backend::dbg_backend::{DebugCapability, WatchpointAccess};
 use crate::hosts::repl::supports_capability;
 use crate::nt::expr::{Expr, ExprType, ExprValue};
 use crate::nt::layout::{ParsedType, find_field};
@@ -52,7 +53,18 @@ impl Server {
             }
         };
         let len = watch_length(size);
-        if let Err(error) = validate_hw_breakpoint(WatchpointAccess::Write.into(), len, address) {
+        let watch = HardwareWatch {
+            address,
+            access: WatchpointAccess::Write.into(),
+            len,
+        };
+        if let Err(error) = self
+            .session()?
+            .target
+            .arch()
+            .debug_registers()
+            .validate(watch)
+        {
             return Ok(Some(json!({
                 "dataId": Value::Null,
                 "description": error.to_string(),

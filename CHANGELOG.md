@@ -25,6 +25,7 @@ Keeping this file:
 
 - On an ARM64 target, `rip` and `rsp` no longer name `pc` and `sp`: `r`, expressions and breakpoint conditions take the ARM64 names (`@pc`, `@sp`, or `$ip` and `$csp` on any architecture), as WinDbg does. `fp`, `lr` and `pstate` still name `x29`, `x30` and `cpsr`.
 - On an ARM64 target, `!vtop` with a directory base lists each page-table entry the translation reads, with its flags, as it does on AMD64. It showed only the physical address.
+- On an ARM64 target, `ba e` refuses an address that is not 4-byte aligned when you set it, on every backend, as such a breakpoint never fires. Only the `kd` backend refused it, and only once it programmed the processors.
 
 ### Fixed
 

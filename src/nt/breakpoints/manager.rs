@@ -11,7 +11,8 @@ use super::spec::CodeSite;
 use super::{BreakpointConfig, BreakpointInfo, BreakpointManager, PartitionFilter, StepFrame};
 #[cfg(test)]
 use super::{HardwareBreakpoint, install::BreakpointPatch};
-use crate::backend::dbg_backend::{DebugBackend, HwBreakpointAccess};
+use crate::arch::HwBreakpointAccess;
+use crate::backend::dbg_backend::DebugBackend;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::types::{Dtb, VirtAddr};
@@ -654,7 +655,7 @@ impl BreakpointManager {
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::dbg_backend::HwBreakpointAccess;
+    use crate::arch::HwBreakpointAccess;
     use crate::base::error::Error;
     use crate::base::types::VirtAddr;
     use crate::nt::breakpoints::{BreakpointManager, HardwareBreakpoint};

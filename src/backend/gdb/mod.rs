@@ -4,10 +4,11 @@ use std::net::TcpStream;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
-use crate::arch::{Arch, Family, RegisterInfo, RegisterMap, registers::push_synonyms};
+use crate::arch::{
+    Arch, Family, HwBreakpointAccess, RegisterInfo, RegisterMap, registers::push_synonyms,
+};
 use crate::backend::dbg_backend::{
-    DebugBackend, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, PciConfigAddress,
-    STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent,
+    DebugBackend, PciConfigAddress, STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent,
 };
 use crate::backend::phys::HaltClock;
 use crate::base::error::{Error, Result};
@@ -1480,7 +1481,8 @@ impl DebugBackend for GdbClient {
     /// RSP sites have no physical slot number. Keep spare records for steps
     /// and new breakpoints; the stub enforces its own limit (none on QEMU TCG).
     fn hardware_breakpoint_slots(&self) -> usize {
-        self.hardware_sites.len() + usize::from(HW_BREAKPOINT_SLOTS)
+        const SPARE_SITES: usize = 4;
+        self.hardware_sites.len() + SPARE_SITES
     }
 
     fn set_hardware_breakpoint(
@@ -1609,8 +1611,8 @@ mod tests {
         GdbClient, HaltCache, PacketReadState, RegisterMap, StopReply, StubFeatures, append_packet,
         description_arch, holds_stop_reply,
     };
-    use crate::arch::{Arch, RegisterInfo};
-    use crate::backend::dbg_backend::{DebugBackend, HwBreakpointAccess};
+    use crate::arch::{Arch, HwBreakpointAccess, RegisterInfo};
+    use crate::backend::dbg_backend::DebugBackend;
     use crate::backend::phys::HaltClock;
     use crate::base::error::Error;
     use crate::base::types::VirtAddr;

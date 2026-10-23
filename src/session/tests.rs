@@ -7,10 +7,8 @@ use super::stepping::{
     RELEASE_BUDGET, RunPast, site_successors, stack_floor, step_over_current_breakpoint,
 };
 use super::*;
-use crate::arch::{Arch, RegisterInfo, amd64::REGISTER_BUFFER_SIZE, arm64};
-use crate::backend::dbg_backend::{
-    ContinueDisposition, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, TrapState, clear_trap_flag,
-};
+use crate::arch::{Arch, HwBreakpointAccess, RegisterInfo, amd64::REGISTER_BUFFER_SIZE, arm64};
+use crate::backend::dbg_backend::{ContinueDisposition, TrapState, clear_trap_flag};
 use crate::backend::partition_backend::PartitionVp;
 use crate::base::memory::PAGE_SIZE;
 use crate::base::types::VirtAddr;
@@ -389,7 +387,7 @@ impl DebugBackend for MockBackend {
     }
     fn hardware_breakpoint_slots(&self) -> usize {
         self.hardware_limit
-            .map_or(usize::from(HW_BREAKPOINT_SLOTS), |limit| limit + 4)
+            .map_or(Arch::Amd64.debug_registers().slots(), |limit| limit + 4)
     }
     fn set_hardware_breakpoint(
         &mut self,

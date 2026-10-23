@@ -7,7 +7,8 @@ use std::{
     sync::Arc,
 };
 
-use crate::backend::dbg_backend::{HwBreakpointAccess, WatchpointAccess};
+use crate::arch::HwBreakpointAccess;
+use crate::backend::dbg_backend::WatchpointAccess;
 use crate::base::types::{Dtb, VirtAddr};
 use crate::nt::expr::Expr;
 use crate::nt::guest::hypercalls::tlfs_hypercall;

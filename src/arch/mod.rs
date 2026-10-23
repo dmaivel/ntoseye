@@ -18,9 +18,11 @@ use crate::base::types::{CodeMachine, VirtAddr};
 
 pub mod amd64;
 pub mod arm64;
+pub mod debug_registers;
 pub mod paging;
 pub mod registers;
 
+pub use debug_registers::{DebugRegisters, HardwareWatch, HwBreakpointAccess};
 pub use paging::{MappingPermissions, Paging, TableEntry};
 pub use registers::{RegisterFile, RegisterInfo, RegisterMap};
 
@@ -199,6 +201,9 @@ pub trait Architecture: Sync {
 
     /// How its address space divides and its page tables translate.
     fn paging(&self) -> &'static dyn Paging;
+
+    /// Its hardware breakpoint registers.
+    fn debug_registers(&self) -> &'static dyn DebugRegisters;
 }
 
 /// A processor family: what its 32- and 64-bit members share, such as how

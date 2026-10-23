@@ -4,10 +4,8 @@
 use std::mem::take;
 use std::sync::Arc;
 
-use crate::arch::Arch;
-use crate::backend::dbg_backend::{
-    BugcheckInfo, DebugCapability, HwBreakpointAccess, ModuleEvent, WatchpointAccess,
-};
+use crate::arch::{Arch, HwBreakpointAccess};
+use crate::backend::dbg_backend::{BugcheckInfo, DebugCapability, ModuleEvent, WatchpointAccess};
 use crate::backend::partition_backend::PartitionBackend;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;

@@ -15,7 +15,8 @@ use super::runcontrol::reject_condition_mutation;
 use super::symbols::Location;
 use super::thread::Thread;
 use super::{err, raise, symbol_not_found};
-use crate::backend::dbg_backend::{HwBreakpointAccess, WatchpointAccess};
+use crate::arch::HwBreakpointAccess;
+use crate::backend::dbg_backend::WatchpointAccess;
 use crate::base::notice::Notice;
 use crate::base::types::VirtAddr;
 use crate::nt::breakpoints::{

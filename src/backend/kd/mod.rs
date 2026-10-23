@@ -6,11 +6,10 @@ use std::time::{Duration, Instant};
 
 use ntoseye_macros::record;
 
-use crate::arch::{Arch, Family, RegisterMap, arm64};
+use crate::arch::{Arch, HwBreakpointAccess, RegisterMap};
 use crate::backend::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability, DebugLog,
-    DebugOutputPage, HW_BREAKPOINT_SLOTS, HwBreakpointAccess, PciConfigAddress, ProcessorRead,
-    StopEvent, TebPath, TrapState, debug_registers,
+    DebugOutputPage, PciConfigAddress, ProcessorRead, StopEvent, TebPath, TrapState,
 };
 use crate::backend::debugger_data::DebuggerDataCandidate;
 use crate::backend::kd::framing::KdFraming;
@@ -509,20 +508,11 @@ impl DebugBackend for KdBackend {
     }
 
     fn hardware_breakpoint_slots(&self) -> usize {
-        match self.arch.family() {
-            Family::X86 => usize::from(HW_BREAKPOINT_SLOTS),
-            Family::Arm => arm64::MAX_BREAKPOINTS + arm64::MAX_WATCHPOINTS,
-        }
+        self.arch.debug_registers().slots()
     }
 
     fn hardware_slot_range(&self, access: HwBreakpointAccess) -> std::ops::Range<usize> {
-        match self.arch.family() {
-            Family::X86 => 0..usize::from(HW_BREAKPOINT_SLOTS),
-            Family::Arm => {
-                let slots = debug_registers::arm64_slot_range(access);
-                usize::from(slots.start)..usize::from(slots.end)
-            }
-        }
+        self.arch.debug_registers().slots_for(access)
     }
 
     fn set_hardware_breakpoint(
@@ -532,14 +522,10 @@ impl DebugBackend for KdBackend {
         access: HwBreakpointAccess,
         len: u8,
     ) -> Result<()> {
-        let slot = u8::try_from(slot)
-            .map_err(|_| Error::Kd(format!("invalid hardware breakpoint slot {slot}")))?;
         self.set_hardware_slot(slot, addr, access, len)
     }
 
     fn clear_hardware_breakpoint(&mut self, slot: usize) -> Result<()> {
-        let slot = u8::try_from(slot)
-            .map_err(|_| Error::Kd(format!("invalid hardware breakpoint slot {slot}")))?;
         self.clear_hardware_slot(slot)
     }
 

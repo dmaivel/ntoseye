@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 
 use ntoseye_macros::record;
 
+use crate::arch::HwBreakpointAccess;
 use crate::backend::dbg_backend::{
-    BugcheckInfo, ContinueDisposition, HwBreakpointAccess, ModuleEvent,
-    processor_index_from_backend_thread_id,
+    BugcheckInfo, ContinueDisposition, ModuleEvent, processor_index_from_backend_thread_id,
 };
 use crate::backend::kd::trace_enabled;
 use crate::base::disasm::ControlFlow;

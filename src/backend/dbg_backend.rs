@@ -5,13 +5,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ntoseye_macros::record;
 
-use crate::arch::{Arch, RegisterMap};
+use crate::arch::{Arch, Family, HwBreakpointAccess, RegisterMap};
 use crate::backend::debugger_data::DebuggerDataCandidate;
 use crate::backend::phys::PhysMem;
 use crate::base::error::{Error, Result};
 use crate::base::types::{KernelLocation, VirtAddr};
-
-pub mod debug_registers;
 
 /// A captured line of guest debug output (DbgPrint, kernel printf).
 #[record]
@@ -273,39 +271,6 @@ pub enum ProcessorRead {
     Device(u64),
 }
 
-/// What memory access a hardware (debug-register) breakpoint traps on. The x86
-/// debug registers have no read-only condition, so a "read" watch is really
-/// read/write ([`Self::ReadWrite`]). Named in snake case.
-#[record]
-#[derive(Copy, PartialEq, Eq)]
-pub enum HwBreakpointAccess {
-    /// Instruction execution at the address (DR7 R/W = 00, length forced to 1).
-    Execute,
-    /// Data write to the address (DR7 R/W = 01).
-    Write,
-    /// Data read or write at the address (DR7 R/W = 11).
-    ReadWrite,
-}
-
-impl HwBreakpointAccess {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Execute => "execute",
-            Self::Write => "write",
-            Self::ReadWrite => "read/write",
-        }
-    }
-
-    /// The WinDbg-style access letter (`e`/`w`/`r`).
-    pub fn letter(self) -> char {
-        match self {
-            Self::Execute => 'e',
-            Self::Write => 'w',
-            Self::ReadWrite => 'r',
-        }
-    }
-}
-
 /// Semantic data-watch access exposed by host APIs. The transport may
 /// implement this with x86 debug registers, but callers request a watchpoint,
 /// not a software-vs-hardware breakpoint implementation.
@@ -338,32 +303,6 @@ impl From<WatchpointAccess> for HwBreakpointAccess {
             WatchpointAccess::ReadWrite => Self::ReadWrite,
         }
     }
-}
-
-/// Number of x86 debug-register breakpoint slots (DR0-DR3).
-pub const HW_BREAKPOINT_SLOTS: u8 = 4;
-
-/// Validate a hardware breakpoint's access/length/address against x86's rules,
-/// backend-independent: execute breakpoints are one byte; data widths are
-/// 1/2/4/8; and the address must be aligned to its length (an unaligned DR
-/// address silently never fires). `Err` carries a user-facing reason.
-pub fn validate_hw_breakpoint(access: HwBreakpointAccess, len: u8, addr: u64) -> Result<()> {
-    if matches!(access, HwBreakpointAccess::Execute) && len != 1 {
-        return Err(Error::InvalidArgument(
-            "execute hardware breakpoints must be 1 byte".into(),
-        ));
-    }
-    if !matches!(len, 1 | 2 | 4 | 8) {
-        return Err(Error::InvalidArgument(format!(
-            "invalid hardware breakpoint length {len} (use 1, 2, 4, or 8)"
-        )));
-    }
-    if !addr.is_multiple_of(len as u64) {
-        return Err(Error::InvalidArgument(format!(
-            "hardware breakpoint address {addr:#x} must be {len}-byte aligned"
-        )));
-    }
-    Ok(())
 }
 
 /// What a backend can do; the SDK shows its [`name`](Self::name).
@@ -506,9 +445,9 @@ pub fn clear_trap_flag(
     backend: &mut dyn DebugBackend,
     register_map: &RegisterMap,
 ) -> Result<()> {
-    match arch {
-        Arch::Amd64 => {}
-        Arch::Arm64 => return Ok(()),
+    match arch.family() {
+        Family::X86 => {}
+        Family::Arm => return Ok(()),
     }
     if backend
         .stop_trap_state()
@@ -524,12 +463,7 @@ pub fn clear_trap_flag(
                 dirty = true;
             }
         }
-        if let Ok(dr6) = register_map.read_u64("dr6", &regs) {
-            let cleared = dr6 & !0b1111u64;
-            if cleared != dr6 && register_map.write_u64("dr6", &mut regs, cleared).is_ok() {
-                dirty = true;
-            }
-        }
+        dirty |= arch.debug_registers().clear_status(register_map, &mut regs);
         if dirty {
             backend.write_registers(&regs)?;
         }
@@ -641,17 +575,17 @@ pub trait DebugBackend {
         false
     }
 
-    /// Hardware-breakpoint slots the manager can allocate. GDB grows its
-    /// logical records as sites are accepted; the stub enforces its own limit.
-    /// AMD64 KD uses four DR0-DR3 slots; ARM64 KD exposes eight execute slots
-    /// and two data-watch slots through one global ID space.
+    /// Hardware-breakpoint slots the manager can allocate: none without
+    /// [`Self::supports_watchpoints`]. KD has the family's
+    /// [`DebugRegisters`](crate::arch::DebugRegisters); GDB grows its logical
+    /// records as sites are accepted, and the stub enforces its own limit.
     fn hardware_breakpoint_slots(&self) -> usize {
-        usize::from(HW_BREAKPOINT_SLOTS)
+        0
     }
 
     /// Backend slots available for a hardware breakpoint access mode.
     /// Backends with separate execute/watchpoint banks override this range;
-    /// the default covers all slots used by AMD64 debug registers.
+    /// the default shares every slot.
     fn hardware_slot_range(&self, access: HwBreakpointAccess) -> Range<usize> {
         let _ = access;
         0..self.hardware_breakpoint_slots()
@@ -1079,41 +1013,6 @@ mod tests {
         assert_eq!(texts, vec!["b", "c"]);
         assert!(page.dropped);
         assert!(!log.read_since(1).dropped);
-    }
-
-    #[test]
-    fn validate_hw_execute_must_be_one_byte() {
-        assert!(validate_hw_breakpoint(HwBreakpointAccess::Execute, 1, 0x1003).is_ok());
-        assert!(validate_hw_breakpoint(HwBreakpointAccess::Execute, 4, 0x1000).is_err());
-        assert!(validate_hw_breakpoint(HwBreakpointAccess::Execute, 2, 0x1000).is_err());
-        assert!(validate_hw_breakpoint(HwBreakpointAccess::Execute, 8, 0x1000).is_err());
-    }
-
-    #[test]
-    fn validate_hw_data_widths_when_aligned() {
-        for access in [HwBreakpointAccess::Write, HwBreakpointAccess::ReadWrite] {
-            assert!(validate_hw_breakpoint(access, 1, 0x1003).is_ok());
-            assert!(validate_hw_breakpoint(access, 2, 0x1000).is_ok());
-            assert!(validate_hw_breakpoint(access, 4, 0x1000).is_ok());
-            assert!(validate_hw_breakpoint(access, 8, 0x2000).is_ok());
-        }
-    }
-
-    #[test]
-    fn validate_hw_rejects_invalid_lengths() {
-        for len in [0u8, 3, 5, 16] {
-            assert!(validate_hw_breakpoint(HwBreakpointAccess::Write, len, 0x1000).is_err());
-            assert!(validate_hw_breakpoint(HwBreakpointAccess::ReadWrite, len, 0x1000).is_err());
-        }
-    }
-
-    #[test]
-    fn validate_hw_requires_length_alignment() {
-        assert!(validate_hw_breakpoint(HwBreakpointAccess::Write, 4, 0x1002).is_err());
-        assert!(validate_hw_breakpoint(HwBreakpointAccess::Write, 2, 0x1001).is_err());
-        assert!(validate_hw_breakpoint(HwBreakpointAccess::ReadWrite, 8, 0x1004).is_err());
-        assert!(validate_hw_breakpoint(HwBreakpointAccess::Write, 1, 0x1001).is_ok());
-        assert!(validate_hw_breakpoint(HwBreakpointAccess::ReadWrite, 1, 0x1003).is_ok());
     }
 
     #[test]

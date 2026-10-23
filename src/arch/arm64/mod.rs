@@ -1,6 +1,7 @@
 //! ARM64 (AArch64).
 
 mod context;
+pub mod debug_registers;
 pub mod paging;
 
 pub use context::*;
@@ -11,7 +12,8 @@ use crate::base::types::CodeMachine;
 
 use super::registers::{numbered, push_synonyms};
 use super::{
-    Architecture, ContextFlags, Family, IMAGE_FILE_MACHINE_ARM64, Paging, RegisterInfo, RegisterMap,
+    Architecture, ContextFlags, DebugRegisters, Family, IMAGE_FILE_MACHINE_ARM64, Paging,
+    RegisterInfo, RegisterMap,
 };
 
 pub struct Arm64;
@@ -154,6 +156,10 @@ impl Architecture for Arm64 {
     }
 
     fn paging(&self) -> &'static dyn Paging {
+        &Arm64
+    }
+
+    fn debug_registers(&self) -> &'static dyn DebugRegisters {
         &Arm64
     }
 }
