@@ -135,7 +135,7 @@ impl TernPrompt {
                 // The removed surface leaves its anchor row empty, with the
                 // cursor under it: the echo takes that row.
                 write_now(b"\x1b[A\r");
-                let prompt = CustomPrompt::new(&state.prompt_backend(), &state.ctx.current_thread);
+                let prompt = CustomPrompt::new(&state.prompt_backend(), &state.prompt_thread());
                 let trimmed = line.trim_start();
                 outln!(
                     "{} {}",

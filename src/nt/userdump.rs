@@ -441,11 +441,23 @@ impl UserDumpInfo {
         }
     }
 
+    /// The thread id a backend id names (see [`Self::backend_thread_id`]),
+    /// when it names a thread of this dump's process.
+    pub fn tid_for_backend_id(&self, id: &str) -> Option<u32> {
+        let (pid, tid) = match id.split_once('.') {
+            Some((pid, tid)) => (Some(u32::from_str_radix(pid, 16).ok()?), tid),
+            None => (None, id),
+        };
+        if pid != self.process_id {
+            return None;
+        }
+        u32::from_str_radix(tid, 16).ok()
+    }
+
     /// The thread a backend id names (see [`Self::backend_thread_id`]).
     pub fn thread_for_backend_id(&self, id: &str) -> Option<&UserThreadInfo> {
-        self.threads
-            .iter()
-            .find(|thread| self.backend_thread_id(thread.tid).eq_ignore_ascii_case(id))
+        let tid = self.tid_for_backend_id(id)?;
+        self.threads.iter().find(|thread| thread.tid == tid)
     }
 }
 

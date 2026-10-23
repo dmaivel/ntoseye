@@ -13,7 +13,6 @@ use std::borrow::Cow;
 use crate::backend::dbg_backend::thread_label;
 use crate::base::output;
 use crate::hosts::repl::*;
-use crate::hosts::ui;
 use crate::nt::expr::Expr;
 use crate::nt::layout::ParsedType;
 
@@ -31,6 +30,8 @@ pub struct CustomPrompt {
 const DEFAULT_MULTILINE_INDICATOR: &str = "     ::: ";
 
 impl CustomPrompt {
+    /// The prompt for `thread`, as [`ReplState::prompt_thread`] names it,
+    /// on `backend`.
     pub fn new(backend: &str, thread: &str) -> Self {
         let left = if thread.is_empty() {
             "ntoseye>".bright_black().to_string()
@@ -38,7 +39,7 @@ impl CustomPrompt {
             // WinDbg's `3: kd>`: the processor, then the backend.
             format!(
                 "{}{}",
-                ui::thread_id(thread),
+                thread.cyan(),
                 format!(": {backend}>").bright_black()
             )
         };

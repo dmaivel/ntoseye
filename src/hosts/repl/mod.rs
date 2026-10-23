@@ -548,12 +548,23 @@ impl<'a> ReplState<'a> {
     /// The unstyled prompt, `ntoseye>` or `0: kd>`, that the plain REPL
     /// prints and a script echoes its commands after.
     pub fn plain_prompt(&self) -> String {
-        let thread = &self.ctx.current_thread;
-        if thread.is_empty() {
+        if self.ctx.current_thread.is_empty() {
             "ntoseye>".to_string()
         } else {
-            format!("{}: {}>", thread_label(thread), self.prompt_backend())
+            format!("{}: {}>", self.prompt_thread(), self.prompt_backend())
         }
+    }
+
+    /// What the prompt names the current thread by: the number `~` selects
+    /// it by, the processor's (`3`) or, in a user-mode dump, the thread's
+    /// place in the dump's list (`17`), as WinDbg's `0:017>` does.
+    pub fn prompt_thread(&self) -> String {
+        let thread = &self.ctx.current_thread;
+        self.ctx
+            .target
+            .user_dump_info()
+            .and_then(|info| info.thread_index(info.tid_for_backend_id(thread)?))
+            .map_or_else(|| thread_label(thread), |index| index.to_string())
     }
 
     /// The window title: the prompt's processor and backend, and where the
@@ -565,7 +576,7 @@ impl<'a> ReplState<'a> {
         } else {
             format!(
                 "ntoseye — {}: {}",
-                thread_label(thread),
+                self.prompt_thread(),
                 self.prompt_backend()
             )
         };
@@ -1174,7 +1185,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                     tern_prompt::Read::Unavailable => {
                         tern_prompt = None;
                         let prompt =
-                            CustomPrompt::new(&state.prompt_backend(), &state.ctx.current_thread);
+                            CustomPrompt::new(&state.prompt_backend(), &state.prompt_thread());
                         match target_loan.lend(&state.ctx.target, || {
                             prompting(|| line_editor.read_line(&prompt))
                         }) {
