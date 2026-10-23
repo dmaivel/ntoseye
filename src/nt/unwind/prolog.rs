@@ -200,26 +200,6 @@ pub fn analyze_prolog(code: &[u8], offset: usize) -> Option<PrologFrame> {
     })
 }
 
-/// Whether the bytes `before` (ending at a return address) end in a call:
-/// `call rel32`, or an indirect `call` through a register or memory.
-pub fn follows_call(before: &[u8]) -> bool {
-    let n = before.len();
-    if n >= 5 && before[n - 5] == 0xe8 {
-        return true;
-    }
-    (2..=7).any(|length| {
-        n >= length && {
-            let call = &before[n - length..];
-            let (op, modrm) = match call {
-                [0x41 | 0x48 | 0x49, 0xff, m, ..] => (0xff, *m),
-                [0xff, m, ..] => (0xff, *m),
-                _ => return false,
-            };
-            op == 0xff && (modrm >> 3) & 7 == 2
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,14 +503,6 @@ mod tests {
                 saved: vec![(7, 0x20)]
             })
         );
-    }
-
-    #[test]
-    fn return_addresses_follow_calls() {
-        assert!(follows_call(&[0x90, 0xe8, 1, 2, 3, 4]));
-        assert!(follows_call(&[0x90, 0xff, 0xd0]), "call rax");
-        assert!(follows_call(&[0x41, 0xff, 0xd3]), "call r11");
-        assert!(!follows_call(&[0x90, 0x90, 0xc3]));
     }
 
     /// The function starts in `pieces` laid end to end from RVA 0.

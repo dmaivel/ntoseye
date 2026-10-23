@@ -109,6 +109,14 @@ impl InstructionSet for Arm64 {
         Some(ip & !3)
     }
 
+    fn ends_in_call(&self, before: &[u8]) -> bool {
+        before
+            .len()
+            .checked_sub(4)
+            .and_then(|at| self.decode_first(&before[at..]))
+            .is_some_and(|(_, flow)| flow == ControlFlow::Call)
+    }
+
     /// `b.<cond>` on NZCV, `cbz`/`cbnz` on a register, `tbz`/`tbnz` on one
     /// of its bits.
     fn condition_holds(

@@ -34,6 +34,9 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - At a bugcheck stop, the registers are the ones the faulting instruction ran with: those of the trap frame at the fault (one the parameters name, or the innermost trap on the stack, which a 0xD1 or 0x50 is raised from), with those a trap frame does not save, such as `rbx` and `r12`-`r15`, recovered by the stack walk. The heading says `registers (trap frame)`, `registers (unwound)`, or `registers (at stop)` for the processor's where neither is found. The stack starts at the frame that faulted, the bugcheck's own frames folded into one line (`#0–#5  nt!DbgBreakPointWithStatus … nt!KiPageFault+0x468`).
 - Stacks (the stop's, `k`, `!thread`, `!analyze -v`) mark with a line where the walk crosses from kernel code into the user-mode code that called it (`user mode`) or through a trap or an interrupt (`trap`).
 - A frame's source line in `k` reads as in the stop, `[local <path>:<line>]` for the copy `.srcpath` maps, `[recorded <path>:<line>]` otherwise. In a terminal that supports links, a local copy that matches the PDB, and the file `ls` and `lsa` list, are links that open it.
+- `dqs`, `dps`, `dds` and `kd` name the registers that point into each slot (`rsp ▶`), and mark a value that is a return address, one the code before ends in a call, `↩` before its symbol.
+- `db` splits each row's two halves with `-`, as WinDbg does, and the memory displays show zero values and unreadable items dimmer than data.
+- `~` marks the selected vCPU with `.`.
 
 ### Fixed
 

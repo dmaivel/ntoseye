@@ -54,6 +54,10 @@ pub trait InstructionSet: Sync {
         read: &dyn Fn(&str) -> Option<u64>,
     ) -> Option<bool>;
 
+    /// Whether the code `before` an address ends in a call, so the address
+    /// is a return address.
+    fn ends_in_call(&self, before: &[u8]) -> bool;
+
     /// See [`decode_preceding`].
     fn decode_preceding(
         &self,
@@ -494,6 +498,21 @@ mod tests {
             immediate: Some(value),
             ..operand(OperandKind::Immediate, text)
         }
+    }
+
+    /// A return address follows a call: x64's `call rel32` and indirect
+    /// calls (REX-prefixed too), A64's `bl` and `blr`; a `ret` is no call.
+    #[test]
+    fn a_return_address_follows_a_call() {
+        let x64 = CodeMachine::Amd64.instruction_set();
+        assert!(x64.ends_in_call(&[0x90, 0xe8, 1, 2, 3, 4]));
+        assert!(x64.ends_in_call(&[0x90, 0xff, 0xd0]), "call rax");
+        assert!(x64.ends_in_call(&[0x41, 0xff, 0xd3]), "call r11");
+        assert!(!x64.ends_in_call(&[0x90, 0x90, 0xc3]));
+        let a64 = CodeMachine::Arm64.instruction_set();
+        assert!(a64.ends_in_call(&0x9400_0010u32.to_le_bytes()), "bl");
+        assert!(a64.ends_in_call(&0xd63f_0100u32.to_le_bytes()), "blr x8");
+        assert!(!a64.ends_in_call(&0xd65f_03c0u32.to_le_bytes()), "ret");
     }
 
     /// A jump's condition reads the flags as its mnemonic does: signed

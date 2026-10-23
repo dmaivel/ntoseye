@@ -6,6 +6,7 @@ use owo_colors::OwoColorize;
 
 use ntoseye_macros::{command, grammar};
 
+use crate::arch::Arch;
 use crate::base::bytes::utf16le_lossy;
 use crate::base::error::{Error, Result, best_effort};
 use crate::base::memory::{
@@ -403,33 +404,102 @@ fn symbol_values(
 }
 
 impl SymbolValues {
-    fn show(&self) {
-        print_symbol_values(&self.rows, self.item_size);
+    fn show(&self, session: &Session) {
+        print_symbol_values(session, &self.rows, self.item_size);
     }
 }
 
 impl Render for SymbolValues {
-    fn render(&self, _: &mut ReplState<'_>, (): ()) {
-        self.show();
+    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+        self.show(repl.ctx);
     }
 }
 
-/// `dds`/`dqs` as text: a line per item, values `item_size * 2` digits wide.
-fn print_symbol_values(rows: &[SymbolValueRow], item_size: usize) {
+/// `arch`'s registers whose values a `dqs` slot can hold the address of,
+/// the stack and frame pointers first.
+fn slot_registers(arch: Arch) -> impl Iterator<Item = &'static str> {
+    let first = [arch.sp_register(), arch.frame_register()];
+    let rest = arch
+        .general_registers()
+        .iter()
+        .copied()
+        .filter(move |name| !first.contains(name) && *name != arch.flags_register());
+    first.into_iter().chain(rest)
+}
+
+/// `dds`/`dqs` as text, a line per item, values `item_size * 2` digits
+/// wide, read as a stack: each slot a register points into named before it
+/// (`rsp ▶`), and a value that is a return address (the code before it
+/// ends in a call) marked `↩` before its symbol.
+fn print_symbol_values(session: &Session, rows: &[SymbolValueRow], item_size: usize) {
+    let target = &session.target;
+    // The selected frame's registers, else the selected thread's.
+    let registers = target
+        .selected_frame
+        .as_ref()
+        .map(|frame| &frame.registers)
+        .or(target.registers.as_ref());
+    let pointing = |address: u64| -> Vec<&str> {
+        let Some(registers) = registers else {
+            return Vec::new();
+        };
+        let slot = address..address.saturating_add(item_size as u64);
+        slot_registers(target.arch())
+            .filter(|name| {
+                registers
+                    .get(*name)
+                    .is_some_and(|value| slot.contains(value))
+            })
+            .collect()
+    };
+    let markers: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            let names = pointing(row.address.0);
+            if names.is_empty() {
+                String::new()
+            } else {
+                format!("{} \u{25b6}", names.join(" "))
+            }
+        })
+        .collect();
+    let marker_width = markers
+        .iter()
+        .map(|marker| marker.chars().count())
+        .max()
+        .unwrap_or(0);
+    // A return address: the code before it, as the code there decodes,
+    // ends in a call.
+    let returns = |value: u64| {
+        let mut before = [0u8; 8];
+        value.checked_sub(before.len() as u64).is_some_and(|from| {
+            session.read_masked(VirtAddr(from), &mut before).is_ok()
+                && target
+                    .code_machine(VirtAddr(value))
+                    .instruction_set()
+                    .ends_in_call(&before)
+        })
+    };
     let width = item_size * 2;
-    for row in rows {
+    for (row, marker) in rows.iter().zip(&markers) {
+        let marker = match marker_width {
+            0 => String::new(),
+            width => format!("{} ", format!("{marker:>width$}").cyan()),
+        };
         let address = ui::addr(row.address.0);
         match &row.value {
-            SymbolValue::Partial => outln!("{address}  <partial>"),
-            SymbolValue::Unreadable => outln!("{address}  <unreadable>"),
-            SymbolValue::Value {
-                value,
-                symbol: Some(symbol),
-            } => outln!("{address}  {value:0width$x}  {}", ui::symbol(symbol)),
-            SymbolValue::Value {
-                value,
-                symbol: None,
-            } => outln!("{address}  {value:0width$x}"),
+            SymbolValue::Partial => outln!("{marker}{address}  <partial>"),
+            SymbolValue::Unreadable => outln!("{marker}{address}  <unreadable>"),
+            SymbolValue::Value { value, symbol } => {
+                let symbol = match symbol {
+                    Some(symbol) if returns(*value) => {
+                        format!("  \u{21a9} {}", ui::symbol(symbol))
+                    }
+                    Some(symbol) => format!("  {}", ui::symbol(symbol)),
+                    None => String::new(),
+                };
+                outln!("{marker}{address}  {value:0width$x}{symbol}");
+            }
         }
     }
     outln!();
@@ -439,7 +509,7 @@ impl ReplState<'_> {
     /// `dds`/`dqs` over `range`: each value, and the symbol it resolves to.
     pub fn display_symbol_range(&self, range: &AddressRange, item_size: usize) -> Result<()> {
         match symbol_values(self.ctx, range, item_size) {
-            Ok(values) => values.show(),
+            Ok(values) => values.show(self.ctx),
             Err(error) => error!("{error}"),
         }
         Ok(())

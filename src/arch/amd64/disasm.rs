@@ -125,6 +125,23 @@ impl InstructionSet for X86 {
 
     /// x86 cannot decode backwards, so every starting offset is tried,
     /// preferring a stream without invalid instructions.
+    /// `call rel32`, or an indirect `call` through a register or memory.
+    fn ends_in_call(&self, before: &[u8]) -> bool {
+        let n = before.len();
+        if n >= 5 && before[n - 5] == 0xe8 {
+            return true;
+        }
+        (2..=7).any(|length| {
+            n >= length && {
+                let modrm = match &before[n - length..] {
+                    [0x41 | 0x48 | 0x49, 0xff, modrm, ..] | [0xff, modrm, ..] => *modrm,
+                    _ => return false,
+                };
+                (modrm >> 3) & 7 == 2
+            }
+        })
+    }
+
     fn condition_holds(
         &self,
         bytes: &[u8],

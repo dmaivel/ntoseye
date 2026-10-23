@@ -438,7 +438,7 @@ impl StackTracer<'_> {
         let follows = return_address
             .checked_sub(base)
             .and_then(|ret| image.read((ret as usize).checked_sub(7)?, 7))
-            .is_some_and(|before| super::prolog::follows_call(&before));
+            .is_some_and(|before| CodeMachine::Amd64.instruction_set().ends_in_call(&before));
         if !follows || !self.is_executable_address(return_address) {
             return Unwound::Stop;
         }

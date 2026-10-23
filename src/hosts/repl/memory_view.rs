@@ -463,23 +463,45 @@ where
 /// Render a memory listing while preserving rows that contain unreadable
 /// bytes. `validity`, when supplied, has one entry per byte in `data`; an
 /// invalid item is shown as question marks and the ASCII column uses `?` for
-/// each unavailable byte.
+/// each unavailable byte. Zeros and unreadable items read quieter than
+/// data, and a byte row's two halves are split by a `-`, as WinDbg splits
+/// them.
 pub fn display_memory_with_validity(
     start_address: VirtAddr,
     data: &[u8],
     validity: Option<&[bool]>,
     mode: &MemoryDisplayMode,
 ) {
+    let bytes = matches!(mode.item_format, ItemFormat::Bytes);
+    let half = mode.bytes_per_row / mode.item_size / 2;
     for (i, chunk) in data.chunks(mode.bytes_per_row).enumerate() {
         out!(
             "{}  ",
             ui::addr((start_address + ((i * mode.bytes_per_row) as u64)).0)
         );
-        row_items(i, chunk, validity, mode, |_, text| out!("{text}"));
+        let mut items = 0;
+        row_items(i, chunk, validity, mode, |kind, text| {
+            let text = text.to_string();
+            // Each item ends in its separator; a partial item's bytes come
+            // first, then the separator on its own.
+            let digits = text.trim_end();
+            let mut separator = &text[digits.len()..];
+            if !separator.is_empty() {
+                items += 1;
+                if bytes && items == half && chunk.len() > half {
+                    separator = "-";
+                }
+            }
+            match kind {
+                ItemKind::Zero | ItemKind::Unreadable => out!("{}", ui::muted(digits)),
+                ItemKind::Value | ItemKind::Padding => out!("{digits}"),
+            }
+            out!("{separator}");
+        });
         if mode.show_ascii {
             out!(" ");
             row_ascii(i, chunk, validity, mode, |cell| match cell {
-                AsciiCell::Unreadable => out!("?"),
+                AsciiCell::Unreadable => out!("{}", ui::muted("?")),
                 AsciiCell::Char(character) => out!("{character}"),
                 AsciiCell::Dot => out!("{}", ".".bright_black()),
             });

@@ -1245,7 +1245,8 @@ impl Render for Contexts {
             Self::UserThreads(threads) => print_user_threads(threads),
             Self::Vcpus(vcpus) => {
                 repl.caches.refresh_vcpus(repl.ctx.backend.as_mut());
-                print_vcpus(vcpus);
+                let current = repl.ctx.current_thread.as_str();
+                print_vcpus(vcpus, current);
             }
         }
     }
@@ -1282,30 +1283,36 @@ fn print_user_threads(threads: &[UserThreadSummary]) {
 }
 
 /// The vCPU list: what each vCPU runs, with the lines below a vCPU in the
-/// hypervisor.
-fn print_vcpus(vcpus: &[VcpuInfo]) {
+/// hypervisor. `.` marks `current`, the selected vCPU, as WinDbg's `~` marks
+/// the current thread.
+fn print_vcpus(vcpus: &[VcpuInfo], current: &str) {
+    // The marker column, and the two spaces after it.
+    let marker_column = 3;
     // Where the Symbol column starts: each column is as wide as its
     // widest cell, plus two spaces. The lines below a vCPU wrap from
     // there, after their three-column tree glyph.
     let widest = |header: &str, cells: &mut dyn Iterator<Item = usize>| {
         cells.fold(header.len(), usize::max) + 2
     };
-    let symbol_column = widest(
-        "vCPU",
-        &mut vcpus.iter().map(|vcpu| vcpu.id.chars().count()),
-    ) + widest(
-        "RIP",
-        &mut vcpus.iter().map(|vcpu| match vcpu.rip {
-            Some(_) => 16,
-            None => "unavailable".len(),
-        }),
-    ) + widest(
-        "Context",
-        &mut vcpus.iter().map(|vcpu| vcpu.context.chars().count()),
-    );
+    let symbol_column = marker_column
+        + widest(
+            "vCPU",
+            &mut vcpus.iter().map(|vcpu| vcpu.id.chars().count()),
+        )
+        + widest(
+            "RIP",
+            &mut vcpus.iter().map(|vcpu| match vcpu.rip {
+                Some(_) => 16,
+                None => "unavailable".len(),
+            }),
+        )
+        + widest(
+            "Context",
+            &mut vcpus.iter().map(|vcpu| vcpu.context.chars().count()),
+        );
 
     let mut builder = Builder::default();
-    builder.push_record(vec!["vCPU", "RIP", "Context", "Symbol"]);
+    builder.push_record(["", "vCPU", "RIP", "Context", "Symbol"]);
     for vcpu in vcpus {
         let (rip_cell, symbol_cell) = match vcpu.rip {
             Some(rip) => (
@@ -1317,7 +1324,9 @@ fn print_vcpus(vcpus: &[VcpuInfo]) {
                 vcpu.error.clone().unwrap_or_default(),
             ),
         };
+        let marker = if vcpu.id == current { "." } else { "" };
         builder.push_record(vec![
+            marker.to_string(),
             vcpu.id.to_string(),
             rip_cell.to_string(),
             vcpu.context.to_string(),
@@ -1335,7 +1344,13 @@ fn print_vcpus(vcpus: &[VcpuInfo]) {
             children.push(served_vp_lines(served, symbol_column + 3));
         }
         for line in event_children_lines("", &children) {
-            builder.push_record(vec![String::new(), String::new(), String::new(), line]);
+            builder.push_record(vec![
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                line,
+            ]);
         }
     }
 
