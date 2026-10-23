@@ -13,10 +13,12 @@ The hypervisor does not name its partitions. Their IDs follow the order in which
 ```text
 0: gdb> .partition 5
 error: Windows hypervisor: partition 0x5 runs no Windows kernel: no NT image is mapped where its VPs run, as in a Linux guest such as WSL2's; !hvd and !hvu read any guest's memory and code
+
 0: gdb> !hvvps 5
 VP  Address           CPU  VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
 0   ffffe804c5038050  -    0*   ffffe804c5039000  22754d000  227c3105e    ffffffffbd1df02f  HLT
 ...
+
 0: gdb> .partition 4
 inspecting partition 0x4: nt at 0xfffff80586250000, VPs 0 1 2 3
 ```
@@ -109,6 +111,7 @@ VM running, waiting for stop (Ctrl+C to pause)...
  BREAK  processor 0  dwm.exe (3832) at nt!NtClose+0xa8
  └─ thread ffff810cc3a60080  TID 3944  PID 3832  process dwm.exe  state Running
 ...
+
 0: partition 0x4> gu
 VM running, waiting for stop (Ctrl+C to pause)...
  BREAK  processor 0  dwm.exe (3832) at nt!KiSystemServiceCopyEnd+0x25
@@ -132,6 +135,7 @@ In the SDK, `dbg.step()`, `dbg.step_over()`, `dbg.step_out()` and `dbg.run(addre
 VP  Address           CPU  VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
 0   ffffe80200231050       0*   ffffe80200232000  2052dc000  20523105e    000000001ff26114  HLT
 ...
+
 1: mem> !hvd 3 0 0x1ff26110 L10
 000000001ff26110  fb c3 fb f4 c3 cc cc cc cc cc cc cc cc cc cc cc  ................
 ```

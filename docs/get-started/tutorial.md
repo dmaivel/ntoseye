@@ -27,6 +27,7 @@ target
  BREAK  processor 1  kernel at nt!DbgBreakPointWithStatus
  └─ thread ffffe70fb1986040  TID 588  PID 4  process System  state Running
 ...
+
 1: kdnet>
 ```
 
@@ -186,9 +187,9 @@ For more information about registers, pseudo-registers, casts, and members, see 
 
 ```text
 0: kdnet> p
-
  BREAK  processor 0  svchost.exe (468) at nt!NtCreateFile+0x7
 ...
+
 0: kdnet> gu
 VM running, waiting for stop (Ctrl+C to pause)...
 

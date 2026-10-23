@@ -9,14 +9,14 @@
 //! Transcript logging is process-wide so a `.logopen` command also records
 //! diagnostics emitted by the backend or another command context.
 //!
-//! A command's output neither starts nor ends with a blank line, as in
-//! WinDbg, gdb and lldb: its first line follows the command line, and the
-//! prompt follows its last. Each stream holds its blank lines back
-//! ([`BlankLines`]) and writes them only once text follows, so the blank
-//! lines between a command's sections still print. The REPL drops what is
-//! held before each prompt ([`drop_trailing_blank_lines`]) and the blank
-//! lines a command starts with ([`drop_leading_blank_lines`]); a capture
-//! does both on its own.
+//! A command's output starts right under the command line and is set apart
+//! from the next prompt by exactly one blank line, however many blank
+//! lines the command itself ended with. Each stream holds its blank lines
+//! back ([`BlankLines`]) and writes them only once text follows, so the
+//! blank lines between a command's sections still print. The REPL drops
+//! the blank lines a command starts with ([`drop_leading_blank_lines`])
+//! and ends its output with the one blank line before each prompt
+//! ([`separate_prompt`]); a capture, with no prompt to follow, drops both.
 //!
 //! Styling reaches stdout and stderr only when the stream is a terminal,
 //! `NO_COLOR` is unset or empty, and `TERM` is not `dumb`; a redirected
@@ -49,8 +49,8 @@ struct Capture {
 static LOG_SINK: LazyLock<Mutex<Option<std::fs::File>>> = LazyLock::new(|| Mutex::new(None));
 
 /// The blank lines held back from stdout and from the transcript.
-static STDOUT_BLANK_LINES: Mutex<BlankLines> = Mutex::new(BlankLines::new(false));
-static LOG_BLANK_LINES: Mutex<BlankLines> = Mutex::new(BlankLines::new(false));
+static STDOUT_BLANK_LINES: Mutex<BlankLines> = Mutex::new(BlankLines::new(true));
+static LOG_BLANK_LINES: Mutex<BlankLines> = Mutex::new(BlankLines::new(true));
 
 /// A stream's blank lines, held back until text follows them: what a
 /// stream ends with is never written, nor, from `starting`, what it starts
@@ -110,6 +110,20 @@ impl BlankLines {
         self.held = 0;
         self.starting = false;
     }
+
+    /// End the output with one blank line in place of those held back,
+    /// when anything was written since the command began, and start over.
+    fn end(&mut self, write: &mut impl FnMut(&str)) {
+        if !self.starting {
+            if self.open {
+                write("\n");
+                self.open = false;
+            }
+            write("\n");
+        }
+        self.held = 0;
+        self.starting = true;
+    }
 }
 
 /// [`BlankLines`] as a [`fmt::Write`], so formatted text passes through it
@@ -132,11 +146,30 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Drop the blank lines the last command's output ended with: the prompt
-/// follows it.
-pub fn drop_trailing_blank_lines() {
-    lock(&STDOUT_BLANK_LINES).held = 0;
-    lock(&LOG_BLANK_LINES).held = 0;
+/// Set the next prompt apart from the last command's output by one blank
+/// line, in place of the blank lines the output ended with; none when the
+/// command printed nothing.
+pub fn separate_prompt() {
+    {
+        let mut stdout = io::stdout().lock();
+        lock(&STDOUT_BLANK_LINES).end(&mut |text: &str| {
+            let _ = stdout.write_all(text.as_bytes());
+        });
+        let _ = stdout.flush();
+    }
+    let mut sink = LOG_SINK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut blank_lines = lock(&LOG_BLANK_LINES);
+    match sink.as_mut() {
+        Some(file) => {
+            blank_lines.end(&mut |text: &str| {
+                let _ = file.write_all(text.as_bytes());
+            });
+            let _ = file.flush();
+        }
+        None => blank_lines.end(&mut |_| {}),
+    }
 }
 
 /// Drop the blank lines the next command's output starts with: it follows
@@ -621,6 +654,27 @@ mod tests {
             outln!("\nfirst");
         });
         assert_eq!(text, "first\n");
+    }
+
+    /// Before a prompt, output that ended with any number of blank lines, or
+    /// none, or in mid-line, ends with exactly one; no output gets none.
+    #[test]
+    fn a_prompt_is_set_apart_by_one_blank_line_from_output_only() {
+        let separated = |pieces: &[&str]| {
+            let mut blank_lines = BlankLines::new(true);
+            let mut text = String::new();
+            let mut write = |piece: &str| text.push_str(piece);
+            for piece in pieces {
+                blank_lines.pass(piece, &mut write);
+            }
+            blank_lines.end(&mut write);
+            text
+        };
+        assert_eq!(separated(&["bl\n"]), "bl\n\n");
+        assert_eq!(separated(&["\nstack\n", "  00\n\n\n"]), "stack\n  00\n\n");
+        assert_eq!(separated(&["VM running..."]), "VM running...\n\n");
+        assert_eq!(separated(&[]), "");
+        assert_eq!(separated(&["\n\n"]), "");
     }
 
     #[test]

@@ -39,6 +39,7 @@ target
  ├─ saved VTL0 nt!HalProcessorIdle+0xf
  └─ inspecting saved VTL0 (.cxr shows the hypervisor's registers)
 ...
+
 0: gdb>
 ```
 
@@ -77,6 +78,7 @@ Partition 0x1 is the target's own Windows. The hypervisor does not name the othe
 ```text
 0: gdb> .partition 4
 inspecting partition 0x4: nt at 0xfffff80586250000, VPs 0 1 2 3
+
 0: partition 0x4> lm
 Start             End               Module                 Version  Symbols  Source  Image
 fffff80586250000  fffff805876a0000  nt                     -        loaded   cached  ntoskrnl.exe
@@ -206,11 +208,13 @@ The Sandbox's `dwm.exe` closed a handle on its VP 2, processor 2 in its view, as
  BREAK  processor 2  dwm.exe (3832) at nt!NtClose+0x5
  └─ thread ffff810cc3a5d080  TID 3956  PID 3832  process dwm.exe  state Running
 ...
+
 2: partition 0x4> gu
 VM running, waiting for stop (Ctrl+C to pause)...
  BREAK  processor 2  dwm.exe (3832) at nt!KiSystemServiceCopyEnd+0x25
  └─ thread ffff810cc3a5d080  TID 3956  PID 3832  process dwm.exe  state Running
 ...
+
 2: partition 0x4> bc *
 breakpoint #0 cleared
 ```
@@ -224,6 +228,7 @@ A hypercall breakpoint is in the hypervisor, which is the target's, so set it fr
 ```text
 2: partition 0x4> .partition 1
 inspecting the target (the root partition)
+
 1: gdb> !hvbp HvCallSendSyntheticClusterIpi 4
 hypercall breakpoint #0 set at fffff850200927c0 (hv!HvCallSendSyntheticClusterIpi) (global, hypercall 0x000b HvCallSendSyntheticClusterIpi from partition 0x4)
 
@@ -271,6 +276,7 @@ breakpoint #0 cleared
 
 2: gdb> .partition 4
 inspecting partition 0x4: nt at 0xfffff80586250000, VPs 0 1 2 3
+
 0: partition 0x4> ~
    Processor  RIP               Context  Symbol
 .  0          fffff8058670f8bd  kernel   nt!PpmIdleGuestExecute+0x1d
@@ -299,6 +305,7 @@ VP 2 was idle: in its idle loop, the Sandbox's kernel woke VP 0 with an interrup
 ```text
 2: partition 0x4> .partition 1
 inspecting the target (the root partition)
+
 2: gdb> q
 ```
 

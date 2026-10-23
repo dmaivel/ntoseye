@@ -32,6 +32,7 @@ The addresses are in the address space of the hypervisor. To read them with {com
 1: mem> !hvbp HvCallFlushVirtualAddressList
 1: mem> g
 ...
+
 1: mem> !hvcall
 root partition VP 0 VTL0  hypercall 0x0003 HvCallFlushVirtualAddressList fast rep 0/4
 ├─ input value 0x0000000400010003  fast

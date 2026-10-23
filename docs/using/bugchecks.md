@@ -70,6 +70,7 @@ stack
   07  fffff808bb461bd2  myfault+0x1bd2
   08  fffff808bb461d54  myfault+0x1d54
 ...
+
 3: kdnet>
 ```
 

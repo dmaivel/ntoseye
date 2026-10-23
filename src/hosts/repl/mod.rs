@@ -37,7 +37,7 @@ use crate::base::error::Error;
 use crate::base::error::Result;
 #[cfg(feature = "cli")]
 use crate::base::output::{
-    self, drop_leading_blank_lines, drop_trailing_blank_lines, log_input_line, prompting,
+    self, drop_leading_blank_lines, log_input_line, prompting, separate_prompt,
 };
 #[cfg(feature = "cli")]
 use crate::base::time::filetime_to_iso;
@@ -1147,7 +1147,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                 if termination_requested() {
                     break;
                 }
-                drop_trailing_blank_lines();
+                separate_prompt();
                 outln!("{}", state.plain_prompt());
                 io::stdout().flush()?;
 
@@ -1160,6 +1160,8 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                 }
                 let command = buffer.trim();
                 if command.is_empty() {
+                    // Nothing ran, so nothing sets the next prompt apart.
+                    drop_leading_blank_lines();
                     continue;
                 }
 
@@ -1177,7 +1179,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                 if termination_requested() {
                     break;
                 }
-                drop_trailing_blank_lines();
+                separate_prompt();
                 // A run that ended without a result to show still stops
                 // its indicator before the prompt.
                 native::finish_running();

@@ -231,6 +231,7 @@ A small dump (`MiniDumpNormal`) holds the stacks but not the TEBs, the PEB, the 
 ```text
 0: minidump> !teb
 error: the minidump did not capture the TEB at 0xf35d172000
+
 0: minidump> !handle
 error: the minidump records no handle data (HandleDataStream)
 ```
