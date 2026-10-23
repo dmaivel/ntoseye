@@ -8,7 +8,7 @@ The Windows hypervisor keeps a partition object for NT (the root partition) and 
 With a Hyper-V VM that runs in the guest:
 
 ```text
-mem:1> !hvpartitions
+1: mem> !hvpartitions
 partition 0x1  root  ffffe80000001000
 ├─ privileges 002bb9ff00003fff  AccessVpRunTimeReg AccessPartitionReferenceCounter
 │                               AccessSynicRegs AccessSyntheticTimerRegs AccessIntrCtrlRegs
@@ -26,7 +26,7 @@ partition 0x1  root  ffffe80000001000
    ├─ VP 0  VTL0  000000001ff26114  last exit HLT
    └─ VP 1  VTL0
 
-mem:1> !hvvps
+1: mem> !hvvps
 VP  Address           CPU  VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
 0   ffffe8000026c050  0    0*   ffffe8000026d000  1160e4000  10155901e    fffff805932e950f  HLT
                            1    ffffe8000026f000  1160e7000  10155c01e    fffff80523b40035  VMCALL
@@ -34,7 +34,7 @@ VP  Address           CPU  VTL  Context           eVMCS      EPT pointer  Guest 
                            1    ffffe80000392000  12ec10000  10155c01e    fffff80523b40035  VMCALL
 ...
 
-mem:1> !hvvps 2
+1: mem> !hvvps 2
 VP  Address           CPU  VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
 0   ffffe80200231050  -    0*   ffffe80200232000  2052dc000  20523105e    000000001ff26114  HLT
 1   ffffe8020024b050  -    0*   ffffe8020024c000  2053e7000  -            -                 -
@@ -51,20 +51,20 @@ The EPT pointer is the root of the VTL's second-level address translation (SLAT)
 With `-v`, the address is virtual, in the current address space ({command}`.process`, or the {command}`.vtl` `1` scope), and the command translates it through the guest's page tables first:
 
 ```text
-mem:1> !hvept -v nt!KeBugCheckEx
+1: mem> !hvept -v nt!KeBugCheckEx
 virtual fffff8059313d130 -> guest physical 5efd130
 VTL  EPT pointer  Host physical  Access  User exec  Page  Type
 0    10155901e    5efd130        r-x                2M    WB
 1    10155c01e    5efd130        rwx                2M    WB
 
-mem:1> !hvept -v nt!KiProcessorBlock
+1: mem> !hvept -v nt!KiProcessorBlock
 virtual fffff80593c08c80 -> guest physical 1185c8c80
 VTL  EPT pointer  Host physical  Access  User exec  Page  Type
 0    10155901e    1185c8c80      rw-                2M    WB
 1    10155c01e    1185c8c80      rwx                2M    WB
 
-mem:1> .vtl 1
-mem:1> !hvept -v securekernel
+1: mem> .vtl 1
+1: mem> !hvept -v securekernel
 virtual fffff805290d3000 -> guest physical 18ba000
 VTL  EPT pointer  Host physical                  Access  User exec  Page  Type
 0    10155901e    not mapped (no level-1 entry)
@@ -76,7 +76,7 @@ With `-v`, the address is virtual in the current address space (the `.process` o
 {command}`!hveptdiff` `[partition-id [vp-index]]` walks the whole EPT of VTL0 and of VTL1 of a VP, by default the one that the current vCPU's processor runs, and lists every range of guest physical memory that the two map differently. A summary of how they differ comes first, largest first. With memory integrity on:
 
 ```text
-mem:1> !hveptdiff
+1: mem> !hveptdiff
 VTL0 EPT 10155901e: 9184 mappings, 10.1 GiB
 VTL1 EPT 10155c01e: 6378 mappings, 8.9 GiB
 
@@ -100,7 +100,7 @@ Most of memory is `rw-` in VTL0 because memory integrity does not let NT execute
 {command}`!hvvmcs` `[-msr|-io] [partition-id [vp-index [vtl]]]` shows the eVMCS of a VTL, by default of the VP that the current vCPU's processor runs (a guest partition's first, else the root partition's) and the VTL that it runs in: each field with its name, offset, and value. With `-msr`, it shows the MSRs whose reads and writes the VTL's MSR bitmap intercepts, with the names of the architectural MSRs in each range, and then the architectural MSRs that the VTL reads and writes without an exit (`read without an exit: IA32_SPEC_CTRL ... IA32_KERNEL_GS_BASE`). The bitmap covers 0x0-0x1fff and 0xc0000000-0xc0001fff, and every other MSR, such as Hyper-V's synthetic ones, always exits. With `-io`, it shows the I/O ports that its I/O bitmaps intercept. When the VM-execution controls do not use the bitmaps, it says that every access exits, or none. The eVMCS layout is the Hyper-V TLFS's, so this works on every hypervisor build.
 
 ```text
-mem:1> !hvvmcs -io
+1: mem> !hvvmcs -io
 VP 0 of partition 0x1, VTL0: eVMCS 1160e4000
 First port  Last port
 0x20        0x21
@@ -122,7 +122,7 @@ First port  Last port
 RIP, RSP, the flags, the control registers and the segment registers come from the VTL's eVMCS. The general-purpose registers are shared by a VP's VTLs and belong to the VTL that it runs in, so another VTL shows its eVMCS state alone. The SDK has `VirtualProcessor.registers(vtl=None)`, whose `source` says where they are from.
 
 ```text
-mem:1> !hvr 6 1
+1: mem> !hvr 6 1
 partition 0x6 VP 1 VTL0  from its last exit
   rax     ffff8c3020a14000   rbx     0000000000000000   rcx     0000000000000001
   rdx     0000000000000001   rsi     0000000000000083   rdi     0000000002125454

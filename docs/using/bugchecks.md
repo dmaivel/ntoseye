@@ -186,7 +186,7 @@ The IRP's current stack location belongs to the lowest driver the IRP has reache
 `!analyze -show 9f` reads what the parameters point to in the target, so you can try it on any power IRP that {command}`!poaction` lists. This guest has no bugcheck; the IRP is a wait/wake request that USBHUB3 holds, as a bus driver does until its device signals a wake. Parameter 3 is not a `TRIAGE_9F_POWER` block here, so `ntoseye` walks the kernel's lists, and says so:
 
 ```text
-mem:1> !analyze -show 9f 3 ffffb28a86bae780 0 ffffb28a8c5cd010
+1: mem> !analyze -show 9f 3 ffffb28a86bae780 0 ffffb28a8c5cd010
 ...
 power failure
   subtype 0x3: a device blocked a power IRP for too long
@@ -221,7 +221,7 @@ To look at a power transition that is slow or stuck before the watchdog fires, u
 - {command}`!popolicy` shows the system power policy in effect (`SYSTEM_POWER_POLICY` at `nt!PopPolicy`): the actions for the buttons, the lid, idling, and overheating, the sleep states, and the timeouts.
 
 ```text
-mem:1> !podev ffffb28a86bae780
+1: mem> !podev ffffb28a86bae780
 Device object ffffb28a86bae780 is for:
   \Driver\USBHUB3 (UsbHub3.sys)
   Flags 00003044 DO_POWER_PAGABLE

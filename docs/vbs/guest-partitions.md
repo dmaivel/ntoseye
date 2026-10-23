@@ -128,11 +128,11 @@ In the SDK, `dbg.step()`, `dbg.step_over()`, `dbg.step_out()` and `dbg.run(addre
 {command}`!hvd` `[-p] [-b|-d|-q] [<partition-id> <vp-index>] <address> [range]` shows the memory of the guest that a child partition runs, such as a Hyper-V VM, WSL2, or Windows Sandbox inside the target. Without a partition and VP, it reads the guest VP that the current vCPU's processor runs. It reads guest virtual memory through the page tables of the VTL that the VP runs in (the CR3 in its eVMCS), or guest physical memory with `-p`, and it translates both through that VTL's EPT. Virtual addresses need a guest in 4-level long-mode paging; for a guest in 32-bit, PAE, or 5-level paging, read guest physical memory with `-p`. `-d` and `-q` show dwords and qwords, and the range works as for {command}`db`. Pages that are not mapped show as `??`. Here, a VM that sits in its firmware halted in the idle loop of its UEFI:
 
 ```text
-mem:1> !hvvps 3
+1: mem> !hvvps 3
 VP  Address           CPU  VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
 0   ffffe80200231050       0*   ffffe80200232000  2052dc000  20523105e    000000001ff26114  HLT
 ...
-mem:1> !hvd 3 0 0x1ff26110 L10
+1: mem> !hvd 3 0 0x1ff26110 L10
 000000001ff26110  fb c3 fb f4 c3 cc cc cc cc cc cc cc cc cc cc cc  ................
 ```
 
@@ -141,7 +141,7 @@ mem:1> !hvd 3 0 0x1ff26110 L10
 {command}`!hvu` `[-p] [<partition-id> <vp-index>] <address> [range]` disassembles the same memory, read as {command}`!hvd` reads it and with the same defaults. It decodes the code in the mode that the VTL left off in, by its eVMCS: 64-bit when the "IA-32e mode guest" entry control is set and the code segment is a 64-bit one (or its access rights are unusable), else 32-bit, in protected mode or compatibility mode. Real mode and 16-bit code give an error instead of a wrong listing. The range works as for {command}`u`: `L<count>` instructions (8 by default), or an end address or a length, which lists each instruction that starts before the range ends. The listing stops at the first page that it cannot read and says where. It uses no symbols of the guest, so branch targets and RIP-relative operands show as addresses. The same VM, where its VP left off:
 
 ```text
-mem:1> !hvu 3 0 0x1ff26110 L4
+1: mem> !hvu 3 0 0x1ff26110 L4
 000000001ff26110  fb  sti
 000000001ff26111  c3  ret
 000000001ff26112  fb  sti
