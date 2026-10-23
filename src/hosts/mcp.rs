@@ -1093,6 +1093,17 @@ async fn serve_http(
     unsafe_http: bool,
     interrupt: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
+    let router = http_router(session, unsafe_http, interrupt);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    axum::serve(listener, router).await?;
+    Ok(())
+}
+
+fn http_router(
+    session: SharedSession,
+    unsafe_http: bool,
+    interrupt: Arc<AtomicBool>,
+) -> axum::Router {
     use rmcp::transport::StreamableHttpService;
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
     use tower_http::cors::{AllowOrigin, Any, CorsLayer};
@@ -1123,18 +1134,60 @@ async fn serve_http(
         .allow_headers(Any)
         .expose_headers(Any);
 
-    let router = axum::Router::new()
-        .nest_service("/mcp", service)
-        .layer(axum::middleware::from_fn(require_loopback_host))
-        .layer(cors);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, router).await?;
-    Ok(())
+    let router = axum::Router::new().nest_service("/mcp", service);
+    let router = if unsafe_http {
+        router
+    } else {
+        router.layer(axum::middleware::from_fn(require_loopback_host))
+    };
+    router.layer(cors)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn http_host_policy_respects_unsafe_http() {
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        for (unsafe_http, host, allowed) in [
+            (false, "localhost:8080", true),
+            (false, "192.168.1.2:8080", false),
+            (false, "debugger.example.com:8080", false),
+            (true, "192.168.1.2:8080", true),
+            (true, "debugger.example.com:8080", true),
+        ] {
+            let router = http_router(
+                Arc::new(std::sync::Mutex::new(SessionSlot::Vacant)),
+                unsafe_http,
+                Arc::new(AtomicBool::new(false)),
+            );
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .uri("/mcp")
+                        .header("host", host)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            // A permitted request reaches rmcp, which requires an SSE Accept header.
+            let expected = if allowed {
+                StatusCode::NOT_ACCEPTABLE
+            } else {
+                StatusCode::FORBIDDEN
+            };
+            assert_eq!(
+                response.status(),
+                expected,
+                "unsafe_http={unsafe_http}, host={host}, status={}",
+                response.status()
+            );
+        }
+    }
 
     #[test]
     fn loopback_host_headers() {
