@@ -883,37 +883,6 @@ fn alias_placeholder_matches(text: &str, alias_arg_index: usize) -> bool {
     false
 }
 
-/// A semantic prompt mark (OSC 133), which lets a terminal tell commands
-/// apart: jump between them, select one's output. reedline writes the
-/// prompt's own (`A`, `B`); Tern's field, which draws no prompt in the
-/// grid, writes them around the line it echoes.
-pub enum PromptMark {
-    /// `A`: a prompt starts.
-    Prompt,
-    /// `B`: the prompt ends, and the typed line starts.
-    Input,
-    /// `C`: the line's output starts.
-    Output,
-    /// `D`: the line finished, failed when one of its commands reported an
-    /// error.
-    Finished { failed: bool },
-}
-
-/// Write `mark` to the terminal, outside any capture or transcript.
-pub fn mark(mark: PromptMark) {
-    let text = match mark {
-        PromptMark::Prompt => Cow::Borrowed("\x1b]133;A;k=i\x1b\\"),
-        PromptMark::Input => Cow::Borrowed("\x1b]133;B\x1b\\"),
-        PromptMark::Output => Cow::Borrowed("\x1b]133;C\x1b\\"),
-        PromptMark::Finished { failed } => {
-            Cow::Owned(format!("\x1b]133;D;{}\x1b\\", u8::from(failed)))
-        }
-    };
-    let mut stdout = std::io::stdout().lock();
-    let _ = stdout.write_all(text.as_bytes());
-    let _ = stdout.flush();
-}
-
 pub struct TrackingHighlighter {
     pub had_content: Arc<AtomicBool>,
 }

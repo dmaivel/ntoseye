@@ -25,6 +25,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - The prompt suggests as you type: the rest of the most recent earlier line that starts with what you've typed appears dimmed after the cursor (`b` suggests `bp nt!NtClose`), as fish does. **→**, **End** or **Ctrl+E** accepts it, **Ctrl+→** a word at a time; **Enter** runs only what you typed. Tern's prompt already did this. With `NO_COLOR` set, nothing is suggested, since only its dimming sets a suggestion apart from what you typed.
 - The prompt marks where each command and its output start and end (OSC 133), as a shell does for its terminal, so a terminal that reads the marks can jump between commands, select one's output, or flag one that reported an error.
 - When the target ran for 10 seconds or more before it stopped, the terminal shows a desktop notification of the stop (`ntoseye: breakpoint #0 hit at nt!NtClose on processor 2`): kitty only while its window is out of view, terminals that read OSC 9 (Ghostty, iTerm2) each time. A stop you cause with Ctrl+C or `break` sends none.
+- The window title names the prompt's processor and backend, and where the target stopped or that it runs (`ntoseye — 3: kd — nt!NtClose+0x5`), and is given back on exit. While the target runs, and while symbols download or a dump is written, terminals that show progress (OSC 9;4: kitty, Ghostty, iTerm2, Windows Terminal) show it on the window or tab.
 
 ### Changed
 

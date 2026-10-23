@@ -26,9 +26,9 @@ use super::native::completions::{Popup, PopupKey};
 use super::native::palette::{Outcome, Palette, Tab};
 use super::native::{self, DIM, MNEMONIC, MUTED, NUMBER, REGISTER, STRING, SYMBOL, span};
 use super::palette::{RECENT_LINES, initial_tab};
+use super::terminal::{self, PromptMark};
 use super::{
-    CustomPrompt, MyCompleter, NATIVE_PROMPT, PromptMark, ReplState, TargetLoan, mark,
-    termination_requested,
+    CustomPrompt, MyCompleter, NATIVE_PROMPT, ReplState, TargetLoan, termination_requested,
 };
 use crate::backend::dbg_backend::{thread_kind, thread_label};
 use crate::base::output::prompting;
@@ -104,8 +104,8 @@ impl TernPrompt {
         ];
         // The row the field takes is where the line is echoed: the prompt
         // starts there, and input is awaited, as Tern sees it.
-        mark(PromptMark::Prompt);
-        mark(PromptMark::Input);
+        terminal::mark(PromptMark::Prompt);
+        terminal::mark(PromptMark::Input);
         // A paste arrives whole, to be joined into one line rather than run
         // line by line as typed.
         let Some(mut session) = native::connect_with::<()>(&features, true) else {

@@ -93,6 +93,7 @@ pub mod native;
 mod palette;
 mod remote;
 mod stop;
+mod terminal;
 #[cfg(feature = "cli")]
 mod tern_prompt;
 pub mod usage;
@@ -106,10 +107,11 @@ pub use commands::{ReplActions, command_reference_json, json_string, open_sessio
 pub use completion::*;
 pub use disasm::*;
 #[cfg(feature = "cli")]
-use line_editor::{CustomPrompt, MyCompleter, PromptMark, TrackingHighlighter, mark};
+use line_editor::{CustomPrompt, MyCompleter, TrackingHighlighter};
 pub use memory_view::*;
 pub use remote::*;
 pub use stop::*;
+use terminal::PromptMark;
 
 pub fn print_module_symbol_report(report: &ModuleSymbolLoadReport) {
     let mut summary = format!("loaded {}/{}", report.loaded, report.total);
@@ -552,6 +554,32 @@ impl<'a> ReplState<'a> {
         } else {
             format!("{}: {}>", thread_label(thread), self.prompt_backend())
         }
+    }
+
+    /// The window title: the prompt's processor and backend, and where the
+    /// target stopped or that it runs (`ntoseye — 3: kd — nt!NtClose+0x5`).
+    pub fn window_title(&self, running: bool) -> String {
+        let thread = &self.ctx.current_thread;
+        let mut title = if thread.is_empty() {
+            "ntoseye".to_string()
+        } else {
+            format!(
+                "ntoseye — {}: {}",
+                thread_label(thread),
+                self.prompt_backend()
+            )
+        };
+        if running {
+            title.push_str(" — running");
+        } else if let Some(shown) = self
+            .ctx
+            .shown_stop
+            .as_ref()
+            .filter(|shown| shown.thread == *thread)
+        {
+            title.push_str(&format!(" — {}", shown.symbol));
+        }
+        title
     }
 
     /// What the prompt names after the processor: the backend (`kd`), or
@@ -1081,6 +1109,9 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         last_run: None,
         virtio_seen: Default::default(),
     };
+    if !plain {
+        terminal::begin(!native::active());
+    }
     // An error ends the prompt, not the cleanup below: breakpoints left
     // planted in a guest that resumes without a debugger crash it.
     let prompt: Result<()> = (|| {
@@ -1124,6 +1155,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                 // A run that ended without a result to show still stops
                 // its indicator before the prompt.
                 native::finish_running();
+                terminal::set_title(&state.window_title(false));
                 // In Tern the line is read in Tern's own field.
                 let native = match tern_prompt.as_mut() {
                     Some(native) => native.read(
@@ -1163,9 +1195,9 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                             // A Ctrl+C that ended the last command's step is spent.
                             state.ctx.target.interrupt.store(false, Ordering::SeqCst);
                             let errors = diagnostics::errors_reported();
-                            mark(PromptMark::Output);
+                            terminal::mark(PromptMark::Output);
                             let flow = state.dispatch_line(&buffer);
-                            mark(PromptMark::Finished {
+                            terminal::mark(PromptMark::Finished {
                                 failed: flow.is_err() || diagnostics::errors_reported() != errors,
                             });
                             match flow? {
@@ -1199,6 +1231,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         Ok(())
     })();
 
+    terminal::end();
     // The breakpoints, traps and backend to clean up are the target's, which
     // a partition view keeps aside while it is shown.
     state.ctx.leave_partition();

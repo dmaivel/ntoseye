@@ -1,6 +1,5 @@
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::io::IsTerminal as _;
 use std::time::{Duration, Instant};
 
 use owo_colors::OwoColorize;
@@ -15,6 +14,7 @@ use crate::base::output::neutralize_controls;
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::commands::display;
 use crate::hosts::repl::commands::frames::registers_from_trap_frame;
+use crate::hosts::repl::terminal;
 use crate::hosts::ui;
 use crate::nt::bugchecks::bugcheck_trap_frame_on_stack;
 use crate::nt::guest::ModuleInfo;
@@ -880,6 +880,7 @@ impl ReplState<'_> {
         let announced = Cell::new(false);
         let printed = Cell::new(self.printed_debug_seq);
         let interactive = self.context == DispatchContext::Interactive;
+        let title = self.window_title(true);
         let tick = |session: &mut Session| {
             if announce && !announced.get() && session.backend.is_running() {
                 announced.set(true);
@@ -893,6 +894,8 @@ impl ReplState<'_> {
                 native::running(print);
                 #[cfg(not(feature = "cli"))]
                 print();
+                terminal::set_running(true);
+                terminal::set_title(&title);
             }
             if interactive && !session.backend_streams_debug_output() {
                 let page = session.read_debug_output(printed.get());
@@ -912,6 +915,7 @@ impl ReplState<'_> {
         self.last_run = Some(started.elapsed());
         self.printed_debug_seq = printed.get();
         if announced.get() {
+            terminal::set_running(false);
             // A wait that ended without a stop (an error, a spent budget)
             // still stops the indicator.
             #[cfg(feature = "cli")]
@@ -954,15 +958,11 @@ impl ReplState<'_> {
         }
     }
 
-    /// Ask the terminal to show a desktop notification of the stop just
-    /// rendered, `what` it was: at the interactive prompt on a terminal only,
-    /// where a long run may have been left to itself. kitty's protocol (OSC
-    /// 99) lets kitty skip it while its window is in view; other terminals
-    /// read OSC 9, as iTerm2 and Ghostty do. One that knows neither ignores
-    /// it. The text comes from the guest (a process name), so its control
-    /// characters are made visible first: none can end the sequence.
+    /// Ask the terminal for a desktop notification of the stop just
+    /// rendered, `what` it was: at the interactive prompt only, where a long
+    /// run may have been left to itself.
     fn notify_stop(&self, what: &str) {
-        if self.context != DispatchContext::Interactive || !std::io::stdout().is_terminal() {
+        if self.context != DispatchContext::Interactive {
             return;
         }
         let mut text = format!("ntoseye: {what}");
@@ -974,15 +974,7 @@ impl ReplState<'_> {
                 thread_label(&shown.thread)
             ));
         }
-        let text = neutralize_controls(&text);
-        let sequence = if std::env::var_os("KITTY_WINDOW_ID").is_some() {
-            format!("\x1b]99;o=invisible;{text}\x1b\\")
-        } else {
-            format!("\x1b]9;{text}\x1b\\")
-        };
-        let mut stdout = std::io::stdout().lock();
-        let _ = stdout.write_all(sequence.as_bytes());
-        let _ = stdout.flush();
+        terminal::notify(&text);
     }
 
     /// Say that a remote client's stop budget ran out with the target still
