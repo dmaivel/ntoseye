@@ -15,6 +15,7 @@
 //! unwinding the x64 callee returns into the thunk.
 
 use super::{REGISTER_SLOTS, RegisterContext, StackTracer, Unwound};
+use crate::arch::Arch;
 use crate::arch::amd64::VOLATILE_REGISTERS;
 
 /// The ARM64 register each x64 register lives in during ARM64EC code, by
@@ -49,13 +50,8 @@ impl StackTracer<'_> {
     /// Unwind an x64 frame of an ARM64 thread, whose registers are in their
     /// ARM64EC homes.
     pub fn unwind_once_emulated_amd64(&mut self, context: &mut RegisterContext) -> Unwound {
-        let mut x64 = RegisterContext {
-            rip: context.rip,
-            rsp: context.rsp,
-            regs: [None; REGISTER_SLOTS],
-            after_call: context.after_call,
-            machine_frame: None,
-        };
+        let mut x64 = RegisterContext::new(Arch::Amd64, context.pc, context.sp);
+        x64.after_call = context.after_call;
         for (register, home) in X64_IN_ARM64.iter().enumerate() {
             if let Some(home) = home {
                 x64.regs[register] = context.regs[*home];
@@ -77,8 +73,8 @@ impl StackTracer<'_> {
                 context.regs[*home] = x64.regs[register];
             }
         }
-        context.rip = x64.rip;
-        context.rsp = x64.rsp;
+        context.pc = x64.pc;
+        context.sp = x64.sp;
         // A popped return address: the caller, x64 or an exit thunk, is
         // suspended in its call.
         context.after_call = !stack_switch;

@@ -77,6 +77,10 @@ impl Architecture for Arm64 {
         &ENCODED_REGISTERS
     }
 
+    fn encoded_sp(&self) -> Option<u8> {
+        None
+    }
+
     fn register_synonyms(&self) -> &'static [(&'static str, &'static str)] {
         &REGISTER_SYNONYMS
     }

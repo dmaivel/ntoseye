@@ -155,6 +155,11 @@ pub trait Architecture: Sync {
     /// which is how unwind codes name them.
     fn encoded_registers(&self) -> &'static [&'static str];
 
+    /// The number [`Self::encoded_registers`] gives the stack pointer, when
+    /// the encoding numbers it among the integer registers (AMD64's `rsp`
+    /// is 4; ARM64 numbers `sp` apart from x0-x30).
+    fn encoded_sp(&self) -> Option<u8>;
+
     /// Pairs of names for one register: the name a listing shows, then the
     /// other name it also answers to (ARM64's `fp` for `x29`).
     fn register_synonyms(&self) -> &'static [(&'static str, &'static str)];
@@ -274,6 +279,20 @@ pub fn machine_name(machine: u16) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The stack pointer's number is where the encoding lists it, so a
+    /// context's `sp` and its numbered slot never disagree.
+    #[test]
+    fn the_encoded_stack_pointer_is_where_the_encoding_lists_it() {
+        for arch in Arch::ALL {
+            let listed = arch
+                .encoded_registers()
+                .iter()
+                .position(|name| *name == arch.sp_register())
+                .map(|index| index as u8);
+            assert_eq!(arch.encoded_sp(), listed, "{arch:?}");
+        }
+    }
 
     #[test]
     fn kernel_space_is_classified_per_architecture() {

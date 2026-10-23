@@ -8,10 +8,17 @@ use std::ops::Range;
 use ntoseye_macros::record;
 
 use super::amd64::{DynamicCode, EntryLookup, RuntimeFunction, Unwind, UnwindBytes, UnwindHandler};
-use super::{RegisterContext, StackTracer, Unwound, image_u32, runtime_functions};
+use super::{RegisterContext, StackTracer, Unwinder, Unwound, image_u32, runtime_functions};
 use crate::{
-    arch::arm64::{OFFSET_PC, OFFSET_SP, OFFSET_X0},
-    base::types::{CodeMachine, VirtAddr},
+    arch::{
+        Arch,
+        arm64::{OFFSET_PC, OFFSET_SP, OFFSET_X0},
+    },
+    base::{
+        error::{Error, Result},
+        memory::MemoryOps,
+        types::{CodeMachine, VirtAddr},
+    },
     nt::{
         pe::{CodeLayout, PeImage},
         target::{Arm64SavedRegisters, SavedThreadRegisters},
@@ -527,7 +534,7 @@ fn restore(
         if slot > LR {
             return None;
         }
-        let address = context.rsp.wrapping_add(8 * (offset + index));
+        let address = context.sp.wrapping_add(8 * (offset + index));
         context.regs[slot] = Some(memory.u64(address)?);
     }
     release_saved(context, pos, 8);
@@ -538,7 +545,7 @@ fn restore(
 /// ones), moving sp when the store was pre-indexed.
 fn release_saved(context: &mut RegisterContext, pos: i64, unit: u64) {
     if pos < 0 {
-        context.rsp = context.rsp.wrapping_add(unit * pos.unsigned_abs());
+        context.sp = context.sp.wrapping_add(unit * pos.unsigned_abs());
     }
 }
 
@@ -575,11 +582,11 @@ fn run_codes(
         let small = i64::from(value & 0x1f);
         let wide = i64::from(value & 0x3f);
         match op {
-            0x00..=0x1f => context.rsp = context.rsp.wrapping_add(16 * u64::from(value & 0x1f)), // alloc_s
+            0x00..=0x1f => context.sp = context.sp.wrapping_add(16 * u64::from(value & 0x1f)), // alloc_s
             0x20..=0x3f => restore(context, memory, 19, save_next, -small)?, // save_r19r20_x
             0x40..=0x7f => restore(context, memory, 29, 2, wide)?,           // save_fplr
             0x80..=0xbf => restore(context, memory, 29, 2, -wide - 1)?,      // save_fplr_x
-            0xc0..=0xc7 => context.rsp = context.rsp.wrapping_add(16 * u64::from(value & 0x7ff)), // alloc_m
+            0xc0..=0xc7 => context.sp = context.sp.wrapping_add(16 * u64::from(value & 0x7ff)), // alloc_m
             0xc8..=0xcb => restore(context, memory, 19 + ((value >> 6) & 0xf), save_next, wide)?, // save_regp
             0xcc..=0xcf => {
                 // save_regp_x
@@ -605,10 +612,10 @@ fn run_codes(
                 // alloc_l
                 let size =
                     u64::from(bytes[1]) << 16 | u64::from(bytes[2]) << 8 | u64::from(bytes[3]);
-                context.rsp = context.rsp.wrapping_add(16 * size);
+                context.sp = context.sp.wrapping_add(16 * size);
             }
-            0xe1 => context.rsp = context.regs[FP]?, // set_fp
-            0xe2 => context.rsp = context.regs[FP]?.wrapping_sub(8 * u64::from(value & 0xff)), // add_fp
+            0xe1 => context.sp = context.regs[FP]?, // set_fp
+            0xe2 => context.sp = context.regs[FP]?.wrapping_sub(8 * u64::from(value & 0xff)), // add_fp
             0xe3 | 0xe5 => {} // nop, end_c
             0xe4 => break,    // end
             0xe6 => {
@@ -642,35 +649,35 @@ fn run_codes(
             }
             0xe8 => {
                 // MSFT_OP_TRAP_FRAME: sp points at a KTRAP_FRAME
-                let frame = memory.trap_frame(context.rsp)?;
+                let frame = memory.trap_frame(context.sp)?;
                 for (slot, value) in context.regs.iter_mut().zip(frame.x) {
                     if value.is_some() {
                         *slot = value;
                     }
                 }
-                context.rip = frame.pc?;
-                context.rsp = frame.sp?;
+                context.pc = frame.pc?;
+                context.sp = frame.sp?;
                 resume = Resume::Interrupted { full: true };
             }
             0xe9 => {
                 // MSFT_OP_MACHINE_FRAME: { sp, pc } at sp
-                context.rip = memory.u64(context.rsp.wrapping_add(8))?;
-                context.rsp = memory.u64(context.rsp)?;
+                context.pc = memory.u64(context.sp.wrapping_add(8))?;
+                context.sp = memory.u64(context.sp)?;
                 resume = Resume::Interrupted { full: false };
             }
             0xea => {
                 // MSFT_OP_CONTEXT: an ARM64 CONTEXT at sp
-                let base = context.rsp;
+                let base = context.sp;
                 for (index, slot) in context.regs.iter_mut().enumerate() {
                     *slot = Some(memory.u64(base.wrapping_add((OFFSET_X0 + 8 * index) as u64))?);
                 }
-                context.rip = memory.u64(base.wrapping_add(OFFSET_PC as u64))?;
-                context.rsp = memory.u64(base.wrapping_add(OFFSET_SP as u64))?;
+                context.pc = memory.u64(base.wrapping_add(OFFSET_PC as u64))?;
+                context.sp = memory.u64(base.wrapping_add(OFFSET_SP as u64))?;
                 resume = Resume::Interrupted { full: true };
             }
             0xec => {
                 // MSFT_OP_CLEAR_UNWOUND_TO_CALL: resume at lr, not after a call
-                context.rip = context.regs[LR]?;
+                context.pc = context.regs[LR]?;
                 resume = Resume::Interrupted { full: false };
             }
             0xfc => context.regs[LR] = context.regs[LR].map(strip_pac), // pac_sign_lr
@@ -1018,6 +1025,62 @@ fn resolve_in(image: &PeImage, layout: Option<&CodeLayout>, base: u64, pc: u64) 
     }
 }
 
+/// The unwinder for ARM64 Windows code: packed and `.xdata` unwind codes from
+/// `.pdata`, the kernel's trap, machine and context frames, and, for x64
+/// code an ARM64EC process runs under emulation, the AMD64 unwinder on the
+/// x64 registers the emulator keeps.
+pub struct Arm64Unwinder;
+
+impl Unwinder for Arm64Unwinder {
+    fn unwind_once(&self, tracer: &mut StackTracer<'_>, context: &mut RegisterContext) -> Unwound {
+        match tracer.code_machine_at(StackTracer::arm64_lookup_pc(context)) {
+            CodeMachine::Amd64 => tracer.unwind_once_emulated_amd64(context),
+            CodeMachine::Arm64 | CodeMachine::X86 => tracer.unwind_once_arm64(context),
+        }
+    }
+
+    fn frame_base(&self, tracer: &mut StackTracer<'_>, context: &RegisterContext) -> Option<u64> {
+        tracer.frame_base_for_arm64(context)
+    }
+
+    // An emulated x64 image, or the x64 ranges of a hybrid one, are AMD64;
+    // code outside any image (the emulator's translation cache) is the
+    // processor's own.
+    fn code_machine_at(&self, tracer: &mut StackTracer<'_>, address: u64) -> CodeMachine {
+        let Some(module) = tracer.module_containing(address) else {
+            return CodeMachine::Arm64;
+        };
+        let rva = (address - module.info.base_address.0) as u32;
+        module
+            .layout
+            .as_ref()
+            .map_or(CodeMachine::Arm64, |layout| layout.machine_at(rva))
+    }
+
+    // KernelStack is sp in KiSwapContext's body, where its prolog saved the
+    // nonvolatile registers before it called SwapContext; the thread resumes
+    // at that call's return.
+    fn context_switch_frame(
+        &self,
+        tracer: &mut StackTracer<'_>,
+        kernel_stack: u64,
+        swap_context: u64,
+        ki_swap_context: Range<u64>,
+    ) -> Result<RegisterContext> {
+        let mut code = vec![0u8; (ki_swap_context.end - ki_swap_context.start) as usize];
+        tracer
+            .target
+            .address_space(tracer.trace.kernel_dtb)
+            .read_bytes(VirtAddr(ki_swap_context.start), &mut code)?;
+        let resume = call_return_address(&code, ki_swap_context.start, swap_context)
+            .ok_or_else(|| Error::DebugInfo("KiSwapContext does not call SwapContext".into()))?;
+        let mut seed = RegisterContext::new(Arch::Arm64, resume, kernel_stack);
+        seed.after_call = true;
+        seed.regs[FP] = tracer.frame_pointer_at_body_arm64(resume - 4, kernel_stack);
+        Ok(seed)
+    }
+}
+
 impl FrameMemory for StackTracer<'_> {
     fn u64(&self, address: u64) -> Option<u64> {
         self.stack_u64(address).ok()
@@ -1088,19 +1151,19 @@ impl StackTracer<'_> {
     /// call that ends a function returns into the next one.
     pub(super) fn arm64_lookup_pc(context: &RegisterContext) -> u64 {
         if context.after_call {
-            context.rip.wrapping_sub(4)
+            context.pc.wrapping_sub(4)
         } else {
-            context.rip
+            context.pc
         }
     }
 
     pub fn unwind_once_arm64(&mut self, context: &mut RegisterContext) -> Unwound {
         let pc = Self::arm64_lookup_pc(context);
-        let sp = context.rsp;
+        let sp = context.sp;
         unwind_trace!(
             "unwind: pc={:#x} sp={:#x} fp={:x?} lr={:x?} after_call={}",
-            context.rip,
-            context.rsp,
+            context.pc,
+            context.sp,
             context.regs[FP],
             context.regs[LR],
             context.after_call
@@ -1147,7 +1210,7 @@ impl StackTracer<'_> {
                 };
                 // A thread's initial frame saves a zero lr: the stack ends.
                 if lr == 0 {
-                    context.rip = 0;
+                    context.pc = 0;
                     return Unwound::Frame {
                         stack_switch: false,
                     };
@@ -1156,7 +1219,7 @@ impl StackTracer<'_> {
                 // A return to the frame's own address is a recursive call
                 // when the unwind moved up the stack, and a walk going
                 // nowhere when it did not.
-                if return_address == context.rip && context.rsp <= sp {
+                if return_address == context.pc && context.sp <= sp {
                     unwind_trace!("unwind: returns to its own pc without moving -> stop");
                     return Unwound::Stop;
                 }
@@ -1164,7 +1227,7 @@ impl StackTracer<'_> {
                     unwind_trace!("unwind: lr {return_address:#x} is no code -> stop");
                     return Unwound::Stop;
                 }
-                context.rip = return_address;
+                context.pc = return_address;
                 context.after_call = true;
                 for index in VOLATILE {
                     context.regs[index] = None;
@@ -1174,7 +1237,7 @@ impl StackTracer<'_> {
                 }
             }
             Resume::Interrupted { full } => {
-                context.rip = strip_pac(context.rip);
+                context.pc = strip_pac(context.pc);
                 context.after_call = false;
                 if !full {
                     for index in VOLATILE {
@@ -1189,7 +1252,7 @@ impl StackTracer<'_> {
     /// The base PDB frame-relative locals are addressed from: x29 in a
     /// function whose prolog establishes it, else sp.
     pub fn frame_base_for_arm64(&mut self, context: &RegisterContext) -> Option<u64> {
-        let fallback = (context.rsp != 0).then_some(context.rsp);
+        let fallback = (context.sp != 0).then_some(context.sp);
         match self.resolve_arm64(Self::arm64_lookup_pc(context)) {
             Resolve::Function { program, .. } if program.sets_frame_pointer() => {
                 context.regs[FP].or(fallback)
@@ -1231,7 +1294,7 @@ mod tests {
     }
 
     fn frame(sp: u64, fp: u64, lr: u64) -> RegisterContext {
-        let mut context = RegisterContext::new(0, sp);
+        let mut context = RegisterContext::new(Arch::Arm64, 0, sp);
         context.regs[FP] = Some(fp);
         context.regs[LR] = Some(lr);
         context
@@ -1264,7 +1327,7 @@ mod tests {
             program.unwind(8, &mut context, &stack),
             Some(Resume::Return)
         );
-        assert_eq!(context.rsp, SP + 64);
+        assert_eq!(context.sp, SP + 64);
         assert_eq!(context.regs[FP], Some(0xf00d));
         assert_eq!(context.regs[LR], Some(0xca11e4));
         assert_eq!(
@@ -1283,7 +1346,7 @@ mod tests {
             program.unwind(1, &mut context, &stack),
             Some(Resume::Return)
         );
-        assert_eq!(context.rsp, SP + 64);
+        assert_eq!(context.sp, SP + 64);
         assert_eq!(context.regs[LR], Some(0xca11e4));
         assert_eq!(context.regs[FP], Some(0xf00d));
         assert_eq!(context.regs[19], Some(0x19));
@@ -1291,7 +1354,7 @@ mod tests {
         // At the first instruction nothing has been saved.
         let mut context = frame(SP + 64, 0xf00d, 0xca11e4);
         program.unwind(0, &mut context, &stack);
-        assert_eq!(context.rsp, SP + 64);
+        assert_eq!(context.sp, SP + 64);
         assert_eq!(context.regs[19], None);
     }
 
@@ -1305,13 +1368,13 @@ mod tests {
             program.unwind(18, &mut context, &stack),
             Some(Resume::Return)
         );
-        assert_eq!(context.rsp, SP + 64);
+        assert_eq!(context.sp, SP + 64);
         assert_eq!(context.regs[19], Some(0x19));
 
         // At `ret` the frame is gone.
         let mut context = frame(SP + 64, 0xf00d, 0xca11e4);
         program.unwind(19, &mut context, &stack);
-        assert_eq!(context.rsp, SP + 64);
+        assert_eq!(context.sp, SP + 64);
         assert_eq!(context.regs[19], None);
     }
 
@@ -1354,7 +1417,7 @@ mod tests {
             program.unwind(0x10, &mut context, &stack),
             Some(Resume::Return)
         );
-        assert_eq!(context.rsp, SP + 64 + 48);
+        assert_eq!(context.sp, SP + 64 + 48);
         assert_eq!(context.regs[LR], Some(0xca11e4));
         assert_eq!(
             context.regs[19..=22],
@@ -1371,7 +1434,7 @@ mod tests {
             program.unwind(2, &mut context, &stack),
             Some(Resume::Return)
         );
-        assert_eq!(context.rsp, SP + 64 + 48);
+        assert_eq!(context.sp, SP + 64 + 48);
         assert_eq!(context.regs[22], Some(0x22));
         assert_eq!(context.regs[FP], Some(0xf00d));
     }
@@ -1385,7 +1448,7 @@ mod tests {
             program.unwind(0x1d, &mut context, &stack),
             Some(Resume::Return)
         );
-        assert_eq!(context.rsp, SP + 64 + 48);
+        assert_eq!(context.sp, SP + 64 + 48);
         assert_eq!(context.regs[21], Some(0x21));
 
         // One instruction before the epilog is still the body.
@@ -1411,7 +1474,7 @@ mod tests {
             program.unwind(2, &mut context, &stack),
             Some(Resume::Interrupted { full: false })
         );
-        assert_eq!((context.rip, context.rsp), (0xfffff803_12345678, 0x8000));
+        assert_eq!((context.pc, context.sp), (0xfffff803_12345678, 0x8000));
     }
 
     #[test]

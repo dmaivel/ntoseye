@@ -7,8 +7,10 @@ use std::sync::Arc;
 
 use pelite::pe64::{Pe, PeView, image::IMAGE_SCN_MEM_EXECUTE};
 
-use super::{CachedModule, OwnedModule, StackPage, StackTracer, ThreadTraceContext};
-use crate::arch::Arch;
+use super::{
+    CachedModule, OwnedModule, RegisterContext, StackPage, StackTracer, ThreadTraceContext,
+    unwinder,
+};
 use crate::{
     base::{
         error::{Error, Result},
@@ -187,23 +189,24 @@ impl<'a> StackTracer<'a> {
             .map(|cached| (cached.image.clone(), cached.layout.clone()))
     }
 
-    /// The instruction set of the code at `address`, which picks the
-    /// unwinder for its frame. On ARM64 an emulated x64 image, or the x64
-    /// ranges of a hybrid one, are AMD64; code outside any image (the
-    /// emulator's translation cache) is the processor's own.
-    pub(super) fn code_machine_at(&mut self, address: u64) -> CodeMachine {
-        match self.target.arch() {
-            Arch::Amd64 => return CodeMachine::Amd64,
-            Arch::Arm64 => {}
-        }
-        let Some(module) = self.module_containing(address) else {
-            return CodeMachine::Arm64;
+    /// Whether `context` is at a Windows hypervisor VM-exit entry, where its
+    /// stack begins.
+    pub fn at_hypervisor_stack_base(&self, context: &RegisterContext) -> bool {
+        let (Some(symbols), Some(image)) = (&self.trace.hypervisor, &self.trace.foreign_image)
+        else {
+            return false;
         };
-        let rva = (address - module.info.base_address.0) as u32;
-        module
-            .layout
-            .as_ref()
-            .map_or(CodeMachine::Arm64, |layout| layout.machine_at(rva))
+        context
+            .pc
+            .checked_sub(image.base_address.0)
+            .and_then(|rva| u32::try_from(rva).ok())
+            .is_some_and(|rva| symbols.in_exit_entry(rva))
+    }
+
+    /// The instruction set of the code at `address`, which picks the
+    /// unwinder for its frame.
+    pub(super) fn code_machine_at(&mut self, address: u64) -> CodeMachine {
+        unwinder(self.target.arch()).code_machine_at(self, address)
     }
 
     /// Replace a module's holed in-memory image with the complete on-disk one,

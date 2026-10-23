@@ -11,9 +11,11 @@ use pelite::pe64::image::{
     UWOP_SAVE_NONVOL_FAR, UWOP_SAVE_XMM128, UWOP_SAVE_XMM128_FAR, UWOP_SET_FPREG,
 };
 
-use super::{RegisterContext, StackTracer, Unwound, image_u32, runtime_functions};
-use crate::arch::amd64::ENCODED_REGISTERS;
+use super::{RegisterContext, StackTracer, Unwinder, Unwound, image_u32, runtime_functions};
+use crate::arch::Arch;
+use crate::arch::amd64::{ENCODED_REGISTERS, VOLATILE_REGISTERS};
 use crate::backend::phys::PhysMem;
+use crate::base::error::{Error, Result};
 use crate::base::memory::{AddressSpace, MemoryOps};
 use crate::base::types::{CodeMachine, VirtAddr};
 use crate::nt::pe::{CodeLayout, PeImage};
@@ -194,9 +196,9 @@ impl StackTracer<'_> {
 
 impl StackTracer<'_> {
     pub fn unwind_once_amd64(&mut self, context: &mut RegisterContext) -> Unwound {
-        unwind_trace!("unwind: rip={:#x} rsp={:#x}", context.rip, context.rsp);
-        if self.module_containing(context.rip).is_none() {
-            if let Some((base, function)) = self.dynamic_function(context.rip) {
+        unwind_trace!("unwind: rip={:#x} rsp={:#x}", context.pc, context.sp);
+        if self.module_containing(context.pc).is_none() {
+            if let Some((base, function)) = self.dynamic_function(context.pc) {
                 unwind_trace!("unwind: dynamic function table base={base:#x}");
                 let code = DynamicCode {
                     memory: &self.memory,
@@ -214,7 +216,7 @@ impl StackTracer<'_> {
             unwind_trace!("unwind: no module for rip -> leaf");
             return self.unwind_leaf(context);
         }
-        let Some((base_address, image, resolved)) = self.resolve_amd64(context.rip) else {
+        let Some((base_address, image, resolved)) = self.resolve_amd64(context.pc) else {
             return Unwound::Stop;
         };
 
@@ -241,7 +243,7 @@ impl StackTracer<'_> {
                 .trace
                 .foreign_image
                 .as_ref()
-                .is_some_and(|hypervisor| hypervisor.contains_address(VirtAddr(context.rip)))
+                .is_some_and(|hypervisor| hypervisor.contains_address(VirtAddr(context.pc)))
         {
             return self.unwind_hypervisor_caller(
                 context,
@@ -279,19 +281,19 @@ impl StackTracer<'_> {
             Unwound::Frame {
                 stack_switch: false
             }
-        ) && context.rsp.is_multiple_of(16)
-            && !by_codes.rsp.is_multiple_of(16)
+        ) && context.sp.is_multiple_of(16)
+            && !by_codes.sp.is_multiple_of(16)
         {
             let mut by_prolog = context.clone();
             if matches!(
                 self.unwind_prolog(&mut by_prolog, base_address),
                 Unwound::Prolog
-            ) && by_prolog.rsp.is_multiple_of(16)
+            ) && by_prolog.sp.is_multiple_of(16)
             {
                 unwind_trace!(
                     "unwind: unwind data misaligns the caller (rsp={:#x}); prolog -> rsp={:#x}",
-                    by_codes.rsp,
-                    by_prolog.rsp
+                    by_codes.sp,
+                    by_prolog.sp
                 );
                 *context = by_prolog;
                 return Unwound::Prolog;
@@ -316,7 +318,7 @@ impl StackTracer<'_> {
         // Walk the function and any chained parents. Only the primary function's
         // codes are gated on the prolog progress at `rip`; chained parents already
         // ran their prologs in full, so all of their codes apply.
-        let rva = (context.rip - base_address) as u32;
+        let rva = (context.pc - base_address) as u32;
         let rip_offset = rva.saturating_sub(begin);
         let mut primary = true;
 
@@ -353,8 +355,8 @@ impl StackTracer<'_> {
                 Some(UnwindStep::MachineFrame) => {
                     unwind_trace!(
                         "unwind: machine frame -> rip={:#x} rsp={:#x}",
-                        context.rip,
-                        context.rsp
+                        context.pc,
+                        context.sp
                     );
                     return Unwound::Frame { stack_switch: true };
                 }
@@ -370,19 +372,19 @@ impl StackTracer<'_> {
                     primary = false;
                 }
                 None => {
-                    let Ok(return_address) = self.stack_u64(context.rsp) else {
+                    let Ok(return_address) = self.stack_u64(context.sp) else {
                         unwind_trace!(
                             "unwind: return-address read failed at rsp={:#x} -> stop",
-                            context.rsp
+                            context.sp
                         );
                         return Unwound::Stop;
                     };
                     unwind_trace!(
                         "unwind: pop return -> rip={return_address:#x} rsp={:#x}",
-                        context.rsp.saturating_add(8)
+                        context.sp.saturating_add(8)
                     );
-                    context.rip = return_address;
-                    context.rsp = context.rsp.saturating_add(8);
+                    context.pc = return_address;
+                    context.sp = context.sp.saturating_add(8);
                     return Unwound::Frame {
                         stack_switch: false,
                     };
@@ -404,10 +406,10 @@ impl StackTracer<'_> {
         let Some(symbols) = self.trace.hypervisor.clone() else {
             return Unwound::Stop;
         };
-        let Some((image, _)) = self.module_code(context.rip) else {
+        let Some((image, _)) = self.module_code(context.pc) else {
             return Unwound::Stop;
         };
-        let rva = (context.rip - base) as u32;
+        let rva = (context.pc - base) as u32;
         let Some(function) = symbols.function_at(rva) else {
             return Unwound::Stop;
         };
@@ -431,7 +433,7 @@ impl StackTracer<'_> {
             unwind_trace!("unwind: prolog of {:#x} undecided -> stop", function.start);
             return Unwound::Stop;
         };
-        let rsp = context.rsp.wrapping_add(u64::from(frame.size));
+        let rsp = context.sp.wrapping_add(u64::from(frame.size));
         let Ok(return_address) = self.stack_u64(rsp) else {
             return Unwound::Stop;
         };
@@ -443,35 +445,21 @@ impl StackTracer<'_> {
             return Unwound::Stop;
         }
         for &(register, at) in &frame.saved {
-            if let Ok(value) = self.stack_u64(context.rsp.wrapping_add(u64::from(at))) {
+            if let Ok(value) = self.stack_u64(context.sp.wrapping_add(u64::from(at))) {
                 context.regs[register] = Some(value);
             }
         }
-        context.rip = return_address;
-        context.rsp = rsp.wrapping_add(8);
+        context.pc = return_address;
+        context.sp = rsp.wrapping_add(8);
         Unwound::Prolog
-    }
-
-    /// Whether `context` is at a Windows hypervisor VM-exit entry, where its
-    /// stack begins.
-    pub fn at_hypervisor_stack_base(&self, context: &RegisterContext) -> bool {
-        let (Some(symbols), Some(image)) = (&self.trace.hypervisor, &self.trace.foreign_image)
-        else {
-            return false;
-        };
-        context
-            .rip
-            .checked_sub(image.base_address.0)
-            .and_then(|rva| u32::try_from(rva).ok())
-            .is_some_and(|rva| symbols.in_exit_entry(rva))
     }
 
     /// Run the remainder of `epilog` against `context`: release the frame,
     /// restore the popped registers, and return to the caller.
     pub fn unwind_epilog(&self, context: &mut RegisterContext, epilog: &Epilog) -> Unwound {
         let mut rsp = match epilog.release {
-            EpilogRelease::None => context.rsp,
-            EpilogRelease::AddRsp(imm) => context.rsp.wrapping_add(u64::from(imm)),
+            EpilogRelease::None => context.sp,
+            EpilogRelease::AddRsp(imm) => context.sp.wrapping_add(u64::from(imm)),
             EpilogRelease::LeaRsp { base, disp } => match context.regs[base] {
                 Some(base) => base.wrapping_add_signed(i64::from(disp)),
                 None => return Unwound::Stop,
@@ -491,8 +479,8 @@ impl StackTracer<'_> {
             "unwind: epilog -> rip={return_address:#x} rsp={:#x}",
             rsp + 8
         );
-        context.rip = return_address;
-        context.rsp = rsp.wrapping_add(8);
+        context.pc = return_address;
+        context.sp = rsp.wrapping_add(8);
         Unwound::Frame {
             stack_switch: false,
         }
@@ -533,7 +521,7 @@ impl StackTracer<'_> {
     }
 
     fn unwind_leaf(&mut self, context: &mut RegisterContext) -> Unwound {
-        let Ok(return_address) = self.stack_u64(context.rsp) else {
+        let Ok(return_address) = self.stack_u64(context.sp) else {
             return Unwound::Stop;
         };
 
@@ -541,8 +529,8 @@ impl StackTracer<'_> {
             return Unwound::Stop;
         }
 
-        context.rip = return_address;
-        context.rsp = context.rsp.saturating_add(8);
+        context.pc = return_address;
+        context.sp = context.sp.saturating_add(8);
         Unwound::Frame {
             stack_switch: false,
         }
@@ -558,13 +546,13 @@ impl StackTracer<'_> {
         let slot = unwind_info.codes[index];
         match slot.unwind_op {
             UWOP_PUSH_NONVOL => {
-                let saved = self.stack_u64(context.rsp).ok()?;
+                let saved = self.stack_u64(context.sp).ok()?;
                 context.set(slot.op_info, saved);
-                context.rsp = context.rsp.saturating_add(8);
+                context.sp = context.sp.saturating_add(8);
             }
             UWOP_ALLOC_SMALL => {
-                context.rsp = context
-                    .rsp
+                context.sp = context
+                    .sp
                     .saturating_add(((u64::from(slot.op_info) + 1) * 8).max(8));
             }
             UWOP_ALLOC_LARGE => {
@@ -576,7 +564,7 @@ impl StackTracer<'_> {
                 } else {
                     return None;
                 };
-                context.rsp = context.rsp.saturating_add(allocation);
+                context.sp = context.sp.saturating_add(allocation);
             }
             UWOP_SET_FPREG => {
                 // re-derive RSP from the established frame pointer: the prolog
@@ -584,7 +572,7 @@ impl StackTracer<'_> {
                 // RSP = fpreg - frame_offset*16. This supersedes any earlier
                 // ALLOC adjustment, which is the whole point of a frame pointer
                 // (the fixed allocation size need not be known to unwind)
-                context.rsp = frame_base(context, unwind_info)?;
+                context.sp = frame_base(context, unwind_info)?;
             }
             UWOP_EPILOG | UWOP_SPARE_CODE => {
                 // version-2 epilog descriptors: they locate epilogs for the case
@@ -622,14 +610,14 @@ impl StackTracer<'_> {
                 // == 1 means a CPU error code sits below it, so step over that to
                 // reach the record: [+0]=rip [+8]=cs [+16]=eflags [+24]=rsp [+32]=ss
                 let base = if slot.op_info == 1 {
-                    context.rsp.saturating_add(8)
+                    context.sp.saturating_add(8)
                 } else {
-                    context.rsp
+                    context.sp
                 };
                 let return_rip = self.stack_u64(base).ok()?;
                 let return_rsp = self.stack_u64(base.saturating_add(24)).ok()?;
-                context.rip = return_rip;
-                context.rsp = return_rsp;
+                context.pc = return_rip;
+                context.sp = return_rsp;
                 context.machine_frame = Some(base);
                 return Some(UnwindStep::MachineFrame);
             }
@@ -643,9 +631,9 @@ impl StackTracer<'_> {
     /// the function containing `context.rip`. A missing or unreadable unwind
     /// record degrades to the recovered RSP rather than aborting the walk.
     pub fn frame_base_for_amd64(&mut self, context: &RegisterContext) -> Option<u64> {
-        let fallback = (context.rsp != 0).then_some(context.rsp);
-        if self.module_containing(context.rip).is_none() {
-            let (base, function) = self.dynamic_function(context.rip)?;
+        let fallback = (context.sp != 0).then_some(context.sp);
+        if self.module_containing(context.pc).is_none() {
+            let (base, function) = self.dynamic_function(context.pc)?;
             let code = DynamicCode {
                 memory: &self.memory,
                 base,
@@ -655,7 +643,7 @@ impl StackTracer<'_> {
                 .or(fallback);
         }
         let Some((_, image, Resolve::Function { unwind_data, .. })) =
-            self.resolve_amd64(context.rip)
+            self.resolve_amd64(context.pc)
         else {
             return fallback;
         };
@@ -676,9 +664,75 @@ impl StackTracer<'_> {
 /// register, or RSP when it has none.
 fn frame_register_value(context: &RegisterContext, info: &ParsedUnwindInfo) -> Option<u64> {
     if info.frame_register == 0 {
-        Some(context.rsp)
+        Some(context.sp)
     } else {
         context.get(info.frame_register)
+    }
+}
+
+/// The unwinder for AMD64 Windows code: `UNWIND_INFO` from `.pdata`, the
+/// prolog of hypervisor code whose tables aren't mapped, and the machine
+/// frames of traps and interrupts.
+pub struct Amd64Unwinder;
+
+impl Unwinder for Amd64Unwinder {
+    fn unwind_once(&self, tracer: &mut StackTracer<'_>, context: &mut RegisterContext) -> Unwound {
+        let unwound = tracer.unwind_once_amd64(context);
+        let stack_switch = match unwound {
+            Unwound::Frame { stack_switch } => Some(stack_switch),
+            Unwound::Prolog => Some(false),
+            Unwound::Stop => None,
+        };
+        if let Some(stack_switch) = stack_switch {
+            // Crossing a machine frame lands where an interrupt or trap
+            // stopped the code, not after a call.
+            context.after_call = !stack_switch;
+            for index in VOLATILE_REGISTERS {
+                context.regs[index] = None;
+            }
+        }
+        unwound
+    }
+
+    fn frame_base(&self, tracer: &mut StackTracer<'_>, context: &RegisterContext) -> Option<u64> {
+        tracer.frame_base_for_amd64(context)
+    }
+
+    // A WOW64 process's x86 frames are walked apart, past its 64-bit ones.
+    fn code_machine_at(&self, _: &mut StackTracer<'_>, _: u64) -> CodeMachine {
+        CodeMachine::Amd64
+    }
+
+    // KernelStack is rsp inside SwapContext's body, so one unwind step from
+    // there lands in KiSwapContext.
+    fn context_switch_frame(
+        &self,
+        tracer: &mut StackTracer<'_>,
+        kernel_stack: u64,
+        swap_context: u64,
+        ki_swap_context: Range<u64>,
+    ) -> Result<RegisterContext> {
+        let body = tracer.function_body_amd64(swap_context).ok_or_else(|| {
+            Error::DebugInfo("SwapContext has no usable PE unwind metadata".into())
+        })?;
+        let mut seed = RegisterContext::new(Arch::Amd64, body, kernel_stack);
+        if !matches!(
+            self.unwind_once(tracer, &mut seed),
+            Unwound::Frame {
+                stack_switch: false
+            }
+        ) {
+            return Err(Error::DebugInfo(
+                "failed to unwind the saved SwapContext frame".into(),
+            ));
+        }
+        if seed.sp <= kernel_stack || !ki_swap_context.contains(&seed.pc) {
+            return Err(Error::DebugInfo(format!(
+                "SwapContext returned outside KiSwapContext ({:#x}, RSP {:#x})",
+                seed.pc, seed.sp
+            )));
+        }
+        Ok(seed)
     }
 }
 
@@ -859,7 +913,7 @@ fn parse_unwind_info(image: &impl UnwindBytes, unwind_rva: u32) -> Option<Parsed
 
 fn frame_base(context: &RegisterContext, unwind_info: &ParsedUnwindInfo) -> Option<u64> {
     if unwind_info.frame_register == 0 {
-        return Some(context.rsp);
+        return Some(context.sp);
     }
 
     let frame_register = context.get(unwind_info.frame_register)?;
@@ -1283,6 +1337,7 @@ mod tests {
         decode_epilog, describe_unwind_codes, frame_base, lookup_runtime_function,
         parse_unwind_info, primary_function_begin, unwind_slot_count,
     };
+    use crate::arch::Arch;
     use crate::nt::pe::PeImage;
     use crate::nt::unwind::RegisterContext;
 
@@ -1513,7 +1568,7 @@ mod tests {
 
     #[test]
     fn frame_base_uses_frame_register_when_present() {
-        let mut context = RegisterContext::new(0, 0x1800);
+        let mut context = RegisterContext::new(Arch::Amd64, 0, 0x1800);
         context.regs[5] = Some(0x2000);
         let unwind = ParsedUnwindInfo {
             version_flags: 1,

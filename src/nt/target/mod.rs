@@ -445,6 +445,14 @@ pub enum SavedThreadRegisters {
 }
 
 impl SavedThreadRegisters {
+    /// The architecture whose registers these are.
+    pub fn arch(&self) -> Arch {
+        match self {
+            Self::Amd64(_) => Arch::Amd64,
+            Self::Arm64(_) => Arch::Arm64,
+        }
+    }
+
     pub fn get(&self, name: &str) -> Option<u64> {
         let name = name.to_ascii_lowercase();
         match self {
