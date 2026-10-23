@@ -7,12 +7,11 @@ pub use context::*;
 
 use std::sync::LazyLock;
 
-use crate::base::types::{CodeMachine, PageTableEntry, PageTableLevel, PteAttributes, VirtAddr};
+use crate::base::types::CodeMachine;
 
 use super::registers::numbered;
 use super::{
-    Architecture, ContextFlags, Family, IMAGE_FILE_MACHINE_AMD64, MappingPermissions, RegisterInfo,
-    RegisterMap, TableEntry,
+    Architecture, ContextFlags, Family, IMAGE_FILE_MACHINE_AMD64, Paging, RegisterInfo, RegisterMap,
 };
 
 pub struct Amd64;
@@ -155,29 +154,8 @@ impl Architecture for Amd64 {
         Some(CodeMachine::X86)
     }
 
-    fn is_kernel_address(&self, va: VirtAddr) -> bool {
-        paging::is_kernel_address(va)
-    }
-
-    fn separate_kernel_root(&self) -> bool {
-        false
-    }
-
-    fn decode_entry(&self, level: usize, entry: PageTableEntry) -> TableEntry {
-        paging::decode_entry(level, entry)
-    }
-
-    fn mapping_permissions(&self, path: &[PageTableEntry], _va: VirtAddr) -> MappingPermissions {
-        paging::mapping_permissions(path)
-    }
-
-    fn entry_attributes(
-        &self,
-        entry: PageTableEntry,
-        level: PageTableLevel,
-        _address: VirtAddr,
-    ) -> PteAttributes {
-        paging::entry_attributes(entry, level)
+    fn paging(&self) -> &'static dyn Paging {
+        &Amd64
     }
 }
 

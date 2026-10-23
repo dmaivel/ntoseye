@@ -1595,9 +1595,12 @@ fn temporary_sites(
             .iter()
             .any(|&address| debugger.is_secure_address(VirtAddr(address)));
     let user_space = !backend.supports_user_mode_breakpoints()
-        && successors
-            .iter()
-            .any(|&address| !debugger.arch().is_kernel_address(VirtAddr(address)));
+        && successors.iter().any(|&address| {
+            !debugger
+                .arch()
+                .paging()
+                .is_kernel_address(VirtAddr(address))
+        });
     if !secure && !user_space {
         return Ok(TemporarySites::Software);
     }

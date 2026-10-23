@@ -4,6 +4,8 @@
 
 use super::Image;
 use crate::arch::Arch;
+use crate::arch::amd64::paging::Entry;
+use crate::arch::arm64::paging::Descriptor;
 use crate::{
     backend::phys::PhysMem,
     base::{
@@ -16,18 +18,13 @@ use crate::{
 use std::sync::Arc;
 
 fn is_valid_kernel_dtb_amd64(phys: &PhysMem, dtb: Dtb) -> Result<bool> {
-    let Ok(kernel_pml4) = phys.read::<[PageTableEntry; 256]>(dtb + 8 * 256) else {
+    let Ok(kernel_pml4) = phys.read::<[Entry; 256]>(dtb + 8 * 256) else {
         // Candidate sits outside mapped guest RAM (below the aarch64 RAM
         // base, in an MMIO hole, or past the end): not a kernel root.
         return Ok(false);
     };
 
-    if kernel_pml4
-        .into_iter()
-        .filter(|e| e.page_frame() == dtb)
-        .count()
-        != 1
-    {
+    if kernel_pml4.into_iter().filter(|e| e.frame() == dtb).count() != 1 {
         return Ok(false);
     }
 
@@ -149,14 +146,14 @@ fn find_kernel_dtb_arm64_candidates(phys: &PhysMem) -> Result<Vec<Dtb>> {
     let ram_end = base.saturating_add(phys.ram_size());
     let mut out = Vec::new();
     for dtb in (base.saturating_add(0x1000)..ram_end).step_by(PAGE_SIZE) {
-        let Ok(entry) = phys.read::<PageTableEntry>(dtb + 8 * KUSER_L0_INDEX) else {
+        let Ok(entry) = phys.read::<Descriptor>(dtb + 8 * KUSER_L0_INDEX) else {
             continue;
         };
-        // Table descriptor (bits[1:0] = 0b11) whose table lies in RAM.
-        if entry.0 & 0b11 != 0b11 {
+        // A table descriptor whose table lies in RAM.
+        if !entry.is_table_or_page() {
             continue;
         }
-        let frame = entry.arm64_page_frame();
+        let frame = entry.frame();
         if frame < base || frame >= ram_end {
             continue;
         }
@@ -180,7 +177,7 @@ fn is_ntoskrnl_header(header: &[u8]) -> bool {
 /// starts with the ntoskrnl image header.
 fn is_ntoskrnl_page(
     phys: &impl MemoryOps<PhysAddr>,
-    entry: PageTableEntry,
+    entry: Entry,
     frame: PhysAddr,
 ) -> Result<bool> {
     if entry.is_user() || !entry.is_nx() {
@@ -202,7 +199,7 @@ pub(super) fn find_ntoskrnl_va(
 
     let pml4e_count = KERNEL_VA_MAX.pml4_index() - KERNEL_VA_MIN.pml4_index() + 1;
 
-    let Ok(kernel_pml4) = phys.read::<[PageTableEntry; 256]>(kernel_dtb + 8 * 256) else {
+    let Ok(kernel_pml4) = phys.read::<[Entry; 256]>(kernel_dtb + 8 * 256) else {
         return Ok(None);
     };
     for (rel_pml4_index, pml4e) in kernel_pml4
@@ -216,7 +213,7 @@ pub(super) fn find_ntoskrnl_va(
         if !pml4e.is_present() {
             continue;
         }
-        let Ok(pdpt) = phys.read::<[PageTableEntry; 512]>(pml4e.page_frame()) else {
+        let Ok(pdpt) = phys.read::<[Entry; 512]>(pml4e.frame()) else {
             continue;
         };
 
@@ -234,15 +231,15 @@ pub(super) fn find_ntoskrnl_va(
                 continue;
             }
 
-            if pdpte.is_large_page() {
-                if let Ok(true) = is_ntoskrnl_page(phys, pdpte, pdpte.huge_page_frame()) {
+            if pdpte.is_large() {
+                if let Ok(true) = is_ntoskrnl_page(phys, pdpte, pdpte.huge_frame()) {
                     return Ok(Some(VirtAddr::construct(pml4_index, pdpt_index, 0, 0)));
                 }
 
                 continue;
             }
 
-            let Ok(pd) = phys.read::<[PageTableEntry; 512]>(pdpte.page_frame()) else {
+            let Ok(pd) = phys.read::<[Entry; 512]>(pdpte.frame()) else {
                 continue;
             };
 
@@ -258,8 +255,8 @@ pub(super) fn find_ntoskrnl_va(
                     continue;
                 }
 
-                if pde.is_large_page() {
-                    if let Ok(true) = is_ntoskrnl_page(phys, pde, pde.large_page_frame()) {
+                if pde.is_large() {
+                    if let Ok(true) = is_ntoskrnl_page(phys, pde, pde.large_frame()) {
                         return Ok(Some(VirtAddr::construct(
                             pml4_index, pdpt_index, pd_index, 0,
                         )));
@@ -268,7 +265,7 @@ pub(super) fn find_ntoskrnl_va(
                     continue;
                 }
 
-                let Ok(pt) = phys.read::<[PageTableEntry; 512]>(pde.page_frame()) else {
+                let Ok(pt) = phys.read::<[Entry; 512]>(pde.frame()) else {
                     continue;
                 };
 
@@ -283,7 +280,7 @@ pub(super) fn find_ntoskrnl_va(
                         continue;
                     }
 
-                    if let Ok(true) = is_ntoskrnl_page(phys, pte, pte.page_frame()) {
+                    if let Ok(true) = is_ntoskrnl_page(phys, pte, pte.frame()) {
                         return Ok(Some(VirtAddr::construct(
                             pml4_index, pdpt_index, pd_index, pt_index,
                         )));
@@ -296,14 +293,14 @@ pub(super) fn find_ntoskrnl_va(
     Ok(None)
 }
 
-fn is_ntoskrnl_pte_arm64(phys: &PhysMem, pte: PageTableEntry) -> Result<bool> {
+fn is_ntoskrnl_pte_arm64(phys: &PhysMem, pte: Descriptor) -> Result<bool> {
     // Kernel code pages: AP[1]=0 (EL1 only), PXN=0 (executable from EL1).
     // (UXN is always set on Windows kernel pages, so it cannot identify code.)
-    if pte.arm64_is_user() || !pte.arm64_is_pxn() {
+    if pte.is_user() || !pte.is_pxn() {
         return Ok(false);
     }
 
-    is_ntoskrnl_header_at(phys, pte.arm64_page_frame())
+    is_ntoskrnl_header_at(phys, pte.frame())
 }
 
 /// Whether the physical page at `frame` holds the ntoskrnl PE header
@@ -327,7 +324,7 @@ pub(super) fn find_ntoskrnl_va_arm64(kernel_dtb: Dtb, phys: &PhysMem) -> Result<
 
     let pml4e_count = KERNEL_VA_MAX.pml4_index() - KERNEL_VA_MIN.pml4_index() + 1;
 
-    let Ok(kernel_table) = phys.read::<[PageTableEntry; 256]>(kernel_dtb + 8 * 256) else {
+    let Ok(kernel_table) = phys.read::<[Descriptor; 256]>(kernel_dtb + 8 * 256) else {
         return Ok(None);
     };
     for (rel_index, l0) in kernel_table
@@ -338,10 +335,10 @@ pub(super) fn find_ntoskrnl_va_arm64(kernel_dtb: Dtb, phys: &PhysMem) -> Result<
     {
         let pml4_index = 256 + rel_index;
 
-        if !l0.arm64_is_valid() || l0.arm64_is_block() {
+        if !l0.is_valid() || l0.is_block() {
             continue;
         }
-        let Ok(l1_table) = phys.read::<[PageTableEntry; 512]>(l0.arm64_page_frame()) else {
+        let Ok(l1_table) = phys.read::<[Descriptor; 512]>(l0.frame()) else {
             continue;
         };
 
@@ -353,14 +350,14 @@ pub(super) fn find_ntoskrnl_va_arm64(kernel_dtb: Dtb, phys: &PhysMem) -> Result<
         };
 
         for (l1_index, l1) in l1_table.into_iter().take(l1_count).enumerate() {
-            if !l1.arm64_is_valid() {
+            if !l1.is_valid() {
                 continue;
             }
 
-            if l1.arm64_is_block() {
+            if l1.is_block() {
                 // A 1 GiB block is unlikely for ntoskrnl. Probe each 2 MiB
                 // boundary and reconstruct the matching VA at the L2 index.
-                let block = l1.arm64_huge_block_frame();
+                let block = l1.huge_frame();
                 for l2_index in 0..512u64 {
                     if is_ntoskrnl_header_at(phys, block + l2_index * (2 << 20))? {
                         return Ok(Some(VirtAddr::construct(
@@ -374,7 +371,7 @@ pub(super) fn find_ntoskrnl_va_arm64(kernel_dtb: Dtb, phys: &PhysMem) -> Result<
                 continue;
             }
 
-            let Ok(l2_table) = phys.read::<[PageTableEntry; 512]>(l1.arm64_page_frame()) else {
+            let Ok(l2_table) = phys.read::<[Descriptor; 512]>(l1.frame()) else {
                 continue;
             };
 
@@ -386,14 +383,14 @@ pub(super) fn find_ntoskrnl_va_arm64(kernel_dtb: Dtb, phys: &PhysMem) -> Result<
             };
 
             for (l2_index, l2) in l2_table.into_iter().take(l2_count).enumerate() {
-                if !l2.arm64_is_valid() {
+                if !l2.is_valid() {
                     continue;
                 }
 
-                if l2.arm64_is_block() {
+                if l2.is_block() {
                     // Probe every 4 KiB page in the 2 MiB block; the PE image
                     // need not begin at the block's first page.
-                    let block = l2.arm64_large_block_frame();
+                    let block = l2.large_frame();
                     for pt_index in 0..512u64 {
                         if is_ntoskrnl_header_at(phys, block + pt_index * 0x1000)? {
                             return Ok(Some(VirtAddr::construct(
@@ -407,7 +404,7 @@ pub(super) fn find_ntoskrnl_va_arm64(kernel_dtb: Dtb, phys: &PhysMem) -> Result<
                     continue;
                 }
 
-                let Ok(l3_table) = phys.read::<[PageTableEntry; 512]>(l2.arm64_page_frame()) else {
+                let Ok(l3_table) = phys.read::<[Descriptor; 512]>(l2.frame()) else {
                     continue;
                 };
 
@@ -419,7 +416,7 @@ pub(super) fn find_ntoskrnl_va_arm64(kernel_dtb: Dtb, phys: &PhysMem) -> Result<
                 };
 
                 for (l3_index, l3) in l3_table.into_iter().take(l3_count).enumerate() {
-                    if l3.0 & 0b11 != 0b11 {
+                    if !l3.is_table_or_page() {
                         continue;
                     }
 

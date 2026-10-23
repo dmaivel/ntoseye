@@ -215,7 +215,7 @@ impl BreakpointManager {
         scope: &BreakpointScope,
     ) -> bool {
         matches!(scope, BreakpointScope::Kernel)
-            || address.is_some_and(|address| arch.is_kernel_address(address))
+            || address.is_some_and(|address| arch.paging().is_kernel_address(address))
     }
 
     pub(super) fn validate_scope_capability(
@@ -224,7 +224,7 @@ impl BreakpointManager {
         address: Option<VirtAddr>,
         scope: &BreakpointScope,
     ) -> Result<()> {
-        let user_space = address.is_some_and(|address| !arch.is_kernel_address(address));
+        let user_space = address.is_some_and(|address| !arch.paging().is_kernel_address(address));
         // A user-space site needs the user-mode capability whatever the scope:
         // a GDB stub writes and restores it through whichever vCPU it has
         // selected, so a lift through one that does not map the page (in the
@@ -408,7 +408,7 @@ impl BreakpointManager {
         };
         // User code runs on the process's KVA-shadow root when it has one:
         // the kernel root's copy of the user half is non-executable.
-        let dtb = if debugger.arch().is_kernel_address(address) {
+        let dtb = if debugger.arch().paging().is_kernel_address(address) {
             root
         } else {
             let mask = debugger.arch().dtb_page_mask();
@@ -427,7 +427,7 @@ impl BreakpointManager {
             // target itself accepts the site and owes the write until the page
             // arrives (`nt!KdSetOwedBreakpoints`). Hand that decision to the
             // target rather than pre-empting it.
-            Ok(None) if debugger.arch().is_kernel_address(address) => None,
+            Ok(None) if debugger.arch().paging().is_kernel_address(address) => None,
             // A user-space site is this debugger's own `int3` in that page,
             // and there is no page to put it in.
             Ok(None) => return Err(Self::non_resident_site_error(debugger, dtb, address, scope)),
@@ -441,7 +441,7 @@ impl BreakpointManager {
         // sections below. TTBR0 user pages can be classified by effective UXN.
         let nx = match (
             debugger.arch(),
-            debugger.arch().is_kernel_address(address),
+            debugger.arch().paging().is_kernel_address(address),
             &translation,
         ) {
             (Arch::Arm64, true, _) => false,
@@ -625,7 +625,7 @@ fn user_patch_error(debugger: &Target, address: VirtAddr, error: Error) -> Error
     match error {
         Error::KdStatus { api, .. }
             if api == DBGKD_WRITE_PHYSICAL_MEMORY
-                && !debugger.arch().is_kernel_address(address) =>
+                && !debugger.arch().paging().is_kernel_address(address) =>
         {
             Error::Breakpoint(format!(
                 "{error} (with VBS enabled, Windows refuses KD writes to user-mode code; use a \

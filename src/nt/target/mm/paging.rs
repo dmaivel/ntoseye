@@ -112,7 +112,9 @@ impl Target {
                     level: step.level,
                     address: VirtAddr(step.address),
                     value: step.entry.0,
-                    attributes: arch.entry_attributes(step.entry, step.level, address),
+                    attributes: arch
+                        .paging()
+                        .entry_attributes(step.entry, step.level, address),
                 })
                 .collect(),
             physical: translation.map(|value| value.address),
@@ -224,7 +226,7 @@ impl Target {
                 level,
                 address: at,
                 value: value.0,
-                attributes: arch.entry_attributes(value, level, address),
+                attributes: arch.paging().entry_attributes(value, level, address),
             })
         };
         // The walk ends at an entry that maps (a large page) or maps nothing:
@@ -260,7 +262,7 @@ impl Target {
 fn scan_ptov_table(
     target: &Target,
     table: u64,
-    level: usize,
+    depth: usize,
     prefix: [usize; 4],
     wanted_page: u64,
     visited: &mut HashSet<u64>,
@@ -285,27 +287,28 @@ fn scan_ptov_table(
             return;
         }
     };
-    let arch = target.arch();
+    let paging = target.arch().paging();
+    let level = paging.levels()[depth];
     for (index, entry) in entries.into_iter().enumerate() {
         if results.len() >= MAX_PTOV_RESULTS {
             break;
         }
         let mut current = prefix;
-        current[level] = index;
-        match arch.decode_entry(level, entry) {
+        current[depth] = index;
+        match paging.decode_entry(level, entry) {
             TableEntry::Absent => {}
             TableEntry::Leaf(frame) => {
-                let span = 1u64 << (39 - 9 * level);
+                let span = 1u64 << level.shift();
                 if (frame..frame.saturating_add(span)).contains(&wanted_page) {
                     let va = VirtAddr::construct(current[0], current[1], current[2], current[3])
                         + (wanted_page - frame);
-                    results.push((va, level < 3));
+                    results.push((va, level != PageTableLevel::Pte));
                 }
             }
             TableEntry::Table(next) => scan_ptov_table(
                 target,
                 next,
-                level + 1,
+                depth + 1,
                 current,
                 wanted_page,
                 visited,

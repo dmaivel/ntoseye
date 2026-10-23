@@ -222,10 +222,6 @@ impl TranslationCache {
     }
 }
 
-/// The address bits each page-table level indexes, root first: four levels
-/// of 512 eight-byte entries over 4 KiB pages, on AMD64 and AArch64 alike.
-const TABLE_SHIFTS: [u32; 4] = [39, 30, 21, 12];
-
 /// One page-table entry a walk read.
 #[derive(Clone, Copy)]
 pub struct WalkStep {
@@ -386,7 +382,8 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
 
     /// Page-table root that maps `va`.
     fn root_for(&self, va: VirtAddr) -> Dtb {
-        if self.arch.separate_kernel_root() && self.arch.is_kernel_address(va) {
+        let paging = self.arch.paging();
+        if paging.separate_kernel_root() && paging.is_kernel_address(va) {
             self.kernel_dtb
         } else {
             self.dtb
@@ -425,10 +422,11 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             let _ = visit(start, start.0, end.0 - start.0);
             return Ok(());
         }
-        // The table walk covers one 48-bit half: the upper half's addresses
-        // are sign-extended from bit 47.
-        let half = if start.0 & (1 << 47) != 0 {
-            0xffff_0000_0000_0000
+        // The root indexes the low `bits` of an address, and the upper half's
+        // addresses are sign-extended from the top one.
+        let bits = self.arch.paging().levels()[0].shift() + 9;
+        let half = if start.0 & (1 << (bits - 1)) != 0 {
+            !0 << bits
         } else {
             0
         };
@@ -436,18 +434,21 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         Ok(())
     }
 
-    /// One table of [`Self::for_each_present_page`]: `level` 0 is the root,
-    /// covering from `base`; entries outside `[start, end)` are skipped.
+    /// One table of [`Self::for_each_present_page`], `depth` levels below
+    /// the root, covering from `base`; entries outside `[start, end)` are
+    /// skipped.
     fn visit_table(
         &self,
         table: PhysAddr,
-        level: usize,
+        depth: usize,
         base: u64,
         start: u64,
         end: u64,
         visit: &mut impl FnMut(VirtAddr, PhysAddr, u64) -> ControlFlow<()>,
     ) -> Result<ControlFlow<()>> {
-        let shift = TABLE_SHIFTS[level];
+        let paging = self.arch.paging();
+        let level = paging.levels()[depth];
+        let shift = level.shift();
         let span = 1u64 << shift;
         let mut entries = [0u8; PAGE_SIZE];
         match self.backend.read_page_table_bytes(table, &mut entries) {
@@ -463,7 +464,7 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
                 entries[at..at + 8].try_into().expect("8-byte entry"),
             ));
             let entry_base = base + index * span;
-            let flow = match self.arch.decode_entry(level, entry) {
+            let flow = match paging.decode_entry(level, entry) {
                 TableEntry::Absent => continue,
                 TableEntry::Leaf(frame) => {
                     let from = entry_base.max(start);
@@ -471,7 +472,7 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
                     visit(VirtAddr(from), frame + (from - entry_base), to - from + 1)
                 }
                 TableEntry::Table(next) => {
-                    self.visit_table(next, level + 1, entry_base, start, end, visit)?
+                    self.visit_table(next, depth + 1, entry_base, start, end, visit)?
                 }
             };
             if flow.is_break() {
@@ -497,7 +498,7 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         if self.dtb == DTB_IDENTITY {
             return Ok((Vec::new(), Some(Translation::identity(va))));
         }
-        let mut steps = Vec::with_capacity(TABLE_SHIFTS.len());
+        let mut steps = Vec::with_capacity(PageTableLevel::ALL.len());
         let translation = match self.walk_tables(va, |step| steps.push(step))? {
             Walked::Mapped(translation) => Some(translation),
             Walked::Unmapped(leaf) => self.section_page(va, leaf),
@@ -507,32 +508,34 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
 
     /// Walk the tables for `va`, handing `on_step` each entry read.
     fn walk_tables(&self, va: VirtAddr, mut on_step: impl FnMut(WalkStep)) -> Result<Walked> {
+        let paging = self.arch.paging();
         let mut table = self.root_for(va);
-        let mut path = [PageTableEntry(0); TABLE_SHIFTS.len()];
-        for (level, shift) in TABLE_SHIFTS.into_iter().enumerate() {
+        let mut path = [PageTableEntry(0); PageTableLevel::ALL.len()];
+        for (depth, &level) in paging.levels().iter().enumerate() {
+            let shift = level.shift();
             let index = (va.0 >> shift) & PT_INDEX_MASK;
             let address = table + 8 * index;
             let Some(entry) = self.read_pt_entry(address)? else {
                 return Ok(Walked::Unmapped(None));
             };
             on_step(WalkStep {
-                level: PageTableLevel::ALL[level],
+                level,
                 address,
                 entry,
             });
-            path[level] = entry;
-            match self.arch.decode_entry(level, entry) {
+            path[depth] = entry;
+            match paging.decode_entry(level, entry) {
                 TableEntry::Table(next) => table = next,
                 TableEntry::Leaf(frame) => {
-                    let permissions = self.arch.mapping_permissions(&path[..=level], va);
+                    let permissions = paging.mapping_permissions(&path[..=depth], va);
                     let offset = va.0 & ((1u64 << shift) - 1);
                     return Ok(Walked::Mapped(Translation::mapped(
                         frame + offset,
-                        shift > PAGE_SHIFT,
+                        level != PageTableLevel::Pte,
                         permissions,
                     )));
                 }
-                TableEntry::Absent if level + 1 < TABLE_SHIFTS.len() => {
+                TableEntry::Absent if level != PageTableLevel::Pte => {
                     return Ok(Walked::Unmapped(None));
                 }
                 TableEntry::Absent => {
@@ -560,7 +563,8 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
     /// it is absent.
     fn section_page(&self, va: VirtAddr, leaf: Option<PageTableEntry>) -> Option<Translation> {
         // Views are mapped in a process's user half only.
-        if va.0 >> 47 != 0 {
+        let paging = self.arch.paging();
+        if paging.is_kernel_address(va) {
             return None;
         }
         let views = self.backend.section_views()?;
@@ -573,7 +577,7 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             Some(_) => None,
         }?;
         let pte = PageTableEntry(self.read::<u64>(prototype).ok()?);
-        let valid = match self.arch.decode_entry(TABLE_SHIFTS.len() - 1, pte) {
+        let valid = match paging.decode_entry(PageTableLevel::Pte, pte) {
             TableEntry::Leaf(frame) => Some(frame),
             TableEntry::Absent | TableEntry::Table(_) => None,
         };

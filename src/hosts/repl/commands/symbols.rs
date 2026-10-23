@@ -892,7 +892,7 @@ fn list_modules(target: &Target, filter: &ModuleFilter) -> Result<Vec<ModuleList
     if let Some(address) = filter.containing
         && !filter.user
     {
-        kernel |= target.arch().is_kernel_address(address);
+        kernel |= target.arch().paging().is_kernel_address(address);
     }
     let dtb = if kernel {
         target.kernel_dtb()

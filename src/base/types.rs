@@ -275,8 +275,19 @@ pub enum PageTableLevel {
 }
 
 impl PageTableLevel {
-    /// The levels a walk reads, root first.
+    /// Every level, root first, as four-level tables have them.
     pub const ALL: [Self; 4] = [Self::Pxe, Self::Ppe, Self::Pde, Self::Pte];
+
+    /// The lowest address bit its entries' index takes: each entry spans
+    /// `1 << shift` bytes.
+    pub const fn shift(self) -> u32 {
+        (match self {
+            Self::Pxe => PML4E_SHIFT,
+            Self::Ppe => PDPTE_SHIFT,
+            Self::Pde => PDE_SHIFT,
+            Self::Pte => PTE_SHIFT,
+        }) as u32
+    }
 }
 
 impl VirtAddr {

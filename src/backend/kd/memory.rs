@@ -210,7 +210,7 @@ impl KdBackend {
     /// session (as WinDbg does); user space only under the root the serving
     /// processor is running on.
     fn virtual_api_serves(&mut self, addr: VirtAddr, root: Dtb) -> bool {
-        self.arch.is_kernel_address(addr) || self.serving_processor_runs_on(root)
+        self.arch.paging().is_kernel_address(addr) || self.serving_processor_runs_on(root)
     }
 
     /// Whether `root` is the page-table root the *serving* processor is

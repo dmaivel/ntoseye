@@ -7,7 +7,7 @@ use crate::arch::{Arch, TableEntry};
 use crate::backend::phys::PhysMem;
 use crate::base::error::{Error, Result};
 use crate::base::memory::{AddressSpace, MemoryOps, PAGE_SIZE};
-use crate::base::types::{PageTableEntry, VirtAddr};
+use crate::base::types::{PageTableEntry, PageTableLevel, VirtAddr};
 use crate::nt::bugchecks::looks_like_kernel_pointer;
 use crate::nt::guest::ProcessInfo;
 use crate::nt::guest::vad::vad_node_offset;
@@ -169,7 +169,9 @@ impl PteFormat {
     /// Whether a PDE maps a large page itself.
     fn maps_large_page(&self, entry: u64) -> bool {
         matches!(
-            self.arch.decode_entry(2, PageTableEntry(entry)),
+            self.arch
+                .paging()
+                .decode_entry(PageTableLevel::Pde, PageTableEntry(entry)),
             TableEntry::Leaf(_)
         )
     }
