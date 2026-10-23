@@ -827,6 +827,23 @@ fn stack(
                 return Ok(());
             }
         };
+        // A dump records a processor it captured no context for with every
+        // register zero, as `~` lists it: a walk from there would invent a
+        // frame at address 0.
+        let pc = state
+            .ctx
+            .register_map
+            .read_u64(state.ctx.target.arch().pc_register(), &regs);
+        if matches!(pc, Ok(0)) {
+            outln!(
+                "{}",
+                ui::muted(&format!(
+                    "no register context for {}: the dump captured none for it",
+                    ui::thread(&state.ctx.current_thread)
+                ))
+            );
+            return Ok(());
+        }
         build_thread_stacktrace(
             &state.ctx.target,
             &state.ctx.register_map,

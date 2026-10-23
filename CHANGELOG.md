@@ -57,6 +57,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - `!exqueue` lists the work queues on Windows 11 build 26200, which keeps one flat list of them per partition. It read the list as one per NUMA node and failed on every queue.
 - `!heap -x` says which heaps it could not search instead of concluding that the address is in no heap.
 - `vertarget` reads `Windows 10.0`, from the shared user data page, instead of `Windows 15.26200`, which took the dump header's build-type marker for a version.
+- On a processor whose context a dump did not capture, `k` says so; it showed a frame at address 0.
 
 ### Removed
 
