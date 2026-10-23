@@ -9,6 +9,7 @@ use pelite::PeView;
 
 use super::{SelectedFrame, Target};
 use crate::arch::Arch;
+use crate::arch::amd64::prolog;
 use crate::{
     backend::{dbg_backend::processor_index_from_backend_thread_id, phys::PhysMem},
     base::{
@@ -32,7 +33,7 @@ use crate::{
         },
         pe::{PeImage, image_file_name, read_pe_header_page, size_of_image},
         symbols::{ImageFetch, SymbolStore},
-        unwind::{halted_in_windows_hypervisor, prolog},
+        unwind::halted_in_windows_hypervisor,
     },
 };
 use ntoseye_macros::record;

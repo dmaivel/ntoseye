@@ -6,6 +6,8 @@ use crate::base::diagnostics;
 use crate::nt::bugchecks::{bugcheck_trap_frame_address, looks_like_kernel_pointer};
 use ntoseye_macros::{command, grammar};
 
+use crate::arch::arm64::unwind::Arm64UnwindCode;
+use crate::arch::unwind::{Unwind, UnwindHandler};
 use crate::base::error::{Error, Result};
 use crate::base::ntstatus::ntstatus_name;
 use crate::base::types::VirtAddr;
@@ -14,9 +16,9 @@ use crate::hosts::repl::*;
 use crate::nt::target::{MemoryKind, SavedThreadRegisters, SelectedFrame, lookup_register};
 use crate::nt::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current, trap_frame_rip_symbol};
 use crate::nt::unwind::{
-    Arm64UnwindCode, FrameSource, FunctionEntry, RecoveredStackTrace, StackTrace, UNKNOWN_CONTEXT,
-    Unwind, UnwindHandler, build_stacktrace_with_register_values, build_thread_stacktrace,
-    halted_in_windows_hypervisor, resolve_thread_trace_context, saved_vtls, try_format_symbol,
+    FrameSource, FunctionEntry, RecoveredStackTrace, StackTrace, UNKNOWN_CONTEXT,
+    build_stacktrace_with_register_values, build_thread_stacktrace, halted_in_windows_hypervisor,
+    resolve_thread_trace_context, saved_vtls, try_format_symbol,
 };
 use crate::session::effects::{Effects, Writes};
 use crate::session::{ExceptionRecord, Session};

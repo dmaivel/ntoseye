@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{
-    FrameSource, MAX_UNWIND_FRAMES, RecoveredFrame, RecoveredStackTrace, RegisterContext,
+    FrameRegisters, FrameSource, MAX_UNWIND_FRAMES, RecoveredFrame, RecoveredStackTrace,
     StackTracer, ThreadTraceContext, Unwound, expand_frame,
 };
 use crate::arch::Arch;
@@ -19,13 +19,13 @@ use crate::{
 pub(super) fn build_recovered_stacktrace_seeded(
     debugger: &Target,
     trace: &ThreadTraceContext,
-    mut context: RegisterContext,
+    mut context: FrameRegisters,
     initial_source: FrameSource,
     limit: usize,
     initial_registers: HashMap<String, u64>,
 ) -> RecoveredStackTrace {
     let limit = limit.max(1);
-    let mut raw: Vec<(RegisterContext, FrameSource, Option<u64>)> = Vec::new();
+    let mut raw: Vec<(FrameRegisters, FrameSource, Option<u64>)> = Vec::new();
     let mut tracer = StackTracer::new(debugger, trace);
     let mut seen = HashSet::from([context.pc]);
     raw.push((
@@ -112,7 +112,7 @@ pub(super) fn build_recovered_stacktrace_seeded(
         limit.saturating_sub(raw.len())
     };
     for (sp, ip) in tracer.scan_stack(context.sp, &seen, remaining) {
-        let mut scan_context = RegisterContext::new(debugger.arch(), ip, sp);
+        let mut scan_context = FrameRegisters::new(debugger.arch(), ip, sp);
         // A scan only accepts slots holding return addresses.
         scan_context.after_call = true;
         raw.push((

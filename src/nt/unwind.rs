@@ -1,12 +1,12 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use ntoseye_macros::record;
 use pelite::pe64::{Pe, PeView, image::IMAGE_DIRECTORY_ENTRY_EXCEPTION};
 
-use crate::arch::{self, Arch, RegisterMap};
+use crate::arch::{Arch, RegisterMap};
 use crate::{
     backend::phys::PhysMem,
     base::{
@@ -29,47 +29,23 @@ use crate::{
     },
 };
 
-/// Per-frame unwinder diagnostics, gated on `NTOSEYE_UNWIND_TRACE`. Prints which
-/// branch each `unwind_once` takes so early bail-outs (no function entry, bad
-/// codes, failed reads) can be told apart from a genuine leaf pop.
-fn unwind_trace_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("NTOSEYE_UNWIND_TRACE").is_some())
-}
-
-macro_rules! unwind_trace {
-    ($($arg:tt)*) => {
-        if $crate::nt::unwind::unwind_trace_enabled() {
-            eprintln!($($arg)*);
-        }
-    };
-}
-
 pub(crate) mod amd64;
 pub(crate) mod arm64;
 mod arm64ec;
-pub mod prolog;
 mod tracer;
 mod walk;
 mod wow64;
 
-pub use amd64::{
-    Amd64UnwindCode, Amd64UnwindInfo, FunctionEntry, RuntimeFunction, Unwind, UnwindHandler,
-};
-use amd64::{Lookup, RUNTIME_FUNCTION_SIZE, lookup_runtime_function, runtime_function_at};
-pub use arm64::{Arm64EpilogScope, Arm64PackedUnwind, Arm64UnwindCode, Arm64XdataUnwind};
+use crate::arch::amd64::unwind::{RUNTIME_FUNCTION_SIZE, runtime_function_at};
+use crate::arch::unwind::{FrameMemory, FrameRegisters, REGISTER_SLOTS, Unwound};
+pub use amd64::{FunctionEntry, RuntimeFunction};
+use amd64::{Lookup, lookup_runtime_function};
 use arm64::{Arm64Lookup, lookup_arm64_runtime_function};
 use walk::{build_recovered_stacktrace_seeded, ensure_module_symbols};
 
 // hard cap on frames walked, so a stack switch (which relaxes the sp-advances
 // guard) can't let a cyclic/corrupt stack spin forever
 const MAX_UNWIND_FRAMES: usize = 1024;
-/// Register slots a walk tracks: the most any architecture numbers.
-const REGISTER_SLOTS: usize = {
-    let amd64 = arch::amd64::ENCODED_REGISTERS.len();
-    let arm64 = arch::arm64::ENCODED_REGISTERS.len();
-    if amd64 > arm64 { amd64 } else { arm64 }
-};
 
 #[derive(Debug, Clone)]
 pub struct ThreadTraceContext {
@@ -228,41 +204,6 @@ pub struct ThreadStackTrace {
 pub struct ThreadRecoveredStack {
     pub source: ThreadStackSource,
     pub stacktrace: RecoveredStackTrace,
-}
-
-/// A frame's registers during a walk. `regs` is indexed by architectural
-/// number, in [`Architecture::encoded_registers`] order: x64 encoding order
-/// or ARM64 x0–x30.
-///
-/// [`Architecture::encoded_registers`]: crate::arch::Architecture::encoded_registers
-#[derive(Clone, Debug)]
-struct RegisterContext {
-    /// The architecture whose registers these are, which numbers `regs`.
-    arch: Arch,
-    pc: u64,
-    sp: u64,
-    /// The integer registers by the architecture's encoding.
-    regs: [Option<u64>; REGISTER_SLOTS],
-    /// `pc` is a return address rather than where the frame was stopped or
-    /// interrupted.
-    after_call: bool,
-    /// The hardware-pushed machine frame the last unwind step crossed to
-    /// reach this frame (AMD64 `UWOP_PUSH_MACHFRAME`): this frame was
-    /// interrupted there rather than called.
-    machine_frame: Option<u64>,
-}
-
-/// Outcome of unwinding one frame to its caller
-enum Unwound {
-    /// Could not unwind further; the caller falls back to a stack scan
-    Stop,
-    /// Advanced to the caller. `stack_switch` is set when we crossed a hardware
-    /// trap/interrupt frame, where sp may move to a different stack (e.g. an IST
-    /// or the idle stack) and so need not be greater than the previous sp.
-    Frame { stack_switch: bool },
-    /// Advanced to the caller by prolog analysis ([`prolog`]): a frame of
-    /// code whose unwind data is not mapped.
-    Prolog,
 }
 
 #[derive(Debug, Clone)]
@@ -996,12 +937,6 @@ fn expand_frame(
     frames
 }
 
-fn image_u32(bytes: &[u8], offset: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(
-        bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
-    ))
-}
-
 /// The RVA range of the runtime functions for `image`'s code of `machine`:
 /// the exception directory, or in a hybrid image the table for the other
 /// instruction set (see [`CodeLayout::runtime_functions`]). `None` when the
@@ -1231,7 +1166,7 @@ fn build_stacktrace_from_values(
         .get(debugger.arch().dtb_register())
         .copied()
         .unwrap_or(0);
-    let context = RegisterContext::from_lookup(debugger.arch(), |name| values.get(name).copied());
+    let context = FrameRegisters::from_lookup(debugger.arch(), |name| values.get(name).copied());
     let trace = resolve_thread_trace_context_at(debugger, cr3, context.pc);
     build_recovered_stacktrace_seeded(
         debugger,
@@ -1252,7 +1187,7 @@ pub fn frame_base_for_register_values(
     values: &HashMap<String, u64>,
 ) -> Option<u64> {
     let lookup = |name: &str| lookup_register(debugger.arch(), values, name);
-    let context = RegisterContext::from_lookup(debugger.arch(), lookup);
+    let context = FrameRegisters::from_lookup(debugger.arch(), lookup);
     let dtb = lookup(debugger.arch().dtb_register())
         .filter(|dtb| *dtb != 0)
         .unwrap_or_else(|| debugger.current_dtb());
@@ -1271,7 +1206,7 @@ pub fn return_address_for_register_values(
 ) -> Option<u64> {
     let lookup = |name: &str| lookup_register(debugger.arch(), values, name);
     lookup(debugger.arch().pc_register())?;
-    let mut context = RegisterContext::from_lookup(debugger.arch(), lookup);
+    let mut context = FrameRegisters::from_lookup(debugger.arch(), lookup);
     let dtb = lookup(debugger.arch().dtb_register())
         .filter(|dtb| *dtb != 0)
         .unwrap_or_else(|| debugger.current_dtb());
@@ -1290,7 +1225,7 @@ fn recover_context_switch_seed(
     debugger: &Target,
     process_dtb: Dtb,
     kernel_stack: VirtAddr,
-) -> Result<RegisterContext> {
+) -> Result<FrameRegisters> {
     let ntoskrnl = &debugger.guest()?.ntoskrnl;
     let swap_context = ntoskrnl.symbol("SwapContext")?.address().0;
     let ki_swap_context = ntoskrnl.symbol("KiSwapContext")?.address().0;
@@ -1325,7 +1260,7 @@ fn recover_context_switch_seed(
     Ok(seed)
 }
 
-fn switch_seed_is_plausible(arch: Arch, thread: &ThreadInfo, seed: &RegisterContext) -> bool {
+fn switch_seed_is_plausible(arch: Arch, thread: &ThreadInfo, seed: &FrameRegisters) -> bool {
     let (Some(kernel_stack), Some(stack_limit), Some(stack_base)) =
         (thread.kernel_stack, thread.stack_limit, thread.stack_base)
     else {
@@ -1384,7 +1319,7 @@ pub fn build_parked_thread_recovered_stack(
     if let Some(kernel_stack) = thread.kernel_stack {
         let pdb_seed = decode_kswitch_frame_seed(debugger, process_dtb, kernel_stack)
             .ok()
-            .and_then(|registers| RegisterContext::from_saved(&registers));
+            .and_then(|registers| frame_registers_from_saved(&registers));
         let seed = match pdb_seed {
             Some(seed) => Ok(seed),
             None => recover_context_switch_seed(debugger, process_dtb, kernel_stack),
@@ -1418,7 +1353,7 @@ pub fn build_parked_thread_recovered_stack(
     if let Some(address) = thread.trap_frame {
         match decode_ktrap_frame_for_thread(debugger, process_dtb, address)
             .ok()
-            .and_then(|registers| RegisterContext::from_saved(&registers))
+            .and_then(|registers| frame_registers_from_saved(&registers))
         {
             Some(seed) if seed.pc != 0 && seed.sp != 0 => {
                 let mut stacktrace = build_recovered_stacktrace_seeded(
@@ -1462,79 +1397,15 @@ pub fn build_parked_thread_stack(
     })
 }
 
-impl RegisterContext {
-    fn new(arch: Arch, pc: u64, sp: u64) -> Self {
-        Self {
-            arch,
-            pc,
-            sp,
-            regs: [None; REGISTER_SLOTS],
-            after_call: false,
-            machine_frame: None,
-        }
-    }
-
-    /// The context of a stopped frame whose registers `lookup` answers by
-    /// name, a register it lacks under its own name taken by its other one
-    /// (ARM64's `x29` as `fp`).
-    fn from_lookup(arch: Arch, lookup: impl Fn(&str) -> Option<u64>) -> Self {
-        let mut context = Self::new(
-            arch,
-            lookup(arch.pc_register()).unwrap_or(0),
-            lookup(arch.sp_register()).unwrap_or(0),
-        );
-        for (slot, name) in context.regs.iter_mut().zip(arch.encoded_registers()) {
-            *slot = lookup(name).or_else(|| lookup(arch.other_register_name(name)?));
-        }
-        context
-    }
-
-    /// Every register the context knows, under each name a host may ask for
-    /// it by.
-    fn named_values(&self) -> Vec<(&'static str, u64)> {
-        let arch = self.arch;
-        let mut values = Vec::new();
-        let mut others = Vec::new();
-        for (register, name) in arch.encoded_registers().iter().enumerate() {
-            let Some(value) = self.get(register as u8) else {
-                continue;
-            };
-            values.push((*name, value));
-            if let Some(other) = arch.other_register_name(name) {
-                others.push((other, value));
-            }
-        }
-        values.extend(others);
-        values.extend([(arch.pc_register(), self.pc), (arch.sp_register(), self.sp)]);
-        values
-    }
-
-    /// The context a thread saved when it left the processor; `None` without
-    /// its program counter and stack pointer.
-    fn from_saved(registers: &SavedThreadRegisters) -> Option<Self> {
-        let arch = registers.arch();
-        registers.get(arch.pc_register())?;
-        registers.get(arch.sp_register())?;
-        Some(Self::from_lookup(arch, |name| registers.get(name)))
-    }
-
-    /// An integer register by its encoding number; the stack pointer's
-    /// number, where the encoding has one, is `sp`.
-    fn get(&self, register: u8) -> Option<u64> {
-        if Some(register) == self.arch.encoded_sp() {
-            return Some(self.sp);
-        }
-        self.regs.get(register as usize).copied().flatten()
-    }
-
-    fn set(&mut self, register: u8, value: u64) {
-        if Some(register) == self.arch.encoded_sp() {
-            self.sp = value;
-        }
-        if let Some(slot) = self.regs.get_mut(register as usize) {
-            *slot = Some(value);
-        }
-    }
+/// The context a thread saved when it left the processor; `None` without
+/// its program counter and stack pointer.
+fn frame_registers_from_saved(registers: &SavedThreadRegisters) -> Option<FrameRegisters> {
+    let arch = registers.arch();
+    registers.get(arch.pc_register())?;
+    registers.get(arch.sp_register())?;
+    Some(FrameRegisters::from_lookup(arch, |name| {
+        registers.get(name)
+    }))
 }
 
 impl ThreadTraceContext {
@@ -1583,11 +1454,11 @@ impl ThreadTraceContext {
 trait Unwinder: Sync {
     /// Step `context` to its caller's frame. Registers the caller cannot
     /// rely on (volatile across a call) come back unknown.
-    fn unwind_once(&self, tracer: &mut StackTracer<'_>, context: &mut RegisterContext) -> Unwound;
+    fn unwind_once(&self, tracer: &mut StackTracer<'_>, context: &mut FrameRegisters) -> Unwound;
 
     /// The address the PDB's frame-relative locations of the function at
     /// `context`'s program counter are counted from.
-    fn frame_base(&self, tracer: &mut StackTracer<'_>, context: &RegisterContext) -> Option<u64>;
+    fn frame_base(&self, tracer: &mut StackTracer<'_>, context: &FrameRegisters) -> Option<u64>;
 
     /// The instruction set of the code at `address`, which picks how its
     /// frame unwinds.
@@ -1603,7 +1474,7 @@ trait Unwinder: Sync {
         kernel_stack: u64,
         swap_context: u64,
         ki_swap_context: Range<u64>,
-    ) -> Result<RegisterContext>;
+    ) -> Result<FrameRegisters>;
 }
 
 /// The unwinder for `arch`'s Windows code.
@@ -1616,14 +1487,14 @@ fn unwinder(arch: Arch) -> &'static dyn Unwinder {
 
 impl StackTracer<'_> {
     /// Step `context` to its caller's frame, by the target's unwinder.
-    fn unwind_once(&mut self, context: &mut RegisterContext) -> Unwound {
+    fn unwind_once(&mut self, context: &mut FrameRegisters) -> Unwound {
         context.machine_frame = None;
         unwinder(self.target.arch()).unwind_once(self, context)
     }
 
     /// Resolve the stack base PDB frame-relative locations are addressed from
     /// for the function containing `context`'s program counter.
-    fn frame_base_for(&mut self, context: &RegisterContext) -> Option<u64> {
+    fn frame_base_for(&mut self, context: &FrameRegisters) -> Option<u64> {
         unwinder(self.target.arch()).frame_base(self, context)
     }
 }
@@ -1633,7 +1504,10 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use super::{FrameSource, RegisterContext, build_stacktrace_with_register_values};
+    use super::{
+        FrameRegisters, FrameSource, build_stacktrace_with_register_values,
+        frame_registers_from_saved,
+    };
     use crate::arch::Arch;
     use crate::base::types::VirtAddr;
     use crate::nt::guest::ModuleInfo;
@@ -1879,7 +1753,7 @@ mod tests {
         let walk = super::walk::build_recovered_stacktrace_seeded(
             &session.target,
             &trace,
-            RegisterContext::new(Arch::Amd64, FRAMED_RIP, FRAMED_RSP),
+            FrameRegisters::new(Arch::Amd64, FRAMED_RIP, FRAMED_RSP),
             FrameSource::Seed,
             8,
             HashMap::new(),
@@ -1959,7 +1833,7 @@ mod tests {
         let walk = super::walk::build_recovered_stacktrace_seeded(
             &session.target,
             &trace,
-            RegisterContext::new(Arch::Amd64, IMAGE + u64::from(CALLEE), rsp - 8),
+            FrameRegisters::new(Arch::Amd64, IMAGE + u64::from(CALLEE), rsp - 8),
             FrameSource::Seed,
             8,
             HashMap::new(),
@@ -2132,7 +2006,7 @@ mod tests {
             rbp: Some(0xffff_a000_2100),
             ..Amd64SavedRegisters::default()
         });
-        let context = RegisterContext::from_saved(&registers).unwrap();
+        let context = frame_registers_from_saved(&registers).unwrap();
         assert_eq!(context.pc, 0xffff_f800_1000);
         assert_eq!(context.sp, 0xffff_a000_2000);
         assert_eq!(context.get(5), Some(0xffff_a000_2100));
@@ -2142,6 +2016,6 @@ mod tests {
             rip: Some(0xffff_f800_1000),
             ..Amd64SavedRegisters::default()
         });
-        assert!(RegisterContext::from_saved(&missing_rsp).is_none());
+        assert!(frame_registers_from_saved(&missing_rsp).is_none());
     }
 }

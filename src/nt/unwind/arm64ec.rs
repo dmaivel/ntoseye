@@ -14,43 +14,16 @@
 //! emulator turns into an x64 call, pushing the thunk's return address, so
 //! unwinding the x64 callee returns into the thunk.
 
-use super::{REGISTER_SLOTS, RegisterContext, StackTracer, Unwound};
+use super::{FrameRegisters, REGISTER_SLOTS, StackTracer, Unwound};
 use crate::arch::Arch;
 use crate::arch::amd64::VOLATILE_REGISTERS;
-
-/// The ARM64 register each x64 register lives in during ARM64EC code, by
-/// x64 unwind number (rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8–r15). rsp
-/// is sp, which the walk keeps as `rsp` on either machine.
-const X64_IN_ARM64: [Option<usize>; 16] = [
-    Some(8),
-    Some(0),
-    Some(1),
-    Some(27),
-    None,
-    Some(29),
-    Some(25),
-    Some(26),
-    Some(2),
-    Some(3),
-    Some(4),
-    Some(5),
-    Some(19),
-    Some(20),
-    Some(21),
-    Some(22),
-];
-
-/// ARM64 registers a call clobbers (x0–x17), and lr, which an x64 frame
-/// neither saves nor restores.
-fn clobbered_by_x64_frame(arm64: usize) -> bool {
-    arm64 < 18 || arm64 == 30
-}
+use crate::arch::arm64::{X64_IN_ARM64, clobbered_by_x64_frame};
 
 impl StackTracer<'_> {
     /// Unwind an x64 frame of an ARM64 thread, whose registers are in their
     /// ARM64EC homes.
-    pub fn unwind_once_emulated_amd64(&mut self, context: &mut RegisterContext) -> Unwound {
-        let mut x64 = RegisterContext::new(Arch::Amd64, context.pc, context.sp);
+    pub fn unwind_once_emulated_amd64(&mut self, context: &mut FrameRegisters) -> Unwound {
+        let mut x64 = FrameRegisters::new(Arch::Amd64, context.pc, context.sp);
         x64.after_call = context.after_call;
         for (register, home) in X64_IN_ARM64.iter().enumerate() {
             if let Some(home) = home {

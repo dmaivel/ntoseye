@@ -16,6 +16,9 @@ use std::ops::Deref;
 use crate::base::bytes::get_u32;
 use crate::base::types::{CodeMachine, VirtAddr};
 
+// First, so its `unwind_trace!` reaches each architecture's unwinder.
+#[macro_use]
+pub mod unwind;
 pub mod amd64;
 pub mod arm64;
 pub mod debug_registers;

@@ -14,7 +14,7 @@ use super::{
     UserDumpInfo, UserException, UserHandle, UserModule, UserSystemInfo, UserThreadInfo,
     UserThreadTimes, UserTimeZone,
 };
-use crate::arch::Arch;
+use crate::arch::{self, Arch};
 use crate::base::bytes::{utf16le_lossy, utf16le_nul_terminated};
 use crate::base::error::{Error, Result};
 use crate::nt::pe::headers::{MAX_CODEVIEW_BYTES, decode_codeview};
@@ -69,11 +69,6 @@ const MAX_MODULES: u32 = 0x10_0000;
 const MAX_MEMORY_RANGES: u64 = 0x100_0000;
 const MAX_HANDLES: u32 = 0x100_0000;
 const MAX_FUNCTION_TABLES: u32 = 0x10_0000;
-/// An AMD64 `RUNTIME_FUNCTION`: begin, end, and unwind-data offsets.
-const AMD64_RUNTIME_FUNCTION_SIZE: u32 = 12;
-/// An ARM64 `RUNTIME_FUNCTION`: begin and unwind-data offsets; the length
-/// is in the packed unwind data or the `.xdata` header.
-const ARM64_RUNTIME_FUNCTION_SIZE: u32 = 8;
 /// The longest `MINIDUMP_STRING` read, in bytes: a module path or thread
 /// name is far shorter.
 const MAX_STRING_BYTES: u32 = 0x1_0000;
@@ -1247,9 +1242,9 @@ fn parse_function_tables(
         return Vec::new();
     };
     let runtime_function_size = match arch {
-        Arch::Amd64 => AMD64_RUNTIME_FUNCTION_SIZE,
-        Arch::Arm64 => ARM64_RUNTIME_FUNCTION_SIZE,
-    };
+        Arch::Amd64 => arch::amd64::unwind::RUNTIME_FUNCTION_SIZE,
+        Arch::Arm64 => arch::arm64::unwind::RUNTIME_FUNCTION_SIZE,
+    } as u32;
     let (header_size, descriptor_size, native_size, entry_size) = (
         header.size_of_header,
         header.size_of_descriptor,

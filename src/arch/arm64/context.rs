@@ -17,6 +17,10 @@
 //! state and the stopped processor's system registers when available,
 //! mirroring how the AMD64 map appends CR0-CR8 from KSPECIAL_REGISTERS.
 
+use std::ops::Range;
+
+use super::unwind::LR;
+
 pub const CONTEXT_SIZE: usize = 0x390; // 912
 
 /// The hardware breakpoint and watchpoint register pairs a `CONTEXT`
@@ -75,3 +79,37 @@ pub const ENCODED_REGISTERS: [&str; 31] = [
     "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27",
     "x28", "x29", "x30",
 ];
+
+/// The registers a call clobbers, by their [`ENCODED_REGISTERS`] number:
+/// x0–x17 carry arguments, results, and scratch values. x18 is the platform
+/// register (the KPCR in kernel mode) and survives calls.
+pub const VOLATILE_REGISTERS: Range<usize> = 0..18;
+
+/// The ARM64 register each x64 register lives in during ARM64EC code, by
+/// x64 unwind number (rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8–r15). rsp
+/// is sp, which the walk keeps as `rsp` on either machine.
+pub const X64_IN_ARM64: [Option<usize>; 16] = [
+    Some(8),
+    Some(0),
+    Some(1),
+    Some(27),
+    None,
+    Some(29),
+    Some(25),
+    Some(26),
+    Some(2),
+    Some(3),
+    Some(4),
+    Some(5),
+    Some(19),
+    Some(20),
+    Some(21),
+    Some(22),
+];
+
+/// Whether an x64 frame of ARM64EC code leaves `arm64` (an
+/// [`ENCODED_REGISTERS`] number) unknown: a register a call clobbers, or
+/// lr, which an x64 frame neither saves nor restores.
+pub fn clobbered_by_x64_frame(arm64: usize) -> bool {
+    VOLATILE_REGISTERS.contains(&arm64) || arm64 == LR
+}

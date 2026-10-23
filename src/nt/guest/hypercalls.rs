@@ -234,7 +234,7 @@ pub struct HypervisorSymbols {
     pub extents: std::collections::HashMap<u32, u32>,
     /// The RVAs functions begin at, sorted: the image's `.pdata` when its
     /// file supplies it, direct call targets and code after padding (see
-    /// [`crate::nt::unwind::prolog::function_starts`]), the hypercall handlers,
+    /// [`crate::arch::amd64::prolog::function_starts`]), the hypercall handlers,
     /// and the VM-exit entry points. The address space maps no `.pdata`, so
     /// without the file this is the only way to find a frame's function.
     pub starts: Vec<u32>,

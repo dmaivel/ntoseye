@@ -4,6 +4,8 @@ mod context;
 pub mod debug_registers;
 pub mod disasm;
 pub mod paging;
+pub mod prolog;
+pub mod unwind;
 
 pub use context::*;
 

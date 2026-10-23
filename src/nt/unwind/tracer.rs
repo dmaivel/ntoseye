@@ -8,9 +8,10 @@ use std::sync::Arc;
 use pelite::pe64::{Pe, PeView, image::IMAGE_SCN_MEM_EXECUTE};
 
 use super::{
-    CachedModule, OwnedModule, RegisterContext, StackPage, StackTracer, ThreadTraceContext,
-    unwinder,
+    CachedModule, FrameMemory, FrameRegisters, OwnedModule, StackPage, StackTracer,
+    ThreadTraceContext, frame_registers_from_saved, unwinder,
 };
+use crate::nt::trapframe::decode_ktrap_frame_for_thread;
 use crate::{
     base::{
         error::{Error, Result},
@@ -191,7 +192,7 @@ impl<'a> StackTracer<'a> {
 
     /// Whether `context` is at a Windows hypervisor VM-exit entry, where its
     /// stack begins.
-    pub fn at_hypervisor_stack_base(&self, context: &RegisterContext) -> bool {
+    pub fn at_hypervisor_stack_base(&self, context: &FrameRegisters) -> bool {
         let (Some(symbols), Some(image)) = (&self.trace.hypervisor, &self.trace.foreign_image)
         else {
             return false;
@@ -413,4 +414,17 @@ fn headers_match_relocated(disk: &[u8], mapped: &[u8]) -> bool {
     }
     disk[..image_base.start] == mapped[..image_base.start]
         && disk[image_base.end..] == mapped[image_base.end..]
+}
+
+impl FrameMemory for StackTracer<'_> {
+    fn stack_u64(&self, address: u64) -> Option<u64> {
+        StackTracer::stack_u64(self, address).ok()
+    }
+
+    fn trap_frame(&self, address: u64) -> Option<FrameRegisters> {
+        let saved =
+            decode_ktrap_frame_for_thread(self.target, self.trace.active_dtb, VirtAddr(address))
+                .ok()?;
+        frame_registers_from_saved(&saved)
+    }
 }
