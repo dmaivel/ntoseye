@@ -37,6 +37,10 @@ use crate::{
 };
 use ntoseye_macros::record;
 
+/// Why the Windows hypervisor's memory can't be read: only direct host RAM
+/// reaches it.
+pub const HYPERVISOR_NEEDS_HOST_RAM: &str = "reading the hypervisor's memory needs direct host RAM: the memory or gdb backend, or kd/kdnet with --memory-source host";
+
 /// How far below an instruction pointer to look for the header of the image
 /// it lies in. The Windows hypervisor and secure kernel are a few MiB.
 const IMAGE_SEARCH_BYTES: u64 = 16 * 1024 * 1024;
@@ -1299,10 +1303,7 @@ impl Target {
                 }
             }
             Err(_) if sources.is_empty() && self.phys.ram_runs().is_empty() => {
-                return Err(Error::Hypervisor(
-                    "reading the hypervisor's memory needs direct host RAM: the memory or gdb backend, or kd/kdnet with --memory-source host"
-                        .to_string(),
-                ));
+                return Err(Error::Hypervisor(HYPERVISOR_NEEDS_HOST_RAM.to_string()));
             }
             Err(error) if sources.is_empty() => return Err(error),
             Err(_) => {}

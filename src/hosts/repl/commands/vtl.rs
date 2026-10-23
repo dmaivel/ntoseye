@@ -21,6 +21,7 @@ use crate::nt::guest::{
     hypercalls::{HypercallCallerInfo, HypercallInput},
     privilege_names,
 };
+use crate::nt::target::vtl::HYPERVISOR_NEEDS_HOST_RAM;
 use crate::nt::target::{CodeExtent, VP_STATE_REGISTERS};
 use crate::nt::unwind::{halted_in_windows_hypervisor, try_format_symbol_at};
 use crate::session::Session;
@@ -1402,6 +1403,15 @@ fn hvcall(repl: &mut ReplState<'_>) -> Result<()> {
         return Ok(());
     };
     if !halted_in_windows_hypervisor(target, cr3, rip) {
+        // Without direct host RAM the hypervisor's memory is unreadable, so
+        // the check above fails even on a vCPU that is in it.
+        if target.phys.ram_runs().is_empty() {
+            error!(
+                "{}",
+                Error::Hypervisor(HYPERVISOR_NEEDS_HOST_RAM.to_string())
+            );
+            return Ok(());
+        }
         error!(
             "{} is not halted in the Windows hypervisor; !hvcall decodes the hypercall a VP made at a stop there, such as on a hypercall handler (ba e1 hv!HvCallFlushVirtualAddressList)",
             ui::thread(&repl.ctx.current_thread)
@@ -2021,17 +2031,16 @@ mod tests {
         assert!(error.ends_with(reason));
     }
 
-    /// A vCPU outside the hypervisor has no hypercall to decode.
+    /// Without direct host RAM, as for the mock, the hypervisor can't be
+    /// read, so `!hvcall` names that cause rather than claim the vCPU is
+    /// outside it.
     #[test]
-    fn hvcall_refuses_a_vcpu_outside_the_hypervisor() {
+    fn hvcall_without_host_ram_names_the_cause() {
         let mut session = session_with_mock(MockBackend::default().one_vcpu());
         let mut state = ReplState::for_oneshot(&mut session);
         let (result, text) = capture(|| state.dispatch_line("!hvcall"));
         result.unwrap();
-        assert!(
-            text.contains("is not halted in the Windows hypervisor"),
-            "{text}"
-        );
+        assert!(text.contains(HYPERVISOR_NEEDS_HOST_RAM), "{text}");
     }
 
     /// A hypervisor command without a VP shows the one the current vCPU's
