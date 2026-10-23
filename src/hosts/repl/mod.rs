@@ -300,6 +300,10 @@ pub struct ReplState<'a> {
     /// buffer to print, for a backend without KD's stream, which prints
     /// its own: the interactive prompt prints them while a run waits.
     pub printed_debug_seq: u64,
+    /// How long the run last driven took, until its stop is rendered: after
+    /// a long one at the interactive prompt, the terminal is asked to notify
+    /// (see [`ReplState::notify_stop`]).
+    pub last_run: Option<Duration>,
     /// What `!virtio` and `!vring` last saw of each queue, to show what
     /// moved since.
     pub virtio_seen: commands::virtio::VirtioSeen,
@@ -519,6 +523,7 @@ impl<'a> ReplState<'a> {
             unseen_stop_rendered: false,
             line_depth: 0,
             printed_debug_seq: 0,
+            last_run: None,
             virtio_seen: store.virtio_seen,
         }
     }
@@ -1073,6 +1078,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         unseen_stop_rendered: false,
         line_depth: 0,
         printed_debug_seq: 0,
+        last_run: None,
         virtio_seen: Default::default(),
     };
     // An error ends the prompt, not the cleanup below: breakpoints left

@@ -748,7 +748,7 @@ pub struct Display {
 /// A stop's register file as a host showed it; see [`Session::shown_stop`].
 #[derive(Debug, Clone)]
 pub struct ShownStop {
-    /// The vCPU, `p1.2`.
+    /// The backend's thread id of the processor (`p01.03`).
     pub thread: String,
     /// The Windows thread's ETHREAD, zero where no Windows thread runs.
     pub ethread: u64,

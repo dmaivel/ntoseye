@@ -21,6 +21,8 @@ ntoseye shows color only when the output goes to a terminal. If you redirect the
 
 The prompt marks where each command and its output start and end, as a shell does for its terminal (OSC 133). A terminal that reads these marks, such as Ghostty, kitty, WezTerm, iTerm2, Windows Terminal, the VS Code terminal or Tern, can then jump from one command to the next, select a command's output, or flag one that reported an error.
 
+When the target ran for 10 seconds or more before it stopped, ntoseye asks the terminal for a desktop notification, such as `ntoseye: breakpoint #0 hit at nt!NtClose on processor 2`, so you can turn to something else while it runs. kitty shows it only while its window is out of view. Ghostty, iTerm2 and other terminals that read OSC 9 show it each time, and a terminal that reads neither shows nothing. A stop you cause yourself, with Ctrl+C or `break`, sends none.
+
 ## In Tern
 
 [Tern](https://stencil.so/tern) is Stencil's terminal. When you run ntoseye in it, you type commands in Tern's own input field, with completion popups and a searchable [palette](#the-palette). Results print as text, as in any other terminal. Other terminals aren't affected.

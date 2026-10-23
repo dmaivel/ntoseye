@@ -1,11 +1,13 @@
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::io::IsTerminal as _;
+use std::time::{Duration, Instant};
 
 use owo_colors::OwoColorize;
 
 use crate::backend::dbg_backend::{
     BugcheckInfo, ContinueDisposition, ModuleEvent, processor_index_from_backend_thread_id,
+    thread_kind, thread_label,
 };
 use crate::base::diagnostics::print_notice;
 use crate::base::error::{Error, Result};
@@ -730,6 +732,28 @@ pub fn print_break_context_at(
 /// How long `g` on a running target waits for a stop it already reported.
 const PENDING_STOP_POLL: Duration = Duration::from_millis(100);
 
+/// How long a run takes before its stop is worth a desktop notification:
+/// long enough that the user may have turned to something else.
+const NOTIFY_AFTER: Duration = Duration::from_secs(10);
+
+/// What a desktop notification says a stop was, or `None` for one the user
+/// caused at the prompt (Ctrl+C, `break`).
+fn stop_notice(kind: &StopKind) -> Option<String> {
+    Some(match kind {
+        StopKind::Interrupt => return None,
+        StopKind::Breakpoint { breakpoint } => format!("breakpoint #{} hit", breakpoint.id),
+        StopKind::Exception { exception } => format!("exception {:#010x}", exception.code),
+        StopKind::Bugcheck {
+            bugcheck: Some(info),
+        } => format!("bugcheck {:#x}", info.code),
+        StopKind::Bugcheck { bugcheck: None } => "bugcheck".to_string(),
+        StopKind::ModuleLoad { module } => format!("{} loaded", module.name),
+        StopKind::ModuleUnload { module } => format!("{} unloaded", module.name),
+        StopKind::Reload { .. } => "the target restarted".to_string(),
+        StopKind::Step | StopKind::Entry => "the target stopped".to_string(),
+    })
+}
+
 /// The cancellation of a run a dispatch drives within its stop `budget`: a
 /// remote client's budget hands the target back running when it is spent;
 /// the interactive prompt (no budget) waits for a stop or Ctrl+C (the
@@ -883,7 +907,9 @@ impl ReplState<'_> {
         };
         self.clear_selected_frame();
         let cancel = budget_cancel(self.stop_wait.as_ref(), Some(&tick));
+        let started = Instant::now();
         let outcome = self.ctx.run(motion, &cancel);
+        self.last_run = Some(started.elapsed());
         self.printed_debug_seq = printed.get();
         if announced.get() {
             // A wait that ended without a stop (an error, a spent budget)
@@ -904,8 +930,17 @@ impl ReplState<'_> {
     /// budget handed the target back still running. `failure` names what
     /// failed for an error.
     fn report_run(&mut self, outcome: Result<RunOutcome>, failure: &str) {
+        let ran = self.last_run.take();
         match outcome {
-            Ok(RunOutcome::Stopped(stop)) => stop.render(self, ()),
+            Ok(RunOutcome::Stopped(stop)) => {
+                let notice = ran
+                    .filter(|ran| *ran >= NOTIFY_AFTER)
+                    .and_then(|_| stop_notice(&stop.kind));
+                stop.render(self, ());
+                if let Some(notice) = notice {
+                    self.notify_stop(&notice);
+                }
+            }
             Ok(RunOutcome::Running) => self.print_still_running(),
             Err(error) => {
                 error!("{failure}: {error}");
@@ -917,6 +952,37 @@ impl ReplState<'_> {
                 }
             }
         }
+    }
+
+    /// Ask the terminal to show a desktop notification of the stop just
+    /// rendered, `what` it was: at the interactive prompt on a terminal only,
+    /// where a long run may have been left to itself. kitty's protocol (OSC
+    /// 99) lets kitty skip it while its window is in view; other terminals
+    /// read OSC 9, as iTerm2 and Ghostty do. One that knows neither ignores
+    /// it. The text comes from the guest (a process name), so its control
+    /// characters are made visible first: none can end the sequence.
+    fn notify_stop(&self, what: &str) {
+        if self.context != DispatchContext::Interactive || !std::io::stdout().is_terminal() {
+            return;
+        }
+        let mut text = format!("ntoseye: {what}");
+        if let Some(shown) = &self.ctx.shown_stop {
+            text.push_str(&format!(
+                " at {} on {} {}",
+                shown.symbol,
+                thread_kind(&shown.thread),
+                thread_label(&shown.thread)
+            ));
+        }
+        let text = neutralize_controls(&text);
+        let sequence = if std::env::var_os("KITTY_WINDOW_ID").is_some() {
+            format!("\x1b]99;o=invisible;{text}\x1b\\")
+        } else {
+            format!("\x1b]9;{text}\x1b\\")
+        };
+        let mut stdout = std::io::stdout().lock();
+        let _ = stdout.write_all(sequence.as_bytes());
+        let _ = stdout.flush();
     }
 
     /// Say that a remote client's stop budget ran out with the target still
