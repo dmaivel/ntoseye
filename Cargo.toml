@@ -116,6 +116,7 @@ quote = "1"
 syn = { version = "2", features = ["full", "visit"] }
 
 [dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 parking_lot = "0.12"
 # Synthetic hypervisor handlers for the partition-layout tests.
 iced-x86 = { version = "1.21.0", features = ["code_asm"] }
