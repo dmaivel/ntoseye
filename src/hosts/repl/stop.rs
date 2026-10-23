@@ -566,13 +566,15 @@ pub fn print_break_context_at(
                 .map(|frame| frame.registers.clone())
         })
         .flatten();
-    // The previous stop's registers count only on the same vCPU and the
-    // same Windows thread: a stop elsewhere would mark nearly everything.
+    // The previous stop's registers count only on the same Windows thread
+    // (a thread a step moved to another vCPU is still the same), or on the
+    // same vCPU where no Windows thread is known: a stop elsewhere would
+    // mark nearly everything.
     let ethread = windows_thread.as_ref().map_or(0, |thread| thread.ethread.0);
     let previous = session
         .shown_stop
         .take()
-        .filter(|shown| shown.thread == thread_id && shown.ethread == ethread);
+        .filter(|shown| shown.ethread == ethread && (ethread != 0 || shown.thread == thread_id));
     let detail = if !session.compact_stops {
         StopDetail::Full
     } else if session.brief_stops {
@@ -943,5 +945,51 @@ impl ReplState<'_> {
         self.stop_wait
             .as_ref()
             .is_some_and(|budget| budget.deadline.is_some())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use parking_lot::Mutex;
+
+    use super::print_break_context_at;
+    use crate::base::output::capture;
+    use crate::base::types::VirtAddr;
+    use crate::session::Session;
+    use crate::session::tests::{MockBackend, session_with_mock};
+
+    /// The stop `session` draws on vCPU `thread`, captured.
+    fn stop_on(session: &mut Session, thread: &str) -> String {
+        session.current_thread = thread.into();
+        capture(|| print_break_context_at(session, None, None)).1
+    }
+
+    /// A step that finishes on another vCPU, as one often does on a busy
+    /// guest, is still a step of the same Windows thread: the stop shows
+    /// the registers it changed, not the whole register file again.
+    #[test]
+    fn a_step_that_moves_vcpus_shows_what_it_changed() {
+        let mut session = session_with_mock(MockBackend::default().one_vcpu());
+        let thread = VirtAddr(0xffff_8000_1234_0000);
+        session.target.test_current_threads = Some(Arc::new(Mutex::new(HashMap::from([
+            (0, thread),
+            (3, thread),
+        ]))));
+        session.compact_stops = true;
+        stop_on(&mut session, "p01.01");
+
+        let mut registers = session.backend.read_registers().unwrap();
+        session
+            .register_map
+            .write_u64("rip", &mut registers, 0x1003)
+            .unwrap();
+        session.backend.write_registers(&registers).unwrap();
+        let stop = stop_on(&mut session, "p01.04");
+
+        assert!(stop.contains("changed rip="), "{stop}");
+        assert!(!stop.contains("\nregisters\n"), "{stop}");
     }
 }
