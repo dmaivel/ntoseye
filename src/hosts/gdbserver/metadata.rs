@@ -15,6 +15,7 @@ use gdbstub::target::{TargetError, TargetResult};
 use pelite::PeView;
 
 use crate::arch::Arch;
+use crate::backend::dbg_backend::{thread_kind, thread_label};
 use crate::nt::guest::ModuleInfo;
 use crate::nt::pe::{HeaderPage, image_base};
 use crate::session::VcpuInfo;
@@ -61,11 +62,14 @@ impl GdbTarget<'_> {
             return b"E00".to_vec();
         };
         if offset == 0 {
-            let names = match self.session.vcpus() {
+            let names: Vec<String> = match self.session.vcpus() {
                 Ok(vcpus) => vcpus.iter().map(VcpuInfo::label).collect(),
                 Err(_) => {
                     self.sync_threads();
-                    self.threads.clone()
+                    self.threads
+                        .iter()
+                        .map(|id| format!("{} {}", thread_kind(id), thread_label(id)))
+                        .collect()
                 }
             };
             self.thread_list =

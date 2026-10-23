@@ -6,7 +6,7 @@ use owo_colors::OwoColorize;
 use tabled::builder::Builder;
 
 use crate::arch::Arch;
-use crate::backend::dbg_backend::processor_index_from_backend_thread_id;
+use crate::backend::dbg_backend::{processor_index_from_backend_thread_id, thread_label};
 use crate::base::error::{Error, Result};
 use crate::base::output;
 use crate::base::types::VirtAddr;
@@ -32,7 +32,6 @@ const MAX_PROCESSOR_SELECTION: usize = 256;
 /// `~` lists, or every processor (`~*`).
 enum TildeSelector {
     Number(u64),
-    Id(String),
     All,
 }
 
@@ -887,7 +886,7 @@ impl Render for CpuInfo {
     }
 }
 
-/// Switch to a different vCPU context.
+/// Switch to another processor, by its number.
 #[command(
     names = ["vcpu"],
     category = "processes and modules",
@@ -898,46 +897,37 @@ impl Render for CpuInfo {
 )]
 fn vcpu(
     state: &mut ReplState<'_>,
-    #[arg(name = "id", complete = Vcpu)] requested: String,
+    #[arg(name = "processor", complete = Vcpu)] requested: String,
 ) -> Result<()> {
     let threads = state
         .ctx
         .backend
         .thread_list()
-        .map_err(|e| Error::DebugInfo(format!("failed to get vCPU list: {e}")))?;
+        .map_err(|e| Error::DebugInfo(format!("failed to list the processors: {e}")))?;
 
-    let thread_id = threads
-        .iter()
-        .find(|thread| thread.as_str() == requested)
-        .cloned()
-        .or_else(|| {
-            Expr::eval_with_radix(&requested, &state.ctx.target, state.radix)
-                .ok()
-                .and_then(|value| u16::try_from(value.0).ok())
-                .and_then(|number| {
-                    threads
-                        .iter()
-                        .find(|thread| {
-                            processor_index_from_backend_thread_id(thread) == Some(number)
-                        })
-                        .cloned()
-                        .or_else(|| threads.get(number as usize).cloned())
-                })
+    let thread_id = Expr::eval_with_radix(&requested, &state.ctx.target, state.radix)
+        .ok()
+        .and_then(|value| u16::try_from(value.0).ok())
+        .and_then(|number| {
+            threads
+                .iter()
+                .find(|thread| processor_index_from_backend_thread_id(thread) == Some(number))
+                .cloned()
         });
     let Some(thread_id) = thread_id else {
         return Err(Error::DebugInfo(format!(
-            "vCPU '{requested}' not found (use 'vcpus' to list vCPUs)"
+            "no processor '{requested}' (`~` lists the processors)"
         )));
     };
 
     state
         .ctx
         .set_current_thread(&thread_id)
-        .map_err(|e| Error::DebugInfo(format!("failed to switch vCPU: {e}")))?;
+        .map_err(|e| Error::DebugInfo(format!("failed to switch processor: {e}")))?;
 
     state.clear_selected_frame();
     state.caches.refresh_symbol_context(&state.ctx.target);
-    outln!("switched to vCPU {}\n", state.ctx.current_thread);
+    outln!("switched to {}\n", ui::thread(&state.ctx.current_thread));
 
     Ok(())
 }
@@ -949,25 +939,14 @@ impl ReplState<'_> {
             self.cmd_tilde_user_dump(body, line);
             return Ok(Flow::Continue);
         }
-        // A processor is named by its number or by the vCPU id `~` lists
-        // (`p01.03`): hex digits and dots after the `p`, which no action
-        // letter is.
+        // A processor is named by its number, as `~` lists it.
         let (selector, suffix) = if let Some(rest) = body.strip_prefix('*') {
             (TildeSelector::All, rest)
-        } else if body.starts_with(['p', 'P']) {
-            let length = 1 + body[1..]
-                .chars()
-                .take_while(|ch| ch.is_ascii_hexdigit() || *ch == '.')
-                .count();
-            (
-                TildeSelector::Id(body[..length].to_string()),
-                &body[length..],
-            )
         } else {
             let digits = body.chars().take_while(|ch| ch.is_ascii_digit()).count();
             if digits == 0 {
                 error!(
-                    "invalid processor selector '{}'; expected ~, ~N[s|k|r], ~<vCPU id>[s|k|r], or ~*k",
+                    "invalid processor selector '{}'; expected ~, ~N[s|k|r], or ~*k",
                     line
                 );
                 return Ok(Flow::Continue);
@@ -995,7 +974,7 @@ impl ReplState<'_> {
         let trailing = actions.as_str();
         if !trailing.is_empty() {
             error!(
-                "unsupported processor command '{}{}'; expected ~, ~N[s|k|r], ~<vCPU id>[s|k|r], or ~*k",
+                "unsupported processor command '{}{}'; expected ~, ~N[s|k|r], or ~*k",
                 action, trailing
             );
             return Ok(Flow::Continue);
@@ -1012,14 +991,6 @@ impl ReplState<'_> {
                 .find(|id| processor_index_from_backend_thread_id(id) == u16::try_from(number).ok())
                 .cloned()
                 .or_else(|| {
-                    ids.iter()
-                        .find(|id| {
-                            id.as_str()
-                                .eq_ignore_ascii_case(&format!("p1.{:x}", number.saturating_add(1)))
-                        })
-                        .cloned()
-                })
-                .or_else(|| {
                     usize::try_from(number)
                         .ok()
                         .and_then(|index| ids.get(index).cloned())
@@ -1032,13 +1003,6 @@ impl ReplState<'_> {
                     return Ok(Flow::Continue);
                 }
                 resolve(number).into_iter().collect::<Vec<_>>()
-            }
-            TildeSelector::Id(wanted) => {
-                let Some(id) = ids.iter().find(|id| id.eq_ignore_ascii_case(&wanted)) else {
-                    error!("no vCPU {} (the vCPUs are {})", wanted, ids.join(", "));
-                    return Ok(Flow::Continue);
-                };
-                vec![id.clone()]
             }
             TildeSelector::All => ids
                 .iter()
@@ -1057,7 +1021,7 @@ impl ReplState<'_> {
                 error!("failed to switch processor: {}", error);
             } else {
                 self.caches.refresh_symbol_context(&self.ctx.target);
-                outln!("switched to processor {}\n", id);
+                outln!("switched to {}\n", ui::thread(&id));
             }
             return Ok(Flow::Continue);
         }
@@ -1188,11 +1152,10 @@ impl ReplState<'_> {
     }
 }
 
-/// List vCPU contexts and their RIP values.
+/// List the processors and where each is.
 ///
-/// `~Ns` selects processor N (zero-based), and `t` and `p` then step that
-/// processor. The vCPU id that the list shows also works in place of N
-/// (`~p01.03s`, `~p01.03k`). Over `kd` and `kdnet` on an AMD64 target, the
+/// `~Ns` selects processor N, numbered from 0 as Windows numbers them, and
+/// `t` and `p` then step that processor. Over `kd` and `kdnet` on an AMD64 target, the
 /// other processors run during the step, as in WinDbg. On an ARM64 target,
 /// only the processor that stopped the target can step over `kd` or `kdnet`.
 /// If a vCPU halted in the Windows hypervisor (VBS), the list also shows
@@ -1296,8 +1259,10 @@ fn print_vcpus(vcpus: &[VcpuInfo], current: &str) {
     };
     let symbol_column = marker_column
         + widest(
-            "vCPU",
-            &mut vcpus.iter().map(|vcpu| vcpu.id.chars().count()),
+            "Processor",
+            &mut vcpus
+                .iter()
+                .map(|vcpu| thread_label(&vcpu.id).chars().count()),
         )
         + widest(
             "RIP",
@@ -1312,7 +1277,7 @@ fn print_vcpus(vcpus: &[VcpuInfo], current: &str) {
         );
 
     let mut builder = Builder::default();
-    builder.push_record(["", "vCPU", "RIP", "Context", "Symbol"]);
+    builder.push_record(["", "Processor", "RIP", "Context", "Symbol"]);
     for vcpu in vcpus {
         let (rip_cell, symbol_cell) = match vcpu.rip {
             Some(rip) => (
@@ -1327,7 +1292,7 @@ fn print_vcpus(vcpus: &[VcpuInfo], current: &str) {
         let marker = if vcpu.id == current { "." } else { "" };
         builder.push_record(vec![
             marker.to_string(),
-            vcpu.id.to_string(),
+            thread_label(&vcpu.id),
             rip_cell.to_string(),
             vcpu.context.to_string(),
             symbol_cell,

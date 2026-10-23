@@ -17,7 +17,8 @@ use crate::TargetSpec;
 use crate::arch::RegisterMap;
 use crate::backend::dbg_backend::{
     BackendCapability, BugcheckInfo, DebugBackend, DebugCapability, DebugLog, DebugOutputPage,
-    LastEvent, ModuleEvent, StopEvent, processor_index_from_backend_thread_id,
+    LastEvent, ModuleEvent, StopEvent, processor_index_from_backend_thread_id, thread_kind,
+    thread_label,
 };
 use crate::base::disasm::ControlFlow;
 use crate::base::error::{Error, Result};
@@ -574,7 +575,8 @@ pub struct UserThreadSummary {
 #[record(impl)]
 #[derive(Debug, Clone)]
 pub struct VcpuInfo {
-    /// The backend thread/vCPU ID (`p1.1`), which `~` shows.
+    /// The backend's thread id (`p01.04`), which is never shown: `~` and the
+    /// prompt show [`Self::number`].
     #[record(skip)]
     pub id: String,
     /// None if ntoseye cannot read the register context.
@@ -610,12 +612,13 @@ impl VcpuInfo {
 }
 
 impl VcpuInfo {
-    /// One line naming the vCPU and what it runs: `p1.1 [notepad.exe]
-    /// ntdll!NtWaitForSingleObject+0x14`, as client thread lists show it. In
+    /// One line naming the processor and what it runs: `processor 0
+    /// [notepad.exe] ntdll!NtWaitForSingleObject+0x14`, as client thread
+    /// lists show it. In
     /// the Windows hypervisor, where its VTLs left off with the hypercall
     /// each made, and the guest partition's VP it serves.
     pub fn label(&self) -> String {
-        let mut label = self.id.clone();
+        let mut label = format!("{} {}", thread_kind(&self.id), thread_label(&self.id));
         if !self.context.is_empty() {
             let _ = write!(label, " [{}]", self.context);
         }

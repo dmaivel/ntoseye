@@ -24,15 +24,15 @@ target
   base   fffff80797200000
   psmods ffffe70faa662830
 
- BREAK  p1.2 kernel at nt!DbgBreakPointWithStatus
+ BREAK  processor 1  kernel at nt!DbgBreakPointWithStatus
  └─ thread System  state Running  ethread ffffe70fb1986040  pid 4  tid 588
 ...
-kdnet:p1.2>
+1: kdnet>
 ```
 
 When `ntoseye` attaches, it halts the VM, finds the kernel, and loads the kernel symbols from the Microsoft symbol server. After the first time, it keeps the symbols in a cache under `~/.ntoseye/symbols`.
 
-It then shows a *stop header* with the processor (`p1.2`), what the processor was running, and where. Below the header come the registers, the instructions around the stop, and the top of the stack. The breakpoint [below](#stop-on-a-kernel-function) shows a full stop.
+It then shows a *stop header* with the processor (`processor 1`, numbered from 0 as Windows numbers them, and in the prompt as `1: kdnet>`), what the processor was running, and where. Below the header come the registers, the instructions around the stop, and the top of the stack. The breakpoint [below](#stop-on-a-kernel-function) shows a full stop.
 
 The first stop is the Windows response to the break-in. The Windows debugger code stops in `nt!DbgBreakPointWithStatus`, here on a `System` thread that received KDNET packets. The `gdb` backend halts the vCPUs from outside the VM instead, so each vCPU stops wherever it was at that time.
 
@@ -43,7 +43,7 @@ The prompt shows the backend and the selected processor.
 {command}`vertarget` shows information about the target:
 
 ```text
-kdnet:p1.2> vertarget
+1: kdnet> vertarget
 target version
   target Windows 10.0 build 26200 (26100.ge_release.240331-1435)
   arch AMD64
@@ -59,7 +59,7 @@ target version
 {command}`lm` lists the loaded kernel modules and shows whether the symbols of each one loaded. `kdcom` and `kdstub` are the KDNET transport that this session communicates with:
 
 ```text
-kdnet:p1.2> lm
+1: kdnet> lm
 Start             End               Module                 Version          Symbols  Source  Image
 fffff80797200000  fffff80798650000  nt                     -                loaded   cached  ntoskrnl.exe
 fffff80798660000  fffff80798666000  hal                    -                loaded   cached  hal.dll
@@ -71,7 +71,7 @@ fffff807286c0000  fffff80728726000  kdstub                 -                load
 {command}`ps` lists the processes with the address of each `_EPROCESS` and its page-table root:
 
 ```text
-kdnet:p1.2> ps
+1: kdnet> ps
 Name            PID   EPROCESS          DTB               Wow64
 System          4     ffffe70faa6df040  00000000001ae000  -
 ...
@@ -87,7 +87,7 @@ services.exe    932   ffffe70fb2e1b1c0  000000010ec46000  -
 To find symbols, use {command}`x`, with `*` and `?` as wildcards:
 
 ```text
-kdnet:p1.2> x nt!NtCreateFi*
+1: kdnet> x nt!NtCreateFi*
 fffff80797ac7930  nt!NtCreateFile
 
 1 symbol (in $0..$0)
@@ -98,13 +98,13 @@ fffff80797ac7930  nt!NtCreateFile
 To set a breakpoint, use {command}`bp`, and to resume the VM, use {command}`g`. Because `NtCreateFile` runs each time a process opens a file, the breakpoint hits almost immediately:
 
 ```text
-kdnet:p1.2> bp nt!NtCreateFile
+1: kdnet> bp nt!NtCreateFile
 breakpoint #0 set at fffff80797ac7930 (nt!NtCreateFile) (global)
 
-kdnet:p1.2> g
+1: kdnet> g
 VM running, waiting for stop (Ctrl+C to pause)...
 
- BREAK  p1.1 svchost.exe (468) at nt!NtCreateFile
+ BREAK  processor 0  svchost.exe (468) at nt!NtCreateFile
  ├─ breakpoint #0
  └─ thread svchost.exe  state Running  ethread ffffe70fb280f080  pid 468  tid 4076
 
@@ -143,7 +143,7 @@ The disassembly shows the instructions around the stop in the function it is in,
 {command}`k` shows the full stack with the stack pointer of each frame. The stack goes from the kernel into the user-mode code of the calling process, and {command}`k` resolves the user-mode frames too:
 
 ```text
-kdnet:p1.1> k
+0: kdnet> k
  00 fffffd86b6413a68  fffff80797ac7930  nt!NtCreateFile
  01 fffffd86b6413a70  fffff807978c1d55  nt!KiSystemServiceCopyEnd+0x25
     ┄┄ user mode ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
@@ -164,14 +164,14 @@ When `ntoseye` sees a module for the first time, it downloads the module symbols
 On x64, the third argument of `NtCreateFile` is in `r8`. It is an `OBJECT_ATTRIBUTES` structure whose `ObjectName` field is the path of the file that the process opens. Because expressions use types from the PDB, a cast reads the path directly, and {command}`dS` shows the `UNICODE_STRING`:
 
 ```text
-kdnet:p1.1> dS ((nt!_OBJECT_ATTRIBUTES*)@r8)->ObjectName
+0: kdnet> dS ((nt!_OBJECT_ATTRIBUTES*)@r8)->ObjectName
 000000ef8a37eea8  Length=36 MaximumLength=38 Buffer=000002276cb50ac0  "\\??\\PhysicalDrive0"
 ```
 
 {command}`dt` shows a structure, or only the fields that you name. `$proc` is the `_EPROCESS` of the current process:
 
 ```text
-kdnet:p1.1> dt nt!_EPROCESS @$proc UniqueProcessId ImageFileName
+0: kdnet> dt nt!_EPROCESS @$proc UniqueProcessId ImageFileName
 _EPROCESS (2112 bytes) @ ffffe70fb2ed3080
   +0x1d0 UniqueProcessId : void* = 0x1d4
   +0x338 ImageFileName : UCHAR[15] = "svchost.exe"
@@ -184,24 +184,24 @@ For more information about registers, pseudo-registers, casts, and members, see 
 {command}`p` steps over one instruction, and {command}`gu` runs until the current function returns. At each stop, `ntoseye` shows a stop header again, and when the stop is on the same thread as the one before, the registers that changed since are yellow. To follow a value while you step, {command}`display` shows it at the end of every stop, also yellow when it changed, until you remove it with {command}`undisplay`:
 
 ```text
-kdnet:p1.1> p
+0: kdnet> p
 
- BREAK  p1.1 svchost.exe (468) at nt!NtCreateFile+0x7
+ BREAK  processor 0  svchost.exe (468) at nt!NtCreateFile+0x7
 ...
-kdnet:p1.1> gu
+0: kdnet> gu
 VM running, waiting for stop (Ctrl+C to pause)...
 
- BREAK  p1.1 svchost.exe (468) at nt!KiSystemServiceCopyEnd+0x25
+ BREAK  processor 0  svchost.exe (468) at nt!KiSystemServiceCopyEnd+0x25
 ...
 ```
 
 ## Clean up and leave
 
 ```text
-kdnet:p1.1> bc *
+0: kdnet> bc *
 breakpoint #0 cleared
 
-kdnet:p1.1> q
+0: kdnet> q
 ```
 
 {command}`bc` clears breakpoints, and {command}`q` detaches from the VM and lets it continue to run.

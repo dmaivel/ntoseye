@@ -7,6 +7,7 @@ use std::fmt::{self, Display, Write as _};
 use std::path::Path;
 use std::sync::LazyLock;
 
+use crate::backend::dbg_backend::{thread_kind, thread_label};
 use crate::base::bytes::before_nul;
 use crate::base::disasm::{AsmKind, AsmToken};
 use crate::base::types::VirtAddr;
@@ -109,10 +110,15 @@ pub fn bp_id(id: impl Display) -> String {
     format!("#{id}").cyan().to_string()
 }
 
-/// Thread/processor id accent, e.g. `p1.1`, cyan like [`bp_id`]. Shared by
-/// the prompt and break lines.
+/// The backend thread `id` as its label (see [`thread_label`]), cyan like
+/// [`bp_id`]: `3` for a processor, `7b0.404` for a user-mode thread.
 pub fn thread_id(id: &str) -> String {
-    id.cyan().to_string()
+    thread_label(id).cyan().to_string()
+}
+
+/// The backend thread `id` in prose: `processor 3`, `thread 7b0.404`.
+pub fn thread(id: &str) -> String {
+    format!("{} {}", thread_kind(id), thread_id(id))
 }
 
 /// An event badge like ` BREAK `: white on red, reserved for execution-stop

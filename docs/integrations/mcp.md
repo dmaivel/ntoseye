@@ -50,7 +50,7 @@ The trailer takes one of three forms:
 
 In the halted form, `process` is the process whose page tables the stopped vCPU has loaded, and `scope` is the {command}`.process` inspection scope that memory commands read through. The scope stays after the target resumes, so `process` and `scope` can differ.
 
-A vCPU that runs a guest partition's VP shows that guest's code, and the trailer names the VP: `[target halted @ p01.02 0x56383cc2d7df | runs partition 0x5 VP 2]`. While {command}`.partition` shows a guest partition in place of the target, the trailer ends with `| inspecting partition 0x4`, and everything before it is that guest's: its VPs are the vCPUs (`p4.1`), and the process is its own.
+A vCPU that runs a guest partition's VP shows that guest's code, and the trailer names the VP: `[target halted @ processor 1 0x56383cc2d7df | runs partition 0x5 VP 2]`. While {command}`.partition` shows a guest partition in place of the target, the trailer ends with `| inspecting partition 0x4`, and everything before it is that guest's: its VPs are the vCPUs (`p4.1`), and the process is its own.
 
 If a vCPU halted in the Windows hypervisor, the trailer shows `hv+<offset>` and adds the location where Windows stopped, for example `| saved VTL0 nt!HalProcessorIdle+0xf`, with the hypercall that VTL made when its last exit was a `VMCALL` (`| saved VTL0 hvcall!Hypercall (hypercall 0x0003 HvCallFlushVirtualAddressList fast rep 0/1)`). When the processor serves a guest partition's VP, the trailer adds it too: `| serving partition 0x3 VP 2 VTL0 ffffffffc0000000, last exit VMCALL (hypercall 0x000b HvCallSendSyntheticClusterIpi fast)`. For more information, refer to [VBS](../vbs/hypervisor-stops.md#where-nt-left-off-under-the-hypervisor).
 

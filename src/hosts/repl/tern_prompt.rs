@@ -30,6 +30,7 @@ use super::{
     CustomPrompt, MyCompleter, NATIVE_PROMPT, PromptMark, ReplState, TargetLoan, mark,
     termination_requested,
 };
+use crate::backend::dbg_backend::{thread_kind, thread_label};
 use crate::base::output::prompting;
 
 /// The input's id: key `ed` in the dock.
@@ -134,7 +135,7 @@ impl TernPrompt {
                 // The removed surface leaves its anchor row empty, with the
                 // cursor under it: the echo takes that row.
                 write_now(b"\x1b[A\r");
-                let prompt = CustomPrompt::new(state.ctx.backend.name(), &state.ctx.current_thread);
+                let prompt = CustomPrompt::new(&state.prompt_backend(), &state.ctx.current_thread);
                 let trimmed = line.trim_start();
                 outln!(
                     "{} {}",
@@ -630,7 +631,10 @@ impl<'a> Line<'a> {
         let running = state.ctx.backend.is_running();
         let mut status = ui::status().child(ui::seg(backend).icon(Icon::Plug));
         if !thread.is_empty() {
-            status = status.child(ui::seg([span("thread ", MUTED), span(thread, "info")]));
+            status = status.child(ui::seg([
+                span(format!("{} ", thread_kind(thread)), MUTED),
+                span(thread_label(thread), "info"),
+            ]));
         }
         status = status.child(if running {
             ui::seg("running").icon(Icon::Play)

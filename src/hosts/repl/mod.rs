@@ -28,9 +28,9 @@ use tabled::settings::Padding;
 
 use owo_colors::OwoColorize;
 
-#[cfg(feature = "cli")]
-use crate::backend::dbg_backend::DebugBackend;
 use crate::backend::dbg_backend::{BackendCapability, DebugCapability};
+#[cfg(feature = "cli")]
+use crate::backend::dbg_backend::{DebugBackend, thread_label};
 use crate::base::diagnostics;
 #[cfg(feature = "cli")]
 use crate::base::error::Error;
@@ -538,14 +538,23 @@ impl<'a> ReplState<'a> {
         }
     }
 
-    /// The unstyled prompt, `ntoseye>` or `kd:p1.1>`, that the plain REPL
+    /// The unstyled prompt, `ntoseye>` or `0: kd>`, that the plain REPL
     /// prints and a script echoes its commands after.
     pub fn plain_prompt(&self) -> String {
         let thread = &self.ctx.current_thread;
         if thread.is_empty() {
             "ntoseye>".to_string()
         } else {
-            format!("{}:{thread}>", self.ctx.backend.name())
+            format!("{}: {}>", thread_label(thread), self.prompt_backend())
+        }
+    }
+
+    /// What the prompt names after the processor: the backend (`kd`), or
+    /// the guest partition a view inspects (`partition 0x3`).
+    pub fn prompt_backend(&self) -> String {
+        match self.ctx.partition() {
+            Some(partition) => format!("partition {partition:#x}"),
+            None => self.ctx.backend.name().to_string(),
         }
     }
 
@@ -830,8 +839,6 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     install_termination_handler();
     #[cfg(unix)]
     bridge_termination_to_interrupt(debugger.interrupt_requester());
-
-    let backend_label = client.name();
 
     // Loaded up front so the summary prints with the transport banner and
     // the completion caches below see them.
@@ -1128,7 +1135,8 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                     tern_prompt::Read::Clear => continue,
                     tern_prompt::Read::Unavailable => {
                         tern_prompt = None;
-                        let prompt = CustomPrompt::new(backend_label, &state.ctx.current_thread);
+                        let prompt =
+                            CustomPrompt::new(&state.prompt_backend(), &state.ctx.current_thread);
                         match target_loan.lend(&state.ctx.target, || {
                             prompting(|| line_editor.read_line(&prompt))
                         }) {

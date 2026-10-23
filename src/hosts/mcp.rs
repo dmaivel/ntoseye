@@ -32,6 +32,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::backend::dbg_backend::{thread_kind, thread_label};
 use crate::backend::kd::KdMemorySource;
 use crate::base::diagnostics;
 use crate::base::error::Error;
@@ -403,7 +404,11 @@ fn status_trailer(status: &RunStatus) -> String {
     if status.running {
         return "[target running]".to_string();
     }
-    let mut line = format!("[target halted @ {}", status.current_thread);
+    let mut line = format!(
+        "[target halted @ {} {}",
+        thread_kind(&status.current_thread),
+        thread_label(&status.current_thread)
+    );
     match (status.rip, status.symbol.as_deref()) {
         (Some(rip), Some(symbol)) => line.push_str(&format!(" {rip:#x} {symbol}")),
         (Some(rip), None) => line.push_str(&format!(" {rip:#x}")),

@@ -9,7 +9,7 @@ use owo_colors::OwoColorize;
 
 use ntoseye_macros::{command, grammar};
 
-use crate::backend::dbg_backend::processor_index_from_backend_thread_id;
+use crate::backend::dbg_backend::{processor_index_from_backend_thread_id, thread_label};
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError, Current, FromArg};
@@ -320,14 +320,14 @@ impl ReplState<'_> {
         let selection = match self.ctx.select_running_windows_thread(vcpu, thread) {
             Ok(selection) => selection,
             Err(e) => {
-                error!("failed to switch to vCPU {vcpu}: {e}");
+                error!("failed to switch to {}: {e}", ui::thread(vcpu));
                 return;
             }
         };
         self.caches.refresh_symbol_context(&self.ctx.target);
         outln!(
             "switched to {} running ETHREAD {}\n",
-            self.ctx.current_thread,
+            ui::thread(&self.ctx.current_thread),
             ui::addr(thread.ethread.0)
         );
         print_thread_detail(detail);
@@ -440,7 +440,7 @@ fn threads(
     Ok(WindowsThreads { threads, active })
 }
 
-/// Every Windows thread, and the vCPU running each that runs.
+/// Every Windows thread, and the processor running each that runs.
 struct WindowsThreads {
     threads: Vec<ThreadInfo>,
     active: HashMap<u64, String>,
@@ -466,7 +466,7 @@ impl Render<Option<String>> for WindowsThreads {
 
         let mut builder = Builder::default();
         builder.push_record(vec![
-            "Active".to_string(),
+            "Processor".to_string(),
             "ETHREAD".to_string(),
             "PID".to_string(),
             "TID".to_string(),
@@ -479,11 +479,10 @@ impl Render<Option<String>> for WindowsThreads {
             let active_vcpu = self
                 .active
                 .get(&thread.ethread.0)
-                .map(|vcpu| vcpu.as_str())
-                .unwrap_or("-");
+                .map_or_else(|| "-".to_string(), |vcpu| thread_label(vcpu));
             let start = thread.start_address.or(thread.win32_start_address);
             builder.push_record(vec![
-                active_vcpu.to_string(),
+                active_vcpu,
                 ui::addr(thread.ethread.0).to_string(),
                 thread
                     .pid
@@ -613,7 +612,7 @@ fn dot_thread(
         if state.ctx.backend.is_running() {
             outln!("cleared the thread selection\n");
         } else {
-            outln!("reset thread context to {}\n", current);
+            outln!("reset thread context to {}\n", ui::thread(&current));
         }
         return Ok(());
     };

@@ -400,7 +400,7 @@ fn vtlcxr(state: &mut ReplState<'_>, #[arg(parse = vtl_choice)] vtl: u8) -> Resu
     if !halted_in_windows_hypervisor(target, cr3, rip) {
         error!(
             "{} is not halted in the Windows hypervisor",
-            ui::thread_id(&state.ctx.current_thread)
+            ui::thread(&state.ctx.current_thread)
         );
         return Ok(());
     }

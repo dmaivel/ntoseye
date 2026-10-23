@@ -11,14 +11,14 @@ The hypervisor does not name its partitions. Their IDs follow the order in which
 - A Windows Sandbox runs the host's own Windows image, so {command}`lmv` `m nt` in it shows the target's kernel PDB, while a Hyper-V VM runs whatever it installed.
 
 ```text
-gdb:p01.01> .partition 5
+0: gdb> .partition 5
 error: Windows hypervisor: partition 0x5 runs no Windows kernel: no NT image is mapped where its VPs run, as in a Linux guest such as WSL2's; !hvd and !hvu read any guest's memory and code
-gdb:p01.01> !hvvps 5
+0: gdb> !hvvps 5
 VP  Address           CPU  VTL  Context           eVMCS      EPT pointer  Guest RIP         Last exit
 0   ffffe804c5038050       0*   ffffe804c5039000  22754d000  227c3105e    ffffffffbd1df02f  HLT
 ...
-gdb:p01.01> .partition 4
-inspecting partition 0x4: nt at 0xfffff80586250000, VPs p4.1 p4.2 p4.3 p4.4
+0: gdb> .partition 4
+inspecting partition 0x4: nt at 0xfffff80586250000, VPs 0 1 2 3
 ```
 
 ## Inspecting a Windows guest partition
@@ -41,10 +41,10 @@ inspecting partition 0x4: nt at 0xfffff80586250000, VPs p4.1 p4.2 p4.3 p4.4
 In the SDK, `dbg.select_partition(id)` switches and `dbg.partition` says which partition is inspected. Handles minted on one side of a switch raise `StaleHandleError` on the other.
 
 ```text
-gdb:p01.01> .partition 4
-inspecting partition 0x4: nt at 0xfffff80586250000, VPs p4.1 p4.2 p4.3 p4.4
+0: gdb> .partition 4
+inspecting partition 0x4: nt at 0xfffff80586250000, VPs 0 1 2 3
 
-partition:p4.1> k
+0: partition 0x4> k
  00 fffff805187199a0  fffff8058670f8bd  nt!PpmIdleGuestExecute+0x1d
  01 fffff805187199e0  fffff8058658bc54  nt!PpmIdleExecuteTransition+0x518
  02 fffff80518719b70  fffff8058658a9f0  nt!PoIdle+0x190
@@ -60,16 +60,16 @@ The host can trim a guest's memory, as it does a Windows Sandbox's while it idle
 In a partition's view, {command}`ba` sets a breakpoint of the partition's, and {command}`g` runs the target until the partition hits it. The hit shows the partition's view, with the VP that ran the code selected:
 
 ```text
-partition:p4.1> ba e1 nt!NtClose
+0: partition 0x4> ba e1 nt!NtClose
 hardware breakpoint #0 (execute 1b) set at fffff80586ac0f10 (nt!NtClose)
 
-partition:p4.1> bl
+0: partition 0x4> bl
 ID  Status  Address           Pass Count   Process/Thread         Symbol               Condition  Action
 #0  e       fffff80586ac0f10  0001 (0001)  partition 0x4, global  watch e1 nt!NtClose  -          -
 
-partition:p4.1> g
+0: partition 0x4> g
 VM running, waiting for stop (Ctrl+C to pause)...
- BREAK  p4.3 dwm.exe (3832) at nt!NtClose
+ BREAK  processor 2  dwm.exe (3832) at nt!NtClose
  ├─ hardware breakpoint #0 e1  nt!NtClose
  └─ thread dwm.exe  state Running  ethread ffff810cc3a5d080  pid 3832  tid 3956
 ...
@@ -96,21 +96,21 @@ In the SDK, `dbg.breakpoints.add(target, hardware=True)` and `dbg.breakpoints.wa
 In a partition's view, {command}`t`, {command}`p` and {command}`gu` step the thread on the selected VP, and {command}`g` `<address>` runs until any of the partition's VPs reaches the address. Each stop shows the view again:
 
 ```text
-partition:p4.1> g nt!NtClose+0xa3
+0: partition 0x4> g nt!NtClose+0xa3
 VM running, waiting for stop (Ctrl+C to pause)...
- BREAK  p4.1 dwm.exe (3832) at nt!NtClose+0xa3
+ BREAK  processor 0  dwm.exe (3832) at nt!NtClose+0xa3
  └─ thread dwm.exe  state Running  ethread ffff810cc3a60080  pid 3832  tid 3944
 ...
  > fffff80586ac0fb3 +0xa3  call nt!ExpLookupHandleTableEntry
 
-partition:p4.1> p
+0: partition 0x4> p
 VM running, waiting for stop (Ctrl+C to pause)...
- BREAK  p4.1 dwm.exe (3832) at nt!NtClose+0xa8
+ BREAK  processor 0  dwm.exe (3832) at nt!NtClose+0xa8
  └─ thread dwm.exe  state Running  ethread ffff810cc3a60080  pid 3832  tid 3944
 ...
-partition:p4.1> gu
+0: partition 0x4> gu
 VM running, waiting for stop (Ctrl+C to pause)...
- BREAK  p4.1 dwm.exe (3832) at nt!KiSystemServiceCopyEnd+0x25
+ BREAK  processor 0  dwm.exe (3832) at nt!KiSystemServiceCopyEnd+0x25
  └─ thread dwm.exe  state Running  ethread ffff810cc3a60080  pid 3832  tid 3944
 ```
 
@@ -150,8 +150,8 @@ mem:1> !hvu 3 0 0x1ff26110 L4
 A vCPU that is running a guest partition's VP when the target halts shows that guest's registers. {command}`~` and the stop line name the VP that it runs, so a WSL2 busy loop reads as follows:
 
 ```text
-   vCPU    RIP               Context             Symbol
-   p01.03  00007c27330c4321  partition 0x5 VP 2  0x7c27330c4321
+   Processor  RIP               Context             Symbol
+   2          00007c27330c4321  partition 0x5 VP 2  0x7c27330c4321
 ```
 
 With that vCPU selected, {command}`!hvd` `<address>` reads that guest's memory and {command}`!hvu` `<address>` disassembles it, at that RIP for example; from another vCPU, pass the partition ID and VP index.

@@ -272,8 +272,8 @@ fn print_triage_report(report: &TriageReport, verbose: bool) {
         );
         outln!(
             "  {} {}",
-            ui::muted("thread "),
-            ui::thread_id(&report.status.current_thread)
+            ui::muted("context"),
+            ui::thread(&report.status.current_thread)
         );
         // Where the fault happened, from its trap frame, rather than where
         // the processor stopped (the debugger break the bugcheck ended in).

@@ -157,7 +157,7 @@ The commands that look at one process work on the dump's own records:
 - {command}`r`, {command}`k`, and {command}`.frame` show the selected thread. {command}`.ecxr` selects the context of the exception the dump was written for, and {command}`.exr` `-1` shows its record. The stack walk uses each module's unwind data, fetching the image from the symbol server when its unwind data was not captured, and the dump's dynamic function tables for code that no module holds, such as .NET's JIT-compiled methods:
 
   ```text
-  minidump:10f4.cc4> .ecxr; k
+  10f4.cc4: minidump> .ecxr; k
   *00 0000005ceb90e270  00007ff946b741ca  kernelbase!RaiseException+0x8a
    01 0000005ceb90e370  00007ff89b6c6a48  0x7ff89b6c6a48
    02 0000005ceb90e420  00007ff89b6c6914  0x7ff89b6c6914
@@ -197,7 +197,7 @@ The commands that look at one process work on the dump's own records:
 - {command}`!address` lists the regions of the address space the dump recorded (`MiniDumpWithFullMemoryInfo`), with their state, protection, type, allocation base, and use: a module image, a thread's stack or TEB, the PEB, or a heap from the PEB's heap list. `!address <address>` shows the region holding an address, and `!address -summary` the totals:
 
   ```text
-  minidump:e24.278c> !address @rsp
+  e24.278c: minidump> !address @rsp
   address 000000f35cfaf788
     Usage:             Stack [~0; e24.278c]
     BaseAddress:       000000f35cfaa000
@@ -227,9 +227,9 @@ The commands that look at one process work on the dump's own records:
 A small dump (`MiniDumpNormal`) holds the stacks but not the TEBs, the PEB, the handles, or the region list. The commands that need them name what the dump lacks:
 
 ```text
-minidump:e24.278c> !teb
+e24.278c: minidump> !teb
 error: the minidump did not capture the TEB at 0xf35d172000
-minidump:e24.278c> !handle
+e24.278c: minidump> !handle
 error: the minidump records no handle data (HandleDataStream)
 ```
 
@@ -240,7 +240,7 @@ Without the region list, `!address` lists the ranges of memory the dump captured
 The dump is a snapshot of a process that no longer runs, so execution control, breakpoints, and writes to memory or registers are refused, as in a kernel dump. Commands that read kernel structures, such as {command}`!process`, {command}`!thread`, {command}`!pcr`, {command}`!pte`, {command}`!pool`, {command}`!object`, and {command}`!drvobj`, and commands that read physical memory, refuse with one message:
 
 ```text
-minidump:e24.278c> !pcr
+e24.278c: minidump> !pcr
 error: !pcr: this needs a kernel target; a user-mode minidump holds one process and no kernel
 ```
 

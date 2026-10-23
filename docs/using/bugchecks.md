@@ -26,7 +26,7 @@ If a session ends without cleanup, this breakpoint can stay in the guest, where 
 Resume the target, then crash it:
 
 ```text
-kdnet:p1.2> g
+1: kdnet> g
 VM running, waiting for stop (Ctrl+C to pause)...
 KDTARGET: Refreshing KD connection
 
@@ -44,7 +44,7 @@ KDTARGET: Refreshing KD connection
     ├─ #3 0000000000000000  value 0 = read operation, 1 = write operation, 2 or 8 = execute operation
     └─ #4 fffff808bb461730  address which referenced memory
 
- BREAK  p1.4 notmyfaultc64. (2012) at myfault+0x1730
+ BREAK  processor 3  notmyfaultc64. (2012) at myfault+0x1730
  ├─ stopped at nt!DbgBreakPointWithStatus
  └─ thread notmyfaultc64.  state Running  ethread ffffbe0ab9e42080  pid 2012  tid 2644
 
@@ -70,7 +70,7 @@ stack
   #7  fffff808bb461bd2  myfault+0x1bd2
   #8  fffff808bb461d54  myfault+0x1d54
 ...
-kdnet:p1.4>
+3: kdnet>
 ```
 
 Windows writes the first lines, and the debugger prints them. The `BUGCHECK` block is the `ntoseye` interpretation of these lines, and shows:
@@ -91,7 +91,7 @@ The disassembly shows the function around the fault: a loop that reads a dword a
 {command}`!analyze` shows the bugcheck, a failure signature that you can use to compare crashes, and the culprit module with a confidence level.
 
 ```text
-kdnet:p1.4> !analyze
+3: kdnet> !analyze
 crash analysis
 
 bugcheck 0x000000d1 DRIVER_IRQL_NOT_LESS_OR_EQUAL  driver myfault.sys
@@ -129,7 +129,7 @@ To select the trap frame, give its address to {command}`.trap`. {command}`k` and
 
 
 ```text
-kdnet:p1.4> k
+3: kdnet> k
  00 fffffb84648d08b8  fffff803e9efdfb0  nt!DbgBreakPointWithStatus
  01 fffffb84648d08c0  fffff803e9fb3622  nt!KiBugCheckDebugBreak+0x12
  02 fffffb84648d0920  fffff803e9fb2b4e  nt!KeBugCheck2+0xb2e
@@ -161,7 +161,7 @@ kdnet:p1.4> k
 The `myfault` frames show `module+offset` because the Microsoft symbol server has no PDB for `myfault`, as {command}`lm` shows:
 
 ```text
-kdnet:p1.4> lm m myfault
+3: kdnet> lm m myfault
 Start             End               Module   Version  Symbols  Source  Image
 fffff808bb460000  fffff808bb46b000  myfault  -        failed   -       myfault.sys
 ```
@@ -244,7 +244,7 @@ This USB tablet is selectively suspended in D2, as Device Manager's power data f
 `!analyze -show` decodes a bugcheck code and arguments that you got from a different source, such as a photo of a blue screen or an event log entry.
 
 ```text
-kdnet:p1.1> !analyze -show 0x50
+0: kdnet> !analyze -show 0x50
  BUGCHECK  PAGE_FAULT_IN_NONPAGED_AREA (0x00000050)
  ├─ reason Invalid system memory was referenced. This cannot be protected by try-except. Typically the address is just plain bad or it is pointing at freed memory.
  └─ args
@@ -259,10 +259,10 @@ kdnet:p1.1> !analyze -show 0x50
 The crashed system cannot continue to run, but it has not written its crash dump yet. When you enter {command}`g`, Windows writes the dump and reboots, and `ntoseye` follows the reboot and stops at the first boot notification of the new kernel.
 
 ```text
-kdnet:p1.4> g
+3: kdnet> g
 VM running, waiting for stop (Ctrl+C to pause)...
 
- BREAK  p1.1 kernel at nt!DebugService2+0x5
+ BREAK  processor 0  kernel at nt!DebugService2+0x5
  └─ guest rebooted; kernel reloaded, module list not available yet (continue to finish)
 ```
 

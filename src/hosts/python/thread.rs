@@ -715,7 +715,7 @@ impl Cpu {
 
     pub fn processor(&self) -> PyResult<u16> {
         processor_index_from_backend_thread_id(&self.id)
-            .ok_or_else(|| PyValueError::new_err(format!("invalid vCPU id: {}", self.id)))
+            .ok_or_else(|| PyValueError::new_err(format!("not a processor: {}", self.id)))
     }
 
     fn id(&self) -> &str {
@@ -950,7 +950,7 @@ impl Msrs {
     }
 
     fn __repr__(&self) -> String {
-        format!("Msrs(cpu={:?})", self.vcpu)
+        format!("Msrs(cpu={})", self.processor)
     }
 }
 

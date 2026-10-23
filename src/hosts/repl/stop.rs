@@ -246,7 +246,7 @@ fn print_target_reload_text(
         ui::badge("BREAK"),
         ui::plate(&format!(
             " {} kernel at {} ",
-            ui::thread_id(current_thread),
+            ui::thread(current_thread),
             location
         ))
     );
@@ -371,8 +371,8 @@ fn print_stop_text(session: &Session, stop: &StopContext) {
         "{}{}",
         ui::badge("BREAK"),
         ui::plate(&format!(
-            " {} {} at {} ",
-            ui::thread_id(&stop.thread),
+            " {}  {} at {} ",
+            ui::thread(&stop.thread),
             stop.context,
             ui::symbol(&stop.symbol)
         ))
@@ -576,7 +576,7 @@ pub fn print_break_context_at(
                 ui::badge("BREAK"),
                 ui::plate(&format!(
                     " {} (register context unavailable: {}) ",
-                    ui::thread_id(&thread_id),
+                    ui::thread(&thread_id),
                     e
                 ))
             );

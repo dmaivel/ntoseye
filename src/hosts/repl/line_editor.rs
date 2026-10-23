@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use owo_colors::OwoColorize;
 use std::borrow::Cow;
 
+use crate::backend::dbg_backend::thread_label;
 use crate::base::output;
 use crate::hosts::repl::*;
 use crate::hosts::ui;
@@ -20,8 +21,9 @@ use crate::nt::layout::ParsedType;
 /// completer stops looking, so a list this long may leave matches out.
 pub const SEARCH_LIMIT: usize = 1024;
 
-/// The REPL prompt, e.g. `kd:p1.1>`: transport muted, thread in the cyan
-/// identity accent. Rebuilt each read_line so it tracks thread switches.
+/// The REPL prompt, WinDbg's `3: kd>`: the processor (or a user-mode dump's
+/// thread) in the cyan identity accent, the backend muted. Rebuilt each
+/// read_line so it tracks switches.
 #[derive(Clone)]
 pub struct CustomPrompt {
     pub left: String,
@@ -33,11 +35,11 @@ impl CustomPrompt {
         let left = if thread.is_empty() {
             "ntoseye>".bright_black().to_string()
         } else {
+            // WinDbg's `3: kd>`: the processor, then the backend.
             format!(
-                "{}{}{}",
-                format!("{backend}:").bright_black(),
+                "{}{}",
                 ui::thread_id(thread),
-                ">".bright_black()
+                format!(": {backend}>").bright_black()
             )
         };
         let left = if output::stdout_styled() {
@@ -380,10 +382,11 @@ impl MyCompleter {
                 let vcpus = self.caches.vcpus.read().unwrap();
                 vcpus
                     .iter()
-                    .filter(|tid| tid.starts_with(input.prefix))
-                    .map(|tid| Suggestion {
-                        value: tid.clone(),
-                        description: Some("vCPU".to_string()),
+                    .map(|tid| thread_label(tid))
+                    .filter(|label| label.starts_with(input.prefix))
+                    .map(|label| Suggestion {
+                        value: label,
+                        description: Some("processor".to_string()),
                         style: None,
                         extra: None,
                         match_indices: None,

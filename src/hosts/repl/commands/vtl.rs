@@ -3,7 +3,7 @@ use tabled::builder::Builder;
 
 use super::memory::MAX_DISASSEMBLY_INSTRUCTIONS;
 use super::memory::MAX_DISPLAY_BYTES;
-use crate::backend::dbg_backend::processor_index_from_backend_thread_id;
+use crate::backend::dbg_backend::{processor_index_from_backend_thread_id, thread_label};
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
@@ -1404,7 +1404,7 @@ fn hvcall(repl: &mut ReplState<'_>) -> Result<()> {
     if !halted_in_windows_hypervisor(target, cr3, rip) {
         error!(
             "{} is not halted in the Windows hypervisor; !hvcall decodes the hypercall a VP made at a stop there, such as on a hypercall handler (ba e1 hv!HvCallFlushVirtualAddressList)",
-            ui::thread_id(&repl.ctx.current_thread)
+            ui::thread(&repl.ctx.current_thread)
         );
         return Ok(());
     }
@@ -1880,7 +1880,14 @@ fn partition(
                     .target
                     .kernel_base()
                     .map_or_else(|| "?".to_string(), |base| format!("{:#x}", base.0));
-                let vps = repl.ctx.backend.thread_list().unwrap_or_default();
+                let vps: Vec<String> = repl
+                    .ctx
+                    .backend
+                    .thread_list()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|id| thread_label(id))
+                    .collect();
                 outln!(
                     "inspecting partition {partition:#x}: nt at {kernel}, VPs {}\n",
                     vps.join(" ")

@@ -27,6 +27,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 
 ### Changed
 
+- **Breaking:** A processor is named by its number, counted from 0 as Windows counts them, the same on every backend: the prompt reads `3: kd>`, as WinDbg's does, a stop names `processor 3`, and `~` lists the processors by number. They were the backends' thread IDs, `p1.4` over `kd` and `p01.04` over `gdb`, counted from 1 in hex. In a guest partition's view, a VP is that guest's processor, under the prompt `1: partition 0x3>`, and a user-mode dump's prompt puts the thread first (`7b0.404: minidump>`). `~` and `vcpu` take only the number (`~3s`); `~p01.04s` is gone. MCP's trailer and the thread names of DAP and gdbserver clients name processors the same way.
 - On an ARM64 target, `rip` and `rsp` no longer name `pc` and `sp`: `r`, expressions and breakpoint conditions take the ARM64 names (`@pc`, `@sp`, or `$ip` and `$csp` on any architecture), as WinDbg does. `fp`, `lr` and `pstate` still name `x29`, `x30` and `cpsr`.
 - On an ARM64 target, `!vtop` with a directory base lists each page-table entry the translation reads, with its flags, as it does on AMD64. It showed only the physical address.
 - On an ARM64 target, `ba e` refuses an address that is not 4-byte aligned when you set it, on every backend, as such a breakpoint never fires. Only the `kd` backend refused it, and only once it programmed the processors.

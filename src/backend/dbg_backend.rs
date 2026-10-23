@@ -479,6 +479,24 @@ pub fn processor_index_from_backend_thread_id(thread_id: &str) -> Option<u16> {
     u16::from_str_radix(tid, 16).ok()?.checked_sub(1)
 }
 
+/// What a backend thread id is shown as: a processor by its number as
+/// Windows numbers it (`3`; a guest partition's VP is that guest's
+/// processor), any other thread, such as a user-mode dump's `7b0.404`, by
+/// the id itself. The backend's own ids (`p01.04`) are never shown.
+pub fn thread_label(thread_id: &str) -> String {
+    processor_index_from_backend_thread_id(thread_id)
+        .map_or_else(|| thread_id.to_string(), |processor| processor.to_string())
+}
+
+/// What a backend thread id names: `processor` or `thread`.
+pub fn thread_kind(thread_id: &str) -> &'static str {
+    if processor_index_from_backend_thread_id(thread_id).is_some() {
+        "processor"
+    } else {
+        "thread"
+    }
+}
+
 /// Why a host single step is refused while Windows runs its own hypervisor.
 /// KVM steps the vCPU, not Windows: the step can complete inside the
 /// hypervisor with the trap flag still set in Windows, which then takes the
