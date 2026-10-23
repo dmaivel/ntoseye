@@ -306,9 +306,6 @@ pub fn image_base(view: &PeView<'_>) -> u64 {
     }
 }
 
-const IMAGE_FILE_MACHINE_I386: u16 = 0x14c;
-const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
-const IMAGE_FILE_MACHINE_ARM64: u16 = 0xaa64;
 /// `CHPEMetadataPointer` in `IMAGE_LOAD_CONFIG_DIRECTORY64`: a virtual
 /// address, relocated like the image.
 const LOAD_CONFIG_CHPE_METADATA: usize = 0xc8;

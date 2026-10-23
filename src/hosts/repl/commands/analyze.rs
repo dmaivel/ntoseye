@@ -47,15 +47,6 @@ pub fn signature_source(source: FailureSignatureSource) -> &'static str {
     }
 }
 
-pub fn machine_name(machine_image_type: u32) -> &'static str {
-    match machine_image_type {
-        0x014c => "I386",
-        0x8664 => "AMD64",
-        0xAA64 => "ARM64",
-        _ => "Unknown",
-    }
-}
-
 pub fn product_name(product_type: u32) -> &'static str {
     match product_type {
         1 => "Workstation",
@@ -791,7 +782,7 @@ fn print_dump_metadata(report: &TriageReport) {
 
     print_section("dump metadata");
     if let Some(info) = &report.system_info {
-        let machine = machine_name(info.machine_image_type);
+        let machine = info.machine();
         outln!(
             "  {} Windows {}.{}  {}  service-pack build {}",
             ui::muted("system "),

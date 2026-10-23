@@ -326,28 +326,36 @@ pub fn hardware_breakpoint_hit(
 
     // Debug-register evidence only means anything on the debug exception, and
     // checking that here is what keeps an ordinary stop from fetching
-    // registers. A transport that exposes no debug registers reports no
-    // exception code either, so it has no such gate to pass.
-    let debug_registers = register_map.contains("dr6") || register_map.contains("bcr0");
+    // registers. A transport that exposes no debug registers (a GDB stub owns
+    // them) reports no exception code either, so it has no such gate to pass.
+    let status_register = match arch {
+        Arch::Amd64 => "dr6",
+        Arch::Arm64 => "bcr0",
+    };
+    let debug_registers = register_map.contains(status_register);
     if debug_registers && event.exception_code != Some(STATUS_SINGLE_STEP) {
         return Ok(None);
     }
 
     let mut regs = backend.read_registers()?;
-    let Ok(dr6) = register_map.read_u64("dr6", &regs) else {
-        if !debug_registers {
-            return execute_breakpoint_at_pc(
-                backend,
-                register_map,
-                breakpoints,
-                slots,
-                event,
-                &mut regs,
-                arch,
-            );
+    if !debug_registers {
+        return execute_breakpoint_at_pc(
+            backend,
+            register_map,
+            breakpoints,
+            slots,
+            event,
+            &mut regs,
+            arch,
+        );
+    }
+    match arch {
+        Arch::Amd64 => {}
+        Arch::Arm64 => {
+            return arm64_hardware_breakpoint_hit(register_map, breakpoints, event, &regs);
         }
-        return arm64_hardware_breakpoint_hit(register_map, breakpoints, event, &regs);
-    };
+    }
+    let dr6 = register_map.read_u64("dr6", &regs)?;
 
     let hit = (0..HW_BREAKPOINT_SLOTS)
         .filter(|slot| dr6 & (1u64 << slot) != 0)
@@ -463,7 +471,14 @@ fn execute_breakpoint_at_pc(
                     .is_some_and(|hw| hw.access == HwBreakpointAccess::Execute)
         });
 
+    // x86 faults an execute breakpoint again on resume unless RF is set;
+    // AArch64 has no such flag.
+    let sets_resume_flag = match arch {
+        Arch::Amd64 => true,
+        Arch::Arm64 => false,
+    };
     if hit.is_some()
+        && sets_resume_flag
         && let Ok(eflags) = register_map.read_u64("eflags", regs)
     {
         const RF: u64 = 1 << 16;

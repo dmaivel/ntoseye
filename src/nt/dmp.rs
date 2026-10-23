@@ -18,7 +18,7 @@ use crate::base::memory::{MemoryOps, PAGE_SIZE};
 use crate::base::notice::Notice;
 use crate::base::ntstatus::exception_code_name;
 use crate::base::time::filetime_to_iso;
-use crate::base::types::{Arch, MAX_PROCESSORS, PhysAddr, VirtAddr};
+use crate::base::types::{Arch, MAX_PROCESSORS, PhysAddr, VirtAddr, machine_name};
 
 pub mod parse;
 pub mod structs;
@@ -32,24 +32,16 @@ use triage::{
     TriageBlock, TriageDriver, TriagePrcbInfo, is_triage_dump, parse_drivers, parse_triage,
 };
 
-pub const IMAGE_FILE_MACHINE_AMD64: u32 = 0x8664;
-pub const IMAGE_FILE_MACHINE_ARM64: u32 = 0xaa64;
-
-fn require_supported_dump(machine_type: u32) -> Result<()> {
-    if matches!(
-        machine_type,
-        IMAGE_FILE_MACHINE_AMD64 | IMAGE_FILE_MACHINE_ARM64
-    ) {
-        return Ok(());
-    }
-    let name = match machine_type {
-        0x014c => "I386",
-        0xaa64 => "ARM64",
-        _ => "unknown",
-    };
-    Err(Error::UnsupportedArchitecture(format!(
-        "{name} crash dump (machine {machine_type:#06x})"
-    )))
+/// The architecture a dump header's machine type names, or why ntoseye
+/// cannot read the dump.
+pub fn dump_arch(machine_type: u32) -> Result<Arch> {
+    let machine = u16::try_from(machine_type).ok();
+    machine.and_then(Arch::from_machine_type).ok_or_else(|| {
+        Error::UnsupportedArchitecture(format!(
+            "{} crash dump (machine {machine_type:#06x})",
+            machine.map_or("Unknown", machine_name)
+        ))
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -168,12 +160,7 @@ impl DmpSystemInfo {
     /// `I386`, `AMD64`, `ARM64`, or `Unknown`.
     #[record(getter)]
     pub fn machine(&self) -> &'static str {
-        match self.machine_image_type {
-            0x014c => "I386",
-            0x8664 => "AMD64",
-            0xAA64 => "ARM64",
-            _ => "Unknown",
-        }
+        u16::try_from(self.machine_image_type).map_or("Unknown", machine_name)
     }
 
     /// `Workstation`, `DomainController`, `Server`, or `Unknown`.
@@ -554,7 +541,7 @@ impl DmpMem {
 
     fn open_full(mmap: Mmap, parsed: ParsedDump) -> Result<Self> {
         let hdr = &parsed.headers;
-        require_supported_dump(hdr.machine_image_type)?;
+        let arch = dump_arch(hdr.machine_image_type)?;
         // `PhysmemMap` is a `BTreeMap` keyed by GPA, so this is already sorted
         // ascending -- which `lookup` relies on for its binary search.
         let pages: Vec<(u64, u64)> = parsed.physmem.into_iter().collect();
@@ -568,50 +555,51 @@ impl DmpMem {
             .map(|last| tagged_blocks_at(&mmap, last + PAGE_SIZE))
             .unwrap_or_default();
 
-        let context = if hdr.machine_image_type == IMAGE_FILE_MACHINE_ARM64 {
-            DmpContext::from_arm64_bytes(&hdr.context_record_buffer)
-        } else {
-            let (ctx, _) = Context::read_from_prefix(&hdr.context_record_buffer)
-                .map_err(|_| Error::InvalidDump("context record is truncated".to_string()))?;
-            DmpContext::Amd64(DmpAmd64Context {
-                rax: ctx.rax,
-                rbx: ctx.rbx,
-                rcx: ctx.rcx,
-                rdx: ctx.rdx,
-                rsi: ctx.rsi,
-                rdi: ctx.rdi,
-                rbp: ctx.rbp,
-                rsp: ctx.rsp,
-                r8: ctx.r8,
-                r9: ctx.r9,
-                r10: ctx.r10,
-                r11: ctx.r11,
-                r12: ctx.r12,
-                r13: ctx.r13,
-                r14: ctx.r14,
-                r15: ctx.r15,
-                rip: ctx.rip,
-                eflags: ctx.eflags,
-                cs: ctx.seg_cs,
-                ds: ctx.seg_ds,
-                es: ctx.seg_es,
-                fs: ctx.seg_fs,
-                gs: ctx.seg_gs,
-                ss: ctx.seg_ss,
-                dr0: ctx.dr0,
-                dr1: ctx.dr1,
-                dr2: ctx.dr2,
-                dr3: ctx.dr3,
-                dr6: ctx.dr6,
-                dr7: ctx.dr7,
-                mxcsr: ctx.mxcsr,
-                xmm: ctx.xmm_registers,
-                debug_control: ctx.debug_control,
-                last_branch_to_rip: ctx.last_branch_to_rip,
-                last_branch_from_rip: ctx.last_branch_from_rip,
-                last_exception_to_rip: ctx.last_exception_to_rip,
-                last_exception_from_rip: ctx.last_exception_from_rip,
-            })
+        let context = match arch {
+            Arch::Arm64 => DmpContext::from_arm64_bytes(&hdr.context_record_buffer),
+            Arch::Amd64 => {
+                let (ctx, _) = Context::read_from_prefix(&hdr.context_record_buffer)
+                    .map_err(|_| Error::InvalidDump("context record is truncated".to_string()))?;
+                DmpContext::Amd64(DmpAmd64Context {
+                    rax: ctx.rax,
+                    rbx: ctx.rbx,
+                    rcx: ctx.rcx,
+                    rdx: ctx.rdx,
+                    rsi: ctx.rsi,
+                    rdi: ctx.rdi,
+                    rbp: ctx.rbp,
+                    rsp: ctx.rsp,
+                    r8: ctx.r8,
+                    r9: ctx.r9,
+                    r10: ctx.r10,
+                    r11: ctx.r11,
+                    r12: ctx.r12,
+                    r13: ctx.r13,
+                    r14: ctx.r14,
+                    r15: ctx.r15,
+                    rip: ctx.rip,
+                    eflags: ctx.eflags,
+                    cs: ctx.seg_cs,
+                    ds: ctx.seg_ds,
+                    es: ctx.seg_es,
+                    fs: ctx.seg_fs,
+                    gs: ctx.seg_gs,
+                    ss: ctx.seg_ss,
+                    dr0: ctx.dr0,
+                    dr1: ctx.dr1,
+                    dr2: ctx.dr2,
+                    dr3: ctx.dr3,
+                    dr6: ctx.dr6,
+                    dr7: ctx.dr7,
+                    mxcsr: ctx.mxcsr,
+                    xmm: ctx.xmm_registers,
+                    debug_control: ctx.debug_control,
+                    last_branch_to_rip: ctx.last_branch_to_rip,
+                    last_branch_from_rip: ctx.last_branch_from_rip,
+                    last_exception_to_rip: ctx.last_exception_to_rip,
+                    last_exception_from_rip: ctx.last_exception_from_rip,
+                })
+            }
         };
 
         let exc = &hdr.exception;
@@ -674,9 +662,6 @@ impl DmpMem {
 
     fn open_triage(mmap: Mmap) -> Result<Self> {
         let (mut info, blocks) = parse_triage(&mmap)?;
-        if let Some(system_info) = info.system_info.as_ref() {
-            require_supported_dump(system_info.machine_image_type)?;
-        }
         info.triage_drivers = parse_drivers(&mmap);
         Ok(Self {
             mmap,
@@ -1041,12 +1026,21 @@ impl DebugBackend for DmpBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::base::types::{
+        IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64, IMAGE_FILE_MACHINE_I386,
+    };
 
     #[test]
     fn dump_open_rejects_unsupported_machine_types() {
-        assert!(require_supported_dump(IMAGE_FILE_MACHINE_AMD64).is_ok());
-        assert!(require_supported_dump(IMAGE_FILE_MACHINE_ARM64).is_ok());
-        let error = require_supported_dump(0x014c).unwrap_err();
+        assert!(matches!(
+            dump_arch(u32::from(IMAGE_FILE_MACHINE_AMD64)),
+            Ok(Arch::Amd64)
+        ));
+        assert!(matches!(
+            dump_arch(u32::from(IMAGE_FILE_MACHINE_ARM64)),
+            Ok(Arch::Arm64)
+        ));
+        let error = dump_arch(u32::from(IMAGE_FILE_MACHINE_I386)).unwrap_err();
         assert!(error.to_string().contains("I386 crash dump"));
     }
 

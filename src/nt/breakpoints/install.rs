@@ -83,18 +83,6 @@ pub(super) enum BreakpointBackend {
     Deferred,
 }
 
-/// The software breakpoint instruction we patch into guest code: x86 `int3`
-/// (one byte) or AArch64 `brk #0xF000` (four bytes, little-endian), the same
-/// opcode the kernel debugger uses so the guest reports it as a KD break.
-/// The breakpoint instruction a software site holds on `arch`.
-pub const fn breakpoint_opcode(arch: Arch) -> &'static [u8] {
-    match arch {
-        Arch::Amd64 => &[0xcc],
-        // 0xD43E0000 little-endian.
-        Arch::Arm64 => &[0x00, 0x00, 0x3E, 0xD4],
-    }
-}
-
 /// Record a host-patched site in the target's journal before its breakpoint
 /// instruction is written: `original` is the instruction it displaces, and
 /// the bytes after it come from memory. Recording first means a session that
@@ -285,7 +273,7 @@ impl BreakpointManager {
             // four. Kernel code is read through the kernel's own tables: an
             // attached process's (KVA-shadow) CR3 need not map it.
             let memory = debugger.address_space(debugger.kernel_dtb());
-            let mut original = BreakpointPatch::new(breakpoint_opcode(debugger.arch()).len());
+            let mut original = BreakpointPatch::new(debugger.arch().breakpoint_instruction().len());
             // A page that is not resident has no bytes to displace yet.
             // The target's own breakpoint table records the site and writes
             // the opcode when the page arrives (`nt!KdpSetOwedBreakpoints`),
@@ -308,7 +296,7 @@ impl BreakpointManager {
             BreakpointScope::Kernel => debugger.kernel_dtb(),
         };
         let memory = debugger.address_space(dtb);
-        let opcode = breakpoint_opcode(debugger.arch());
+        let opcode = debugger.arch().breakpoint_instruction();
         let mut original = BreakpointPatch::new(opcode.len());
         // This debugger owns the byte at a user-space site, and it cannot
         // write one into a page that is not there. Nothing reports the page
@@ -351,7 +339,7 @@ impl BreakpointManager {
                 let memory = debugger.address_space(*dtb);
                 journal_site(debugger, &memory, bp.address, original.as_slice());
                 memory
-                    .write_bytes(bp.address, breakpoint_opcode(debugger.arch()))
+                    .write_bytes(bp.address, debugger.arch().breakpoint_instruction())
                     .map_err(|error| user_patch_error(debugger, bp.address, error))?;
                 client.note_breakpoint_installed(bp.address.0);
                 Ok(())

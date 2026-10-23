@@ -12,7 +12,7 @@ use crate::backend::kd::framing::KdFraming;
 use crate::base::bytes;
 use crate::base::error::{Error, Result};
 use crate::base::memory::{AddressSpace, MemoryOps, TranslationCache};
-use crate::base::types::{Arch, Dtb, PhysAddr, VirtAddr};
+use crate::base::types::{Arch, Dtb, PhysAddr, VirtAddr, machine_name};
 
 use super::breakpoints::{
     breakpoint_instruction_at, reclaimed_breakpoints_notice, restore_unowned_breakpoint_handles,
@@ -38,18 +38,12 @@ const MEMORY_OVER_KD_FALLBACK: &str = "Guest memory is read over KD on this sess
      was unavailable at connect), and KD only answers while the target is halted.";
 
 pub(super) fn detect_arch(machine_type: u16) -> Result<Arch> {
-    match Arch::from_machine_type(machine_type) {
-        Some(arch) => Ok(arch),
-        None => {
-            let name = match machine_type {
-                0x014c => "I386",
-                _ => "unknown",
-            };
-            Err(Error::UnsupportedArchitecture(format!(
-                "{name} KD target (machine {machine_type:#06x})"
-            )))
-        }
-    }
+    Arch::from_machine_type(machine_type).ok_or_else(|| {
+        Error::UnsupportedArchitecture(format!(
+            "{} KD target (machine {machine_type:#06x})",
+            machine_name(machine_type)
+        ))
+    })
 }
 
 pub(super) fn normalize_kernel_dtb(arch: Arch, register_value: u64) -> Dtb {

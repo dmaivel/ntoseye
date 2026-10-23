@@ -19,7 +19,7 @@ use crate::hosts::repl::commands::analyze::{
     ANALYZE_MODULE_LIMIT, ANALYZE_STACK_LIMIT, ANALYZE_UNLOADED_LIMIT,
     ANALYZE_VERBOSE_MODULE_LIMIT, ANALYZE_VERBOSE_UNLOADED_LIMIT, USER_DUMP_NOT_APPLICABLE,
     code_owner_text, codeview_path, culprit_caller_text, culprit_label, kmdf_log_summary,
-    machine_name, product_name, signature_source, user_captured_text, user_detail_modules,
+    product_name, signature_source, user_captured_text, user_detail_modules,
     user_exception_verdict, user_no_culprit_text, user_process_label, user_stack_heading,
     user_system_text,
 };
@@ -791,7 +791,7 @@ fn dump_metadata(report: &TriageReport) -> Option<Section<()>> {
                         "Windows {}.{}  {}",
                         info.major_version,
                         info.minor_version,
-                        machine_name(info.machine_image_type)
+                        info.machine()
                     ),
                     "",
                 ),

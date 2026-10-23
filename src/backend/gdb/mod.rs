@@ -201,13 +201,11 @@ fn description_arch(xml: &str) -> Result<Arch> {
             "the stub's target description declares no architecture".into(),
         ));
     };
-    match architecture {
-        "i386:x86-64" => Ok(Arch::Amd64),
-        "aarch64" => Ok(Arch::Arm64),
-        other => Err(Error::UnsupportedArchitecture(format!(
-            "{other}; ntoseye debugs AMD64 and ARM64 Windows"
-        ))),
-    }
+    Arch::from_gdb_architecture(architecture).ok_or_else(|| {
+        Error::UnsupportedArchitecture(format!(
+            "{architecture}; ntoseye debugs AMD64 and ARM64 Windows"
+        ))
+    })
 }
 
 /// System registers ntoseye needs, spelled the way it spells them elsewhere.
@@ -372,7 +370,10 @@ impl GdbClient {
             features: StubFeatures::default(),
             rx_state: PacketReadState::default(),
             no_ack_mode: false,
-            arch: Arch::default(),
+            // Replaced from the target description below, before anything
+            // reads it: the handshake packets before it are the same for
+            // every architecture.
+            arch: Arch::Amd64,
             register_map: RegisterMap::default(),
             // Resuming the VM from outside (a hypervisor GUI) goes unseen here.
             halts,

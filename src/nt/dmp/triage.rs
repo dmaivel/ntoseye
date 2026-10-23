@@ -3,14 +3,13 @@ use crate::backend::debugger_data::KdDebuggerData64;
 use crate::base::bytes::utf16le_nul_terminated;
 use crate::base::bytes::{c_string_lossy, read_u16, read_u32, read_u64};
 use crate::base::error::{Error, Result};
-use crate::base::types::VirtAddr;
+use crate::base::types::{Arch, VirtAddr};
 #[cfg(test)]
-use crate::nt::dmp::IMAGE_FILE_MACHINE_AMD64;
+use crate::base::types::{IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64};
 use crate::nt::dmp::structs::{ExceptionRecord64, Header64};
 use crate::nt::dmp::tagged::tagged_blocks_at;
 use crate::nt::dmp::{
-    DmpContext, DmpException, DmpInfo, DmpSystemInfo, IMAGE_FILE_MACHINE_ARM64, UnloadedDriver,
-    clamp_processors,
+    DmpContext, DmpException, DmpInfo, DmpSystemInfo, UnloadedDriver, clamp_processors, dump_arch,
 };
 use crate::nt::guest::ModuleInfo;
 use std::mem::{offset_of, size_of};
@@ -157,6 +156,7 @@ pub fn parse_triage(mmap: &[u8]) -> Result<(DmpInfo, Vec<TriageBlock>)> {
     let number_processors = read_u32(mmap, OFF_NUMBER_PROCESSORS);
     let bug_check_code = read_u32(mmap, OFF_BUG_CHECK_CODE);
     let machine_image_type = read_u32(mmap, OFF_MACHINE_IMAGE_TYPE);
+    let arch = dump_arch(machine_image_type)?;
     let bug_check_parameters = [
         read_u64(mmap, OFF_BUG_CHECK_PARAMETERS),
         read_u64(mmap, OFF_BUG_CHECK_PARAMETERS + 8),
@@ -173,10 +173,9 @@ pub fn parse_triage(mmap: &[u8]) -> Result<(DmpInfo, Vec<TriageBlock>)> {
     // position — in practice they point to the same data, but the triage
     // offset is authoritative for minidumps.
     let ctx_offset = read_u32(triage_hdr, TRIAGE_CONTEXT_OFFSET) as usize;
-    let pc_offset = if machine_image_type == IMAGE_FILE_MACHINE_ARM64 {
-        arm64::OFFSET_PC
-    } else {
-        amd64::OFFSET_RIP
+    let pc_offset = match arch {
+        Arch::Arm64 => arm64::OFFSET_PC,
+        Arch::Amd64 => amd64::OFFSET_RIP,
     };
     let ctx_offset = if ctx_offset > 0
         && ctx_offset
@@ -192,10 +191,9 @@ pub fn parse_triage(mmap: &[u8]) -> Result<(DmpInfo, Vec<TriageBlock>)> {
             "dump too small for context record".into(),
         ));
     }
-    let context = if machine_image_type == IMAGE_FILE_MACHINE_ARM64 {
-        DmpContext::from_arm64_bytes(&mmap[ctx_offset..])
-    } else {
-        DmpContext::from_bytes(&mmap[ctx_offset..])
+    let context = match arch {
+        Arch::Arm64 => DmpContext::from_arm64_bytes(&mmap[ctx_offset..]),
+        Arch::Amd64 => DmpContext::from_bytes(&mmap[ctx_offset..]),
     };
 
     let call_stack_offset = read_u32(triage_hdr, TRIAGE_CALL_STACK_OFFSET) as u64;
@@ -701,7 +699,7 @@ pub(crate) fn make_triage_dump(blocks: &[TriageBlock], mem_regions: &[(u64, &[u8
     // NumberProcessors = 1
     buf[OFF_NUMBER_PROCESSORS..OFF_NUMBER_PROCESSORS + 4].copy_from_slice(&1u32.to_le_bytes());
     buf[OFF_MACHINE_IMAGE_TYPE..OFF_MACHINE_IMAGE_TYPE + 4]
-        .copy_from_slice(&IMAGE_FILE_MACHINE_AMD64.to_le_bytes());
+        .copy_from_slice(&u32::from(IMAGE_FILE_MACHINE_AMD64).to_le_bytes());
     // DTB
     buf[OFF_DIRECTORY_TABLE_BASE..OFF_DIRECTORY_TABLE_BASE + 8]
         .copy_from_slice(&0x1ad000u64.to_le_bytes());
@@ -791,7 +789,7 @@ mod tests {
     fn parse_triage_extracts_arm64_context_layout() {
         let mut dump = make_triage_dump(&[], &[]);
         dump[OFF_MACHINE_IMAGE_TYPE..OFF_MACHINE_IMAGE_TYPE + 4]
-            .copy_from_slice(&IMAGE_FILE_MACHINE_ARM64.to_le_bytes());
+            .copy_from_slice(&u32::from(IMAGE_FILE_MACHINE_ARM64).to_le_bytes());
         let ctx_base = OFF_CONTEXT_RECORD;
         dump[ctx_base + arm64::OFFSET_PC..ctx_base + arm64::OFFSET_PC + 8]
             .copy_from_slice(&0xffff_0000_0000_1000u64.to_le_bytes());

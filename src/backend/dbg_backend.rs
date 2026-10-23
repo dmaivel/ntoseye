@@ -8,7 +8,7 @@ use ntoseye_macros::record;
 use crate::backend::debugger_data::DebuggerDataCandidate;
 use crate::backend::phys::PhysMem;
 use crate::base::error::{Error, Result};
-use crate::base::types::{KernelLocation, VirtAddr};
+use crate::base::types::{Arch, KernelLocation, VirtAddr};
 
 pub mod debug_registers;
 mod registers;
@@ -498,11 +498,20 @@ impl TrapState {
 
 /// Clear the trap flag (`TF`, RFLAGS bit 8) and DR6's B0-B3 status bits on the
 /// currently selected thread, best-effort, so an absorbed single-step leaves
-/// no residue for the next resume. ARM64 has neither x86 field, so its
-/// single-step state is acknowledged by KD's ARM64 continue request instead.
-/// A transport that reports TF and DR6 with the stop answers this without a
-/// register fetch, which is what keeps an absorbed breakpoint hit cheap.
-pub fn clear_trap_flag(backend: &mut dyn DebugBackend, register_map: &RegisterMap) -> Result<()> {
+/// no residue for the next resume. ARM64 has neither x86 field: KD's ARM64
+/// continue request acknowledges its single-step state. A transport that
+/// reports TF and DR6 with the stop answers this without a register fetch,
+/// which is what keeps an absorbed breakpoint hit cheap; one that exposes no
+/// DR6 (a GDB stub) has only TF cleared.
+pub fn clear_trap_flag(
+    arch: Arch,
+    backend: &mut dyn DebugBackend,
+    register_map: &RegisterMap,
+) -> Result<()> {
+    match arch {
+        Arch::Amd64 => {}
+        Arch::Arm64 => return Ok(()),
+    }
     if backend
         .stop_trap_state()
         .is_some_and(|state| state.is_clean())

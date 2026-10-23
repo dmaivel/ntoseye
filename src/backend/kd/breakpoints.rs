@@ -26,9 +26,9 @@ pub(super) struct PendingWriteBreakpoint {
 /// software breakpoints any debugger can have installed at once.
 pub(super) const KD_BREAKPOINT_TABLE_SIZE: u32 = 32;
 
-/// Whether the instruction at `pc` is the KD breakpoint instruction (`int3`
-/// on AMD64, `BRK #0xF000` on ARM64), read through the target so it reflects
-/// what will execute on resume.
+/// Whether the instruction at `pc` is the KD breakpoint instruction
+/// ([`Arch::breakpoint_instruction`]), read through the target so it
+/// reflects what will execute on resume.
 ///
 /// An unreadable PC answers `false`. The only thing this answer is used for is
 /// deciding whether to step the PC past a byte, and guessing wrong in that
@@ -40,12 +40,7 @@ pub(super) fn breakpoint_instruction_at(
     processor: u16,
     pc: u64,
 ) -> bool {
-    const INT3: [u8; 1] = [0xcc];
-    const BRK_F000: [u8; 4] = 0xD43E_0000u32.to_le_bytes();
-    let expected: &[u8] = match arch {
-        Arch::Amd64 => &INT3,
-        Arch::Arm64 => &BRK_F000,
-    };
+    let expected = arch.breakpoint_instruction();
     match with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
         api::read_virtual_memory(framing, processor, pc, expected.len() as u32)
     }) {

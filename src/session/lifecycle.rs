@@ -15,7 +15,7 @@ use crate::backend::phys::{HaltClock, PhysMem};
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::notice::Notice;
-use crate::nt::breakpoints::{BreakpointManager, SiteJournal, breakpoint_opcode};
+use crate::nt::breakpoints::{BreakpointManager, SiteJournal};
 use crate::nt::bugchecks::plausible_bugcheck_code;
 use crate::nt::cpu_state;
 use crate::nt::dmp::{DmpBackend, DmpInfo};
@@ -321,7 +321,7 @@ impl Session {
         };
         let key = instance_key(resource);
         let journal = SiteJournal::open(&dir, &key, kernel_base.0);
-        let opcode = breakpoint_opcode(self.target.arch());
+        let opcode = self.target.arch().breakpoint_instruction();
         let mut repair = journal.repair(self.target.phys.as_ref(), opcode);
         let orphaned = std::fs::read_dir(&dir)
             .into_iter()

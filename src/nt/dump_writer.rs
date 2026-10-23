@@ -19,7 +19,6 @@ use crate::base::bytes::{write_u32, write_u64};
 use crate::base::error::{Error, Result};
 use crate::base::memory::{MemoryOps, PAGE_SIZE};
 use crate::base::types::{Arch, MAX_PROCESSORS, PhysAddr};
-use crate::nt::dmp::{IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64};
 use crate::nt::layout::{FieldInfo, ParsedType};
 use crate::nt::target::Target;
 
@@ -38,13 +37,6 @@ pub struct DumpWrite {
 }
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-fn machine_image_type(arch: Arch) -> u32 {
-    match arch {
-        Arch::Amd64 => IMAGE_FILE_MACHINE_AMD64,
-        Arch::Arm64 => IMAGE_FILE_MACHINE_ARM64,
-    }
-}
 
 /// Rebuild a `CONTEXT` from a register file in another layout (a GDB stub's),
 /// register by register. Registers the source lacks stay zero, and
@@ -302,7 +294,7 @@ fn build_header(metadata: &DumpMetadata, pages: u64) -> Result<Vec<u8>> {
     write_u32(
         &mut header,
         offset_of!(Header64, machine_image_type),
-        machine_image_type(metadata.arch),
+        u32::from(metadata.arch.machine_type()),
     );
     write_u32(
         &mut header,
@@ -900,7 +892,7 @@ mod tests {
         let machine = offset_of!(Header64, machine_image_type);
         assert_eq!(
             u32::from_le_bytes(raw[machine..machine + 4].try_into().unwrap()),
-            IMAGE_FILE_MACHINE_ARM64,
+            u32::from(Arch::Arm64.machine_type()),
             "the header must declare ARM64, not AMD64"
         );
         let ctx = offset_of!(Header64, context_record_buffer);

@@ -31,12 +31,12 @@ pub struct Layout {
 impl Layout {
     /// The layout for `arch` over a transport whose registers `map` names.
     pub fn new(arch: Arch, map: &RegisterMap) -> Self {
-        let (architecture, mut registers) = match arch {
-            Arch::Amd64 => ("i386:x86-64", amd64()),
-            Arch::Arm64 => ("aarch64", arm64()),
+        let mut registers = match arch {
+            Arch::Amd64 => amd64(),
+            Arch::Arm64 => arm64(),
         };
         registers.retain(|register| !register.optional || map.info(&register.name).is_some());
-        let target_xml = target_xml(architecture, &registers);
+        let target_xml = target_xml(arch.gdb_architecture(), &registers);
         Self {
             registers,
             target_xml,

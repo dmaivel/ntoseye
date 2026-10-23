@@ -87,7 +87,7 @@ impl KdBackend {
             // record_stop selected the stop's processor, so this clears TF on the
             // offending vCPU. Clone the map to avoid borrowing self twice.
             let register_map = self.register_map.clone();
-            let _ = clear_trap_flag(self, &register_map);
+            let _ = clear_trap_flag(self.arch, self, &register_map);
         }
     }
 

@@ -26,7 +26,7 @@ mod spec;
 mod test_backend;
 
 use install::BreakpointBackend;
-pub use install::{breakpoint_opcode, lift_target_site, plant_target_site};
+pub use install::{lift_target_site, plant_target_site};
 pub use journal::{Repair, SiteJournal};
 
 /// A hardware (debug-register) breakpoint's parameters: the access it traps on,

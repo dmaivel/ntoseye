@@ -10,7 +10,7 @@ use crate::backend::dbg_backend::{
 use crate::base::error::Result;
 use crate::base::memory::MemoryOps;
 use crate::base::types::{Arch, VirtAddr};
-use crate::nt::breakpoints::{BreakpointInfo, BreakpointManager, breakpoint_opcode};
+use crate::nt::breakpoints::{BreakpointInfo, BreakpointManager};
 use crate::nt::guest::{ModuleInfo, ProcessInfo};
 use crate::nt::target::{BreakpointStop, HYPERVISOR_CONTEXT, ThreadInfo};
 use crate::nt::unwind::{UNKNOWN_CONTEXT, thread_root, try_format_symbol_at};
@@ -483,7 +483,11 @@ impl Session {
         }
 
         if stop_is_stray_single_step(&event, &self.breakpoints) {
-            let _ = clear_trap_flag(self.backend.as_mut(), &self.register_map);
+            let _ = clear_trap_flag(
+                self.target.arch(),
+                self.backend.as_mut(),
+                &self.register_map,
+            );
             self.continue_backend(ContinueDisposition::Handled)?;
             return Ok(StopResolution::Resumed);
         }
@@ -571,7 +575,7 @@ impl Session {
         {
             return false;
         }
-        let opcode = breakpoint_opcode(self.target.arch());
+        let opcode = self.target.arch().breakpoint_instruction();
         let mut bytes = [0u8; 4];
         let bytes = &mut bytes[..opcode.len()];
         self.target

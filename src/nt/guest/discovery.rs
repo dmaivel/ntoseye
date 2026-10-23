@@ -82,9 +82,9 @@ fn is_valid_kernel_dtb_arm64(phys: &PhysMem, dtb: Dtb) -> Result<bool> {
 
 /// Read the PE machine type of the kernel image found through `dtb` with the
 /// arch's walker, or `None` when no valid PE header is there. This is the
-/// definitive architecture check: a kernel image's machine must be 0x8664
-/// (AMD64) or 0xaa64 (ARM64), which an accidental page-table false positive
-/// cannot satisfy.
+/// definitive architecture check: a kernel image's machine must be the
+/// arch's [`Arch::machine_type`], which an accidental page-table false
+/// positive cannot satisfy.
 fn kernel_machine_at(dtb: Dtb, phys: &PhysMem, arch: Arch) -> Result<Option<u16>> {
     let base = match arch {
         Arch::Amd64 => find_ntoskrnl_va(dtb, phys)?,
@@ -115,21 +115,23 @@ fn kernel_machine_at(dtb: Dtb, phys: &PhysMem, arch: Arch) -> Result<Option<u16>
     Ok(Some(u16::from_le_bytes([sig[4], sig[5]])))
 }
 
-/// Discover the kernel page-table root and guest architecture. The AMD64
-/// descriptor format is tried first (the historical default), but a candidate
-/// only counts when the kernel image found through it is genuinely an AMD64
-/// PE: an AArch64 guest's TTBR1 tables can false-positive the x64 descriptor
-/// checks (Windows maps its own page tables), and the weak MZ+POOLCODE page
-/// heuristic can match a data page. The PE machine type is the tie-breaker.
+/// Discover the kernel page-table root and guest architecture. Each
+/// architecture in [`Arch::ALL`] offers its candidate roots in turn, but a
+/// candidate only counts when the kernel image found through it has that
+/// architecture's machine type: an AArch64 guest's TTBR1 tables can
+/// false-positive the x64 descriptor checks (Windows maps its own page
+/// tables), and the weak MZ+POOLCODE page heuristic can match a data page.
+/// The PE machine type is the tie-breaker.
 pub(super) fn find_kernel(phys: &PhysMem) -> Result<Option<(Dtb, Arch)>> {
-    if let Some(dtb) = find_kernel_dtb_amd64(phys)?
-        && matches!(kernel_machine_at(dtb, phys, Arch::Amd64)?, Some(0x8664))
-    {
-        return Ok(Some((dtb, Arch::Amd64)));
-    }
-    for dtb in find_kernel_dtb_arm64_candidates(phys)? {
-        if matches!(kernel_machine_at(dtb, phys, Arch::Arm64)?, Some(0xaa64)) {
-            return Ok(Some((dtb, Arch::Arm64)));
+    for arch in Arch::ALL {
+        let candidates = match arch {
+            Arch::Amd64 => find_kernel_dtb_amd64(phys)?.into_iter().collect(),
+            Arch::Arm64 => find_kernel_dtb_arm64_candidates(phys)?,
+        };
+        for dtb in candidates {
+            if kernel_machine_at(dtb, phys, arch)? == Some(arch.machine_type()) {
+                return Ok(Some((dtb, arch)));
+            }
         }
     }
     Ok(None)

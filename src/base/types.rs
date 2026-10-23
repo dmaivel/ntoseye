@@ -177,14 +177,18 @@ impl CodeMachine {
 
 /// Guest CPU architecture. Determines page-table descriptor interpretation and
 /// register-file layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arch {
-    #[default]
     Amd64,
     Arm64,
 }
 
 impl Arch {
+    /// Every architecture, in the order kernel discovery tries them (AMD64,
+    /// the historical default, first). A new variant goes here too: the
+    /// reverse lookups below and discovery read this list.
+    pub const ALL: [Self; 2] = [Self::Amd64, Self::Arm64];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Amd64 => "AMD64",
@@ -242,14 +246,21 @@ impl Arch {
         }
     }
 
-    /// Bytes in the software breakpoint instruction (x86 `int3`, AArch64
-    /// `brk #0xF000`): how far the program counter must move to step past
-    /// one, and the kind an RSP `Z0` packet names.
-    pub const fn breakpoint_size(self) -> u8 {
+    /// The software breakpoint instruction a site holds: x86 `int3`, or
+    /// AArch64 `brk #0xF000` (`0xD43E0000`, little-endian), the opcode the
+    /// kernel debugger uses so the guest reports it as a KD break.
+    pub const fn breakpoint_instruction(self) -> &'static [u8] {
         match self {
-            Self::Amd64 => 1,
-            Self::Arm64 => 4,
+            Self::Amd64 => &[0xcc],
+            Self::Arm64 => &[0x00, 0x00, 0x3e, 0xd4],
         }
+    }
+
+    /// Bytes in [`Arch::breakpoint_instruction`]: how far the program
+    /// counter must move to step past one, and the kind an RSP `Z0` packet
+    /// names.
+    pub const fn breakpoint_size(self) -> u8 {
+        self.breakpoint_instruction().len() as u8
     }
 
     /// Bytes in a kernel pointer: a `LIST_ENTRY` link, a slot of a pointer
@@ -270,12 +281,48 @@ impl Arch {
         }
     }
 
-    pub fn from_machine_type(machine: u16) -> Option<Self> {
-        match machine {
-            0x8664 => Some(Self::Amd64),
-            0xaa64 => Some(Self::Arm64),
-            _ => None,
+    /// The PE and dump-header machine type (`IMAGE_FILE_MACHINE_*`).
+    pub const fn machine_type(self) -> u16 {
+        match self {
+            Self::Amd64 => IMAGE_FILE_MACHINE_AMD64,
+            Self::Arm64 => IMAGE_FILE_MACHINE_ARM64,
         }
+    }
+
+    pub fn from_machine_type(machine: u16) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|arch| arch.machine_type() == machine)
+    }
+
+    /// The `<architecture>` a GDB target description names it by.
+    pub const fn gdb_architecture(self) -> &'static str {
+        match self {
+            Self::Amd64 => "i386:x86-64",
+            Self::Arm64 => "aarch64",
+        }
+    }
+
+    pub fn from_gdb_architecture(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|arch| arch.gdb_architecture() == name)
+    }
+}
+
+pub const IMAGE_FILE_MACHINE_I386: u16 = 0x014c;
+pub const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+pub const IMAGE_FILE_MACHINE_ARM64: u16 = 0xaa64;
+
+/// A machine type as kernel dumps and `vertarget` name it: `I386`, `AMD64`,
+/// `ARM64`, or `Unknown`. A PE header's richer naming is
+/// [`crate::nt::pe::headers::machine_name`].
+pub fn machine_name(machine: u16) -> &'static str {
+    match machine {
+        IMAGE_FILE_MACHINE_I386 => "I386",
+        IMAGE_FILE_MACHINE_AMD64 => "AMD64",
+        IMAGE_FILE_MACHINE_ARM64 => "ARM64",
+        _ => "Unknown",
     }
 }
 

@@ -20,7 +20,7 @@ use crate::nt::breakpoints::{
     BreakpointConfig, BreakpointInfo, HardwareBreakpoint, HypercallFilter, PartitionFilter,
     StepFrame, ThreadScope,
 };
-use crate::nt::dmp::{IMAGE_FILE_MACHINE_ARM64, structs::Header64};
+use crate::nt::dmp::structs::Header64;
 use crate::nt::guest::ModuleInfo;
 use crate::nt::target::SelectedFrame;
 use crate::session::exception_policy::{ExceptionPolicyFinalAction, ExceptionPolicyMode};
@@ -812,7 +812,7 @@ fn session_over_arm64_memory(base: u64, memory: &[u8]) -> Session {
     let mut dump = make_triage_dump(&[block], &[(base, memory)]);
     let machine_offset = std::mem::offset_of!(Header64, machine_image_type);
     dump[machine_offset..machine_offset + 4]
-        .copy_from_slice(&IMAGE_FILE_MACHINE_ARM64.to_le_bytes());
+        .copy_from_slice(&u32::from(Arch::Arm64.machine_type()).to_le_bytes());
 
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -3788,7 +3788,7 @@ fn clear_trap_flag_clears_tf_and_dr6_status_in_one_write() {
     backend.set("dr6", 0b1011 | DR6_BS);
 
     let map = build_register_map();
-    clear_trap_flag(&mut backend, &map).unwrap();
+    clear_trap_flag(Arch::Amd64, &mut backend, &map).unwrap();
 
     assert_eq!(backend.get("eflags"), EFLAGS_BASE);
     assert_eq!(backend.get("dr6"), DR6_BS);
@@ -3802,7 +3802,7 @@ fn clear_trap_flag_trusts_a_stop_that_reports_no_residue() {
     backend.set("dr6", 0b1011 | DR6_BS);
     let map = build_register_map();
 
-    clear_trap_flag(&mut backend, &map).unwrap();
+    clear_trap_flag(Arch::Amd64, &mut backend, &map).unwrap();
 
     // The registers still hold residue, so a fetch would have rewritten
     // them: proving none happened proves the report was believed.
@@ -3817,7 +3817,7 @@ fn clear_trap_flag_still_writes_when_the_stop_reports_residue() {
     backend.set("dr6", 0b1011 | DR6_BS);
     let map = build_register_map();
 
-    clear_trap_flag(&mut backend, &map).unwrap();
+    clear_trap_flag(Arch::Amd64, &mut backend, &map).unwrap();
 
     assert_eq!(backend.get("eflags"), EFLAGS_BASE);
     assert_eq!(backend.get("dr6"), DR6_BS);
@@ -3831,7 +3831,7 @@ fn clear_trap_flag_skips_the_write_when_nothing_is_set() {
     let before = backend.regs.clone();
 
     let map = build_register_map();
-    clear_trap_flag(&mut backend, &map).unwrap();
+    clear_trap_flag(Arch::Amd64, &mut backend, &map).unwrap();
 
     assert_eq!(backend.writes, 0);
     assert_eq!(backend.regs, before);

@@ -95,6 +95,7 @@ impl Session {
             )?,
             None => {
                 step_one_and_clear_tf(
+                    self.target.arch(),
                     self.backend.as_mut(),
                     &self.register_map,
                     &self.target.interrupt,
@@ -1215,13 +1216,14 @@ impl Session {
 /// A fault or bugcheck instead of the step trap is returned as an error.
 /// `interrupt` (Ctrl+C) ends the wait with a break-in.
 pub fn step_one_and_clear_tf(
+    arch: Arch,
     backend: &mut dyn DebugBackend,
     register_map: &RegisterMap,
     interrupt: &AtomicBool,
 ) -> Result<()> {
     backend.step()?;
     let event = wait_for_step_stop(backend, interrupt)?;
-    clear_trap_flag(backend, register_map)?;
+    clear_trap_flag(arch, backend, register_map)?;
     if event.is_bugcheck {
         return Err(Error::DebugInfo(
             "target bugchecked while single-stepping".into(),
@@ -1355,7 +1357,8 @@ fn execute_lifted_site(
             cr3,
         )
     } else {
-        step_one_and_clear_tf(backend, register_map, &debugger.interrupt).map(|()| RunPast::Reached)
+        step_one_and_clear_tf(debugger.arch(), backend, register_map, &debugger.interrupt)
+            .map(|()| RunPast::Reached)
     }
 }
 
