@@ -11,6 +11,7 @@ use super::{
 use crate::arch::Arch;
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
+use crate::nt::bugchecks::looks_like_kernel_pointer;
 use crate::nt::expr::Expr;
 use crate::nt::guest::{
     ProcessInfo,
@@ -234,8 +235,7 @@ impl BreakpointManager {
         address: VirtAddr,
         fallback: &BreakpointScope,
     ) -> BreakpointScope {
-        const WINDOWS_X64_KERNEL_START: u64 = 0xffff_8000_0000_0000;
-        if address.0 >= WINDOWS_X64_KERNEL_START
+        if looks_like_kernel_pointer(debugger.arch(), address.0)
             || Self::find_kernel_module_containing_address(debugger, address).is_some()
         {
             BreakpointScope::Kernel

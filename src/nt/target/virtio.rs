@@ -8,9 +8,11 @@
 
 use ntoseye_macros::record;
 
+use crate::arch::Arch;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::types::VirtAddr;
+use crate::nt::bugchecks::looks_like_kernel_pointer;
 use crate::nt::layout::le_uint;
 use crate::nt::target::Target;
 use crate::nt::target::pci::{PciTreeBus, PciTreeDevice};
@@ -975,15 +977,11 @@ pub fn walk_chain(
 /// PDB.
 #[derive(Debug, Clone, Copy)]
 pub struct DeviceFields {
+    pub arch: Arch,
     pub size: usize,
     pub max_queues: usize,
     pub info: usize,
     pub pointer_size: usize,
-}
-
-/// Whether `value` is a canonical kernel address.
-fn kernel_address(value: u64) -> bool {
-    value >= 0xffff_8000_0000_0000
 }
 
 /// Whether the bytes at the start of `header` could be a `virtio_device`:
@@ -998,7 +996,7 @@ fn plausible_device(header: &[u8], fields: DeviceFields) -> bool {
     };
     let queues = u32::from_le_bytes(queues.try_into().unwrap_or_default());
     let info = le_uint(info);
-    (1..=MAX_QUEUES).contains(&u64::from(queues)) && kernel_address(info)
+    (1..=MAX_QUEUES).contains(&u64::from(queues)) && looks_like_kernel_pointer(fields.arch, info)
 }
 
 /// The driver's `virtio_device` in its context, `bytes` read at `base`:
@@ -1034,7 +1032,7 @@ pub fn locate_device(
             }
         }
         let pointer = le_uint(&here[..pointer_size]);
-        if !kernel_address(pointer) {
+        if !looks_like_kernel_pointer(fields.arch, pointer) {
             continue;
         }
         if is_device(pointer) {
@@ -1298,7 +1296,9 @@ impl Target {
         bytes
             .chunks_exact(pointer_size)
             .map(le_uint)
-            .filter(|pointer| kernel_address(*pointer) && seen.insert(*pointer))
+            .filter(|pointer| {
+                looks_like_kernel_pointer(self.arch(), *pointer) && seen.insert(*pointer)
+            })
             .take(MAX_FOLLOWED_POINTERS)
             .find(|pointer| {
                 let block = self.read_readable(VirtAddr(*pointer), POINTED_BLOCK_SCAN);
@@ -1318,6 +1318,7 @@ impl Target {
         let types = self.guest().ok()?.ntoskrnl.types();
         let device = types.layout(format!("{module}!virtio_device")).ok()?;
         let fields = DeviceFields {
+            arch: self.arch(),
             size: device.size as usize,
             max_queues: device.field_offset("maxQueues").ok()? as usize,
             info: device.field_offset("info").ok()? as usize,
@@ -1363,7 +1364,8 @@ impl Target {
             let device = types.struct_at(&format!("{module}!virtio_device"), address)?;
             let count = device.read_uint("maxQueues")?;
             let info = device.read_pointer("info")?;
-            if !(1..=MAX_QUEUES).contains(&count) || !kernel_address(info.0) {
+            if !(1..=MAX_QUEUES).contains(&count) || !looks_like_kernel_pointer(self.arch(), info.0)
+            {
                 return Ok(false);
             }
             let entry = types.layout(format!("{module}!virtio_queue_info"))?;
@@ -1380,7 +1382,7 @@ impl Target {
                 if vq == 0 {
                     continue;
                 }
-                if !kernel_address(vq)
+                if !looks_like_kernel_pointer(self.arch(), vq)
                     || memory.read_pointer(VirtAddr(vq) + vdev_offset)? != address
                 {
                     return Ok(false);
@@ -1918,6 +1920,7 @@ mod tests {
         indirect_table, locate_device, outstanding_heads, packed_signal, queue_movement,
         queue_role, queue_verdict, read_packed_ring, split_signals, walk_chain,
     };
+    use crate::arch::Arch;
     use crate::base::types::VirtAddr;
 
     /// An indirect table sums what the driver sends and what the device may
@@ -2039,6 +2042,7 @@ mod tests {
     }
 
     const FIELDS: DeviceFields = DeviceFields {
+        arch: Arch::Amd64,
         size: 0x30,
         max_queues: 0x10,
         info: 0x18,

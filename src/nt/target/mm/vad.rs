@@ -22,7 +22,7 @@ impl Target {
     /// `address` command, the MCP tool, and the SDK.
     pub fn describe_address(&self, address: VirtAddr) -> Result<AddressDescription> {
         let dtb = self.current_dtb();
-        let is_kernel = address.0 >= 0xffff_0000_0000_0000;
+        let is_kernel = self.arch().paging().is_kernel_address(address);
 
         // 1. Loaded module containment (kernel list for kernel VAs, else the
         // current scope's user modules).

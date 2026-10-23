@@ -332,9 +332,6 @@ const GDB_STUB_NEEDS_HALT: &str = "the GDB stub serves no requests while the tar
 /// hex, inside QEMU's 4 KiB packet buffer.
 const PHYSICAL_READ_CHUNK: usize = 0x400;
 
-/// The first canonical upper-half (kernel) address on AMD64.
-const KERNEL_HALF: u64 = 0xffff_8000_0000_0000;
-
 /// The read timeout of a wait asked not to wait: a socket refuses zero.
 const MIN_READ_TIMEOUT: Duration = Duration::from_millis(1);
 
@@ -678,7 +675,10 @@ impl GdbClient {
         let packet = format!("{op}0,{addr:x},{}", self.arch.breakpoint_size());
         let response = self.send_packet(&packet)?;
         let borrows_kernel_root = self.arch.family() == Family::X86;
-        if !response.starts_with('E') || !borrows_kernel_root || addr < KERNEL_HALF {
+        if !response.starts_with('E')
+            || !borrows_kernel_root
+            || addr < self.arch.paging().system_range_start()
+        {
             return Ok(response);
         }
         if let Some(response) = self.through_another_vcpu(&packet)? {

@@ -1655,7 +1655,7 @@ impl Target {
             .and_then(|l| l.field_offset("Context").ok())
             .unwrap_or(2 * pointer_size);
 
-        let is_kernel = |a: VirtAddr| a.0 >= 0xffff_0000_0000_0000;
+        let is_kernel = |a: VirtAddr| looks_like_kernel_pointer(self.arch(), a.0);
         let dtb = self.kernel_dtb();
         let mut out = Vec::new();
 
