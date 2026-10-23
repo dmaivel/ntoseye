@@ -1,6 +1,7 @@
 //! Attaching to a KD target over KDCOM or KDNET, and querying the identity
 //! (architecture, kernel page-table root, kernel base) a session builds on.
 
+use super::machine::machine;
 use std::collections::{HashMap, HashSet};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
@@ -20,7 +21,6 @@ use super::breakpoints::{
 use super::halt::HaltRegisters;
 use super::kdnet::KdNetStream;
 use super::memory::{KD_REMOTE_MEMORY_CHUNK, LineCache};
-use super::registers::ARM64_WINDBG_TTBR1_EL1;
 use super::transport::KdTransport;
 use super::{
     DBG_KD_EXCEPTION_STATE_CHANGE, DEBUG_LOG_CAPACITY, KD_REQUEST_TIMEOUT, KdBackend,
@@ -245,17 +245,7 @@ impl KdBackend {
         let version = with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
             api::get_version(framing, processor)
         })?;
-        let register_value = match self.arch {
-            Arch::Amd64 => {
-                let special = self.read_special_registers_uncached(processor)?;
-                self.arch.special_register_map().read_u64("cr3", &special)?
-            }
-            Arch::Arm64 => {
-                with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
-                    api::read_machine_specific_register(framing, processor, ARM64_WINDBG_TTBR1_EL1)
-                })?
-            }
-        };
+        let register_value = machine(self.arch).kernel_root(self, processor)?;
         let kernel_dtb = normalize_kernel_dtb(self.arch, register_value);
         if kernel_dtb == 0 || version.kern_base == 0 || version.ps_loaded_module_list == 0 {
             return Err(Error::Kd(format!(

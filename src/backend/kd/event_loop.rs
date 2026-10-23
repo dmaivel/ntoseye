@@ -1,3 +1,4 @@
+use super::machine::machine;
 use std::collections::HashSet;
 use std::env::VarError;
 use std::io::ErrorKind;
@@ -20,7 +21,6 @@ use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
 
 use super::breakpoints::breakpoint_instruction_at;
-use super::registers::CONTROL_SPACE_KSPECIAL;
 use super::{
     BugcheckCapture, CONTROL_REPORT_OFFSET, ControlReport, DBG_KD_COMMAND_STRING_STATE_CHANGE,
     DBG_KD_EXCEPTION_STATE_CHANGE, DBG_KD_LOAD_SYMBOLS_STATE_CHANGE, KD_INITIAL_PROBE_TIMEOUT,
@@ -249,13 +249,12 @@ pub fn poll_for_initial_break(
         }
         attempts += 1;
 
-        // Initial handshake: surface whatever state-change arrives first
-        // The architecture is not known yet; the handshake filter guarantees
-        // this path never sends an architecture-specific continue request.
+        // Initial handshake: surface whatever state-change arrives first,
+        // before the architecture is known.
         match await_state_change(
             framing,
             AwaitStateOptions {
-                arch: Arch::Amd64,
+                arch: None,
                 saw_kd_refresh: None,
                 filter: StateChangeFilter::Handshake,
                 bugcheck: None,
@@ -324,7 +323,7 @@ pub fn breakin_and_wait(
     match await_state_change(
         framing,
         AwaitStateOptions {
-            arch,
+            arch: Some(arch),
             saw_kd_refresh: None,
             filter: StateChangeFilter::Runtime,
             bugcheck: None,
@@ -420,37 +419,7 @@ pub fn continue_transparent_state_change(
     framing
         .transport_mut()
         .set_read_timeout(Some(KD_REQUEST_TIMEOUT))?;
-    match arch {
-        Arch::Amd64 => continue_preserving_dr7(framing, stop.processor, api::DBG_CONTINUE, false),
-        Arch::Arm64 => api::continue_api2_arm64(framing, stop.processor, api::DBG_CONTINUE, false),
-    }
-}
-
-/// Read `KernelDr7` from the processor's `KSPECIAL_REGISTERS` and continue
-/// with it preserved, so existing data watchpoints keep firing across a
-/// transparent state change. The pump holds only the framing (no backend
-/// cache), hence the extra wire read; `KdBackend::continue_preserving_dr7`
-/// is the cached equivalent.
-fn continue_preserving_dr7(
-    framing: &mut KdFraming<KdTransport>,
-    processor: u16,
-    continue_status: u32,
-    trace: bool,
-) -> Result<()> {
-    let special_map = Arch::Amd64.special_register_map();
-    let special = api::read_control_space(
-        framing,
-        processor,
-        CONTROL_SPACE_KSPECIAL,
-        special_map.extent() as u32,
-    )?;
-    let dr7 = special_map.read_u64("dr7", &special).map_err(|_| {
-        Error::Kd(format!(
-            "KSPECIAL_REGISTERS buffer too short for KernelDr7: {} bytes",
-            special.len()
-        ))
-    })?;
-    api::continue_api2(framing, processor, continue_status, trace, dr7)
+    machine(arch).resume_from_pump(framing, stop.processor, api::DBG_CONTINUE)
 }
 
 /// Which state-changes [`await_state_change`] hands back to its caller.
@@ -465,7 +434,9 @@ pub enum StateChangeFilter {
 }
 
 pub struct AwaitStateOptions<'a> {
-    pub arch: Arch,
+    /// The target's architecture; unknown during the handshake, which
+    /// continues nothing.
+    pub arch: Option<Arch>,
     pub saw_kd_refresh: Option<&'a mut bool>,
     pub filter: StateChangeFilter,
     pub bugcheck: Option<&'a mut bool>,
@@ -558,6 +529,14 @@ pub fn await_state_change(
                     stop.new_state,
                     stop.program_counter
                 );
+                // The handshake surfaces every state change, so only a
+                // session that knows its architecture continues one here.
+                let arch = arch.ok_or_else(|| {
+                    Error::Kd(
+                        "a state change to continue arrived before the architecture was known"
+                            .into(),
+                    )
+                })?;
                 continue_transparent_state_change(framing, arch, &stop)?;
             }
             PACKET_TYPE_KD_DEBUG_IO => {
@@ -860,7 +839,7 @@ pub fn run_pump(
         match await_state_change(
             &mut framing,
             AwaitStateOptions {
-                arch,
+                arch: Some(arch),
                 saw_kd_refresh: None,
                 filter: StateChangeFilter::Runtime,
                 bugcheck: Some(&mut bugcheck),

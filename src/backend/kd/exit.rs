@@ -36,7 +36,7 @@ impl KdBackend {
     fn continue_stopped_for_exit(&mut self) -> Result<()> {
         let processor = self.last_stop_processor;
         self.skip_hardcoded_breakpoint(processor)?;
-        self.continue_preserving_dr7(processor, api::DBG_CONTINUE, false)?;
+        self.resume_processor(processor, api::DBG_CONTINUE, false)?;
         self.record_running();
         Ok(())
     }

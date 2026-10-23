@@ -1,12 +1,13 @@
 //! Run control: resuming, stepping and interrupting the target, and
 //! recording and classifying the stops it reports.
 
+use super::machine::machine;
 use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use crate::arch::{Arch, Family, RegisterMap};
+use crate::arch::{Family, RegisterMap};
 use crate::backend::dbg_backend::{ContinueDisposition, ModuleEvent, StopEvent};
 use crate::base::error::{Error, Result};
 
@@ -14,7 +15,7 @@ use super::breakpoints::{
     breakpoint_instruction_at, reclaimed_breakpoints_notice, restore_unowned_breakpoint_handles,
 };
 use super::{
-    AwaitStateOptions, ContinueDrain, ControlReport, DBG_KD_EXCEPTION_STATE_CHANGE,
+    AwaitStateOptions, ContinueDrain, DBG_KD_EXCEPTION_STATE_CHANGE,
     DBG_KD_LOAD_SYMBOLS_STATE_CHANGE, KD_REQUEST_TIMEOUT, KdBackend, Link, STATUS_BREAKPOINT,
     StateChange, StateChangeFilter, advance_pc_past_breakpoint, api, await_state_change,
     blocking_read_timeout, breakin_and_wait, read_program_counter, thread_id_for,
@@ -253,44 +254,10 @@ impl KdBackend {
         )
     }
 
-    pub(super) fn continue_preserving_dr7(
-        &mut self,
-        processor: u16,
-        status: u32,
-        trace: bool,
-    ) -> Result<()> {
-        match self.arch {
-            Arch::Amd64 => {
-                // The stop reported DR7, so a resume that read no special
-                // registers needs none: only a host write can have changed
-                // it, and that drops the report along with the rest of the
-                // processor's halt state.
-                let reported_dr7 = self
-                    .registers
-                    .report(processor)
-                    .and_then(ControlReport::amd64_dr7);
-                if reported_dr7.is_none() && self.registers.special(processor).is_none() {
-                    let special = self.read_special_registers_uncached(processor)?;
-                    self.registers.set_special(processor, special);
-                }
-                let dr7 = match self.registers.special(processor) {
-                    // A `ba` installed during this halt wrote the cache; it
-                    // is newer than the report.
-                    Some(special) => self.arch.special_register_map().read_u64("dr7", special)?,
-                    None => reported_dr7.expect("read the registers when no report offered DR7"),
-                };
-                with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
-                    api::continue_api2(framing, processor, status, trace, dr7)
-                })
-            }
-            Arch::Arm64 => {
-                // ARM64_DBGKD_CONTROL_SET has no Dr7 field; the kernel
-                // single-steps via MDSCR when TraceFlag is set.
-                with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
-                    api::continue_api2_arm64(framing, processor, status, trace)
-                })
-            }
-        }
+    /// Continue `processor` with `status`, single-stepping when `trace`,
+    /// with the hardware breakpoints the halt set kept.
+    pub fn resume_processor(&mut self, processor: u16, status: u32, trace: bool) -> Result<()> {
+        machine(self.arch).resume(self, processor, status, trace)
     }
 
     pub(super) fn request_reboot(&mut self) -> Result<()> {
@@ -341,7 +308,7 @@ impl KdBackend {
             "kd: continue: sending ContinueApi2 on p{}",
             resume_processor + 1
         );
-        self.continue_preserving_dr7(
+        self.resume_processor(
             resume_processor,
             api::status_for_disposition(disposition),
             false,
@@ -377,7 +344,7 @@ impl KdBackend {
         // only execute it again and report the same stop.
         self.skip_hardcoded_breakpoint(owner)?;
         if processor == owner {
-            self.continue_preserving_dr7(processor, api::DBG_CONTINUE, true)?;
+            self.resume_processor(processor, api::DBG_CONTINUE, true)?;
         } else {
             self.step_other_processor(processor, owner)?;
         }
@@ -404,9 +371,9 @@ impl KdBackend {
             api::switch_processor(framing, processor)
         })?;
         self.adopt_report_from(processor)?;
-        self.continue_preserving_dr7(processor, api::DBG_CONTINUE, true)?;
+        self.resume_processor(processor, api::DBG_CONTINUE, true)?;
         self.adopt_report_from(owner)?;
-        self.continue_preserving_dr7(owner, api::DBG_CONTINUE, false)
+        self.resume_processor(owner, api::DBG_CONTINUE, false)
     }
 
     /// Run `request` with `processor` holding the target. The target runs
@@ -465,7 +432,7 @@ impl KdBackend {
             await_state_change(
                 framing,
                 AwaitStateOptions {
-                    arch,
+                    arch: Some(arch),
                     saw_kd_refresh: None,
                     filter: StateChangeFilter::Runtime,
                     bugcheck: None,
@@ -532,7 +499,7 @@ impl KdBackend {
         let stop = await_state_change(
             self.framing()?,
             AwaitStateOptions {
-                arch,
+                arch: Some(arch),
                 saw_kd_refresh: None,
                 filter: StateChangeFilter::Runtime,
                 bugcheck: None,
@@ -574,7 +541,7 @@ impl KdBackend {
         let result = await_state_change(
             self.framing()?,
             AwaitStateOptions {
-                arch,
+                arch: Some(arch),
                 saw_kd_refresh: Some(&mut saw_kd_refresh),
                 filter: StateChangeFilter::Runtime,
                 bugcheck: None,

@@ -792,7 +792,7 @@ fn await_refresh_sets_flag_without_breakin() {
         let stop = await_state_change(
             &mut framing,
             AwaitStateOptions {
-                arch: Arch::Amd64,
+                arch: Some(Arch::Amd64),
                 saw_kd_refresh: Some(&mut saw_refresh),
                 filter: StateChangeFilter::Runtime,
                 bugcheck: None,
@@ -882,7 +882,7 @@ fn await_bugcheck_aware(prints: &[&[u8]], pc: u64) -> StateChange {
         await_state_change(
             &mut framing,
             AwaitStateOptions {
-                arch: Arch::Amd64,
+                arch: Some(Arch::Amd64),
                 saw_kd_refresh: None,
                 filter: StateChangeFilter::Runtime,
                 bugcheck: Some(&mut bugcheck),

@@ -52,7 +52,9 @@ pub fn trace_bytes_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("NTOSEYE_KD_TRACE_BYTES").is_some())
 }
 
+mod amd64;
 pub mod api;
+mod arm64;
 mod breakpoints;
 mod connect;
 mod exit;
@@ -61,6 +63,7 @@ mod halt;
 mod handles;
 mod hw_breakpoints;
 mod kdnet;
+mod machine;
 mod memory;
 mod pump;
 mod registers;
@@ -68,6 +71,7 @@ mod run;
 mod transport;
 use breakpoints::PendingWriteBreakpoint;
 use halt::HaltRegisters;
+use machine::machine;
 use memory::LineCache;
 use transport::KdTransport;
 
@@ -470,17 +474,8 @@ impl DebugBackend for KdBackend {
         self.read_register_context()
     }
 
-    /// KD reports TF and DR6 in every AMD64 state change, so an absorbed
-    /// breakpoint hit can decide it has no single-step residue to clear
-    /// without fetching a `CONTEXT` it would read two fields from.
     fn stop_trap_state(&mut self) -> Option<TrapState> {
-        match self.arch {
-            Arch::Amd64 => {}
-            Arch::Arm64 => return None,
-        }
-        self.registers
-            .report(self.current_processor)?
-            .amd64_trap_state()
+        machine(self.arch).stop_trap_state(self)
     }
 
     fn surface_next_break_at(&mut self, address: Option<u64>) {
@@ -499,12 +494,10 @@ impl DebugBackend for KdBackend {
         self.uninstall_breakpoint(addr)
     }
 
+    // Every architecture exposes per-processor debug state through KD's
+    // KSPECIAL_REGISTERS (DR0-DR7 on AMD64; BVR/BCR and WVR/WCR on ARM64).
     fn supports_watchpoints(&self) -> bool {
-        // Both architectures expose per-processor debug state through KD
-        // KSPECIAL_REGISTERS (DR0-DR7 on AMD64; BVR/BCR and WVR/WCR on ARM64).
-        match self.arch {
-            Arch::Amd64 | Arch::Arm64 => true,
-        }
+        true
     }
 
     fn hardware_breakpoint_slots(&self) -> usize {
@@ -529,11 +522,9 @@ impl DebugBackend for KdBackend {
         self.clear_hardware_slot(slot)
     }
 
+    // GuestMemoryPatch writes the architecture's breakpoint instruction.
     fn supports_user_mode_breakpoints(&self) -> bool {
-        // GuestMemoryPatch emits `int3` on AMD64 and `brk #0xF000` on ARM64.
-        match self.arch {
-            Arch::Amd64 | Arch::Arm64 => true,
-        }
+        true
     }
 
     fn supports_msr(&self) -> bool {
