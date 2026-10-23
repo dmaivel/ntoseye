@@ -8,10 +8,9 @@ use std::ops::Range;
 use super::amd64::{DynamicCode, EntryLookup, RuntimeFunction};
 use super::{FrameRegisters, StackTracer, Unwinder, Unwound, runtime_functions};
 use crate::arch::arm64::unwind::{
-    FP, LR, Program, RUNTIME_FUNCTION_SIZE, Resume, call_return_address, describe_arm64_unwind,
-    read_program, strip_pac,
+    FP, LR, RUNTIME_FUNCTION_SIZE, Resume, UnwindData, call_return_address, describe_arm64_unwind,
+    function_length, runtime_function_at, strip_pac,
 };
-use crate::base::bytes::get_u32;
 use crate::{
     arch::{Arch, arm64::VOLATILE_REGISTERS},
     base::{
@@ -48,13 +47,7 @@ pub fn lookup_arm64_runtime_function(
     pdata: Range<usize>,
     rva: u32,
 ) -> Arm64Lookup {
-    let entry = |index: usize| {
-        let bytes = image.read(
-            pdata.start + index * RUNTIME_FUNCTION_SIZE,
-            RUNTIME_FUNCTION_SIZE,
-        )?;
-        Some((get_u32(&bytes, 0)?, get_u32(&bytes, 4)?))
-    };
+    let entry = |index: usize| runtime_function_at(image, pdata.start, index);
     let mut low = 0usize;
     let mut high = pdata.len() / RUNTIME_FUNCTION_SIZE;
     while low < high {
@@ -75,16 +68,11 @@ pub fn lookup_arm64_runtime_function(
     let Some((begin, unwind_data)) = entry(index) else {
         return Arm64Lookup::Unreadable;
     };
-    let instructions = match unwind_data & 0b11 {
-        0 => match image.read((unwind_data & !0b11) as usize, 4) {
-            Some(header) => get_u32(&header, 0).map_or(0, |header| header & 0x3ffff),
-            None => return Arm64Lookup::Unreadable,
-        },
-        1 | 2 => (unwind_data >> 2) & 0x7ff,
-        _ => 0,
+    let Some(length) = function_length(image, unwind_data) else {
+        return Arm64Lookup::Unreadable;
     };
-    match begin.checked_add(instructions * 4) {
-        Some(end) if instructions != 0 && rva < end => Arm64Lookup::Found(Arm64Function {
+    match begin.checked_add(length) {
+        Some(end) if length != 0 && rva < end => Arm64Lookup::Found(Arm64Function {
             begin,
             end,
             unwind_data,
@@ -136,7 +124,7 @@ enum Resolve {
     Function {
         base: u64,
         function: Arm64Function,
-        program: Program,
+        unwind: UnwindData,
     },
     /// The lookup or the unwind data lies in a paged-out hole.
     Holed,
@@ -150,11 +138,11 @@ fn resolve_in(image: &PeImage, layout: Option<&CodeLayout>, base: u64, pc: u64) 
         return Resolve::Leaf;
     };
     match lookup_arm64_runtime_function(image, pdata, rva) {
-        Arm64Lookup::Found(function) => match read_program(image, function.unwind_data) {
-            Some(program) => Resolve::Function {
+        Arm64Lookup::Found(function) => match UnwindData::read(image, function.unwind_data) {
+            Some(unwind) => Resolve::Function {
                 base,
                 function,
-                program,
+                unwind,
             },
             None => Resolve::Holed,
         },
@@ -255,15 +243,15 @@ impl StackTracer<'_> {
             memory: &self.memory,
             base,
         };
-        match read_program(&code, function.unwind_data) {
-            Some(program) => Resolve::Function {
+        match UnwindData::read(&code, function.unwind_data) {
+            Some(unwind) => Resolve::Function {
                 base,
                 function: Arm64Function {
                     begin: function.begin,
                     end: function.end,
                     unwind_data: function.unwind_data,
                 },
-                program,
+                unwind,
             },
             None => Resolve::Holed,
         }
@@ -295,7 +283,7 @@ impl StackTracer<'_> {
             Resolve::Function {
                 base,
                 function,
-                program,
+                unwind,
             } => {
                 let offset = (pc - base) as u32 - function.begin;
                 unwind_trace!(
@@ -304,7 +292,7 @@ impl StackTracer<'_> {
                     base + u64::from(function.end),
                     offset
                 );
-                match program.unwind(offset / 4, context, &*self) {
+                match unwind.step(offset, context, &*self) {
                     Some(resume) => resume,
                     None => {
                         unwind_trace!("unwind: unreadable stack or unsupported code -> stop");
@@ -377,7 +365,7 @@ impl StackTracer<'_> {
     pub fn frame_base_for_arm64(&mut self, context: &FrameRegisters) -> Option<u64> {
         let fallback = (context.sp != 0).then_some(context.sp);
         match self.resolve_arm64(Self::arm64_lookup_pc(context)) {
-            Resolve::Function { program, .. } if program.sets_frame_pointer() => {
+            Resolve::Function { unwind, .. } if unwind.sets_frame_pointer() => {
                 context.regs[FP].or(fallback)
             }
             _ => fallback,
@@ -385,10 +373,10 @@ impl StackTracer<'_> {
     }
 
     /// x29 in the body of the function containing `address` when sp there
-    /// is `sp`; see [`Program::frame_pointer_at_body`].
+    /// is `sp`; see [`UnwindData::frame_pointer_at_body`].
     pub fn frame_pointer_at_body_arm64(&mut self, address: u64, sp: u64) -> Option<u64> {
         match self.resolve_arm64(address) {
-            Resolve::Function { program, .. } => program.frame_pointer_at_body(sp),
+            Resolve::Function { unwind, .. } => unwind.frame_pointer_at_body(sp),
             Resolve::Leaf | Resolve::Holed => None,
         }
     }

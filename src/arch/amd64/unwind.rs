@@ -45,7 +45,7 @@ pub fn runtime_function_at(
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct UnwindCodeSlot {
+struct UnwindCodeSlot {
     code_offset: u8,
     unwind_op: u8,
     op_info: u8,
@@ -53,17 +53,17 @@ pub struct UnwindCodeSlot {
 }
 
 #[derive(Debug, Clone)]
-pub struct ParsedUnwindInfo {
-    pub version_flags: u8,
-    pub size_of_prolog: u8,
-    pub frame_register: u8,
-    pub frame_offset: u8,
-    pub codes: Vec<UnwindCodeSlot>,
+pub struct UnwindInfo {
+    version_flags: u8,
+    size_of_prolog: u8,
+    frame_register: u8,
+    frame_offset: u8,
+    codes: Vec<UnwindCodeSlot>,
     /// Image offset past the code array, where a handler or parent entry is
-    pub tail_offset: usize,
+    tail_offset: usize,
     /// Present when this is a chained entry (`UNW_FLAG_CHAININFO`): the parent
     /// RUNTIME_FUNCTION, whose unwind data the walk follows
-    pub parent: Option<RUNTIME_FUNCTION>,
+    parent: Option<RUNTIME_FUNCTION>,
 }
 
 /// Outcome of applying one frame's unwind codes
@@ -74,47 +74,72 @@ enum UnwindStep {
     MachineFrame,
 }
 
-pub fn parse_unwind_info(image: &impl UnwindBytes, unwind_rva: u32) -> Option<ParsedUnwindInfo> {
-    // every read goes through `UnwindBytes::read`, so unwind data that lands in a
-    // paged-out hole returns None (fall back to scan) rather than being parsed as
-    // zeros and fabricating a frame
-    let offset = unwind_rva as usize;
-    let header = image.read(offset, 4)?;
-    let version_flags = header[0];
-    let count_of_codes = header[2] as usize;
-    let frame_register_offset = header[3];
+impl UnwindInfo {
+    /// The `UNWIND_INFO` at `unwind_rva` in `image`. `None` when any of it
+    /// cannot be read or its codes are malformed.
+    pub fn read(image: &impl UnwindBytes, unwind_rva: u32) -> Option<Self> {
+        // every read goes through `UnwindBytes::read`, so unwind data that lands in a
+        // paged-out hole returns None (fall back to scan) rather than being parsed as
+        // zeros and fabricating a frame
+        let offset = unwind_rva as usize;
+        let header = image.read(offset, 4)?;
+        let version_flags = header[0];
+        let count_of_codes = header[2] as usize;
+        let frame_register_offset = header[3];
 
-    let codes_offset = offset + 4;
-    let codes_bytes = image.read(codes_offset, count_of_codes.checked_mul(2)?)?;
+        let codes_offset = offset + 4;
+        let codes_bytes = image.read(codes_offset, count_of_codes.checked_mul(2)?)?;
 
-    let aligned_code_count = (count_of_codes + 1) & !1;
-    let tail_offset = offset + 4 + aligned_code_count * 2;
-    let parent = if (version_flags >> 3) & UNW_FLAG_CHAININFO != 0 {
-        // a chained entry is followed by the parent RUNTIME_FUNCTION
-        Some(runtime_function_at(image, tail_offset, 0)?)
-    } else {
-        None
-    };
+        let aligned_code_count = (count_of_codes + 1) & !1;
+        let tail_offset = offset + 4 + aligned_code_count * 2;
+        let parent = if (version_flags >> 3) & UNW_FLAG_CHAININFO != 0 {
+            // a chained entry is followed by the parent RUNTIME_FUNCTION
+            Some(runtime_function_at(image, tail_offset, 0)?)
+        } else {
+            None
+        };
 
-    let mut codes = Vec::with_capacity(count_of_codes);
-    for raw in codes_bytes.as_chunks::<2>().0 {
-        codes.push(UnwindCodeSlot {
-            code_offset: raw[0],
-            unwind_op: raw[1] & 0x0f,
-            op_info: raw[1] >> 4,
-            raw_op_info: raw[1],
-        });
+        let mut codes = Vec::with_capacity(count_of_codes);
+        for raw in codes_bytes.as_chunks::<2>().0 {
+            codes.push(UnwindCodeSlot {
+                code_offset: raw[0],
+                unwind_op: raw[1] & 0x0f,
+                op_info: raw[1] >> 4,
+                raw_op_info: raw[1],
+            });
+        }
+
+        Some(UnwindInfo {
+            version_flags,
+            size_of_prolog: header[1],
+            frame_register: frame_register_offset & 0x0f,
+            frame_offset: frame_register_offset >> 4,
+            codes,
+            tail_offset,
+            parent,
+        })
     }
 
-    Some(ParsedUnwindInfo {
-        version_flags,
-        size_of_prolog: header[1],
-        frame_register: frame_register_offset & 0x0f,
-        frame_offset: frame_register_offset >> 4,
-        codes,
-        tail_offset,
-        parent,
-    })
+    /// The length of the function's prolog, in bytes.
+    pub fn prolog_size(&self) -> u32 {
+        u32::from(self.size_of_prolog)
+    }
+
+    /// The entry this one is chained to (`UNW_FLAG_CHAININFO`), whose
+    /// unwind data applies after this one's.
+    pub fn parent(&self) -> Option<RUNTIME_FUNCTION> {
+        self.parent
+    }
+
+    /// The value of the register the function's frame is addressed by: its
+    /// frame register, or RSP when it has none.
+    pub fn frame_register_value(&self, context: &FrameRegisters) -> Option<u64> {
+        if self.frame_register == 0 {
+            Some(context.sp)
+        } else {
+            context.get(self.frame_register)
+        }
+    }
 }
 
 fn unwind_slot_count(unwind_op: u8, op_info: u8) -> usize {
@@ -159,7 +184,7 @@ pub fn unwind_by_codes(
     let mut primary = true;
 
     for _ in 0..MAX_CHAIN_DEPTH {
-        let Some(unwind_info) = parse_unwind_info(image, unwind_data) else {
+        let Some(unwind_info) = UnwindInfo::read(image, unwind_data) else {
             unwind_trace!(
                 "unwind: parse_unwind_info failed/holed at unwind_data={unwind_data:#x} -> stop"
             );
@@ -179,12 +204,12 @@ pub fn unwind_by_codes(
         let in_prolog = primary && rip_offset < unwind_info.size_of_prolog as u32;
         if primary
             && !in_prolog
-            && let Some(epilog) = image
+            && let Some(unwound) = image
                 .read(rva as usize, 32)
                 .or_else(|| image.read(rva as usize, 16))
-                .and_then(|code| decode_epilog(&code, rva, begin..end))
+                .and_then(|code| unwind_if_epilog(memory, context, &code, rva, begin..end))
         {
-            return unwind_epilog(memory, context, &epilog);
+            return unwound;
         }
         match apply_unwind_codes(memory, context, &unwind_info, in_prolog, rip_offset) {
             Some(UnwindStep::Continue) => {}
@@ -238,7 +263,7 @@ pub fn unwind_by_codes(
 fn apply_unwind_codes(
     memory: &impl FrameMemory,
     context: &mut FrameRegisters,
-    unwind_info: &ParsedUnwindInfo,
+    unwind_info: &UnwindInfo,
     in_prolog: bool,
     rip_offset: u32,
 ) -> Option<UnwindStep> {
@@ -270,7 +295,7 @@ fn apply_unwind_code(
     memory: &impl FrameMemory,
     context: &mut FrameRegisters,
     original_context: &FrameRegisters,
-    unwind_info: &ParsedUnwindInfo,
+    unwind_info: &UnwindInfo,
     index: usize,
 ) -> Option<UnwindStep> {
     let slot = unwind_info.codes[index];
@@ -357,7 +382,7 @@ fn apply_unwind_code(
     Some(UnwindStep::Continue)
 }
 
-fn frame_base(context: &FrameRegisters, unwind_info: &ParsedUnwindInfo) -> Option<u64> {
+fn frame_base(context: &FrameRegisters, unwind_info: &UnwindInfo) -> Option<u64> {
     if unwind_info.frame_register == 0 {
         return Some(context.sp);
     }
@@ -366,19 +391,9 @@ fn frame_base(context: &FrameRegisters, unwind_info: &ParsedUnwindInfo) -> Optio
     frame_register.checked_sub(u64::from(unwind_info.frame_offset) * 16)
 }
 
-/// The value of the register a function's frame is addressed by: its frame
-/// register, or RSP when it has none.
-pub fn frame_register_value(context: &FrameRegisters, info: &ParsedUnwindInfo) -> Option<u64> {
-    if info.frame_register == 0 {
-        Some(context.sp)
-    } else {
-        context.get(info.frame_register)
-    }
-}
-
 /// How an epilog starts to release the frame before its pops.
 #[derive(Debug, PartialEq, Eq)]
-pub enum EpilogRelease {
+enum EpilogRelease {
     /// Already at the pops (or the return).
     None,
     /// `add rsp, imm`.
@@ -394,13 +409,13 @@ pub enum EpilogRelease {
 /// what they would undo again; the unwinder runs the remaining epilog
 /// instead, as `RtlVirtualUnwind` does.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Epilog {
+struct Epilog {
     release: EpilogRelease,
     /// Registers popped, in order, by unwind register number.
     pops: Vec<usize>,
 }
 
-pub fn decode_epilog(code: &[u8], code_rva: u32, function: Range<u32>) -> Option<Epilog> {
+fn decode_epilog(code: &[u8], code_rva: u32, function: Range<u32>) -> Option<Epilog> {
     let mut at = 0usize;
     let release = match code {
         [0x48, 0x83, 0xc4, imm, ..] => {
@@ -468,9 +483,23 @@ pub fn decode_epilog(code: &[u8], code_rva: u32, function: Range<u32>) -> Option
     }
 }
 
+/// If the code at `rva` (`code`, its bytes from there) is an epilog of
+/// `function`, run the rest of it against `context`, stepping to the
+/// caller; `None` when it is not one.
+pub fn unwind_if_epilog(
+    memory: &impl FrameMemory,
+    context: &mut FrameRegisters,
+    code: &[u8],
+    rva: u32,
+    function: Range<u32>,
+) -> Option<Unwound> {
+    let epilog = decode_epilog(code, rva, function)?;
+    Some(unwind_epilog(memory, context, &epilog))
+}
+
 /// Run the remainder of `epilog` against `context`: release the frame,
 /// restore the popped registers, and return to the caller.
-pub fn unwind_epilog(
+fn unwind_epilog(
     memory: &impl FrameMemory,
     context: &mut FrameRegisters,
     epilog: &Epilog,
@@ -564,7 +593,7 @@ pub fn describe_unwind_info(
     base: u64,
     symbol: impl Fn(u64) -> String,
 ) -> Option<(Amd64UnwindInfo, Option<RUNTIME_FUNCTION>)> {
-    let parsed = parse_unwind_info(image, rva)?;
+    let parsed = UnwindInfo::read(image, rva)?;
     let flags = parsed.version_flags >> 3;
     let tail_offset = parsed.tail_offset;
     let mut size = tail_offset - rva as usize;
@@ -774,7 +803,7 @@ mod tests {
             0x00, 0x11, 0x00, 0x00, // EndAddress   = 0x1100
             0x00, 0x20, 0x00, 0x00, // UnwindData   = 0x2000
         ];
-        let info = parse_unwind_info(&Bytes(&blob), 0).expect("unwind info parses");
+        let info = UnwindInfo::read(&Bytes(&blob), 0).expect("unwind info parses");
         let parent = info.parent.expect("chained parent");
         assert_eq!(
             (parent.BeginAddress, parent.EndAddress, parent.UnwindData),
@@ -786,7 +815,7 @@ mod tests {
     fn parse_unwind_info_without_chain_flag_has_no_parent() {
         // version 1, no flags, no codes
         let blob = [0x01, 0x00, 0x00, 0x00];
-        let info = parse_unwind_info(&Bytes(&blob), 0).expect("unwind info parses");
+        let info = UnwindInfo::read(&Bytes(&blob), 0).expect("unwind info parses");
         assert!(info.parent.is_none());
     }
 
@@ -805,7 +834,7 @@ mod tests {
     fn frame_base_uses_frame_register_when_present() {
         let mut context = FrameRegisters::new(Arch::Amd64, 0, 0x1800);
         context.regs[5] = Some(0x2000);
-        let unwind = ParsedUnwindInfo {
+        let unwind = UnwindInfo {
             version_flags: 1,
             size_of_prolog: 0,
             frame_register: 5,

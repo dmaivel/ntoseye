@@ -25,7 +25,7 @@ pub fn strip_pac(addr: u64) -> u64 {
 
 /// A function's unwind description, read out of the image.
 #[derive(Debug)]
-pub enum Program {
+enum Program {
     /// Packed `.pdata` data (flags 1 and 2): a canonical prolog and epilog
     /// described by the entry's fields.
     Packed(u32),
@@ -33,30 +33,105 @@ pub enum Program {
 }
 
 #[derive(Debug)]
-pub struct Xdata {
+struct Xdata {
     /// The first header word: length, version, and the X and E bits.
-    pub header: u32,
+    header: u32,
     /// Where the unwind codes end: the exception handler's RVA follows.
-    pub end: usize,
+    end: usize,
     /// Function length in instructions.
-    pub length: u32,
-    pub epilog_in_header: bool,
+    length: u32,
+    epilog_in_header: bool,
     /// With `epilog_in_header`, the index of the lone epilog's first unwind
     /// code; otherwise the number of epilog scopes.
-    pub epilog_count: u32,
+    epilog_count: u32,
     /// Epilog scopes: the start in instructions from the function's start
     /// in the low 18 bits, and the index of its first unwind code in the top
     /// 10 bits.
-    pub scopes: Vec<u32>,
-    pub codes: Vec<u8>,
+    scopes: Vec<u32>,
+    codes: Vec<u8>,
 }
 
-pub fn read_program(image: &impl UnwindBytes, unwind_data: u32) -> Option<Program> {
+fn read_program(image: &impl UnwindBytes, unwind_data: u32) -> Option<Program> {
     match unwind_data & 0b11 {
         0 => read_xdata(image, unwind_data as usize).map(Program::Full),
         1 | 2 => Some(Program::Packed(unwind_data)),
         _ => None,
     }
+}
+
+/// A function's ARM64 unwind data: the packed form a `.pdata` entry holds,
+/// or the `.xdata` record it points to.
+pub struct UnwindData(Program);
+
+impl UnwindData {
+    /// The unwind data a `.pdata` entry's `unwind_data` word gives: packed
+    /// data, or the RVA of an `.xdata` record in `image`. `None` when the
+    /// record cannot be read, or the word has a reserved form.
+    pub fn read(image: &impl UnwindBytes, unwind_data: u32) -> Option<Self> {
+        read_program(image, unwind_data).map(Self)
+    }
+
+    /// Step `context` toward the caller of a frame stopped `offset` bytes
+    /// into the function: undo the part of the prolog that has run, or
+    /// finish the part of an epilog that has not. `None` when the stack
+    /// cannot be read or a code is not supported.
+    pub fn step(
+        &self,
+        offset: u32,
+        context: &mut FrameRegisters,
+        memory: &impl FrameMemory,
+    ) -> Option<Resume> {
+        self.0.unwind(offset / 4, context, memory)
+    }
+
+    /// Whether the prolog makes x29 the frame pointer.
+    pub fn sets_frame_pointer(&self) -> bool {
+        self.0.sets_frame_pointer()
+    }
+
+    /// x29 in the function's body when sp there is `sp`; `None` when the
+    /// prolog does not set x29.
+    pub fn frame_pointer_at_body(&self, sp: u64) -> Option<u64> {
+        self.0.frame_pointer_at_body(sp)
+    }
+}
+
+/// Entry `index` of the ARM64 exception directory at `pdata`: the
+/// function's begin RVA and its unwind-data word. `None` when it cannot be
+/// read.
+pub fn runtime_function_at(
+    image: &impl UnwindBytes,
+    pdata: usize,
+    index: usize,
+) -> Option<(u32, u32)> {
+    let bytes = image.read(pdata + index * RUNTIME_FUNCTION_SIZE, RUNTIME_FUNCTION_SIZE)?;
+    Some((get_u32(&bytes, 0)?, get_u32(&bytes, 4)?))
+}
+
+/// The length in bytes of the function whose `.pdata` entry holds
+/// `unwind_data`: from the packed data, or the header of the `.xdata`
+/// record. `None` when that header cannot be read; 0 when the word gives no
+/// length.
+pub fn function_length(image: &impl UnwindBytes, unwind_data: u32) -> Option<u32> {
+    let instructions = match unwind_data & 0b11 {
+        0 => {
+            let header = image.read((unwind_data & !0b11) as usize, 4)?;
+            get_u32(&header, 0).map_or(0, xdata_length)
+        }
+        1 | 2 => packed_length(unwind_data),
+        _ => 0,
+    };
+    Some(instructions * 4)
+}
+
+/// The function length, in instructions, of packed unwind data.
+fn packed_length(unwind_data: u32) -> u32 {
+    (unwind_data >> 2) & 0x7ff
+}
+
+/// The function length, in instructions, an `.xdata` header gives.
+fn xdata_length(header: u32) -> u32 {
+    header & 0x3ffff
 }
 
 fn read_xdata(image: &impl UnwindBytes, at: usize) -> Option<Xdata> {
@@ -86,7 +161,7 @@ fn read_xdata(image: &impl UnwindBytes, at: usize) -> Option<Xdata> {
     Some(Xdata {
         header,
         end: next + codes.len(),
-        length: header & 0x3ffff,
+        length: xdata_length(header),
         epilog_in_header,
         epilog_count,
         scopes,
@@ -120,7 +195,7 @@ impl Packed {
     fn new(unwind_data: u32) -> Self {
         Self {
             flag: unwind_data & 0b11,
-            length: (unwind_data >> 2) & 0x7ff,
+            length: packed_length(unwind_data),
             reg_f: (unwind_data >> 13) & 0b111,
             reg_i: (unwind_data >> 16) & 0xf,
             homes_arguments: (unwind_data >> 20) & 1 != 0,
@@ -246,7 +321,7 @@ impl Program {
     /// Undo the part of the function's prolog that has run, or finish the
     /// part of its epilog that has not, for a frame stopped `offset`
     /// instructions into the function.
-    pub fn unwind(
+    fn unwind(
         &self,
         offset: u32,
         context: &mut FrameRegisters,
@@ -315,7 +390,7 @@ impl Program {
     }
 
     /// Whether the prolog makes x29 the frame pointer.
-    pub fn sets_frame_pointer(&self) -> bool {
+    fn sets_frame_pointer(&self) -> bool {
         match self {
             Program::Packed(unwind_data) => matches!(Packed::new(*unwind_data).cr, 2 | 3),
             Program::Full(xdata) => {
@@ -335,7 +410,7 @@ impl Program {
     /// x29 in the function's body when sp there is `sp` and the body has not
     /// moved sp: the prolog's allocations after it set x29 are undone to
     /// find the sp x29 was set from. `None` when the prolog does not set x29.
-    pub fn frame_pointer_at_body(&self, mut sp: u64) -> Option<u64> {
+    fn frame_pointer_at_body(&self, mut sp: u64) -> Option<u64> {
         let codes = match self {
             Program::Packed(unwind_data) => Packed::new(*unwind_data).codes()?.0,
             Program::Full(xdata) => xdata.codes.clone(),
@@ -755,7 +830,7 @@ pub fn describe_arm64_unwind(
 /// Each unwind code in `codes`, framed by its length, up to the `end` of
 /// the sequence starting at or after `last_sequence`: what follows it pads
 /// the code words.
-pub fn describe_arm64_codes(codes: &[u8], last_sequence: usize) -> Vec<Arm64UnwindCode> {
+fn describe_arm64_codes(codes: &[u8], last_sequence: usize) -> Vec<Arm64UnwindCode> {
     let mut described = Vec::new();
     let mut at = 0;
     while let Some(&op) = codes.get(at) {

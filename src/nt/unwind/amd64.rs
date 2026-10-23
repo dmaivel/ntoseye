@@ -14,8 +14,8 @@ use crate::arch::Arch;
 use crate::arch::amd64::VOLATILE_REGISTERS;
 use crate::arch::amd64::prolog::{PROLOG_BYTES, analyze_prolog};
 use crate::arch::amd64::unwind::{
-    MAX_CHAIN_DEPTH, RUNTIME_FUNCTION_SIZE, decode_epilog, describe_unwind_info,
-    frame_register_value, parse_unwind_info, runtime_function_at, unwind_by_codes, unwind_epilog,
+    MAX_CHAIN_DEPTH, RUNTIME_FUNCTION_SIZE, UnwindInfo, describe_unwind_info, runtime_function_at,
+    unwind_by_codes, unwind_if_epilog,
 };
 use crate::arch::unwind::{Unwind, UnwindBytes};
 use crate::backend::phys::PhysMem;
@@ -60,8 +60,8 @@ impl StackTracer<'_> {
         else {
             return None;
         };
-        let unwind = parse_unwind_info(&*image, unwind_data)?;
-        let body = u64::from(begin) + u64::from(unwind.size_of_prolog);
+        let unwind = UnwindInfo::read(&*image, unwind_data)?;
+        let body = u64::from(begin) + u64::from(unwind.prolog_size());
         (body < u64::from(end)).then_some(base + body)
     }
 }
@@ -210,9 +210,9 @@ impl StackTracer<'_> {
         };
         if !context.after_call
             && let Some(code) = image.read(rva as usize, 16)
-            && let Some(epilog) = decode_epilog(&code, rva, function.clone())
+            && let Some(unwound) = unwind_if_epilog(&*self, context, &code, rva, function.clone())
         {
-            return match unwind_epilog(&*self, context, &epilog) {
+            return match unwound {
                 Unwound::Frame { .. } => Unwound::Prolog,
                 other => other,
             };
@@ -273,8 +273,8 @@ impl StackTracer<'_> {
                 memory: &self.memory,
                 base,
             };
-            return parse_unwind_info(&code, function.unwind_data)
-                .and_then(|info| frame_register_value(context, &info))
+            return UnwindInfo::read(&code, function.unwind_data)
+                .and_then(|info| info.frame_register_value(context))
                 .or(fallback);
         }
         let Some((_, image, Resolve::Function { unwind_data, .. })) =
@@ -282,8 +282,8 @@ impl StackTracer<'_> {
         else {
             return fallback;
         };
-        parse_unwind_info(&*image, unwind_data)
-            .and_then(|info| frame_register_value(context, &info))
+        UnwindInfo::read(&*image, unwind_data)
+            .and_then(|info| info.frame_register_value(context))
             .or(fallback)
     }
 
@@ -570,10 +570,10 @@ pub fn primary_function_begin(
         Resolve::Holed => return PrimaryLookup::Holed,
     };
     for _ in 0..=MAX_CHAIN_DEPTH {
-        let Some(parsed) = parse_unwind_info(image, unwind_data) else {
+        let Some(parsed) = UnwindInfo::read(image, unwind_data) else {
             return PrimaryLookup::Holed;
         };
-        match parsed.parent {
+        match parsed.parent() {
             Some(parent) => (begin, unwind_data) = (parent.BeginAddress, parent.UnwindData),
             None => return PrimaryLookup::Found(base_address + u64::from(begin)),
         }
