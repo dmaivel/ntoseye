@@ -2,7 +2,8 @@
 //! `_EX_WORK_QUEUE` per partition, NUMA node, and queue index: an
 //! `_EPARTITION`'s `ExPartition` is an `_EX_PARTITION` whose `WorkQueues`
 //! is an array (one per node, `KeNumberNodes` long) of arrays (one per
-//! `_EXQUEUEINDEX`, `ExPoolMax` long) of queue pointers. Each queue is a
+//! `_EXQUEUEINDEX`, `ExPoolMax` long) of queue pointers; newer builds flatten
+//! it into one array of queue pointers. Each queue is a
 //! `_KPRIQUEUE`: 32 priority lists of `_WORK_QUEUE_ITEM`s, the threads
 //! serving it linked through `_KTHREAD.QueueListEntry`.
 
@@ -275,116 +276,165 @@ impl Target {
                     continue;
                 }
             };
-            for node in 0..node_count {
-                let Ok(per_node) = memory.read_pointer(work_queues + node * pointer_size) else {
-                    detail.errors.push(format!(
-                        "_EX_PARTITION {:#x}: node {node}'s queue array is unreadable",
-                        ex_partition.0
-                    ));
-                    continue;
-                };
-                if per_node.is_zero() {
-                    continue;
+            let owned_by_partition = |queue: VirtAddr| {
+                types
+                    .struct_at("_EX_WORK_QUEUE", queue)
+                    .and_then(|work_queue| work_queue.read_pointer("Partition"))
+                    .is_ok_and(|owner| owner == ex_partition)
+            };
+            // Newer builds (Windows 11 26200 does) keep `WorkQueues` as
+            // one flat array of queue pointers instead of an array of
+            // per-node arrays: its first slot then holds a queue of this
+            // partition rather than a pointer array.
+            let flat = memory
+                .read_pointer(work_queues)
+                .is_ok_and(|first| !first.is_zero() && owned_by_partition(first));
+            // The queue slots to read: the NUMA node (when the array says
+            // it), the slot's index, and the slot's address.
+            let mut slots: Vec<(u64, u64, VirtAddr)> = Vec::new();
+            if flat {
+                for slot in 0..node_count * index_count {
+                    slots.push((slot / index_count, slot, work_queues + slot * pointer_size));
                 }
-                for index in 0..index_count {
-                    let Ok(queue) = memory.read_pointer(per_node + index * pointer_size) else {
+            } else {
+                for node in 0..node_count {
+                    let Ok(per_node) = memory.read_pointer(work_queues + node * pointer_size)
+                    else {
+                        detail.errors.push(format!(
+                            "_EX_PARTITION {:#x}: node {node}'s queue array is unreadable",
+                            ex_partition.0
+                        ));
                         continue;
                     };
-                    // ExpTryQueueWorkItem takes a slot with bit 0 set as no queue.
-                    if queue.is_zero() || queue.0 & 1 != 0 {
+                    if per_node.is_zero() {
                         continue;
                     }
-                    let work_queue = types.struct_at("_EX_WORK_QUEUE", queue)?.prefetch();
-                    match work_queue.read_pointer("Partition") {
-                        Ok(owner) if owner == ex_partition => {}
-                        Ok(owner) => {
-                            detail.errors.push(format!(
-                                "{:#x} (node {node}, index {index}) is not a work queue of \
-                                 _EX_PARTITION {:#x}: its Partition is {:#x}",
-                                queue.0, ex_partition.0, owner.0
-                            ));
-                            continue;
-                        }
-                        Err(error) => {
-                            detail.errors.push(format!("queue {:#x}: {error}", queue.0));
-                            continue;
-                        }
+                    for index in 0..index_count {
+                        slots.push((node, index, per_node + index * pointer_size));
                     }
-                    let pri = work_queue.embedded("WorkPriQueue")?;
-                    let mut counts = [0i32; PRIORITY_COUNT];
-                    if let Ok(bytes) = pri.read_field_bytes("CurrentCount", PRIORITY_COUNT * 4) {
-                        for (slot, chunk) in counts.iter_mut().zip(bytes.as_chunks::<4>().0) {
-                            *slot = i32::from_le_bytes(*chunk);
-                        }
+                }
+            }
+            let mut mismatches: Vec<String> = Vec::new();
+            let mut found = false;
+            for (slot_node, index, slot) in slots {
+                let Ok(queue) = memory.read_pointer(slot) else {
+                    continue;
+                };
+                // ExpTryQueueWorkItem takes a slot with bit 0 set as no queue.
+                if queue.is_zero() || queue.0 & 1 != 0 {
+                    continue;
+                }
+                let work_queue = types.struct_at("_EX_WORK_QUEUE", queue)?.prefetch();
+                match work_queue.read_pointer("Partition") {
+                    Ok(owner) if owner == ex_partition => {}
+                    Ok(owner) => {
+                        mismatches.push(format!(
+                            "{:#x} (slot {index}) has Partition {:#x}",
+                            queue.0, owner.0
+                        ));
+                        continue;
                     }
-                    let mut pending = 0u64;
-                    let mut priorities = Vec::new();
-                    for (priority, &current_count) in counts.iter().enumerate() {
-                        let head = pri.addr() + entry_lists + priority as u64 * entry_size;
-                        let (work_items, termination) =
-                            walk_list_records(self, head, item_link, MAX_ITEMS_PER_PRIORITY);
-                        pending += work_items.len() as u64;
-                        let shown = priority_filter
-                            .as_ref()
-                            .is_none_or(|selected| selected.contains(&(priority as u8)));
-                        if !shown || (work_items.is_empty() && current_count == 0) {
-                            continue;
-                        }
-                        let shown_items = work_items
-                            .into_iter()
-                            .map(|item| work_item(types, item, io_item, io_work_item, &symbol))
-                            .collect();
-                        priorities.push(WorkQueuePriority {
-                            priority: priority as u8,
-                            queue_types: builtin
-                                .iter()
-                                .filter(|(_, p)| usize::from(*p) == priority)
-                                .map(|(name, _)| *name)
-                                .collect(),
-                            current_count,
-                            work_items: shown_items,
-                            termination,
-                        });
+                    Err(error) => {
+                        mismatches.push(format!("{:#x} (slot {index}): {error}", queue.0));
+                        continue;
                     }
-                    let (kthreads, threads_termination) = walk_list_records(
-                        self,
-                        pri.addr() + thread_list,
-                        queue_link,
-                        MAX_THREADS_PER_QUEUE,
-                    );
-                    let threads = kthreads
+                }
+                found = true;
+                // The queue's own _ENODE names its node, which the flat
+                // array's slot does not; fall back to the slot's node.
+                let node = work_queue
+                    .read_pointer("Node")
+                    .ok()
+                    .filter(|node| !node.is_zero())
+                    .and_then(|node| types.struct_at("_ENODE", node).ok())
+                    .and_then(|node| node.embedded("Ncb").ok())
+                    .and_then(|ncb| ncb.read_field::<u16>("NodeNumber").ok())
+                    .map_or(slot_node, u64::from);
+                let pri = work_queue.embedded("WorkPriQueue")?;
+                let mut counts = [0i32; PRIORITY_COUNT];
+                if let Ok(bytes) = pri.read_field_bytes("CurrentCount", PRIORITY_COUNT * 4) {
+                    for (slot, chunk) in counts.iter_mut().zip(bytes.as_chunks::<4>().0) {
+                        *slot = i32::from_le_bytes(*chunk);
+                    }
+                }
+                let mut pending = 0u64;
+                let mut priorities = Vec::new();
+                for (priority, &current_count) in counts.iter().enumerate() {
+                    let head = pri.addr() + entry_lists + priority as u64 * entry_size;
+                    let (work_items, termination) =
+                        walk_list_records(self, head, item_link, MAX_ITEMS_PER_PRIORITY);
+                    pending += work_items.len() as u64;
+                    let shown = priority_filter
+                        .as_ref()
+                        .is_none_or(|selected| selected.contains(&(priority as u8)));
+                    if !shown || (work_items.is_empty() && current_count == 0) {
+                        continue;
+                    }
+                    let shown_items = work_items
                         .into_iter()
-                        .map(|kthread| WorkerThread {
-                            kthread,
-                            thread: DiagnosticValue::from_result(
-                                self.thread_info_from_ethread(kthread - tcb),
-                            ),
-                            stack: None,
-                        })
+                        .map(|item| work_item(types, item, io_item, io_work_item, &symbol))
                         .collect();
-                    let queue_index: u32 = work_queue.read_field("QueueIndex")?;
-                    detail.queues.push(WorkQueue {
-                        address: queue,
-                        partition,
-                        node: node as u16,
-                        queue_index,
-                        queue_index_name: index_names
+                    priorities.push(WorkQueuePriority {
+                        priority: priority as u8,
+                        queue_types: builtin
                             .iter()
-                            .find(|(_, value)| *value == i64::from(queue_index))
-                            .map(|(name, _)| name.clone()),
-                        items_processed: work_queue.read_field("WorkItemsProcessed")?,
-                        items_processed_last_pass: work_queue
-                            .read_field("WorkItemsProcessedLastPass")?,
-                        thread_count: work_queue.read_field("ThreadCount")?,
-                        min_threads: work_queue.read_bits("MinThreads")?,
-                        max_threads: work_queue.read_field("MaxThreads")?,
-                        concurrency: pri.read_field("MaximumCount")?,
-                        pending,
-                        priorities,
-                        threads,
-                        threads_termination,
+                            .filter(|(_, p)| usize::from(*p) == priority)
+                            .map(|(name, _)| *name)
+                            .collect(),
+                        current_count,
+                        work_items: shown_items,
+                        termination,
                     });
                 }
+                let (kthreads, threads_termination) = walk_list_records(
+                    self,
+                    pri.addr() + thread_list,
+                    queue_link,
+                    MAX_THREADS_PER_QUEUE,
+                );
+                let threads = kthreads
+                    .into_iter()
+                    .map(|kthread| WorkerThread {
+                        kthread,
+                        thread: DiagnosticValue::from_result(
+                            self.thread_info_from_ethread(kthread - tcb),
+                        ),
+                        stack: None,
+                    })
+                    .collect();
+                let queue_index: u32 = work_queue.read_field("QueueIndex")?;
+                detail.queues.push(WorkQueue {
+                    address: queue,
+                    partition,
+                    node: node as u16,
+                    queue_index,
+                    queue_index_name: index_names
+                        .iter()
+                        .find(|(_, value)| *value == i64::from(queue_index))
+                        .map(|(name, _)| name.clone()),
+                    items_processed: work_queue.read_field("WorkItemsProcessed")?,
+                    items_processed_last_pass: work_queue
+                        .read_field("WorkItemsProcessedLastPass")?,
+                    thread_count: work_queue.read_field("ThreadCount")?,
+                    min_threads: work_queue.read_bits("MinThreads")?,
+                    max_threads: work_queue.read_field("MaxThreads")?,
+                    concurrency: pri.read_field("MaximumCount")?,
+                    pending,
+                    priorities,
+                    threads,
+                    threads_termination,
+                });
+            }
+            if !found && let Some(first) = mismatches.first() {
+                let more = match mismatches.len() - 1 {
+                    0 => String::new(),
+                    1 => " (and 1 more slot)".to_string(),
+                    count => format!(" (and {count} more slots)"),
+                };
+                detail.errors.push(format!(
+                    "no work queue of _EX_PARTITION {:#x} matched: {first}{more}",
+                    ex_partition.0
+                ));
             }
         }
         if detail.queues.is_empty() && !detail.errors.is_empty() {
