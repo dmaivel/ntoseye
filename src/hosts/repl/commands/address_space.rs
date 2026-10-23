@@ -600,7 +600,7 @@ fn print_user_address_report(report: &UserAddressReport, summary_only: bool) {
         }
         UserAddressReport::CapturedRanges { ranges } => {
             print_no_memory_info_list();
-            print_captured_ranges(ranges);
+            print_captured_ranges(ranges, summary_only);
         }
     }
 }
@@ -659,13 +659,16 @@ fn print_no_memory_info_list() {
 }
 
 /// The ranges a dump without a memory-info list captured.
-fn print_captured_ranges(ranges: &[CapturedRange]) {
+fn print_captured_ranges(ranges: &[CapturedRange], summary_only: bool) {
     let total: u64 = ranges.iter().map(|range| range.length).sum();
     outln!(
         "captured memory: {} ranges, {}",
         ranges.len(),
         human_size(total)
     );
+    if summary_only {
+        return;
+    }
     let mut builder = Builder::default();
     builder.push_record(["Start", "End", "Size", "Usage"]);
     for range in ranges {

@@ -62,6 +62,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - The working-set sizes of `!vm` and `!memusage`, and the SDK's `ProcessMemoryUsage.working_set_size`, are in bytes, as the other counters are. They were page counts.
 - `s` counts the bytes it could not read correctly, and says so when it could read none of the range rather than reporting no matches. `dS` no longer reads past a string's `MaximumLength`.
 - `!hvcall` on a target without direct host RAM, such as a kernel dump, says that the hypervisor's memory needs it, as the other hypervisor commands do. It said the processor was not halted in the hypervisor.
+- `!address -summary` on a user-mode dump without a memory-info list prints the summary only, not every captured range.
 
 ### Removed
 
