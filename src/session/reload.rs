@@ -318,7 +318,7 @@ fn stop_event_requires_target_reload(debugger: &Target, event: &StopEvent) -> bo
     let Some(pc) = event.program_counter else {
         return false;
     };
-    if !looks_like_kernel_pointer(pc) {
+    if !looks_like_kernel_pointer(debugger.arch(), pc) {
         return false;
     }
 

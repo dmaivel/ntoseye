@@ -11,7 +11,7 @@ use crate::backend::debugger_data::{
     DebuggerDataBlock, MetadataSource, MetadataValue, read_counter_from_getter,
 };
 use crate::base::error::{Error, Result};
-use crate::base::memory::{MemoryOps, PAGE_SIZE};
+use crate::base::memory::PAGE_SIZE;
 use crate::base::types::VirtAddr;
 use crate::nt::guest::ProcessInfo;
 use crate::nt::layout::{ParsedType, TypeInfo};
@@ -346,10 +346,11 @@ impl Target {
         address: Option<MetadataValue<VirtAddr>>,
     ) -> Option<Result<MetadataValue<u64>>> {
         address.map(|address| {
+            // Page counts (`PFN_NUMBER`), as wide as a pointer.
             self.kernel_address_space()
-                .read::<u64>(address.value)
+                .read_pointer(address.value)
                 .map(|value| MetadataValue {
-                    value,
+                    value: value.0,
                     source: address.source,
                 })
         })

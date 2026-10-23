@@ -1327,13 +1327,13 @@ fn recover_context_switch_seed(
     Ok(seed)
 }
 
-fn switch_seed_is_plausible(thread: &ThreadInfo, seed: &RegisterContext) -> bool {
+fn switch_seed_is_plausible(arch: Arch, thread: &ThreadInfo, seed: &RegisterContext) -> bool {
     let (Some(kernel_stack), Some(stack_limit), Some(stack_base)) =
         (thread.kernel_stack, thread.stack_limit, thread.stack_base)
     else {
         return false;
     };
-    looks_like_kernel_pointer(seed.rip)
+    looks_like_kernel_pointer(arch, seed.rip)
         && kernel_stack >= stack_limit
         && kernel_stack < stack_base
         && seed.rsp >= stack_limit.0
@@ -1392,7 +1392,7 @@ pub fn build_parked_thread_recovered_stack(
             None => recover_context_switch_seed(debugger, process_dtb, kernel_stack),
         };
         match seed {
-            Ok(seed) if switch_seed_is_plausible(thread, &seed) => {
+            Ok(seed) if switch_seed_is_plausible(debugger.arch(), thread, &seed) => {
                 let mut stacktrace = build_recovered_stacktrace_seeded(
                     debugger,
                     &trace,

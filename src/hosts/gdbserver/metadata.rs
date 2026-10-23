@@ -141,10 +141,7 @@ struct Span<'m> {
 /// half stops a page short of the top so its end fits in 64 bits. Empty
 /// stretches are left out: a zero-length region is malformed to IDA.
 fn address_layout<'m>(arch: Arch, images: &[(u64, u64, &'m str)]) -> Vec<Span<'m>> {
-    let (user_len, kernel_start) = match arch {
-        Arch::Amd64 => (0x0000_8000_0000_0000u64, 0xFFFF_8000_0000_0000u64),
-        Arch::Arm64 => (0x0001_0000_0000_0000, 0xFFFF_0000_0000_0000),
-    };
+    let (user_len, kernel_start) = arch.paging().canonical_halves();
     let kernel_end = 0u64.wrapping_sub(0x1000);
     let mut images: Vec<(u64, u64, &str)> = images
         .iter()

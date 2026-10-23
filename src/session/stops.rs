@@ -3,7 +3,6 @@
 
 use std::time::Duration;
 
-use crate::arch::Arch;
 use crate::backend::dbg_backend::{
     ContinueDisposition, DebugBackend, LastEvent, ModuleEvent, StopEvent, clear_trap_flag,
     processor_index_from_backend_thread_id,
@@ -625,13 +624,8 @@ impl Session {
             .take_if(|(event, interrupted)| *event == kind && Some(*interrupted) == stack)
             .is_some();
         self.unreported_module_change = self.refresh_modules_on_stop();
-        let argument = match self.target.arch() {
-            Arch::Amd64 => "rdx",
-            Arch::Arm64 => "x1",
-        };
         let module = self
-            .target
-            .register_value(argument)
+            .argument_on_entry(1, |name| self.target.register_value(name))
             .filter(|_| !repeated)
             .and_then(|base| self.module_event_to_surface(kind, VirtAddr(base)));
         if let Some(module) = module {

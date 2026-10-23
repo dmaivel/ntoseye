@@ -5,7 +5,7 @@ use super::{Guest, ProcessInfo};
 use crate::arch::Arch;
 use crate::{
     base::{
-        bytes::{before_nul, read_u64},
+        bytes::before_nul,
         error::{Error, Result},
         memory::MemoryOps,
         types::*,
@@ -53,7 +53,7 @@ impl EprocessSpan {
             .min(image_file_name_offset)
             .min(wow64_process_offset.unwrap_or(u64::MAX));
         let end = (unique_process_id_offset + pointer_size)
-            .max(dir_table_base_offset + 8)
+            .max(dir_table_base_offset + pointer_size)
             .max(active_process_links_offset + pointer_size)
             .max(image_file_name_offset + IMAGE_FILE_NAME_LEN as u64)
             .max(wow64_process_offset.map_or(0, |offset| offset + pointer_size));
@@ -73,11 +73,6 @@ impl EprocessSpan {
         memory.read_bytes(eprocess + self.start, &mut self.bytes)
     }
 
-    fn u64_at(&self, offset: u64) -> u64 {
-        let start = (offset - self.start) as usize;
-        read_u64(&self.bytes, start)
-    }
-
     fn pointer_at(&self, offset: u64) -> VirtAddr {
         let start = (offset - self.start) as usize;
         self.arch.decode_pointer(&self.bytes[start..])
@@ -88,7 +83,7 @@ impl EprocessSpan {
     }
 
     fn dtb(&self) -> Dtb {
-        self.u64_at(self.dir_table_base_offset) & !0xfff
+        self.pointer_at(self.dir_table_base_offset).0 & !0xfff
     }
 
     fn active_process_links_flink(&self) -> VirtAddr {

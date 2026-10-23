@@ -37,9 +37,7 @@ pub mod vad;
 pub mod vm_exits;
 pub mod vp_registers;
 
-use discovery::{
-    find_kernel, find_ntoskrnl, find_ntoskrnl_va, find_ntoskrnl_va_arm64, find_ntoskrnl_va_triage,
-};
+use discovery::{find_kernel, find_ntoskrnl, find_ntoskrnl_va, find_ntoskrnl_va_triage};
 pub use evmcs::{EvmcsCache, EvmcsPages, EvmcsState};
 pub use exit_registers::{ENTRY_CODE_BYTES, EXIT_GPRS, ExitRegisterLayout, ordered_exit_gprs};
 pub use hypervisor::{
@@ -341,9 +339,9 @@ impl Guest {
             .set_section_views(section_layout(&ntoskrnl).map(SectionViews::new));
         if let Ok(pte_base) = ntoskrnl
             .symbol("MmPteBase")
-            .and_then(|symbol| symbol.read::<u64>())
+            .and_then(|symbol| symbol.read_pointer())
         {
-            ntoskrnl.phys.set_pte_self_map(pte_base);
+            ntoskrnl.phys.set_pte_self_map(pte_base.0);
         }
         Self {
             kernel_transition_code: OnceLock::new(),
@@ -607,10 +605,7 @@ impl Guest {
         let ntoskrnl_va = if is_triage {
             find_ntoskrnl_va_triage(kernel_dtb, &phys)?
         } else {
-            match arch {
-                Arch::Amd64 => find_ntoskrnl_va(kernel_dtb, &phys)?,
-                Arch::Arm64 => find_ntoskrnl_va_arm64(kernel_dtb, &phys)?,
-            }
+            find_ntoskrnl_va(arch, kernel_dtb, &phys)?
         };
 
         // For triage dumps, fall back to kern_base from KDDEBUGGER_DATA64

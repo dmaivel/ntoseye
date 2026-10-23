@@ -839,6 +839,39 @@ fn page_in_result_reads_arm64_pc_and_first_argument() {
     assert!(report.from_worker);
 }
 
+/// Stopped on `KeBugCheckEx`'s first instruction, the code and first three
+/// parameters are in registers and the fourth, its fifth argument, on the
+/// stack past the return address and the four registers' shadow space.
+#[test]
+fn a_bugcheck_trap_reads_its_last_parameter_past_the_shadow_space() {
+    let mut memory = [0u8; 0x100];
+    for (slot, value) in memory[0x80..0xb0]
+        .as_chunks_mut::<8>()
+        .0
+        .iter_mut()
+        .zip(0x10u64..)
+    {
+        slot.copy_from_slice(&value.to_le_bytes());
+    }
+    let mut session = session_over_memory(0x1000, &memory);
+    let mut backend = MockBackend::default();
+    backend.set("rcx", 0x139);
+    backend.set("rdx", 3);
+    backend.set("r8", 0xffff_8000_1000_0000);
+    backend.set("r9", 0xffff_8000_2000_0000);
+    backend.set("rsp", 0x1080);
+    session.register_map = backend.register_map.clone();
+    session.backend = Box::new(backend);
+
+    let info = session.bugcheck_from_trap().unwrap();
+
+    assert_eq!(info.code, 0x139);
+    assert_eq!(
+        info.parameters,
+        [3, 0xffff_8000_1000_0000, 0xffff_8000_2000_0000, 0x15]
+    );
+}
+
 /// With nothing attached, the bytes `db` and `s` show are the halted
 /// context's, the same space an expression like `poi(addr)` reads.
 #[test]

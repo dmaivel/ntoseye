@@ -81,6 +81,22 @@ impl Paging for Arm64 {
         va.0 & (1 << 55) != 0
     }
 
+    /// 48-bit TTBR0 and TTBR1 ranges.
+    fn canonical_halves(&self) -> (u64, u64) {
+        (0x0001_0000_0000_0000, 0xffff_0000_0000_0000)
+    }
+
+    /// Any value: a return address a pointer-authenticated prolog saved
+    /// carries its authentication code in the upper bits.
+    fn could_be_pointer(&self, _value: u64) -> bool {
+        true
+    }
+
+    /// The canonical upper half, as on every 64-bit Windows.
+    fn system_range_start(&self) -> u64 {
+        0xffff_8000_0000_0000
+    }
+
     fn separate_kernel_root(&self) -> bool {
         true
     }

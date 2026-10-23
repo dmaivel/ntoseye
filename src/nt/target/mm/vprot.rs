@@ -227,7 +227,7 @@ impl PteFormat {
         } else {
             raw
         };
-        (looks_like_kernel_pointer(address) && address != u64::MAX && address & 7 == 0)
+        (looks_like_kernel_pointer(self.arch, address) && address != u64::MAX && address & 7 == 0)
             .then_some(address)
     }
 }

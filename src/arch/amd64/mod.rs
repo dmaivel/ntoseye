@@ -13,8 +13,8 @@ use crate::base::types::CodeMachine;
 
 use super::registers::numbered;
 use super::{
-    Architecture, ContextFlags, DebugRegisters, Family, IMAGE_FILE_MACHINE_AMD64, Paging,
-    RegisterInfo, RegisterMap,
+    Architecture, ArgumentLocation, ContextFlags, DebugRegisters, Family, IMAGE_FILE_MACHINE_AMD64,
+    Paging, RegisterInfo, RegisterMap,
 };
 
 pub struct Amd64;
@@ -143,6 +143,23 @@ impl Architecture for Amd64 {
         } else {
             None
         }
+    }
+
+    fn return_pops_address(&self) -> bool {
+        true
+    }
+
+    /// The first four in registers; the rest above the return address and
+    /// the four registers' shadow space.
+    fn argument(&self, index: usize) -> ArgumentLocation {
+        match ["rcx", "rdx", "r8", "r9"].get(index) {
+            Some(register) => ArgumentLocation::Register(register),
+            None => ArgumentLocation::Stack(0x28 + 8 * (index as u64 - 4)),
+        }
+    }
+
+    fn return_register(&self) -> &'static str {
+        "rax"
     }
 
     fn family(&self) -> Family {

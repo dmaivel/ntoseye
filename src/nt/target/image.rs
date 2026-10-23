@@ -214,7 +214,7 @@ impl Target {
         })?;
         let base = module.base_address;
         let dtb = image.dtb.unwrap_or_else(|| {
-            if looks_like_kernel_pointer(base.0) {
+            if looks_like_kernel_pointer(self.arch(), base.0) {
                 self.kernel_dtb()
             } else {
                 self.process_dtb()

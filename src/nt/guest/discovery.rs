@@ -84,11 +84,7 @@ fn is_valid_kernel_dtb_arm64(phys: &PhysMem, dtb: Dtb) -> Result<bool> {
 /// arch's [`Arch::machine_type`], which an accidental page-table false
 /// positive cannot satisfy.
 fn kernel_machine_at(dtb: Dtb, phys: &PhysMem, arch: Arch) -> Result<Option<u16>> {
-    let base = match arch {
-        Arch::Amd64 => find_ntoskrnl_va(dtb, phys)?,
-        Arch::Arm64 => find_ntoskrnl_va_arm64(dtb, phys)?,
-    };
-    let Some(base) = base else {
+    let Some(base) = find_ntoskrnl_va(arch, dtb, phys)? else {
         return Ok(None);
     };
     let space = AddressSpace::for_arch(phys, dtb, dtb, arch);
@@ -190,7 +186,16 @@ fn is_ntoskrnl_page(
     Ok(is_ntoskrnl_header(&header))
 }
 
-pub(super) fn find_ntoskrnl_va(
+/// The kernel image's base, found by scanning the kernel range of the page
+/// tables `kernel_dtb` roots with `arch`'s walker.
+pub fn find_ntoskrnl_va(arch: Arch, kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>> {
+    match arch {
+        Arch::Amd64 => find_ntoskrnl_va_amd64(kernel_dtb, phys),
+        Arch::Arm64 => find_ntoskrnl_va_arm64(kernel_dtb, phys),
+    }
+}
+
+fn find_ntoskrnl_va_amd64(
     kernel_dtb: Dtb,
     phys: &impl MemoryOps<PhysAddr>,
 ) -> Result<Option<VirtAddr>> {
@@ -312,10 +317,10 @@ fn is_ntoskrnl_header_at(phys: &PhysMem, frame: u64) -> Result<bool> {
     Ok(is_ntoskrnl_header(&header))
 }
 
-/// Same bounded kernel-VA scan as [`find_ntoskrnl_va`] but interpreting
+/// Same bounded kernel-VA scan as [`find_ntoskrnl_va_amd64`] but interpreting
 /// AArch64 descriptors (TTBR1 root, 4 KiB granule). The VA index math is
 /// identical to x64's four 9-bit levels.
-pub(super) fn find_ntoskrnl_va_arm64(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>> {
+fn find_ntoskrnl_va_arm64(kernel_dtb: Dtb, phys: &PhysMem) -> Result<Option<VirtAddr>> {
     // Cover the Windows ARM64 kernel VA range. Unlike the AMD64 scan's narrow
     // low-kernel slot, this includes every populated L0 slot from 496 through
     // the inclusive upper bound.
@@ -485,11 +490,7 @@ pub(super) fn find_ntoskrnl(
         return Ok(None);
     };
 
-    let ntoskrnl_va = match arch {
-        Arch::Amd64 => find_ntoskrnl_va(kernel_dtb, &phys)?,
-        Arch::Arm64 => find_ntoskrnl_va_arm64(kernel_dtb, &phys)?,
-    };
-    let Some(ntoskrnl_va) = ntoskrnl_va else {
+    let Some(ntoskrnl_va) = find_ntoskrnl_va(arch, kernel_dtb, &phys)? else {
         return Ok(None);
     };
 
@@ -504,7 +505,7 @@ pub(super) fn find_ntoskrnl(
 
 #[cfg(test)]
 mod tests {
-    use super::find_ntoskrnl_va;
+    use super::find_ntoskrnl_va_amd64;
     use crate::base::error::{Error, Result};
     use crate::base::memory::MemoryOps;
     use crate::base::types::{PhysAddr, VirtAddr};
@@ -564,11 +565,11 @@ mod tests {
         let past = upper.pdpt_index() as u64 + 1;
         phys.write_u64(PDPT + 8 * past, 0x8000_0000 | KERNEL_LARGE_PAGE);
         phys.write_ntoskrnl_header(0x8000_0000);
-        assert_eq!(find_ntoskrnl_va(DTB, &phys).unwrap(), None);
+        assert_eq!(find_ntoskrnl_va_amd64(DTB, &phys).unwrap(), None);
 
         let at_bound = upper.pdpt_index() as u64;
         phys.write_u64(PDPT + 8 * at_bound, 0x4000_0000 | KERNEL_LARGE_PAGE);
         phys.write_ntoskrnl_header(0x4000_0000);
-        assert_eq!(find_ntoskrnl_va(DTB, &phys).unwrap(), Some(upper));
+        assert_eq!(find_ntoskrnl_va_amd64(DTB, &phys).unwrap(), Some(upper));
     }
 }

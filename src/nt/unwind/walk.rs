@@ -88,11 +88,12 @@ pub(super) fn build_recovered_stacktrace_seeded(
             unwind_trace!("unwind: {:#x} is no return address -> scan", context.rip);
             break;
         }
-        // An x64 return pops its address, so sp always climbs; an ARM64 leaf
-        // returns through lr and leaves sp where it was.
-        let stack_regressed = match debugger.arch() {
-            Arch::Amd64 => context.rsp <= previous_rsp,
-            Arch::Arm64 => context.rsp < previous_rsp,
+        // A return that pops its address always climbs the stack; a leaf
+        // returning through a link register leaves sp where it was.
+        let stack_regressed = if debugger.arch().return_pops_address() {
+            context.rsp <= previous_rsp
+        } else {
+            context.rsp < previous_rsp
         };
         if !stack_switch && stack_regressed {
             unwind_trace!(
@@ -223,13 +224,9 @@ pub(super) fn ensure_module_symbols(
 }
 
 /// Whether `address` could hold code: above the first 64 KiB, which Windows
-/// never maps, and, on AMD64, canonical.
+/// never maps, and a pointer by its upper bits.
 fn could_be_return_address(address: u64, arch: Arch) -> bool {
-    address >= 0x1_0000
-        && match arch {
-            Arch::Amd64 => matches!(address >> 47, 0 | 0x1_ffff),
-            Arch::Arm64 => true,
-        }
+    address >= 0x1_0000 && arch.paging().could_be_pointer(address)
 }
 
 pub(super) fn record_recovered_frame(

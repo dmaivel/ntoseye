@@ -1189,6 +1189,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::arch::Arch;
     use crate::backend::dbg_backend::{BugcheckInfo, StopEvent};
     use crate::base::output::capture;
     use crate::base::types::VirtAddr;
@@ -1224,8 +1225,8 @@ mod tests {
 
     #[test]
     fn kernel_pointer_heuristic_accepts_canonical_kernel_addresses() {
-        assert!(looks_like_kernel_pointer(0xfffff8007f1afb50));
-        assert!(!looks_like_kernel_pointer(0x00000000000000e2));
+        assert!(looks_like_kernel_pointer(Arch::Amd64, 0xfffff8007f1afb50));
+        assert!(!looks_like_kernel_pointer(Arch::Amd64, 0x00000000000000e2));
     }
 
     #[test]

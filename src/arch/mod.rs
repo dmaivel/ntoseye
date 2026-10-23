@@ -187,6 +187,16 @@ pub trait Architecture: Sync {
     /// every record carries.
     fn context_group(&self, register: &str) -> Option<u32>;
 
+    /// Whether a return pops its address off the stack (x86's `ret`) rather
+    /// than taking it from a register (AArch64's `ret` through `lr`).
+    fn return_pops_address(&self) -> bool;
+
+    /// Where a Windows function finds argument `index` (from 0) on entry.
+    fn argument(&self, index: usize) -> ArgumentLocation;
+
+    /// The register a function's integer return value arrives in.
+    fn return_register(&self) -> &'static str;
+
     /// The processor family it belongs to, which decides what its members
     /// share whatever their width.
     fn family(&self) -> Family;
@@ -204,6 +214,14 @@ pub trait Architecture: Sync {
 
     /// Its hardware breakpoint registers.
     fn debug_registers(&self) -> &'static dyn DebugRegisters;
+}
+
+/// Where a function's argument is on entry, by the calling convention.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArgumentLocation {
+    Register(&'static str),
+    /// The pointer-sized slot this many bytes above the stack pointer.
+    Stack(u64),
 }
 
 /// A processor family: what its 32- and 64-bit members share, such as how

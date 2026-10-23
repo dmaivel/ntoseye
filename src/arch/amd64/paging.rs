@@ -61,6 +61,21 @@ impl Paging for Amd64 {
         va.0 >= 0xffff_8000_0000_0000
     }
 
+    fn canonical_halves(&self) -> (u64, u64) {
+        (0x0000_8000_0000_0000, 0xffff_8000_0000_0000)
+    }
+
+    /// A canonical address: bits 63:47 all equal.
+    fn could_be_pointer(&self, value: u64) -> bool {
+        let (user_end, kernel_start) = self.canonical_halves();
+        value < user_end || value >= kernel_start
+    }
+
+    /// The canonical upper half, as on every 64-bit Windows.
+    fn system_range_start(&self) -> u64 {
+        0xffff_8000_0000_0000
+    }
+
     fn separate_kernel_root(&self) -> bool {
         false
     }

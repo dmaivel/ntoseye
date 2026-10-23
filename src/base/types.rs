@@ -177,6 +177,14 @@ impl CodeMachine {
         }
     }
 
+    /// Shortest encoded instruction: the step past bytes that decode to none.
+    pub const fn min_instruction_bytes(self) -> usize {
+        match self {
+            Self::X86 | Self::Amd64 => 1,
+            Self::Arm64 => 4,
+        }
+    }
+
     /// Longest encoded instruction, which bounds a lookbehind window.
     pub const fn max_instruction_bytes(self) -> usize {
         match self {

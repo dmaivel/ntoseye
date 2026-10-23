@@ -2,10 +2,11 @@
 // Source: https://learn.microsoft.com/windows-hardware/drivers/debugger/bug-check-code-reference2
 // Audited against all 379 linked code pages on 2026-07-16.
 
+use crate::arch::Arch;
 use crate::backend::dbg_backend::BugcheckInfo;
 use crate::base::error::Result;
-use crate::base::memory::MemoryOps;
-use crate::base::types::VirtAddr;
+use crate::base::memory::{AddressSpace, MemoryOps};
+use crate::base::types::{PhysAddr, VirtAddr};
 use crate::nt::target::Target;
 use crate::nt::trapframe::{
     KtrapFrame, KtrapFrameData, ktrap_frame_at_machine_frame, read_ktrap_frame,
@@ -138,17 +139,21 @@ pub fn plausible_bugcheck_code(code: u64) -> bool {
     code != 0 && code <= u32::MAX as u64
 }
 
-pub fn looks_like_kernel_pointer(value: u64) -> bool {
-    value >= 0xffff_8000_0000_0000
+/// Whether `value` could be a kernel pointer on `arch`: an address in
+/// Windows' system address space.
+pub fn looks_like_kernel_pointer(arch: Arch, value: u64) -> bool {
+    value >= arch.paging().system_range_start()
 }
 
-pub fn read_bugcheck_data<M: MemoryOps<VirtAddr>>(
-    mem: &M,
+/// `nt!KiBugCheckData` at `addr`, an array of `ULONG_PTR`.
+pub fn read_bugcheck_data<B: MemoryOps<PhysAddr>>(
+    mem: &AddressSpace<'_, B>,
     addr: VirtAddr,
 ) -> Result<[u64; BUGCHECK_DATA_SLOTS]> {
+    let stride = mem.arch().pointer_size();
     let mut data = [0u64; BUGCHECK_DATA_SLOTS];
-    for (i, slot) in data.iter_mut().enumerate() {
-        *slot = mem.read::<u64>(addr + (i * 8) as u64)?;
+    for (slot, index) in data.iter_mut().zip(0u64..) {
+        *slot = mem.read_pointer(addr + index * stride)?.0;
     }
     Ok(data)
 }
@@ -204,7 +209,7 @@ pub fn bugcheck_fault_ip(info: &BugcheckInfo) -> Option<u64> {
 /// The trap-frame address a bugcheck's parameters carry, per the documented
 /// parameter meanings (mirrors the descriptor text in [`bugcheck_descriptor`]).
 /// Filtered to kernel pointers so a zeroed/garbage parameter is never chased.
-pub fn bugcheck_trap_frame_address(info: &BugcheckInfo) -> Option<u64> {
+pub fn bugcheck_trap_frame_address(arch: Arch, info: &BugcheckInfo) -> Option<u64> {
     let addr = match info.code {
         // PANIC_STACK_SWITCH: parameter 1 is the trap frame.
         0x0000_002b => info.parameters[0],
@@ -219,7 +224,7 @@ pub fn bugcheck_trap_frame_address(info: &BugcheckInfo) -> Option<u64> {
         0x0000_0151 => info.parameters[1],
         _ => return None,
     };
-    looks_like_kernel_pointer(addr).then_some(addr)
+    looks_like_kernel_pointer(arch, addr).then_some(addr)
 }
 
 /// The trap frame of the innermost trap on a bugcheck's stack, for a
@@ -489,7 +494,7 @@ pub fn analyze_bugcheck(debugger: &Target, info: &BugcheckInfo) -> BugcheckAnaly
         })
         .collect();
     let fault = site.map(|(ip, symbol, driver)| BugcheckFault { ip, symbol, driver });
-    let trap_frames: Vec<BugcheckTrapFrame> = bugcheck_trap_frame_address(info)
+    let trap_frames: Vec<BugcheckTrapFrame> = bugcheck_trap_frame_address(debugger.arch(), info)
         .map(|address| {
             let (frame, error) = match read_ktrap_frame(debugger, VirtAddr(address)) {
                 Ok(frame) => (Some(frame), None),
@@ -571,7 +576,7 @@ pub fn resolve_current_bugcheck(debugger: &Target) -> CurrentBugcheckResolution 
 
     let (data, source) = if plausible_bugcheck_code(direct[0]) {
         (direct, None)
-    } else if looks_like_kernel_pointer(direct[0]) {
+    } else if looks_like_kernel_pointer(debugger.arch(), direct[0]) {
         let indirect_address = VirtAddr(direct[0]);
         match read_bugcheck_data(&mem, indirect_address) {
             Ok(indirect) if plausible_bugcheck_code(indirect[0]) => (

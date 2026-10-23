@@ -10,7 +10,7 @@ use iced_x86::{
     Mnemonic, OpAccess, OpKind, Register,
 };
 
-use crate::arch::{Arch, HwBreakpointAccess, RegisterMap};
+use crate::arch::{Arch, Family, HwBreakpointAccess, RegisterMap};
 use crate::backend::dbg_backend::{
     ContinueDisposition, DebugBackend, STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent, clear_trap_flag,
     processor_index_from_backend_thread_id,
@@ -581,11 +581,9 @@ impl Session {
         walked: Option<&ThreadScope>,
     ) -> Result<WalkStep> {
         // An instruction without known successors is not followed; one run
-        // alone fails its step the same way.
-        let follows = match self.target.arch() {
-            Arch::Amd64 => walked.is_some(),
-            Arch::Arm64 => false,
-        };
+        // alone fails its step the same way. Successors are decoded for x86
+        // code only.
+        let follows = self.target.arch().family() == Family::X86 && walked.is_some();
         let (successors, floor) = if follows {
             self.walk_continuation(state, registers, bytes)
                 .unwrap_or_default()
@@ -841,11 +839,7 @@ impl Session {
             if current.flow == ControlFlow::Call {
                 stack.push((frame(name(&self.target, &next)), next.sp));
             } else if current.flow == ControlFlow::Ret
-                && (next.sp > *entry_sp
-                    || match arch {
-                        Arch::Arm64 => next.sp >= *entry_sp,
-                        Arch::Amd64 => false,
-                    })
+                && (next.sp > *entry_sp || (!arch.return_pops_address() && next.sp >= *entry_sp))
             {
                 let (completed, _) = stack.pop().expect("an open frame");
                 match stack.last_mut() {
@@ -899,13 +893,11 @@ impl Session {
             StepStack::CallReturn | StepStack::FunctionReturn => {
                 let registers = self.read_registers()?;
                 stack_pointer(self.target.arch(), &self.register_map, &registers).map(|sp| {
-                    // An x86 `ret` pops its return address; an AArch64 `ret`
-                    // leaves the stack pointer where the callee found it.
-                    let pops = match self.target.arch() {
-                        Arch::Amd64 => true,
-                        Arch::Arm64 => false,
-                    };
-                    if stack == StepStack::FunctionReturn && pops {
+                    // A popping `ret` leaves the stack above where the callee
+                    // found it; a register `ret` leaves it in place.
+                    if stack == StepStack::FunctionReturn
+                        && self.target.arch().return_pops_address()
+                    {
                         sp + 1
                     } else {
                         sp

@@ -13,8 +13,8 @@ use crate::base::types::CodeMachine;
 
 use super::registers::{numbered, push_synonyms};
 use super::{
-    Architecture, ContextFlags, DebugRegisters, Family, IMAGE_FILE_MACHINE_ARM64, Paging,
-    RegisterInfo, RegisterMap,
+    Architecture, ArgumentLocation, ContextFlags, DebugRegisters, Family, IMAGE_FILE_MACHINE_ARM64,
+    Paging, RegisterInfo, RegisterMap,
 };
 
 pub struct Arm64;
@@ -142,6 +142,22 @@ impl Architecture for Arm64 {
         } else {
             None
         }
+    }
+
+    fn return_pops_address(&self) -> bool {
+        false
+    }
+
+    /// The first eight in registers; the rest from the stack pointer up.
+    fn argument(&self, index: usize) -> ArgumentLocation {
+        match ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"].get(index) {
+            Some(register) => ArgumentLocation::Register(register),
+            None => ArgumentLocation::Stack(8 * (index as u64 - 8)),
+        }
+    }
+
+    fn return_register(&self) -> &'static str {
+        "x0"
     }
 
     fn family(&self) -> Family {

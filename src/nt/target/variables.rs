@@ -2,12 +2,8 @@
 //! the `vars` inventory of them, and the result slots commands fill.
 
 use super::{BuiltinVar, Target, ThreadInfo};
-use crate::arch::Arch;
 use crate::{
-    base::{
-        memory::{MemoryOps, PAGE_SIZE},
-        types::VirtAddr,
-    },
+    base::{memory::PAGE_SIZE, types::VirtAddr},
     nt::unwind::return_address_for_register_values,
 };
 
@@ -164,7 +160,7 @@ impl Target {
             // The caller of the current scope, one unwind step away.
             "ra" => self.scope_return_address(),
             "csp" => self.register_value(self.arch().sp_register()),
-            "retreg" => self.register_value(self.return_value_register()),
+            "retreg" => self.register_value(self.arch().return_register()),
             // Both supported architectures are LP64.
             "ptrsize" => Some(8),
             "pagesize" => Some(
@@ -264,26 +260,21 @@ impl Target {
         Some(base.0)
     }
 
-    /// One entry of `nt!KiBugCheckData`: the bugcheck code at index 0 and its
-    /// four parameters after it. Zero when the target has not bugchecked,
-    /// which is what the array itself reports.
+    /// One entry of `nt!KiBugCheckData`, an array of `ULONG_PTR`: the
+    /// bugcheck code at index 0 and its four parameters after it. Zero when
+    /// the target has not bugchecked, which is what the array itself
+    /// reports.
     fn bugcheck_data(&self, index: u64) -> Option<u64> {
         let address = self
             .symbols
             .find_symbol_across_modules(self.kernel_dtb(), "nt!KiBugCheckData")
             .ok()
             .flatten()?;
-        self.address_space(self.kernel_dtb())
-            .read::<u64>(address + index * 8)
+        let memory = self.address_space(self.kernel_dtb());
+        memory
+            .read_pointer(address + index * self.arch().pointer_size())
             .ok()
-    }
-
-    /// The register a function's return value arrives in, behind `$retreg`.
-    fn return_value_register(&self) -> &'static str {
-        match self.arch() {
-            Arch::Amd64 => "rax",
-            Arch::Arm64 => "x0",
-        }
+            .map(|value| value.0)
     }
 
     /// `t0`..`t19` and nothing else: `t20`, `t007`, and `ta` are not slots.

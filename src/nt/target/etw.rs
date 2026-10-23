@@ -1375,7 +1375,7 @@ impl Target {
             if context <= 1 {
                 continue;
             }
-            if !looks_like_kernel_pointer(context) {
+            if !looks_like_kernel_pointer(self.arch(), context) {
                 return Err(Error::DebugInfo(format!(
                     "EtwpLoggerContext[{slot:#x}] at {:#x} holds {context:#x}, not a logger context",
                     context_array.0 + (slot * pointer_size) as u64
@@ -1542,7 +1542,7 @@ impl Target {
         logger: &EtwLogger,
         address: VirtAddr,
     ) -> Result<EtwBuffer> {
-        if !looks_like_kernel_pointer(address.0) {
+        if !looks_like_kernel_pointer(self.arch(), address.0) {
             return Err(Error::DebugInfo("not a kernel address".into()));
         }
         let mut raw = [0u8; MAX_BUFFER_HEADER_SIZE];

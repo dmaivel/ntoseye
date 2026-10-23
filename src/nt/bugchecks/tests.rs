@@ -1,4 +1,5 @@
 use super::*;
+use crate::arch::Arch;
 
 fn info(code: u32, parameters: [u64; 4]) -> BugcheckInfo {
     BugcheckInfo {
@@ -13,32 +14,32 @@ fn trap_frame_parameter_mapping_matches_descriptors() {
     let frame = 0xffff_b000_1234_5000u64;
     // PANIC_STACK_SWITCH: arg1.
     assert_eq!(
-        bugcheck_trap_frame_address(&info(0x2b, [frame, 0, 0, 0])),
+        bugcheck_trap_frame_address(Arch::Amd64, &info(0x2b, [frame, 0, 0, 0])),
         Some(frame)
     );
     // SET_OF_INVALID_CONTEXT: arg3.
     assert_eq!(
-        bugcheck_trap_frame_address(&info(0x30, [1, 2, frame, 0])),
+        bugcheck_trap_frame_address(Arch::Amd64, &info(0x30, [1, 2, frame, 0])),
         Some(frame)
     );
     // KERNEL_MODE_EXCEPTION_NOT_HANDLED: arg3.
     assert_eq!(
-        bugcheck_trap_frame_address(&info(0x8e, [0xc0000005, 0, frame, 0])),
+        bugcheck_trap_frame_address(Arch::Amd64, &info(0x8e, [0xc0000005, 0, frame, 0])),
         Some(frame)
     );
     // KERNEL_SECURITY_CHECK_FAILURE: arg2.
     assert_eq!(
-        bugcheck_trap_frame_address(&info(0x139, [3, frame, 0, 0])),
+        bugcheck_trap_frame_address(Arch::Amd64, &info(0x139, [3, frame, 0, 0])),
         Some(frame)
     );
     // KERNEL_MODE_EXCEPTION_NOT_HANDLED_M: arg3.
     assert_eq!(
-        bugcheck_trap_frame_address(&info(0x1000008e, [0xc0000005, 0, frame, 0])),
+        bugcheck_trap_frame_address(Arch::Amd64, &info(0x1000008e, [0xc0000005, 0, frame, 0])),
         Some(frame)
     );
     // UNSUPPORTED_INSTRUCTION_MODE: arg2.
     assert_eq!(
-        bugcheck_trap_frame_address(&info(0x151, [0, frame, 0, 0])),
+        bugcheck_trap_frame_address(Arch::Amd64, &info(0x151, [0, frame, 0, 0])),
         Some(frame)
     );
 }
@@ -46,11 +47,11 @@ fn trap_frame_parameter_mapping_matches_descriptors() {
 #[test]
 fn trap_frame_requires_kernel_pointer() {
     assert_eq!(
-        bugcheck_trap_frame_address(&info(0x139, [3, 0, 0, 0])),
+        bugcheck_trap_frame_address(Arch::Amd64, &info(0x139, [3, 0, 0, 0])),
         None
     );
     assert_eq!(
-        bugcheck_trap_frame_address(&info(0x8e, [0xc0000005, 0, 0x7ffe_0000, 0])),
+        bugcheck_trap_frame_address(Arch::Amd64, &info(0x8e, [0xc0000005, 0, 0x7ffe_0000, 0])),
         None
     );
 }
@@ -60,7 +61,7 @@ fn codes_without_documented_trap_frames_yield_none() {
     let kernel_ptr = 0xffff_b000_1234_5000u64;
     for code in [0x0a, 0x1e, 0x3b, 0x50, 0x7e, 0xd1] {
         assert_eq!(
-            bugcheck_trap_frame_address(&info(code, [kernel_ptr; 4])),
+            bugcheck_trap_frame_address(Arch::Amd64, &info(code, [kernel_ptr; 4])),
             None,
             "code {code:#x} must not claim a trap frame"
         );

@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::arch::Arch;
 use crate::backend::dbg_backend::{ContinueDisposition, processor_index_from_backend_thread_id};
 use crate::base::bytes;
 use crate::base::disasm::{
@@ -917,16 +916,12 @@ impl Session {
                 .read_u64(self.target.arch().pc_register(), regs)
                 .ok()
         });
-        let first_argument = match self.target.arch() {
-            Arch::Amd64 => "rcx",
-            Arch::Arm64 => "x0",
-        };
-        let status = registers
-            .as_ref()
-            .and_then(|regs| self.register_map.read_u64(first_argument, regs).ok());
-        // `DbgBreakPointWithStatus` takes its status in the first argument
-        // register, so a worker break is distinguishable from any other
-        // hard-coded break at the same address.
+        let status = registers.as_ref().and_then(|regs| {
+            self.argument_on_entry(0, |name| self.register_map.read_u64(name, regs).ok())
+        });
+        // `DbgBreakPointWithStatus` takes its status as its first argument,
+        // so a worker break is distinguishable from any other hard-coded
+        // break at the same address.
         let from_worker = pc == Some(worker_break.0) && status == Some(DBG_STATUS_WORKER);
         let mut probe = [0u8; 1];
         let resident = self

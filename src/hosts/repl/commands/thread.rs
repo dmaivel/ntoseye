@@ -187,7 +187,7 @@ impl ReplState<'_> {
             if let Some((_, thread)) = active.get(&value) {
                 return Ok(ThreadResolution::Found(thread.clone()));
             }
-            if looks_like_kernel_pointer(value)
+            if looks_like_kernel_pointer(self.ctx.target.arch(), value)
                 && let Ok(thread) = self.ctx.target.thread_info_from_ethread(VirtAddr(value))
                 && let Ok(processes) = self.ctx.target.guest()?.enumerate_processes()
                 && thread

@@ -280,7 +280,7 @@ fn ecxr(state: &mut ReplState<'_>) -> Result<()> {
         .and_then(|event| event.stop.bugcheck.as_ref())
         && matches!(info.code, 0x8e | 0x1000_008e)
     {
-        let Some(address) = bugcheck_trap_frame_address(info) else {
+        let Some(address) = bugcheck_trap_frame_address(state.ctx.target.arch(), info) else {
             error!("no trap frame is available for the current bugcheck");
             return Ok(());
         };
@@ -1117,7 +1117,7 @@ impl ReplState<'_> {
         candidates
             .iter()
             .map(|index| info.parameters[*index])
-            .find(|address| looks_like_kernel_pointer(*address))
+            .find(|address| looks_like_kernel_pointer(self.ctx.target.arch(), *address))
     }
 
     fn print_stack_parameters(&self, trace: &StackTrace, frame_offset: usize) -> Result<()> {

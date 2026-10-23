@@ -4,7 +4,7 @@
 use std::mem::take;
 use std::sync::Arc;
 
-use crate::arch::{Arch, HwBreakpointAccess};
+use crate::arch::HwBreakpointAccess;
 use crate::backend::dbg_backend::{BugcheckInfo, DebugCapability, ModuleEvent, WatchpointAccess};
 use crate::backend::partition_backend::PartitionBackend;
 use crate::base::error::{Error, Result};
@@ -420,32 +420,22 @@ impl Session {
     ///
     /// `nt!KiBugCheckData` is empty at the function's first instruction: the
     /// code that fills it has not run. The arguments have not been spilled
-    /// yet either, so they are still in registers, the fifth on the stack
-    /// above the shadow space.
+    /// yet either, so they are where the calling convention put them.
     pub(super) fn bugcheck_from_trap(&mut self) -> Option<BugcheckInfo> {
         let registers = self.backend.read_registers().ok()?;
-        let read = |name: &str| self.register_map.read_u64(name, &registers).ok();
-        let (code, p1, p2, p3, p4) = match self.target.arch() {
-            Arch::Amd64 => {
-                let stack = read("rsp")?;
-                let fourth = self
-                    .target
-                    .address_space(self.target.current_dtb())
-                    .read::<u64>(VirtAddr(stack.wrapping_add(0x28)))
-                    .ok();
-                (read("rcx")?, read("rdx")?, read("r8")?, read("r9")?, fourth)
-            }
-            Arch::Arm64 => (
-                read("x0")?,
-                read("x1")?,
-                read("x2")?,
-                read("x3")?,
-                read("x4"),
-            ),
+        let argument = |index| {
+            self.argument_on_entry(index, |name| {
+                self.register_map.read_u64(name, &registers).ok()
+            })
         };
         Some(BugcheckInfo {
-            code: code as u32,
-            parameters: [p1, p2, p3, p4.unwrap_or(0)],
+            code: argument(0)? as u32,
+            parameters: [
+                argument(1)?,
+                argument(2)?,
+                argument(3)?,
+                argument(4).unwrap_or(0),
+            ],
             driver: None,
         })
     }

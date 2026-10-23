@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use crate::arch::{RegisterFile, RegisterMap};
+use crate::arch::{ArgumentLocation, RegisterFile, RegisterMap};
 use crate::backend::dbg_backend::{DebugCapability, processor_index_from_backend_thread_id};
 use crate::base::error::{Error, Result};
 use crate::base::memory::DTB_IDENTITY;
@@ -412,6 +412,28 @@ impl Session {
                     .ok()
             })
             .unwrap_or(0)
+    }
+
+    /// Argument `index` of the function the current thread has just entered,
+    /// where the calling convention puts it: a register `register` reads, or
+    /// a stack slot above the stack pointer `register` reads.
+    pub fn argument_on_entry(
+        &self,
+        index: usize,
+        register: impl Fn(&str) -> Option<u64>,
+    ) -> Option<u64> {
+        let arch = self.target.arch();
+        match arch.argument(index) {
+            ArgumentLocation::Register(name) => register(name),
+            ArgumentLocation::Stack(offset) => {
+                let stack = register(arch.sp_register())?;
+                self.target
+                    .address_space(self.target.current_dtb())
+                    .read_pointer(VirtAddr(stack.wrapping_add(offset)))
+                    .ok()
+                    .map(|value| value.0)
+            }
+        }
     }
 
     /// Read the selected live vCPU register file. A parked Windows thread is a

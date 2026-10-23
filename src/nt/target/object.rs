@@ -1529,7 +1529,7 @@ impl Target {
             let index = u64::from(raw ^ ((header.0 >> 8) as u8) ^ cookie);
             mem.read_pointer(type_table? + index * mem.arch().pointer_size())
                 .ok()
-                .filter(|object| looks_like_kernel_pointer(object.0))
+                .filter(|object| looks_like_kernel_pointer(self.arch(), object.0))
         };
 
         // The input is usually the object body. If both possible headers are
@@ -1573,7 +1573,7 @@ impl Target {
                 let resolved = mem
                     .read_pointer(table + index * mem.arch().pointer_size())
                     .ok()
-                    .filter(|object| looks_like_kernel_pointer(object.0));
+                    .filter(|object| looks_like_kernel_pointer(self.arch(), object.0));
                 let name = resolved.and_then(|t| {
                     let off = guest
                         .ntoskrnl

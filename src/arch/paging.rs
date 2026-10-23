@@ -9,6 +9,18 @@ pub trait Paging: Sync {
     /// Whether `va` lies in the kernel half of the address space.
     fn is_kernel_address(&self, va: VirtAddr) -> bool;
 
+    /// The end of the user half and the start of the kernel half of the
+    /// canonical address space: the addresses between them no page table
+    /// maps.
+    fn canonical_halves(&self) -> (u64, u64);
+
+    /// Whether `value` could be a pointer, by its upper bits.
+    fn could_be_pointer(&self, value: u64) -> bool;
+
+    /// Where Windows' system address space starts (`MmSystemRangeStart`):
+    /// a kernel pointer lies at or above it.
+    fn system_range_start(&self) -> u64;
+
     /// Whether kernel addresses translate through a root of their own
     /// (AArch64's TTBR1) rather than through each address space's.
     fn separate_kernel_root(&self) -> bool;
