@@ -19,6 +19,8 @@ With `--plain-repl`, ntoseye reads commands line by line without completion or h
 
 ntoseye shows color only when the output goes to a terminal. If you redirect the output, or if `NO_COLOR` is set, the output is plain text, and so are the prompt and its completion menu.
 
+The prompt marks where each command and its output start and end, as a shell does for its terminal (OSC 133). A terminal that reads these marks, such as Ghostty, kitty, WezTerm, iTerm2, Windows Terminal, the VS Code terminal or Tern, can then jump from one command to the next, select a command's output, or flag one that reported an error.
+
 ## In Tern
 
 [Tern](https://stencil.so/tern) is Stencil's terminal. When you run ntoseye in it, you type commands in Tern's own input field, with completion popups and a searchable [palette](#the-palette). Results print as text, as in any other terminal. Other terminals aren't affected.

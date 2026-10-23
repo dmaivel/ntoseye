@@ -5,7 +5,7 @@ use nu_ansi_term::{Color, Style};
 #[cfg(feature = "cli")]
 use reedline::{
     DefaultHinter, DescriptionMode, Emacs, FileBackedHistory, IdeMenu, KeyCode, KeyModifiers,
-    MenuBuilder, ReedlineEvent, ReedlineMenu, default_emacs_keybindings,
+    MenuBuilder, Osc133Markers, ReedlineEvent, ReedlineMenu, default_emacs_keybindings,
 };
 #[cfg(feature = "cli")]
 use reedline::{Reedline, Signal};
@@ -106,7 +106,7 @@ pub use commands::{ReplActions, command_reference_json, json_string, open_sessio
 pub use completion::*;
 pub use disasm::*;
 #[cfg(feature = "cli")]
-use line_editor::{CustomPrompt, MyCompleter, TrackingHighlighter};
+use line_editor::{CustomPrompt, MyCompleter, PromptMark, TrackingHighlighter, mark};
 pub use memory_view::*;
 pub use remote::*;
 pub use stop::*;
@@ -1016,6 +1016,9 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         .with_completer(completor)
         .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
         .with_ansi_colors(styled)
+        // OSC 133 `A` and `B` around the prompt; the loop below marks the
+        // output (`C`) and the end of each line it runs (`D`).
+        .with_semantic_markers(Some(Osc133Markers::boxed()))
         .with_edit_mode(edit_mode)
         .with_highlighter(Box::new(highlighter))
         .with_history_exclusion_prefix(Some(" ".to_string()));
@@ -1145,7 +1148,13 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                             state.line = buffer.trim().to_string();
                             // A Ctrl+C that ended the last command's step is spent.
                             state.ctx.target.interrupt.store(false, Ordering::SeqCst);
-                            match state.dispatch_line(&buffer)? {
+                            let errors = diagnostics::errors_reported();
+                            mark(PromptMark::Output);
+                            let flow = state.dispatch_line(&buffer);
+                            mark(PromptMark::Finished {
+                                failed: flow.is_err() || diagnostics::errors_reported() != errors,
+                            });
+                            match flow? {
                                 Flow::Quit => break,
                                 Flow::Continue | Flow::Denied | Flow::Jump(_) => {}
                             }

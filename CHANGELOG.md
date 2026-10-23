@@ -23,6 +23,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - The `gdb` backend sets as many hardware breakpoints (`ba`) as the GDB stub accepts, no longer four, so QEMU running with TCG, which emulates them, takes any number. Under KVM the processor still has four debug registers, and a fifth `ba` says the stub refused it.
 - A module whose PDB no symbol source has — a vendor driver never published — falls back to the export table of its image in the dump, as the Windows debugger does, so `k`, `ln` and `!analyze` name its functions (`myfault!nmf_fault_irql+0x35`) where they showed `module+offset`, and a deferred breakpoint on an export binds. So does a module whose image names no PDB at all (no CodeView record), once fetching the image does not name one either. A PDB acquired later (a source added, the process attached again) replaces the export symbols.
 - The prompt suggests as you type: the rest of the most recent earlier line that starts with what you've typed appears dimmed after the cursor (`b` suggests `bp nt!NtClose`), as fish does. **→**, **End** or **Ctrl+E** accepts it, **Ctrl+→** a word at a time; **Enter** runs only what you typed. Tern's prompt already did this. With `NO_COLOR` set, nothing is suggested, since only its dimming sets a suggestion apart from what you typed.
+- The prompt marks where each command and its output start and end (OSC 133), as a shell does for its terminal, so a terminal that reads the marks can jump between commands, select one's output, or flag one that reported an error.
 
 ### Changed
 
