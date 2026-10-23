@@ -109,6 +109,59 @@ impl InstructionSet for Arm64 {
         Some(ip & !3)
     }
 
+    /// `b.<cond>` on NZCV, `cbz`/`cbnz` on a register, `tbz`/`tbnz` on one
+    /// of its bits.
+    fn condition_holds(
+        &self,
+        bytes: &[u8],
+        ip: u64,
+        read: &dyn Fn(&str) -> Option<u64>,
+    ) -> Option<bool> {
+        let instruction = bad64::decode(word(bytes)?, ip).ok()?;
+        let mnemonic = instruction.op().mnem();
+        let operands = self.operands(bytes, ip);
+        let register = || -> Option<u64> {
+            let operand = operands.first()?;
+            let value = read(operand.full_register.as_deref()?)?;
+            let narrow = operand
+                .register
+                .as_deref()
+                .is_some_and(|name| name.starts_with('w'));
+            Some(if narrow { value & 0xffff_ffff } else { value })
+        };
+        match mnemonic {
+            "cbz" => return Some(register()? == 0),
+            "cbnz" => return Some(register()? != 0),
+            "tbz" | "tbnz" => {
+                let bit = u32::try_from(operands.get(1)?.immediate?).ok()?;
+                let set = register()?.checked_shr(bit)? & 1 != 0;
+                return Some(set == (mnemonic == "tbnz"));
+            }
+            _ => {}
+        }
+        let cpsr = read("cpsr")?;
+        let flag = |bit: u32| cpsr >> bit & 1 != 0;
+        let (n, z, c, v) = (flag(31), flag(30), flag(29), flag(28));
+        Some(match mnemonic.strip_prefix("b.")? {
+            "eq" => z,
+            "ne" => !z,
+            "cs" | "hs" => c,
+            "cc" | "lo" => !c,
+            "mi" => n,
+            "pl" => !n,
+            "vs" => v,
+            "vc" => !v,
+            "hi" => c && !z,
+            "ls" => !c || z,
+            "ge" => n == v,
+            "lt" => n != v,
+            "gt" => !z && n == v,
+            "le" => z || n != v,
+            "al" | "nv" => true,
+            _ => return None,
+        })
+    }
+
     fn decode_preceding(
         &self,
         bytes: &[u8],

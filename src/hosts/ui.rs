@@ -4,7 +4,10 @@
 
 use owo_colors::OwoColorize;
 use std::fmt::{self, Display, Write as _};
+use std::path::Path;
+use std::sync::LazyLock;
 
+use crate::base::bytes::before_nul;
 use crate::base::disasm::{AsmKind, AsmToken};
 use crate::base::types::VirtAddr;
 
@@ -124,4 +127,79 @@ pub fn badge(text: &str) -> String {
 /// reset foreground only (`39`) and never carry a background.
 pub fn plate(text: &str) -> String {
     text.on_black().to_string()
+}
+
+/// `text` as a terminal link (OSC 8) to the local file `path`: a click opens
+/// it in the terminals that support them, and the rest show `text`. Output
+/// that is not styled (a pipe, a capture, `NO_COLOR`) drops the link with
+/// the colors. The link names this host, so a terminal reached over SSH
+/// does not open a file of the same name on its own machine.
+pub fn file_link(path: &Path, text: &str) -> String {
+    let Ok(path) = std::path::absolute(path) else {
+        return text.to_string();
+    };
+    let mut uri = format!("file://{}", *HOSTNAME);
+    for byte in path.as_os_str().as_encoded_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'.' | b'_' | b'~' => {
+                uri.push(char::from(*byte));
+            }
+            _ => {
+                let _ = write!(uri, "%{byte:02X}");
+            }
+        }
+    }
+    format!("\x1b]8;;{uri}\x1b\\{text}\x1b]8;;\x1b\\")
+}
+
+/// This machine's name, as a `file:` link's host, or empty when unknown.
+static HOSTNAME: LazyLock<String> = LazyLock::new(hostname);
+
+#[cfg(unix)]
+fn hostname() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: `buf` is writable for its length; gethostname writes at most
+    // that many bytes.
+    let status = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+    if status != 0 {
+        return String::new();
+    }
+    // A name a URI host cannot hold is left out; the link still opens the
+    // local file.
+    match std::str::from_utf8(before_nul(&buf)) {
+        Ok(name)
+            if name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.') =>
+        {
+            name.to_string()
+        }
+        _ => String::new(),
+    }
+}
+
+#[cfg(not(unix))]
+fn hostname() -> String {
+    String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::base::output::strip_ansi;
+
+    /// A link shows only its text once the styling is stripped, and a
+    /// path's characters that would end or change the URI are escaped.
+    #[test]
+    fn file_link_keeps_its_text_and_escapes_the_path() {
+        let link = file_link(Path::new("/src/my driver/#1.c"), "[local driver.c:42]");
+        assert_eq!(strip_ansi(&link), "[local driver.c:42]");
+        assert!(
+            link.starts_with(&format!(
+                "\x1b]8;;file://{}/src/my%20driver/%231.c\x1b\\",
+                *HOSTNAME
+            )),
+            "{link:?}"
+        );
+    }
 }

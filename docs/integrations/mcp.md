@@ -34,7 +34,7 @@ The `command` tool works like a WinDbg prompt, with one difference: a call never
 
 Every stop costs the agent tokens, so the server draws stops more compactly than the REPL:
 
-- The first stop, and a stop on another thread, show everything: the banner, the registers, the next instructions, and the stack.
+- The first stop, and a stop on another thread, show everything: the banner, the registers, the instructions around the stop, and the stack.
 - A stop on the same thread as the one before, such as after {command}`p` or {command}`t`, shows the banner, the registers that changed on one line, the next three instructions, and the stack only when the function changed. A step then costs about 100 tokens instead of about 350.
 - A stop in the middle of a line, such as the one that {command}`break` causes in `break; bp ...; g`, shows only its banner, because the rest of the line carries on from it.
 

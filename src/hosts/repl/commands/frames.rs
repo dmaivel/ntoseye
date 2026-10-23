@@ -1158,7 +1158,7 @@ fn print_exception_record(record: &ExceptionRecord) {
 /// `r`'s text: the general-purpose grid, then the control (when `control`)
 /// and segment registers.
 fn print_register_grid(register_map: &RegisterMap, regs: &[u8], arch: Arch, control: bool) {
-    print_registers(register_map, arch, regs, None, false);
+    print_registers(register_map, arch, regs, None, None);
     // Control registers match the GP-register cluster's
     // styling; segment selectors are 16-bit, so render
     // them as 4 digits rather than padding to 64-bit
@@ -1225,6 +1225,11 @@ pub fn print_indexed_stacktrace(
     for (index, recovered) in trace.frames.iter().take(display_limit).enumerate() {
         let frame = &recovered.frame;
         let global_index = frame_offset + index;
+        if index > 0
+            && let Some(label) = crossing(&trace.frames[index - 1].frame, frame)
+        {
+            outln!("{}", crossing_line(label, 4));
+        }
         let marker = if selected_index == Some(global_index) {
             "*"
         } else {
@@ -1259,7 +1264,7 @@ pub fn print_indexed_stacktrace(
         let location = frame
             .source_location
             .as_ref()
-            .map(|location| format!("  [{}:{}]", location.file, location.line))
+            .map(|location| format!("  {}", ui::muted(&format_source_location(location))))
             .unwrap_or_default();
         outln!(
             "{}{:02} {}{}  {}{}{}",

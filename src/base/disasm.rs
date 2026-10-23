@@ -45,6 +45,15 @@ pub trait InstructionSet: Sync {
     /// See [`instruction_containing`].
     fn instruction_containing(&self, bytes: &[u8], start: u64, ip: u64) -> Option<u64>;
 
+    /// Whether the condition of the conditional jump `bytes` encode at `ip`
+    /// holds with the registers `read` returns; see [`DisasmRow::jump_taken`].
+    fn condition_holds(
+        &self,
+        bytes: &[u8],
+        ip: u64,
+        read: &dyn Fn(&str) -> Option<u64>,
+    ) -> Option<bool>;
+
     /// See [`decode_preceding`].
     fn decode_preceding(
         &self,
@@ -288,6 +297,48 @@ impl DisasmRow {
     }
 }
 
+/// A direct jump: where it goes, and whether it may fall through instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Jump {
+    pub target: u64,
+    pub conditional: bool,
+}
+
+impl DisasmRow {
+    /// The direct jump this instruction is, conditional or not. `None` for
+    /// calls, returns, indirect branches and everything else.
+    pub fn jump(&self) -> Option<Jump> {
+        let (_, flow) = self
+            .machine
+            .instruction_set()
+            .walk_step(self.instruction_bytes(), self.ip)?;
+        match flow {
+            Flow::Jump(target) => Some(Jump {
+                target,
+                conditional: false,
+            }),
+            Flow::Fork(target) => Some(Jump {
+                target,
+                conditional: true,
+            }),
+            Flow::Next | Flow::End => None,
+        }
+    }
+
+    /// Whether this jump goes to its target when run with the registers
+    /// `read` returns by name (`eflags`, `rcx`; `cpsr`, `x3`). `None` when
+    /// it is no jump, or its condition reads something `read` lacks or that
+    /// is not modeled (`loop`).
+    pub fn jump_taken(&self, read: impl Fn(&str) -> Option<u64>) -> Option<bool> {
+        if !self.jump()?.conditional {
+            return Some(true);
+        }
+        self.machine
+            .instruction_set()
+            .condition_holds(self.instruction_bytes(), self.ip, &read)
+    }
+}
+
 /// Instruction bytes as space-separated lowercase hex pairs.
 fn hex_bytes(bytes: &[u8]) -> String {
     let mut hex = String::with_capacity(bytes.len() * 3);
@@ -443,6 +494,90 @@ mod tests {
             immediate: Some(value),
             ..operand(OperandKind::Immediate, text)
         }
+    }
+
+    /// A jump's condition reads the flags as its mnemonic does: signed
+    /// (`jl`, `jg`) from SF and OF, unsigned (`jb`, `jbe`) from CF and ZF;
+    /// `jrcxz` reads RCX; a `jmp` always goes, and a call is no jump.
+    #[test]
+    fn x64_jump_taken_follows_the_condition() {
+        let row = |bytes: &[u8]| {
+            CodeMachine::Amd64
+                .instruction_set()
+                .decode_rows(bytes, 0x1000, Some(1), &|_| String::new())
+                .remove(0)
+        };
+        let taken = |bytes: &[u8], eflags: u64, rcx: u64| {
+            row(bytes).jump_taken(|name| match name {
+                "eflags" => Some(eflags),
+                "rcx" => Some(rcx),
+                _ => None,
+            })
+        };
+        const CF: u64 = 1;
+        const ZF: u64 = 1 << 6;
+        const SF: u64 = 1 << 7;
+        let (jl, jb, jg, jbe) = ([0x7c, 0x10], [0x72, 0x10], [0x7f, 0x10], [0x76, 0x10]);
+
+        assert_eq!(
+            row(&jl).jump(),
+            Some(Jump {
+                target: 0x1012,
+                conditional: true
+            })
+        );
+        // Negative (SF without OF), unsigned above or equal.
+        assert_eq!(taken(&jl, SF, 0), Some(true));
+        assert_eq!(taken(&jb, SF, 0), Some(false));
+        assert_eq!(taken(&jg, SF, 0), Some(false));
+        assert_eq!(taken(&jbe, SF, 0), Some(false));
+        // Equal with a borrow.
+        assert_eq!(taken(&jl, CF | ZF, 0), Some(false));
+        assert_eq!(taken(&jb, CF | ZF, 0), Some(true));
+        assert_eq!(taken(&jg, CF | ZF, 0), Some(false));
+        assert_eq!(taken(&jbe, CF | ZF, 0), Some(true));
+
+        assert_eq!(taken(&[0xe3, 0x10], 0, 0), Some(true));
+        assert_eq!(taken(&[0xe3, 0x10], 0, 1), Some(false));
+        assert_eq!(taken(&[0xeb, 0x10], 0, 0), Some(true));
+        assert_eq!(row(&[0xe8, 0, 0, 0, 0]).jump(), None);
+        // A condition read from a register the caller lacks is unknown.
+        assert_eq!(row(&jl).jump_taken(|_| None), None);
+    }
+
+    /// ARM64's conditions: `b.<cond>` on NZCV, `cbz` on a whole register,
+    /// `tbnz` on one bit of it.
+    #[test]
+    fn arm64_jump_taken_follows_the_condition() {
+        let row = |word: u32| {
+            CodeMachine::Arm64
+                .instruction_set()
+                .decode_rows(&word.to_le_bytes(), 0x1000, None, &|_| String::new())
+                .remove(0)
+        };
+        let taken = |word: u32, registers: &[(&str, u64)]| {
+            row(word).jump_taken(|name| {
+                registers
+                    .iter()
+                    .find(|(register, _)| *register == name)
+                    .map(|(_, value)| *value)
+            })
+        };
+        let (cbz_x0, tbnz_w1_3, b_ne) = (0xb400_0080, 0x3718_0041, 0x5400_0041);
+
+        assert_eq!(
+            row(cbz_x0).jump(),
+            Some(Jump {
+                target: 0x1010,
+                conditional: true
+            })
+        );
+        assert_eq!(taken(cbz_x0, &[("x0", 0)]), Some(true));
+        assert_eq!(taken(cbz_x0, &[("x0", 5)]), Some(false));
+        assert_eq!(taken(tbnz_w1_3, &[("x1", 0b1000)]), Some(true));
+        assert_eq!(taken(tbnz_w1_3, &[("x1", 0b0111)]), Some(false));
+        assert_eq!(taken(b_ne, &[("cpsr", 1 << 30)]), Some(false));
+        assert_eq!(taken(b_ne, &[("cpsr", 0)]), Some(true));
     }
 
     /// A breakpoint address inside an instruction is placed in the

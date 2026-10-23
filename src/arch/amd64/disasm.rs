@@ -3,8 +3,9 @@
 //! emulates.
 
 use iced_x86::{
-    Code, Decoder, DecoderOptions, FlowControl, FormatMnemonicOptions, Formatter, FormatterOutput,
-    FormatterTextKind, Instruction, MemorySizeOptions, Mnemonic, NasmFormatter, OpKind, Register,
+    Code, ConditionCode, Decoder, DecoderOptions, FlowControl, FormatMnemonicOptions, Formatter,
+    FormatterOutput, FormatterTextKind, Instruction, MemorySizeOptions, Mnemonic, NasmFormatter,
+    OpKind, Register,
 };
 
 use crate::base::disasm::{
@@ -124,6 +125,44 @@ impl InstructionSet for X86 {
 
     /// x86 cannot decode backwards, so every starting offset is tried,
     /// preferring a stream without invalid instructions.
+    fn condition_holds(
+        &self,
+        bytes: &[u8],
+        ip: u64,
+        read: &dyn Fn(&str) -> Option<u64>,
+    ) -> Option<bool> {
+        let instruction = self.decode_at(bytes, ip);
+        match instruction.mnemonic() {
+            Mnemonic::Jrcxz => return Some(read("rcx")? == 0),
+            Mnemonic::Jecxz => return Some(read("rcx")? as u32 == 0),
+            Mnemonic::Jcxz => return Some(read("rcx")? as u16 == 0),
+            Mnemonic::Loop | Mnemonic::Loope | Mnemonic::Loopne => return None,
+            _ => {}
+        }
+        let flags = read("eflags")?;
+        let flag = |bit: u32| flags >> bit & 1 != 0;
+        let (cf, pf, zf, sf, of) = (flag(0), flag(2), flag(6), flag(7), flag(11));
+        Some(match instruction.condition_code() {
+            ConditionCode::o => of,
+            ConditionCode::no => !of,
+            ConditionCode::b => cf,
+            ConditionCode::ae => !cf,
+            ConditionCode::e => zf,
+            ConditionCode::ne => !zf,
+            ConditionCode::be => cf || zf,
+            ConditionCode::a => !cf && !zf,
+            ConditionCode::s => sf,
+            ConditionCode::ns => !sf,
+            ConditionCode::p => pf,
+            ConditionCode::np => !pf,
+            ConditionCode::l => sf != of,
+            ConditionCode::ge => sf == of,
+            ConditionCode::le => zf || sf != of,
+            ConditionCode::g => !zf && sf == of,
+            ConditionCode::None => return None,
+        })
+    }
+
     fn decode_preceding(
         &self,
         bytes: &[u8],

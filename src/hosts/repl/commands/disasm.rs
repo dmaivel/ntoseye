@@ -11,6 +11,7 @@ use crate::base::types::{CodeMachine, VirtAddr};
 #[cfg(feature = "python")]
 use crate::hosts::python::command::PyArg;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError, virtual_memory};
+use crate::hosts::repl::listing::{Listing, listing_lines};
 use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::symbols::glob_matches;
@@ -22,6 +23,10 @@ use super::memory::MAX_DISASSEMBLY_INSTRUCTIONS;
 
 /// Instructions `u` and `ub` list without a count.
 const DEFAULT_INSTRUCTIONS: u64 = 8;
+/// Jumps drawn side by side beside `u` and `ub`.
+const LISTING_LANES: usize = 4;
+/// Beside `uf`, where every target in the function is listed.
+const FUNCTION_LANES: usize = 6;
 
 /// How far `u` lists from its start.
 #[derive(Clone, Copy, Debug)]
@@ -160,22 +165,52 @@ fn continues_listing(
     Ok(ContinuesListing)
 }
 
-/// A plain listing, as `u` and `ub` show it.
-fn show_listing(rows: &[DisasmRow]) {
-    render_rows(rows, |_| None);
+/// A listing as `u` and `ub` show it.
+fn show_listing(rows: &[DisasmRow], repl: &ReplState<'_>) {
+    print_listing(repl.ctx, rows, LISTING_LANES);
+}
+
+/// A listing with its bytes, its jumps drawn and their targets named, each
+/// row's offset from its symbol, and the instruction the selected thread is
+/// at marked, with whether its jump is taken.
+fn print_listing(session: &Session, rows: &[DisasmRow], lanes: usize) {
+    let target = &session.target;
+    let trace = resolve_thread_trace_context(target, target.current_dtb());
+    let current = target
+        .builtin_variable_value("ip")
+        .and_then(|ip| rows.iter().position(|row| row.ip == ip));
+    // The flags are the thread's own only where no frame is selected; a
+    // caller's frame recovers no flags.
+    let taken = current
+        .filter(|_| target.selected_frame.is_none())
+        .and_then(|current| {
+            let registers = target.registers.as_ref()?;
+            rows[current].jump_taken(|name| registers.get(name).copied())
+        });
+    let listing = Listing {
+        rows,
+        current,
+        taken,
+        returns_to: None,
+        bytes: true,
+        lanes,
+    };
+    for line in listing_lines(session, &trace, &listing) {
+        outln!("{line}");
+    }
     outln!();
 }
 
 impl Render<ContinuesListing> for Vec<DisasmRow> {
     fn render(&self, repl: &mut ReplState<'_>, ContinuesListing: ContinuesListing) {
-        show_listing(self);
+        show_listing(self, repl);
         repl.disasm_cursor = DisasmCursor::after(&repl.ctx.target, self);
     }
 }
 
 impl Render for Vec<DisasmRow> {
-    fn render(&self, _: &mut ReplState<'_>, (): ()) {
-        show_listing(self);
+    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+        show_listing(self, repl);
     }
 }
 
@@ -210,10 +245,9 @@ fn address_or_ip(
 }
 
 impl Render for FunctionDisassembly {
-    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
         outln!("{}  {} bytes", ui::symbol(&self.symbol), self.length);
-        render_rows(&self.rows, |_| None);
-        outln!();
+        print_listing(repl.ctx, &self.rows, FUNCTION_LANES);
     }
 }
 
@@ -429,12 +463,17 @@ mod tests {
     use crate::session::session_over_memory;
     use std::collections::HashMap;
 
-    /// The addresses a `u` line listed.
+    /// The addresses a `u` line listed: each row's first 16-digit word, past
+    /// the gutter and the current-instruction marker.
     fn listed(state: &mut ReplState<'_>, line: &str) -> Vec<u64> {
         let (result, text) = capture(|| state.dispatch_line(line));
         result.unwrap();
         text.lines()
-            .filter_map(|row| u64::from_str_radix(row.split_whitespace().next()?, 16).ok())
+            .filter_map(|row| {
+                row.split_whitespace()
+                    .find(|word| word.len() == 16)
+                    .and_then(|word| u64::from_str_radix(word, 16).ok())
+            })
             .collect()
     }
 

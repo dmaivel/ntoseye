@@ -366,7 +366,7 @@ impl ReplState<'_> {
                             self.ctx.target.arch(),
                             &regs,
                             None,
-                            false,
+                            None,
                         );
                     }
                 }

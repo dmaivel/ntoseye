@@ -25,7 +25,7 @@ use crate::nt::target::usermode::ImageCheck;
 use crate::nt::target::{CompareResult, SearchResult, SelectedFrame, ThreadInfo, exit_registers};
 use crate::nt::unwind::{
     FunctionEntry, RecoveredStackTrace, StackTrace, ThreadStackSource, ThreadStackTrace,
-    build_parked_thread_recovered_stack, build_parked_thread_stack,
+    ThreadTraceContext, build_parked_thread_recovered_stack, build_parked_thread_stack,
     build_stacktrace_with_register_values, build_thread_stacktrace, format_symbol, function_entry,
     function_range, guest_vp_running, halted_in_windows_hypervisor, resolve_thread_trace_context,
     saved_vtls,
@@ -423,6 +423,19 @@ impl Session {
             length: len,
             rows,
         })
+    }
+
+    /// Where the function containing `addr` begins and ends, in the code
+    /// `trace` runs: its runtime function entry, or else the leaf its symbol
+    /// starts (see [`Self::leaf_function_range`]).
+    pub fn function_bounds(
+        &self,
+        trace: &ThreadTraceContext,
+        addr: VirtAddr,
+    ) -> Option<(u64, u64)> {
+        function_range(&self.target, trace, addr.0)
+            .or_else(|| self.leaf_function_range(trace.active_dtb, addr).ok())
+            .filter(|(start, end)| (*start..*end).contains(&addr.0))
     }
 
     /// The function containing `addr` that no runtime function entry

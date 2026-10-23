@@ -429,41 +429,73 @@ fn thread_trace_context(debugger: &Target, cr3: u64, process_modules: bool) -> T
     }
 }
 
+/// What an address is named after, as `k`, `ln` and a stop name it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SymbolName {
+    pub module: String,
+    /// The symbol, or `None` in a module without symbols, whose base the
+    /// offset counts from then.
+    pub name: Option<String>,
+    pub offset: u64,
+}
+
+impl std::fmt::Display for SymbolName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.name {
+            Some(name) => f.write_str(&format_symbol_with_offset(
+                &self.module,
+                name,
+                u32::try_from(self.offset).unwrap_or(u32::MAX),
+            )),
+            None => write!(f, "{}+{:#x}", self.module, self.offset),
+        }
+    }
+}
+
+/// What `addr` is named after in the code `trace` runs: the nearest symbol
+/// below it, a split-off fragment's function, or the module it is in.
+pub fn symbol_name(debugger: &Target, trace: &ThreadTraceContext, addr: u64) -> Option<SymbolName> {
+    let named = |(module, name, offset): (String, String, u32)| SymbolName {
+        module,
+        name: Some(name),
+        offset: u64::from(offset),
+    };
+    let find = |dtb| {
+        debugger
+            .symbols
+            .find_closest_symbol_for_address(dtb, VirtAddr(addr))
+            .map(named)
+    };
+
+    if let Some(module) = trace.module_for_address(addr) {
+        let symbol = find(module.dtb)
+            .or_else(|| {
+                ensure_module_symbols(debugger, trace, std::iter::once(addr));
+                find(module.dtb)
+            })
+            .or_else(|| split_function(debugger, trace, module.dtb, addr).map(named));
+        return Some(symbol.unwrap_or_else(|| {
+            // The module has no PDB, or its fetch is still running.
+            SymbolName {
+                module: module.info.short_name.clone(),
+                name: None,
+                offset: addr.saturating_sub(module.info.base_address.0),
+            }
+        }));
+    }
+
+    trace
+        .process_dtb
+        .and_then(find)
+        .or_else(|| find(trace.kernel_dtb))
+}
+
 pub fn try_format_symbol(
     debugger: &Target,
     trace: &ThreadTraceContext,
     addr: u64,
 ) -> Option<String> {
-    let try_format = |dtb| {
-        debugger
-            .symbols
-            .format_closest_symbol_for_address(dtb, VirtAddr(addr))
-    };
-
-    if let Some(module) = trace.module_for_address(addr) {
-        let symbol = try_format(module.dtb)
-            .or_else(|| {
-                ensure_module_symbols(debugger, trace, std::iter::once(addr));
-                try_format(module.dtb)
-            })
-            .or_else(|| {
-                split_function(debugger, trace, module.dtb, addr)
-                    .map(|(module, name, offset)| format_symbol_with_offset(&module, &name, offset))
-            });
-        return Some(symbol.unwrap_or_else(|| {
-            // The module has no PDB, or its fetch is still running.
-            let offset = addr.saturating_sub(module.info.base_address.0);
-            format!("{}+{:#x}", module.info.short_name, offset)
-        }));
-    }
-
-    if let Some(process_dtb) = trace.process_dtb
-        && let Some(symbol) = try_format(process_dtb)
-    {
-        return Some(symbol);
-    }
-
-    try_format(trace.kernel_dtb)
+    symbol_name(debugger, trace, addr).map(|name| name.to_string())
 }
 
 /// The context description for a root that is none of NT's.

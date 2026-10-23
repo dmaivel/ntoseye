@@ -12,12 +12,14 @@ use crate::base::error::{Error, Result};
 use crate::base::output::neutralize_controls;
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::commands::display;
+use crate::hosts::repl::commands::frames::registers_from_trap_frame;
 use crate::hosts::ui;
+use crate::nt::bugchecks::bugcheck_trap_frame_on_stack;
 use crate::nt::guest::ModuleInfo;
 use crate::nt::target::{HYPERVISOR_CONTEXT, Target, ThreadInfo, kthread_state_name};
 use crate::nt::unwind::{
     StackTrace, ThreadTraceContext, UNKNOWN_CONTEXT, build_stacktrace_with_register_values,
-    format_symbol, resolve_thread_trace_context_at, saved_vtls,
+    build_thread_stacktrace, format_symbol, resolve_thread_trace_context_at, saved_vtls,
 };
 use crate::session::stops::module_event_line;
 use crate::session::{
@@ -275,7 +277,7 @@ fn print_saved_vtl0_context(session: &Session, saved: &HashMap<String, u64>) {
     print_section("registers (saved VTL0)");
     print_sparse_registers(saved, session.target.arch(), None, 2);
     let (trace, rip, stack) = saved_vtl0_code(session, saved);
-    print_disasm_context(session, &trace, rip);
+    print_disasm_context(session, &trace, rip, NextStep::default());
     print_stacktrace_data(&stack, BREAK_STACKTRACE_DISPLAY_LIMIT, true);
 }
 
@@ -302,7 +304,7 @@ fn saved_vtl0_code(
 }
 
 /// What a stop shows, gathered once for either renderer.
-struct StopContext {
+pub struct StopContext {
     thread: String,
     context: String,
     symbol: String,
@@ -376,6 +378,22 @@ fn print_stop_text(session: &Session, stop: &StopContext) {
         ))
     );
     print_event_children(" ", &stop.children());
+    let map = &session.register_map;
+    let read = |name: &str| map.read_u64(name, &stop.regs).ok();
+    // A bugcheck's banner names the fault site, which is not where the
+    // registers are: its jumps are not predicted from them.
+    let live = read(session.target.arch().pc_register()) == Some(stop.rip);
+    let next = |stack: Option<&'_ StackTrace>| {
+        if !live {
+            return (None, None);
+        }
+        // The caller a return goes back to: the first physical frame past
+        // the stopped one.
+        let returns_to = stack
+            .and_then(|stack| stack.frames.iter().skip(1).find(|frame| !frame.inline))
+            .map(|frame| frame.symbol.clone());
+        (Some(&read as &dyn Fn(&str) -> Option<u64>), returns_to)
+    };
     match stop.detail {
         StopDetail::Full => {}
         StopDetail::Banner => {
@@ -384,16 +402,27 @@ fn print_stop_text(session: &Session, stop: &StopContext) {
         }
         StopDetail::Changes { stack } => {
             print_changed_registers(
-                &session.register_map,
+                map,
                 session.target.arch(),
                 &stop.regs,
                 stop.before.as_deref(),
             );
-            print_disasm_lines(session, &stop.trace, stop.rip, COMPACT_DISASM_INSTRUCTIONS);
+            let (read, _) = next(None);
+            print_disasm_lines(
+                session,
+                &stop.trace,
+                stop.rip,
+                COMPACT_DISASM_INSTRUCTIONS,
+                0,
+                NextStep {
+                    read,
+                    returns_to: None,
+                },
+            );
             if stack {
                 print_stacktrace(
                     &session.target,
-                    &session.register_map,
+                    map,
                     &stop.regs,
                     BREAK_STACKTRACE_PROBE_LIMIT,
                     BREAK_STACKTRACE_DISPLAY_LIMIT,
@@ -411,24 +440,109 @@ fn print_stop_text(session: &Session, stop: &StopContext) {
         outln!();
         return;
     }
-    print_registers(
-        &session.register_map,
-        session.target.arch(),
-        &stop.regs,
-        stop.before.as_deref(),
-        true,
-    );
-    print_disasm_context(session, &stop.trace, stop.rip);
-    print_stacktrace(
+    let recovered = build_thread_stacktrace(
         &session.target,
-        &session.register_map,
+        map,
         &stop.regs,
+        session.target.windows_thread_selection.as_ref(),
         BREAK_STACKTRACE_PROBE_LIMIT,
+    );
+    let stack = StackTrace {
+        frames: recovered
+            .frames
+            .iter()
+            .map(|frame| frame.frame.clone())
+            .collect(),
+        truncated: recovered.truncated,
+    };
+    // At a bugcheck the frame that faulted is the one at the fault site:
+    // the stack starts from it, and the registers are the ones it ran with,
+    // when they can be found; else they are where the target stopped, and
+    // the heading says so.
+    let fault_index = (!live)
+        .then(|| {
+            recovered
+                .frames
+                .iter()
+                .position(|frame| frame.frame.ip == stop.rip)
+        })
+        .flatten();
+    let fault = (!live)
+        .then(|| {
+            fault_registers(
+                session,
+                &stack,
+                fault_index.map(|index| &recovered.frames[index].registers),
+                stop.rip,
+            )
+        })
+        .flatten();
+    match &fault {
+        Some((values, heading)) => print_known_registers(values, session.target.arch(), heading),
+        None => print_registers(
+            map,
+            session.target.arch(),
+            &stop.regs,
+            stop.before.as_deref(),
+            Some(if live {
+                "registers"
+            } else {
+                "registers (at stop)"
+            }),
+        ),
+    }
+    let (read_next, returns_to) = next(Some(&stack));
+    print_disasm_context(
+        session,
+        &stop.trace,
+        stop.rip,
+        NextStep {
+            read: read_next,
+            returns_to: returns_to.as_deref(),
+        },
+    );
+    print_stop_stack(
+        &stack,
+        fault_index.unwrap_or(0),
         BREAK_STACKTRACE_DISPLAY_LIMIT,
-        true,
     );
     print_displays(&stop.displays);
     outln!();
+}
+
+/// The registers the faulting instruction a bugcheck stop shows ran with,
+/// and the heading saying where they came from: the trap frame at `fault`
+/// (the one the bugcheck's parameters name, or else the innermost trap on
+/// the stack, which a bugcheck such as 0xD1 is raised from), its gaps
+/// filled with what the unwinder recovered for the frame that faulted
+/// (`unwound`: the nonvolatile registers a trap frame does not hold); or
+/// those recovered alone.
+fn fault_registers(
+    session: &Session,
+    stack: &StackTrace,
+    unwound: Option<&HashMap<String, u64>>,
+    fault: u64,
+) -> Option<(HashMap<String, u64>, &'static str)> {
+    let mut values = unwound.cloned().unwrap_or_default();
+    let named = session
+        .bugcheck()
+        .map(|analysis| analysis.trap_frames)
+        .unwrap_or_default();
+    let trap = named
+        .into_iter()
+        .chain(bugcheck_trap_frame_on_stack(&session.target, stack))
+        .find_map(|trap_frame| {
+            let frame = trap_frame.frame?;
+            (frame.instruction_pointer() == fault).then(|| registers_from_trap_frame(&frame))
+        });
+    match trap {
+        Some(saved) => {
+            values.extend(saved);
+            Some((values, "registers (trap frame)"))
+        }
+        None if !values.is_empty() => Some((values, "registers (unwound)")),
+        None => None,
+    }
 }
 
 /// The `display` expressions under a stop, in a section of their own.

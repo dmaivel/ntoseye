@@ -15,6 +15,8 @@ Keeping this file:
 
 ## Unreleased
 
+Stops and `u` now show where the code goes: the instructions around the stop in its function, jump and call targets by name, the jumps between them drawn as arrows, and whether the next one is taken. A bugcheck stop shows the registers the faulting instruction ran with, and its stack starts at the frame that faulted.
+
 ### Added
 
 - `--kd-handshake-timeout <seconds>` sets how long the `kd` and `kdnet` backends wait for the target's first answer, as `NTOSEYE_KD_TIMEOUT` does, and wins over it; the default is still 8 seconds. MCP's `open` takes it as `kd_handshake_timeout`, DAP's attach arguments as `kdHandshakeTimeout`, and the SDK as `ntoseye.attach(kd_handshake_timeout=...)`.
@@ -27,6 +29,11 @@ Keeping this file:
 - On an ARM64 target, `rip` and `rsp` no longer name `pc` and `sp`: `r`, expressions and breakpoint conditions take the ARM64 names (`@pc`, `@sp`, or `$ip` and `$csp` on any architecture), as WinDbg does. `fp`, `lr` and `pstate` still name `x29`, `x30` and `cpsr`.
 - On an ARM64 target, `!vtop` with a directory base lists each page-table entry the translation reads, with its flags, as it does on AMD64. It showed only the physical address.
 - On an ARM64 target, `ba e` refuses an address that is not 4-byte aligned when you set it, on every backend, as such a breakpoint never fires. Only the `kd` backend refused it, and only once it programmed the processors.
+- A stop's disassembly shows nine instructions around the instruction pointer, those before it too, within its function (no longer the padding past its `ret`), each with its offset from its symbol, as the stack and `ln` count it; where a symbol starts among them, a line names it (`nt!KiSystemServiceCopyEnd:`). A direct jump or call names its target in place of its address: by its offset when the target is among the instructions shown, under the same symbol (`je +0x33`), else by its symbol, which `u`, `bp` and `g` take as it is (`call nt!ObpPushStackInfo`, `jle ↓ nt!ObfDereferenceObject+0x59`). The jumps between the instructions shown are drawn as arrows, a breakpoint is marked `●`, and the instruction the processor is at says whether its jump is `taken` (its arrow lit) or `not taken`, and where a `ret` returns to. The instruction bytes are left out of the stop; `u` shows them. MCP's step results show the same.
+- `u`, `ub` and `uf` list instructions as the stop does, with their bytes, and mark the instruction the selected thread is at. `uf` draws the arrows across the whole function. A short jump now names its target, where it showed a bare address.
+- At a bugcheck stop, the registers are the ones the faulting instruction ran with: those of the trap frame at the fault (one the parameters name, or the innermost trap on the stack, which a 0xD1 or 0x50 is raised from), with those a trap frame does not save, such as `rbx` and `r12`-`r15`, recovered by the stack walk. The heading says `registers (trap frame)`, `registers (unwound)`, or `registers (at stop)` for the processor's where neither is found. The stack starts at the frame that faulted, the bugcheck's own frames folded into one line (`#0–#5  nt!DbgBreakPointWithStatus … nt!KiPageFault+0x468`).
+- Stacks (the stop's, `k`, `!thread`, `!analyze -v`) mark with a line where the walk crosses from kernel code into the user-mode code that called it (`user mode`) or through a trap or an interrupt (`trap`).
+- A frame's source line in `k` reads as in the stop, `[local <path>:<line>]` for the copy `.srcpath` maps, `[recorded <path>:<line>]` otherwise. In a terminal that supports links, a local copy that matches the PDB, and the file `ls` and `lsa` list, are links that open it.
 
 ### Fixed
 

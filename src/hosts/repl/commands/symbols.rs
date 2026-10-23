@@ -1202,7 +1202,7 @@ impl ReplState<'_> {
         }
         let last = (first as usize + count as usize - 1).min(lines.len());
         let shown = &lines[first as usize - 1..last];
-        outln!("{}:", path.display());
+        outln!("{}:", ui::file_link(path, &path.display().to_string()));
         for (number, line) in (first as usize..).zip(shown) {
             let mark = if Some(number as u32) == current {
                 '>'

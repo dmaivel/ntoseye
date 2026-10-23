@@ -109,11 +109,11 @@ These are the Sandbox's 75 processes, not the target's. Among them are `CExecSvc
 
 ```text
 partition:p4.1> ~
-vCPU  RIP               Context  Symbol
-p4.1  fffff8058670f8bd  kernel   nt!PpmIdleGuestExecute+0x1d
-p4.2  fffff8058670f8bd  kernel   nt!PpmIdleGuestExecute+0x1d
-p4.3  fffff8058670f8bd  kernel   nt!PpmIdleGuestExecute+0x1d
-p4.4  fffff8058670f8bd  kernel   nt!PpmIdleGuestExecute+0x1d
+   vCPU  RIP               Context  Symbol
+.  p4.1  fffff8058670f8bd  kernel   nt!PpmIdleGuestExecute+0x1d
+   p4.2  fffff8058670f8bd  kernel   nt!PpmIdleGuestExecute+0x1d
+   p4.3  fffff8058670f8bd  kernel   nt!PpmIdleGuestExecute+0x1d
+   p4.4  fffff8058670f8bd  kernel   nt!PpmIdleGuestExecute+0x1d
 
 partition:p4.1> k
  00 fffff805187199a0  fffff8058670f8bd  nt!PpmIdleGuestExecute+0x1d
@@ -284,11 +284,11 @@ gdb:p01.03> .partition 4
 inspecting partition 0x4: nt at 0xfffff80586250000, VPs p4.1 p4.2 p4.3 p4.4
 
 partition:p4.1> ~
-vCPU  RIP               Context  Symbol
-p4.1  fffff8058670f8bd  kernel   nt!PpmIdleGuestExecute+0x1d
-p4.2  fffff8058670f8bd  kernel   nt!PpmIdleGuestExecute+0x1d
-p4.3  fffff805171e0000  kernel   hvcall!Hypercall
-p4.4  fffff8058670f8bd  kernel   nt!PpmIdleGuestExecute+0x1d
+   vCPU  RIP               Context  Symbol
+.  p4.1  fffff8058670f8bd  kernel   nt!PpmIdleGuestExecute+0x1d
+   p4.2  fffff8058670f8bd  kernel   nt!PpmIdleGuestExecute+0x1d
+   p4.3  fffff805171e0000  kernel   hvcall!Hypercall
+   p4.4  fffff8058670f8bd  kernel   nt!PpmIdleGuestExecute+0x1d
 
 partition:p4.1> ~2s
 switched to processor p4.3

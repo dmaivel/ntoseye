@@ -85,6 +85,7 @@ mod completion;
 mod disasm;
 #[cfg(feature = "cli")]
 mod line_editor;
+pub mod listing;
 mod memory_view;
 #[cfg(feature = "cli")]
 pub mod native;

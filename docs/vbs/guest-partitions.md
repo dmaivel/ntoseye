@@ -101,7 +101,7 @@ VM running, waiting for stop (Ctrl+C to pause)...
  BREAK  p4.1 dwm.exe (3832) at nt!NtClose+0xa3
  └─ thread dwm.exe  state Running  ethread ffff810cc3a60080  pid 3832  tid 3944
 ...
- > fffff80586ac0fb3  e8 98 14 00 00     call 0xFFFFF80586AC2450 ; nt!ExpLookupHandleTableEntry
+ > fffff80586ac0fb3 +0xa3  call nt!ExpLookupHandleTableEntry
 
 partition:p4.1> p
 VM running, waiting for stop (Ctrl+C to pause)...
@@ -150,8 +150,8 @@ mem:1> !hvu 3 0 0x1ff26110 L4
 A vCPU that is running a guest partition's VP when the target halts shows that guest's registers. {command}`~` and the stop line name the VP that it runs, so a WSL2 busy loop reads as follows:
 
 ```text
-vCPU    RIP               Context             Symbol
-p01.03  00007c27330c4321  partition 0x5 VP 2  0x7c27330c4321
+   vCPU    RIP               Context             Symbol
+   p01.03  00007c27330c4321  partition 0x5 VP 2  0x7c27330c4321
 ```
 
 With that vCPU selected, {command}`!hvd` `<address>` reads that guest's memory and {command}`!hvu` `<address>` disassembles it, at that RIP for example; from another vCPU, pass the partition ID and VP index.

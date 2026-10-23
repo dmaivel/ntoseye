@@ -47,15 +47,28 @@ KDTARGET: Refreshing KD connection
  BREAK  p1.4 notmyfaultc64. (2012) at myfault+0x1730
  ├─ stopped at nt!DbgBreakPointWithStatus
  └─ thread notmyfaultc64.  state Running  ethread ffffbe0ab9e42080  pid 2012  tid 2644
+
+registers (trap frame)
+  rax 0000000000000000   rbx ffffce06dc2dd010   rcx 0000000000000802
 ...
+
 disasm
- > fffff808bb461730  8b 03                 mov  eax, dword [rbx]
-   fffff808bb461732  48 8d 9b 00 10 00 00  lea  rbx, [rbx+0x1000]
-   fffff808bb461739  89 44 24 30           mov  dword [rsp+0x30], eax
-   fffff808bb46173d  eb f1                 jmp  0xFFFFF808BB461730
-   fffff808bb46173f  cc                    int3
-   fffff808bb461740  40 53                 push rbx
-   fffff808bb461742  56                    push rsi
+     fffff808bb46171b +0x171b  mov  rbx, rax
+     fffff808bb46171e +0x171e  call qword [rip+0x2964]     myfault+0x4088
+     fffff808bb461724 +0x1724  mov  cl, 2
+     fffff808bb461726 +0x1726  call qword [rip+0x28F4]     myfault+0x4020
+     fffff808bb46172c +0x172c  nop  dword [rax]
+╭▶ > fffff808bb461730 +0x1730  mov  eax, dword [rbx]
+│    fffff808bb461732 +0x1732  lea  rbx, [rbx+0x1000]
+│    fffff808bb461739 +0x1739  mov  dword [rsp+0x30], eax
+╰─   fffff808bb46173d +0x173d  jmp  +0x1730
+
+stack
+  #0–#5  nt!DbgBreakPointWithStatus … nt!KiPageFault+0x468
+      ┄┄ trap ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+  #6  fffff808bb461730  myfault+0x1730
+  #7  fffff808bb461bd2  myfault+0x1bd2
+  #8  fffff808bb461d54  myfault+0x1d54
 ...
 kdnet:p1.4>
 ```
@@ -71,7 +84,7 @@ In this example, a driver, `myfault.sys`, read memory that it must not access at
 
 The `BREAK` header shows the processor and the thread, and puts the stop at the fault, `myfault+0x1730`. Windows is actually stopped in `nt!DbgBreakPointWithStatus`, where it gives control to the debugger.
 
-The disassembly starts at the fault, in a loop that reads a dword and then moves forward by one page. The registers and the stack are those of the processor at the time it stopped.
+The disassembly shows the function around the fault: a loop that reads a dword and then moves forward by one page, its jump drawn back to the faulting instruction. The registers are the ones that instruction ran with: those of the trap frame that the page fault built, with the registers a trap frame does not save recovered by the stack walk, so `rbx` holds the address in argument 1. When no trap frame is at the fault, the heading says `registers (unwound)` for what the stack walk recovered, or `registers (at stop)` for those of the processor where it stopped. The stack starts at the frame that faulted; the frames of the bugcheck itself, from `nt!DbgBreakPointWithStatus` to `nt!KiPageFault`, fold into its first line, and {command}`k` shows them.
 
 ## Analyze it
 

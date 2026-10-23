@@ -32,7 +32,7 @@ kdnet:p1.2>
 
 When `ntoseye` attaches, it halts the VM, finds the kernel, and loads the kernel symbols from the Microsoft symbol server. After the first time, it keeps the symbols in a cache under `~/.ntoseye/symbols`.
 
-It then shows a *stop header* with the processor (`p1.2`), what the processor was running, and where. Below the header come the registers, a few instructions of disassembly, and the top of the stack. The breakpoint [below](#stop-on-a-kernel-function) shows a full stop.
+It then shows a *stop header* with the processor (`p1.2`), what the processor was running, and where. Below the header come the registers, the instructions around the stop, and the top of the stack. The breakpoint [below](#stop-on-a-kernel-function) shows a full stop.
 
 The first stop is the Windows response to the break-in. The Windows debugger code stops in `nt!DbgBreakPointWithStatus`, here on a `System` thread that received KDNET packets. The `gdb` backend halts the vCPUs from outside the VM instead, so each vCPU stops wherever it was at that time.
 
@@ -117,17 +117,20 @@ registers
   r14 0000000000000000   r15 0000000000000003   rfl 0000000000040246 [PF ZF IF AC]
 
 disasm
- > fffff80797ac7930  48 81 ec 88 00 00 00     sub  rsp, 0x88
-   fffff80797ac7937  33 c0                    xor  eax, eax
-   fffff80797ac7939  48 89 44 24 78           mov  qword [rsp+0x78], rax
-   fffff80797ac793e  c7 44 24 70 20 00 00 00  mov  dword [rsp+0x70], 0x20
-   fffff80797ac7946  89 44 24 68              mov  dword [rsp+0x68], eax
-   fffff80797ac794a  48 89 44 24 60           mov  qword [rsp+0x60], rax
-   fffff80797ac794f  89 44 24 58              mov  dword [rsp+0x58], eax
+●> fffff80797ac7930 +0x0   sub  rsp, 0x88
+   fffff80797ac7937 +0x7   xor  eax, eax
+   fffff80797ac7939 +0x9   mov  qword [rsp+0x78], rax
+   fffff80797ac793e +0xe   mov  dword [rsp+0x70], 0x20
+   fffff80797ac7946 +0x16  mov  dword [rsp+0x68], eax
+   fffff80797ac794a +0x1a  mov  qword [rsp+0x60], rax
+   fffff80797ac794f +0x1f  mov  dword [rsp+0x58], eax
+   fffff80797ac7953 +0x23  mov  eax, dword [rsp+0xE0]
+   fffff80797ac795a +0x2a  mov  dword [rsp+0x50], eax
 
 stack
   #0  fffff80797ac7930  nt!NtCreateFile
   #1  fffff807978c1d55  nt!KiSystemServiceCopyEnd+0x25
+      ┄┄ user mode ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
   #2  00007ff855661864  ntdll!NtCreateFile+0x14
   #3  00007ff852e36217  kernelbase!CreateFileInternal+0x373
   #4  00007ff852e37887  kernelbase!CreateFileW+0x97
@@ -135,12 +138,15 @@ stack
   ... 4 more frames
 ```
 
+The disassembly shows the instructions around the stop in the function it is in, each with its offset from its symbol, as the stack counts it: `>` marks the instruction the processor is at, and `●` an instruction with a breakpoint. A jump or a call names its target, such as `je +0x33` or `call nt!ObpPushStackInfo`, the jumps between the instructions shown are drawn as arrows, and at a jump the stop says whether it will be taken. The stack marks where it crosses from the kernel into the user-mode code that called it, or through a trap or an interrupt.
+
 {command}`k` shows the full stack with the stack pointer of each frame. The stack goes from the kernel into the user-mode code of the calling process, and {command}`k` resolves the user-mode frames too:
 
 ```text
 kdnet:p1.1> k
  00 fffffd86b6413a68  fffff80797ac7930  nt!NtCreateFile
  01 fffffd86b6413a70  fffff807978c1d55  nt!KiSystemServiceCopyEnd+0x25
+    ┄┄ user mode ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
  02 000000ef8a37ede8  00007ff855661864  ntdll!NtCreateFile+0x14
  03 000000ef8a37edf0  00007ff852e36217  kernelbase!CreateFileInternal+0x373
  04 000000ef8a37ef70  00007ff852e37887  kernelbase!CreateFileW+0x97
