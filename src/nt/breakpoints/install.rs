@@ -13,7 +13,6 @@ use crate::backend::phys::PhysMem;
 use crate::base::error::{Error, Result};
 use crate::base::memory::{AddressSpace, MemoryOps, PAGE_SIZE};
 use crate::base::types::{Dtb, VirtAddr};
-use crate::nt::bugchecks::looks_like_kernel_pointer;
 use crate::nt::guest::ModuleInfo;
 use crate::nt::pe::read_pe_header_page;
 use crate::nt::target::Target;
@@ -216,7 +215,7 @@ impl BreakpointManager {
         scope: &BreakpointScope,
     ) -> bool {
         matches!(scope, BreakpointScope::Kernel)
-            || address.is_some_and(|address| Self::is_kernel_space(arch, address))
+            || address.is_some_and(|address| arch.is_kernel_address(address))
     }
 
     pub(super) fn validate_scope_capability(
@@ -225,7 +224,7 @@ impl BreakpointManager {
         address: Option<VirtAddr>,
         scope: &BreakpointScope,
     ) -> Result<()> {
-        let user_space = address.is_some_and(|address| !Self::is_kernel_space(arch, address));
+        let user_space = address.is_some_and(|address| !arch.is_kernel_address(address));
         // A user-space site needs the user-mode capability whatever the scope:
         // a GDB stub writes and restores it through whichever vCPU it has
         // selected, so a lift through one that does not map the page (in the
@@ -396,19 +395,6 @@ impl BreakpointManager {
         }
     }
 
-    /// Whether `address` is a kernel-space virtual address on this architecture.
-    ///
-    /// AMD64 kernel space is the canonical upper half; AArch64 selects TTBR1 by
-    /// bit 55, the same test the executable-permission check above relies on.
-    /// Windows places its kernel in the upper half on both, so the AMD64 bound
-    /// also holds there, but the bit is what the hardware actually uses.
-    pub fn is_kernel_space(arch: Arch, address: VirtAddr) -> bool {
-        match arch {
-            Arch::Amd64 => looks_like_kernel_pointer(address.0),
-            Arch::Arm64 => address.0 & (1 << 55) != 0,
-        }
-    }
-
     pub(super) fn validate_breakpoint_target(
         debugger: &Target,
         address: VirtAddr,
@@ -422,7 +408,7 @@ impl BreakpointManager {
         };
         // User code runs on the process's KVA-shadow root when it has one:
         // the kernel root's copy of the user half is non-executable.
-        let dtb = if Self::is_kernel_space(debugger.arch(), address) {
+        let dtb = if debugger.arch().is_kernel_address(address) {
             root
         } else {
             let mask = debugger.arch().dtb_page_mask();
@@ -441,7 +427,7 @@ impl BreakpointManager {
             // target itself accepts the site and owes the write until the page
             // arrives (`nt!KdSetOwedBreakpoints`). Hand that decision to the
             // target rather than pre-empting it.
-            Ok(None) if Self::is_kernel_space(debugger.arch(), address) => None,
+            Ok(None) if debugger.arch().is_kernel_address(address) => None,
             // A user-space site is this debugger's own `int3` in that page,
             // and there is no page to put it in.
             Ok(None) => return Err(Self::non_resident_site_error(debugger, dtb, address, scope)),
@@ -453,7 +439,11 @@ impl BreakpointManager {
         // does not capture. Do not reject a TTBR1 address solely from descriptor
         // bits; known kernel modules are still checked against PE executable
         // sections below. TTBR0 user pages can be classified by effective UXN.
-        let nx = match (debugger.arch(), address.0 & (1 << 55) != 0, &translation) {
+        let nx = match (
+            debugger.arch(),
+            debugger.arch().is_kernel_address(address),
+            &translation,
+        ) {
             (Arch::Arm64, true, _) => false,
             (Arch::Arm64, false, Some(translation)) => translation.uxn,
             (Arch::Amd64, _, Some(translation)) => translation.nx,
@@ -635,7 +625,7 @@ fn user_patch_error(debugger: &Target, address: VirtAddr, error: Error) -> Error
     match error {
         Error::KdStatus { api, .. }
             if api == DBGKD_WRITE_PHYSICAL_MEMORY
-                && !BreakpointManager::is_kernel_space(debugger.arch(), address) =>
+                && !debugger.arch().is_kernel_address(address) =>
         {
             Error::Breakpoint(format!(
                 "{error} (with VBS enabled, Windows refuses KD writes to user-mode code; use a \
@@ -650,7 +640,6 @@ fn user_patch_error(debugger: &Target, address: VirtAddr, error: Error) -> Error
 mod tests {
     use std::fs;
 
-    use crate::arch::Arch;
     use crate::base::types::VirtAddr;
     use crate::nt::breakpoints::test_backend::SlotRecorder;
     use crate::nt::breakpoints::{
@@ -834,42 +823,5 @@ mod tests {
             client.installed.is_empty(),
             "a host-patched site must not enter the target's breakpoint table"
         );
-    }
-
-    #[test]
-    fn kernel_space_is_classified_per_architecture() {
-        for (arch, kernel, user) in [
-            (
-                Arch::Amd64,
-                VirtAddr(0xfffff80000001000),
-                VirtAddr(0x00007ff000001000),
-            ),
-            (
-                Arch::Arm64,
-                VirtAddr(0xffff800000001000),
-                VirtAddr(0x00007ff000001000),
-            ),
-        ] {
-            assert!(
-                BreakpointManager::is_kernel_space(arch, kernel),
-                "{arch:?} rejected its own kernel address {:#x}",
-                kernel.0
-            );
-            assert!(
-                !BreakpointManager::is_kernel_space(arch, user),
-                "{arch:?} accepted a user address {:#x} as kernel space",
-                user.0
-            );
-        }
-        // An AArch64 kernel address is below the AMD64 canonical bound, so the
-        // bit-55 rule is doing real work rather than agreeing by accident.
-        assert!(!BreakpointManager::is_kernel_space(
-            Arch::Amd64,
-            VirtAddr(0x0080000000001000)
-        ));
-        assert!(BreakpointManager::is_kernel_space(
-            Arch::Arm64,
-            VirtAddr(0x0080000000001000)
-        ));
     }
 }

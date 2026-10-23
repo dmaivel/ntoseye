@@ -15,7 +15,6 @@ use crate::{
         types::{CodeMachine, Dtb, Keyed, VirtAddr},
     },
     nt::{
-        breakpoints::BreakpointManager,
         bugchecks::looks_like_kernel_pointer,
         guest::{Image, ModuleInfo, ProcessInfo, SecureKernel, hypercalls::HypervisorSymbols},
         pe::{CodeLayout, PeImage},
@@ -619,7 +618,7 @@ pub fn guest_vp_running(
 /// loaded before any module list is walked: the lists are walked again at
 /// every halt, which over KD memory costs hundreds of reads a stop.
 pub fn try_format_symbol_at(debugger: &Target, cr3: u64, rip: u64) -> Option<String> {
-    let kernel = BreakpointManager::is_kernel_space(debugger.arch(), VirtAddr(rip));
+    let kernel = debugger.arch().is_kernel_address(VirtAddr(rip));
     if kernel
         && matches!(
             root_owner(debugger, cr3 & debugger.arch().dtb_page_mask()),

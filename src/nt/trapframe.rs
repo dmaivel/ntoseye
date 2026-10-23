@@ -569,7 +569,7 @@ pub fn ktrap_frame_at_machine_frame(
 /// once `.thread` selected it.
 pub fn trap_frame_rip_symbol(debugger: &Target, frame: &KtrapFrame) -> Option<String> {
     let pc = frame.instruction_pointer();
-    let dtb = if pc >> 63 != 0 {
+    let dtb = if debugger.arch().is_kernel_address(VirtAddr(pc)) {
         debugger.kernel_dtb()
     } else {
         debugger.current_dtb()

@@ -12,7 +12,6 @@ use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError, words};
 use crate::hosts::repl::*;
 use crate::hosts::ui;
-use crate::nt::breakpoints::BreakpointManager;
 use crate::nt::expr::{Expr, ExprValue};
 use crate::nt::guest::{ModuleInfo, ModuleSymbolLoadReport};
 use crate::nt::layout::{FieldInfo, nested_layout_name};
@@ -893,7 +892,7 @@ fn list_modules(target: &Target, filter: &ModuleFilter) -> Result<Vec<ModuleList
     if let Some(address) = filter.containing
         && !filter.user
     {
-        kernel |= BreakpointManager::is_kernel_space(target.arch(), address);
+        kernel |= target.arch().is_kernel_address(address);
     }
     let dtb = if kernel {
         target.kernel_dtb()

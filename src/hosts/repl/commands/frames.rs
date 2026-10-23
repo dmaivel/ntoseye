@@ -1159,7 +1159,7 @@ impl ReplState<'_> {
     /// the one the thread ran in. Say so when nothing there covers it.
     fn warn_if_user_frame_is_out_of_view(&self, pc: u64) {
         let target = &self.ctx.target;
-        if pc >> 63 != 0 {
+        if target.arch().is_kernel_address(VirtAddr(pc)) {
             return;
         }
         let trace = resolve_thread_trace_context(target, target.current_dtb());

@@ -1,13 +1,19 @@
 //! ARM64 (AArch64).
 
 mod context;
+pub mod paging;
 
 pub use context::*;
 
 use std::sync::LazyLock;
 
+use crate::base::types::{PageTableEntry, PageTableLevel, PteAttributes, VirtAddr};
+
 use super::registers::{numbered, push_synonyms};
-use super::{Architecture, ContextFlags, IMAGE_FILE_MACHINE_ARM64, RegisterInfo, RegisterMap};
+use super::{
+    Architecture, ContextFlags, IMAGE_FILE_MACHINE_ARM64, MappingPermissions, RegisterInfo,
+    RegisterMap, TableEntry,
+};
 
 pub struct Arm64;
 
@@ -134,6 +140,31 @@ impl Architecture for Arm64 {
         } else {
             None
         }
+    }
+
+    fn is_kernel_address(&self, va: VirtAddr) -> bool {
+        paging::is_kernel_address(va)
+    }
+
+    fn separate_kernel_root(&self) -> bool {
+        true
+    }
+
+    fn decode_entry(&self, level: usize, entry: PageTableEntry) -> TableEntry {
+        paging::decode_entry(level, entry)
+    }
+
+    fn mapping_permissions(&self, path: &[PageTableEntry], va: VirtAddr) -> MappingPermissions {
+        paging::mapping_permissions(path, va)
+    }
+
+    fn entry_attributes(
+        &self,
+        entry: PageTableEntry,
+        level: PageTableLevel,
+        address: VirtAddr,
+    ) -> PteAttributes {
+        paging::entry_attributes(entry, level, address)
     }
 }
 

@@ -120,7 +120,7 @@ impl BreakpointManager {
                 Some(_) => Some(BreakpointScope::Kernel),
                 // A user-space target is in the process the stop is in,
                 // whichever process inspection is attached to.
-                None => (!Self::is_kernel_space(debugger.arch(), address))
+                None => (!debugger.arch().is_kernel_address(address))
                     .then(|| {
                         debugger.process_for_cr3(debugger.normalize_dtb(debugger.current_dtb()))
                     })

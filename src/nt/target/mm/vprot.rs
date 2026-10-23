@@ -3,11 +3,11 @@
 
 use super::paging::PteSelfMap;
 use super::{MemoryBasicInformation, MemoryRegionInfo, VadType};
-use crate::arch::Arch;
+use crate::arch::{Arch, TableEntry};
 use crate::backend::phys::PhysMem;
 use crate::base::error::{Error, Result};
 use crate::base::memory::{AddressSpace, MemoryOps, PAGE_SIZE};
-use crate::base::types::{PageTableEntry, PageTableLevel, VirtAddr};
+use crate::base::types::{PageTableEntry, VirtAddr};
 use crate::nt::bugchecks::looks_like_kernel_pointer;
 use crate::nt::guest::ProcessInfo;
 use crate::nt::guest::vad::vad_node_offset;
@@ -166,11 +166,12 @@ impl PteFormat {
         })
     }
 
-    /// Whether a present upper-level entry maps a large page itself.
-    fn maps_large_page(&self, entry: u64, va: u64) -> bool {
-        let attributes =
-            PageTableEntry(entry).attributes(self.arch, PageTableLevel::Pde, VirtAddr(va));
-        attributes.present && attributes.large_page
+    /// Whether a PDE maps a large page itself.
+    fn maps_large_page(&self, entry: u64) -> bool {
+        matches!(
+            self.arch.decode_entry(2, PageTableEntry(entry)),
+            TableEntry::Leaf(_)
+        )
     }
 
     /// The protection of a valid PTE, from its hardware and software bits:
@@ -275,7 +276,7 @@ impl PageWalk<'_> {
             }
         }
         // The PDE: valid and large, it maps the whole span.
-        if self.format.maps_large_page(entry, va) {
+        if self.format.maps_large_page(entry) {
             return Ok((
                 Some(self.format.valid_protection(entry)),
                 span_end(PTE_TABLE_SPAN),

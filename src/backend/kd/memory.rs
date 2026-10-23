@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use crate::arch::Arch;
 use crate::base::error::{Error, Result};
 use crate::base::memory::PAGE_SIZE;
 use crate::base::types::{Dtb, PhysAddr, VirtAddr};
@@ -211,11 +210,7 @@ impl KdBackend {
     /// session (as WinDbg does); user space only under the root the serving
     /// processor is running on.
     fn virtual_api_serves(&mut self, addr: VirtAddr, root: Dtb) -> bool {
-        let kernel_space = match self.arch {
-            Arch::Amd64 => addr.0 >> 63 != 0,
-            Arch::Arm64 => addr.0 & (1 << 55) != 0,
-        };
-        kernel_space || self.serving_processor_runs_on(root)
+        self.arch.is_kernel_address(addr) || self.serving_processor_runs_on(root)
     }
 
     /// Whether `root` is the page-table root the *serving* processor is

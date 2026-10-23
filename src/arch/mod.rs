@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::ops::Deref;
 
 use crate::base::bytes::get_u32;
-use crate::base::types::VirtAddr;
+use crate::base::types::{PageTableEntry, PageTableLevel, PhysAddr, PteAttributes, VirtAddr};
 
 pub mod amd64;
 pub mod arm64;
@@ -182,6 +182,51 @@ pub trait Architecture: Sync {
     /// `register` to hold a value; `None` for the control and integer state
     /// every record carries.
     fn context_group(&self, register: &str) -> Option<u32>;
+
+    /// Whether `va` lies in the kernel half of the address space.
+    fn is_kernel_address(&self, va: VirtAddr) -> bool;
+
+    /// Whether kernel addresses translate through a root of their own
+    /// (AArch64's TTBR1) rather than through each address space's.
+    fn separate_kernel_root(&self) -> bool;
+
+    /// What `entry` means at `level` of the page tables: 0 is the root, 3
+    /// the last level, where an entry maps a page or nothing.
+    fn decode_entry(&self, level: usize, entry: PageTableEntry) -> TableEntry;
+
+    /// The access the mapping of `va` grants, from the entries its walk
+    /// read, root first and the mapping entry last.
+    fn mapping_permissions(&self, path: &[PageTableEntry], va: VirtAddr) -> MappingPermissions;
+
+    /// `entry` decoded at `level` for `!pte`, on the walk of `address`.
+    fn entry_attributes(
+        &self,
+        entry: PageTableEntry,
+        level: PageTableLevel,
+        address: VirtAddr,
+    ) -> PteAttributes;
+}
+
+/// What a page-table entry means at its level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableEntry {
+    /// It maps nothing.
+    Absent,
+    /// It points at the next level's table.
+    Table(PhysAddr),
+    /// It maps the page or block starting at this frame.
+    Leaf(PhysAddr),
+}
+
+/// The access a mapping grants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MappingPermissions {
+    pub user: bool,
+    /// Execute-never for the address's half: AMD64 NX, AArch64 PXN in the
+    /// kernel half and UXN in the user half.
+    pub nx: bool,
+    /// AArch64 UXN; never set on AMD64.
+    pub uxn: bool,
 }
 
 /// A `CONTEXT` record's `ContextFlags`: where it sits, and the bits that
@@ -214,5 +259,41 @@ pub fn machine_name(machine: u16) -> &'static str {
         IMAGE_FILE_MACHINE_AMD64 => "AMD64",
         IMAGE_FILE_MACHINE_ARM64 => "ARM64",
         _ => "Unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kernel_space_is_classified_per_architecture() {
+        for (arch, kernel, user) in [
+            (
+                Arch::Amd64,
+                VirtAddr(0xfffff80000001000),
+                VirtAddr(0x00007ff000001000),
+            ),
+            (
+                Arch::Arm64,
+                VirtAddr(0xffff800000001000),
+                VirtAddr(0x00007ff000001000),
+            ),
+        ] {
+            assert!(
+                arch.is_kernel_address(kernel),
+                "{arch:?} rejected its own kernel address {:#x}",
+                kernel.0
+            );
+            assert!(
+                !arch.is_kernel_address(user),
+                "{arch:?} accepted a user address {:#x} as kernel space",
+                user.0
+            );
+        }
+        // An AArch64 kernel address is below the AMD64 canonical bound, so the
+        // bit-55 rule is doing real work rather than agreeing by accident.
+        assert!(!Arch::Amd64.is_kernel_address(VirtAddr(0x0080000000001000)));
+        assert!(Arch::Arm64.is_kernel_address(VirtAddr(0x0080000000001000)));
     }
 }

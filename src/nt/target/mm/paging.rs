@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use super::{PteLevel, PteWalk, PtovDetail, PtovMapping, VtopDetail};
-use crate::arch::Arch;
+use crate::arch::{Arch, TableEntry};
 use crate::base::error::{Error, Result};
 use crate::base::memory::{AddressSpace, DTB_IDENTITY, MemoryOps, PAGE_SIZE, Residency};
 use crate::base::types::{Dtb, PFN_MASK, PageTableEntry, PageTableLevel, VirtAddr};
@@ -12,8 +12,6 @@ use crate::nt::target::Target;
 
 const MAX_PTOV_TABLE_PAGES: usize = 65_536;
 const MAX_PTOV_RESULTS: usize = 32;
-const LARGE_PAGE_1G: u64 = 1 << 30;
-const LARGE_PAGE_2M: u64 = 1 << 21;
 
 /// NT's page-table self-map: the bases of its PTE, PDE, PPE, and PXE arrays.
 #[derive(Debug, Clone, Copy)]
@@ -73,8 +71,8 @@ impl Target {
     }
 
     /// Walk `directory_base` for `address`, reusing the existing current-context
-    /// `PteWalk` decoder when the argument is zero. Explicit AMD64 walks retain
-    /// each PML4/PDP/PDE/PTE entry; other architectures use the shared translator.
+    /// `PteWalk` decoder when the argument is zero, and listing each entry
+    /// the walk reads otherwise.
     pub fn vtop(&self, directory_base: u64, address: VirtAddr) -> Result<VtopDetail> {
         let dtb = if directory_base == 0 {
             self.current_dtb()
@@ -103,32 +101,25 @@ impl Target {
                 section: translation.is_some_and(|value| value.residency == Residency::Section),
             });
         }
-        match self.arch() {
-            Arch::Amd64 => {}
-            Arch::Arm64 => {
-                let translation = self.address_space(dtb).virt_to_phys(address)?;
-                return Ok(VtopDetail {
-                    address,
-                    dtb,
-                    levels: Vec::new(),
-                    physical: translation.map(|value| value.address),
-                    large: translation.is_some_and(|value| value.large),
-                    transition: translation
-                        .is_some_and(|value| value.residency == Residency::Transition),
-                    section: translation.is_some_and(|value| value.residency == Residency::Section),
-                });
-            }
-        }
-        let mut detail = explicit_amd64_walk(self, dtb, address)?;
-        // The tables end short of a frame; the page's section may hold one.
-        if detail.physical.is_none()
-            && let Some(translation) = self.address_space(dtb).virt_to_phys(address)?
-            && translation.residency == Residency::Section
-        {
-            detail.physical = Some(translation.address);
-            detail.section = true;
-        }
-        Ok(detail)
+        let arch = self.arch();
+        let (steps, translation) = self.address_space(dtb).walk_steps(address)?;
+        Ok(VtopDetail {
+            address,
+            dtb,
+            levels: steps
+                .into_iter()
+                .map(|step| PteLevel {
+                    level: step.level,
+                    address: VirtAddr(step.address),
+                    value: step.entry.0,
+                    attributes: arch.entry_attributes(step.entry, step.level, address),
+                })
+                .collect(),
+            physical: translation.map(|value| value.address),
+            large: translation.is_some_and(|value| value.large),
+            transition: translation.is_some_and(|value| value.residency == Residency::Transition),
+            section: translation.is_some_and(|value| value.residency == Residency::Section),
+        })
     }
 
     /// Reverse-walk the current AMD64 directory base for mappings of a physical
@@ -233,7 +224,7 @@ impl Target {
                 level,
                 address: at,
                 value: value.0,
-                attributes: value.attributes(arch, level, address),
+                attributes: arch.entry_attributes(value, level, address),
             })
         };
         // The walk ends at an entry that maps (a large page) or maps nothing:
@@ -266,146 +257,10 @@ impl Target {
     }
 }
 
-fn explicit_amd64_walk(target: &Target, dtb: Dtb, va: VirtAddr) -> Result<VtopDetail> {
-    if dtb == DTB_IDENTITY {
-        return Ok(VtopDetail {
-            address: va,
-            dtb,
-            levels: Vec::new(),
-            physical: Some(va.0),
-            large: false,
-            transition: false,
-            section: false,
-        });
-    }
-    let root = dtb & PFN_MASK;
-    let memory = &target.phys;
-    let mut levels = Vec::with_capacity(4);
-    let pml4_address = root
-        .checked_add((va.pml4_index() as u64) * 8)
-        .ok_or_else(|| Error::DebugInfo("PML4 address overflow".to_string()))?;
-    let pml4e: PageTableEntry = memory.read(pml4_address)?;
-    levels.push(PteLevel {
-        level: PageTableLevel::Pxe,
-        address: VirtAddr(pml4_address),
-        value: pml4e.0,
-        attributes: pml4e.attributes(Arch::Amd64, PageTableLevel::Pxe, va),
-    });
-    if !pml4e.is_present() {
-        return Ok(VtopDetail {
-            address: va,
-            dtb,
-            levels,
-            physical: None,
-            large: false,
-            transition: false,
-            section: false,
-        });
-    }
-    let pdpt_address = pml4e
-        .page_frame()
-        .checked_add((va.pdpt_index() as u64) * 8)
-        .ok_or_else(|| Error::DebugInfo("PDPT address overflow".to_string()))?;
-    let pdpte: PageTableEntry = memory.read(pdpt_address)?;
-    levels.push(PteLevel {
-        level: PageTableLevel::Ppe,
-        address: VirtAddr(pdpt_address),
-        value: pdpte.0,
-        attributes: pdpte.attributes(Arch::Amd64, PageTableLevel::Ppe, va),
-    });
-    if !pdpte.is_present() {
-        return Ok(VtopDetail {
-            address: va,
-            dtb,
-            levels,
-            physical: None,
-            large: false,
-            transition: false,
-            section: false,
-        });
-    }
-    if pdpte.is_large_page() {
-        let frame = pdpte.huge_page_frame();
-        return Ok(VtopDetail {
-            address: va,
-            dtb,
-            levels,
-            physical: frame.checked_add(va.huge_page_offset()),
-            large: true,
-            transition: false,
-            section: false,
-        });
-    }
-    let pde_address = pdpte
-        .page_frame()
-        .checked_add((va.pd_index() as u64) * 8)
-        .ok_or_else(|| Error::DebugInfo("PD address overflow".to_string()))?;
-    let pde: PageTableEntry = memory.read(pde_address)?;
-    levels.push(PteLevel {
-        level: PageTableLevel::Pde,
-        address: VirtAddr(pde_address),
-        value: pde.0,
-        attributes: pde.attributes(Arch::Amd64, PageTableLevel::Pde, va),
-    });
-    if !pde.is_present() {
-        return Ok(VtopDetail {
-            address: va,
-            dtb,
-            levels,
-            physical: None,
-            large: false,
-            transition: false,
-            section: false,
-        });
-    }
-    if pde.is_large_page() {
-        let frame = pde.large_page_frame();
-        return Ok(VtopDetail {
-            address: va,
-            dtb,
-            levels,
-            physical: frame.checked_add(va.large_page_offset()),
-            transition: false,
-            section: false,
-            large: true,
-        });
-    }
-    let pte_address = pde
-        .page_frame()
-        .checked_add((va.pt_index() as u64) * 8)
-        .ok_or_else(|| Error::DebugInfo("PT address overflow".to_string()))?;
-    let pte: PageTableEntry = memory.read(pte_address)?;
-    levels.push(PteLevel {
-        level: PageTableLevel::Pte,
-        address: VirtAddr(pte_address),
-        value: pte.0,
-        attributes: pte.attributes(Arch::Amd64, PageTableLevel::Pte, va),
-    });
-    // A transition leaf still names the frame the guest holds, and reads go
-    // through it, so reporting it unmapped here would contradict them.
-    let transition = pte.is_transition();
-    Ok(VtopDetail {
-        address: va,
-        dtb,
-        levels,
-        physical: if pte.is_present() {
-            Some(pte.page_frame() + va.page_offset())
-        } else if transition {
-            let pte = pte.unswizzled(target.phys.invalid_pte_mask());
-            Some(pte.page_frame() + va.page_offset())
-        } else {
-            None
-        },
-        large: false,
-        transition,
-        section: false,
-    })
-}
-
 fn scan_ptov_table(
     target: &Target,
     table: u64,
-    level: u8,
+    level: usize,
     prefix: [usize; 4],
     wanted_page: u64,
     visited: &mut HashSet<u64>,
@@ -430,48 +285,34 @@ fn scan_ptov_table(
             return;
         }
     };
+    let arch = target.arch();
     for (index, entry) in entries.into_iter().enumerate() {
-        if !entry.is_present() || results.len() >= MAX_PTOV_RESULTS {
-            continue;
+        if results.len() >= MAX_PTOV_RESULTS {
+            break;
         }
         let mut current = prefix;
-        current[level as usize] = index;
-        if level == 1 && entry.is_large_page() {
-            let frame = entry.huge_page_frame();
-            if (frame..frame.saturating_add(LARGE_PAGE_1G)).contains(&wanted_page) {
-                let va = VirtAddr::construct(current[0], current[1], 0, 0) + (wanted_page - frame);
-                results.push((va, true));
+        current[level] = index;
+        match arch.decode_entry(level, entry) {
+            TableEntry::Absent => {}
+            TableEntry::Leaf(frame) => {
+                let span = 1u64 << (39 - 9 * level);
+                if (frame..frame.saturating_add(span)).contains(&wanted_page) {
+                    let va = VirtAddr::construct(current[0], current[1], current[2], current[3])
+                        + (wanted_page - frame);
+                    results.push((va, level < 3));
+                }
             }
-            continue;
+            TableEntry::Table(next) => scan_ptov_table(
+                target,
+                next,
+                level + 1,
+                current,
+                wanted_page,
+                visited,
+                table_pages,
+                results,
+            ),
         }
-        if level == 2 && entry.is_large_page() {
-            let frame = entry.large_page_frame();
-            if (frame..frame.saturating_add(LARGE_PAGE_2M)).contains(&wanted_page) {
-                let va = VirtAddr::construct(current[0], current[1], current[2], 0)
-                    + (wanted_page - frame);
-                results.push((va, true));
-            }
-            continue;
-        }
-        if level == 3 {
-            if entry.page_frame() == wanted_page {
-                results.push((
-                    VirtAddr::construct(current[0], current[1], current[2], current[3]),
-                    false,
-                ));
-            }
-            continue;
-        }
-        scan_ptov_table(
-            target,
-            entry.page_frame(),
-            level + 1,
-            current,
-            wanted_page,
-            visited,
-            table_pages,
-            results,
-        );
     }
     visited.remove(&table);
 }
