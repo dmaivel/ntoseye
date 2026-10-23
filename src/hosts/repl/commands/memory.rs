@@ -917,6 +917,9 @@ fn counted_string(
     };
     let text = match (length, buffer) {
         (Some(length), Some(buffer)) => {
+            // A Length past MaximumLength is a corrupt or unrelated
+            // descriptor; the buffer holds no more than MaximumLength bytes.
+            let length = maximum_length.map_or(length, |maximum| length.min(maximum));
             let byte_len = (length as usize / unit_size) * unit_size;
             if byte_len == 0 || buffer.is_zero() {
                 CountedText::Empty
@@ -2192,7 +2195,13 @@ impl Render for SearchResult {
                 .unwrap_or_default();
             outln!("{}  {}", ui::addr(address), ui::symbol(&symbol));
         }
-        if hits.is_empty() {
+        if hits.is_empty() && self.length > 0 && self.unreadable >= self.length {
+            // Nothing was searched, so "no matches" would claim too much.
+            error!(
+                "none of the {:#x} bytes at {:#x} can be read",
+                self.length, self.start.0
+            );
+        } else if hits.is_empty() {
             outln!(
                 "{} (searched {:#x} bytes at {})",
                 "no matches found".bright_black(),
@@ -2207,7 +2216,7 @@ impl Render for SearchResult {
                 hits.len() - 1
             );
         }
-        if self.unreadable > 0 {
+        if self.unreadable > 0 && self.unreadable < self.length {
             outln!(
                 "{}",
                 format!("{:#x} unreadable bytes skipped", self.unreadable).bright_black()

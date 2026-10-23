@@ -355,7 +355,14 @@ impl Target {
             let chunk_len = starts + pattern.len() - 1;
             let chunk_start = VirtAddr(start.0.wrapping_add(offset as u64));
             let (data, valid) = read_page_chunks(chunk_start, chunk_len, &read)?;
-            result.unreadable += valid[..starts].iter().filter(|valid| !**valid).count();
+            // The overlap past `starts` is the next chunk's start, so only
+            // the last chunk counts it: the count is of the range's bytes.
+            let counted = if offset + starts + pattern.len() > length {
+                chunk_len
+            } else {
+                starts
+            };
+            result.unreadable += valid[..counted].iter().filter(|valid| !**valid).count();
             for at in pattern_offsets(&data, pattern).filter(|&at| at < starts) {
                 if !valid[at..at + pattern.len()].iter().all(|valid| *valid) {
                     continue;
