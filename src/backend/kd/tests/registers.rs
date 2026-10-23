@@ -272,6 +272,110 @@ fn arm64_registers_survive_refused_control_space() {
     worker.join().unwrap();
 }
 
+/// A halted AMD64 processor whose first register read the kernel answers
+/// with an empty `CONTEXT` and `special` control space, EFER already known.
+fn amd64_backend_reading(host: UnixStream) -> KdBackend {
+    let mut backend = kd_backend_with_framing(host);
+    backend.link.halt();
+    backend.exit_prepared = true;
+    backend.efer_cache.insert(0, 0xd01);
+    backend
+}
+
+/// A slot armed during a halt shows in the registers read after it, though
+/// the halt's registers were read before: the write keeps nothing that
+/// described them.
+#[test]
+fn registers_read_after_arming_a_slot_show_it() {
+    const ADDRESS: u64 = 0xffff_f800_1234_5000;
+    let (kernel, host) = UnixStream::pair().unwrap();
+    let mut backend = amd64_backend_reading(host);
+    let context = vec![0u8; amd64::CONTEXT_SIZE];
+    let special_map = Arch::Amd64.special_register_map();
+    let mut special = vec![0u8; special_map.extent()];
+    special_map.write_u64("dr7", &mut special, 0x400).unwrap();
+    let worker = serve_manipulate(
+        kernel,
+        vec![
+            (api::DBGKD_GET_CONTEXT, api::STATUS_SUCCESS, context.clone()),
+            (
+                api::DBGKD_READ_CONTROL_SPACE,
+                api::STATUS_SUCCESS,
+                special.clone(),
+            ),
+            // Arming slot 0: its state for a rollback, then the
+            // read-modify-write.
+            (
+                api::DBGKD_READ_CONTROL_SPACE,
+                api::STATUS_SUCCESS,
+                special.clone(),
+            ),
+            (
+                api::DBGKD_READ_CONTROL_SPACE,
+                api::STATUS_SUCCESS,
+                special.clone(),
+            ),
+            (api::DBGKD_WRITE_CONTROL_SPACE, api::STATUS_SUCCESS, special),
+            (api::DBGKD_GET_CONTEXT, api::STATUS_SUCCESS, context),
+        ],
+    );
+    let map = backend.register_map.clone();
+
+    let before = backend.read_registers().unwrap();
+    assert_eq!(map.read_u64("dr7", &before).unwrap(), 0x400);
+    backend
+        .set_hardware_breakpoint(0, ADDRESS, HwBreakpointAccess::Execute, 1)
+        .unwrap();
+    let after = backend.read_registers().unwrap();
+
+    assert_eq!(map.read_u64("dr0", &after).unwrap(), ADDRESS);
+    assert_eq!(
+        map.read_u64("dr7", &after).unwrap() & 0b11,
+        0b10,
+        "G0 enables slot 0"
+    );
+    drop(backend);
+    worker.join().unwrap();
+}
+
+/// An MSR written during a halt shows in the registers read after it.
+#[test]
+fn registers_read_after_an_msr_write_show_it() {
+    const MSR_EFER: u32 = 0xc000_0080;
+    let (kernel, host) = UnixStream::pair().unwrap();
+    let mut backend = amd64_backend_reading(host);
+    let context = vec![0u8; amd64::CONTEXT_SIZE];
+    let special = vec![0u8; Arch::Amd64.special_register_map().extent()];
+    let worker = serve_manipulate(
+        kernel,
+        vec![
+            (api::DBGKD_GET_CONTEXT, api::STATUS_SUCCESS, context.clone()),
+            (
+                api::DBGKD_READ_CONTROL_SPACE,
+                api::STATUS_SUCCESS,
+                special.clone(),
+            ),
+            (
+                api::DBGKD_WRITE_MACHINE_SPECIFIC_REGISTER,
+                api::STATUS_SUCCESS,
+                Vec::new(),
+            ),
+            (api::DBGKD_GET_CONTEXT, api::STATUS_SUCCESS, context),
+            (api::DBGKD_READ_CONTROL_SPACE, api::STATUS_SUCCESS, special),
+        ],
+    );
+    let map = backend.register_map.clone();
+
+    let before = backend.read_registers().unwrap();
+    assert_eq!(map.read_u64("efer", &before).unwrap(), 0xd01);
+    backend.write_msr(0, MSR_EFER, 0x501).unwrap();
+    let after = backend.read_registers().unwrap();
+
+    assert_eq!(map.read_u64("efer", &after).unwrap(), 0x501);
+    drop(backend);
+    worker.join().unwrap();
+}
+
 /// Windows' KD does not return an ARM64 thread's `x18`. In kernel mode it is
 /// the KPCR, whatever KD reported (seen: 0, and the KPRCB); in user mode it
 /// is the TEB, read through the KPCR's current thread, and KD reports 0. A

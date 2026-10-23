@@ -171,6 +171,10 @@ impl KdBackend {
                 expected_size,
             )));
         }
+        // The CONTEXT and the stop's report the halt holds were read with
+        // the special registers before this write (the debug registers among
+        // them), so they go; the new special registers are what was written.
+        self.registers.invalidate(processor);
         self.registers.set_special(processor, special);
         Ok(())
     }
@@ -346,6 +350,9 @@ impl KdBackend {
         with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
             api::write_machine_specific_register(framing, processor, msr, value)
         })?;
+        // The register buffer the halt holds shows system registers read
+        // from MSRs (EFER; TTBR0, ESR and FAR on ARM64).
+        self.registers.invalidate(processor);
         if msr == MSR_EFER {
             self.efer_cache.insert(processor, value);
         }
