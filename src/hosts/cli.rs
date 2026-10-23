@@ -168,11 +168,12 @@ struct McpCommand {
     #[arg(long)]
     http: Option<String>,
 
-    /// Let Streamable HTTP bind to a non-loopback address and accept any
-    /// browser origin (CORS). This option makes the debugger control tools
-    /// available to the network, so use it only on trusted hosts and networks.
-    /// Without this option, HTTP binds only to loopback addresses, and the
-    /// server accepts cross-origin requests only from loopback origins.
+    /// Let Streamable HTTP bind to a non-loopback address, answer requests
+    /// addressed to any host, and accept any browser origin (CORS). This option
+    /// makes the debugger control tools available to the network, so use it
+    /// only on trusted hosts and networks. Without this option, HTTP binds only
+    /// to loopback addresses, answers only requests addressed to a loopback
+    /// host, and accepts cross-origin requests only from loopback origins.
     #[arg(long)]
     unsafe_http: bool,
 }

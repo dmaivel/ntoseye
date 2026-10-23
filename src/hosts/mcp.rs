@@ -1149,8 +1149,10 @@ mod tests {
 
     #[tokio::test]
     async fn http_host_policy_respects_unsafe_http() {
-        use axum::http::{Request, StatusCode};
+        use axum::http::{Request, StatusCode, header};
         use tower::ServiceExt;
+
+        const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}"#;
 
         for (unsafe_http, host, allowed) in [
             (false, "localhost:8080", true),
@@ -1166,17 +1168,18 @@ mod tests {
             );
             let response = router
                 .oneshot(
-                    Request::builder()
-                        .uri("/mcp")
-                        .header("host", host)
-                        .body(axum::body::Body::empty())
+                    Request::post("/mcp")
+                        .header(header::HOST, host)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(header::ACCEPT, "application/json, text/event-stream")
+                        .body(axum::body::Body::from(INITIALIZE))
                         .unwrap(),
                 )
                 .await
                 .unwrap();
-            // A permitted request reaches rmcp, which requires an SSE Accept header.
+            // A permitted host's initialize opens a session.
             let expected = if allowed {
-                StatusCode::NOT_ACCEPTABLE
+                StatusCode::OK
             } else {
                 StatusCode::FORBIDDEN
             };

@@ -176,7 +176,7 @@ Some web MCP clients connect over the network instead of starting a subprocess. 
 ntoseye mcp --http 127.0.0.1:8080
 ```
 
-The service is at `http://127.0.0.1:8080/mcp`, and by default HTTP binds only to loopback addresses. Request Host authorities may name `localhost`, any address in `127.0.0.0/8`, or `[::1]`, optionally followed by a port. Non-loopback hosts, userinfo, and malformed host suffixes are rejected.
+The service is at `http://127.0.0.1:8080/mcp`, and by default HTTP binds only to loopback addresses. Request Host authorities may name `localhost`, any address in `127.0.0.0/8`, or `[::1]`, optionally followed by a port. Non-loopback hosts, userinfo, and malformed host suffixes are rejected. `--unsafe-http` lifts both limits: the server may bind to any address and answers requests addressed to any host, from any browser origin.
 
 :::{warning}
 The `command` tool gives access to the full REPL, including:

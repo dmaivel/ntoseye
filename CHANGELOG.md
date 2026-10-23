@@ -69,6 +69,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - `s` counts the bytes it could not read correctly, and says so when it could read none of the range rather than reporting no matches. `dS` no longer reads past a string's `MaximumLength`.
 - `!hvcall` on a target without direct host RAM, such as a kernel dump, says that the hypervisor's memory needs it, as the other hypervisor commands do. It said the processor was not halted in the hypervisor.
 - `!address -summary` on a user-mode dump without a memory-info list prints the summary only, not every captured range.
+- `ntoseye mcp --http <address> --unsafe-http` answers requests addressed to the host's network address or name. Since v0.49.1 it refused every request whose `Host` was not a loopback name with `403 Forbidden`, so no other machine could use it.
 
 ### Removed
 
