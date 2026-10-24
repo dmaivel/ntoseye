@@ -507,6 +507,15 @@ impl Session {
                 self.continue_backend(ContinueDisposition::Handled)?;
                 return Ok(StopResolution::Resumed);
             }
+            WatchpointStopAction::Declined if self.hold_declined_hits => {
+                let rip = event.program_counter.unwrap_or(0);
+                let resolution = StopResolution::Stopped {
+                    event: held_pause(event),
+                    rip,
+                };
+                self.record_visible_stop(&resolution);
+                return Ok(resolution);
+            }
             WatchpointStopAction::Declined => {
                 self.continue_backend(ContinueDisposition::Handled)?;
                 return Ok(StopResolution::Resumed);
@@ -585,6 +594,10 @@ impl Session {
                 condition_error,
             },
             BreakpointStopAction::Resumed => StopResolution::Resumed,
+            BreakpointStopAction::Held => StopResolution::Stopped {
+                event: held_pause(event),
+                rip,
+            },
             BreakpointStopAction::NotBreakpoint
                 if self.is_stale_breakpoint_hit(&event, rip, cr3) =>
             {
@@ -784,6 +797,14 @@ impl Session {
                     return Ok(resolution);
                 }
                 BreakpointStopAction::Resumed => return Ok(StopResolution::ModulesChanged),
+                BreakpointStopAction::Held => {
+                    let resolution = StopResolution::Stopped {
+                        event: held_pause(event),
+                        rip,
+                    };
+                    self.record_visible_stop(&resolution);
+                    return Ok(resolution);
+                }
                 BreakpointStopAction::NotBreakpoint => {}
             }
         }
@@ -961,6 +982,18 @@ impl Session {
             return;
         }
         self.reconcile_deferred_breakpoints();
+    }
+}
+
+/// A hit held as a break-in's pause: the stop is the pause the host asked
+/// for, not the exception the hit raised.
+fn held_pause(event: StopEvent) -> StopEvent {
+    StopEvent {
+        exception_code: None,
+        first_chance: None,
+        exception_address: None,
+        break_in: true,
+        ..event
     }
 }
 

@@ -448,6 +448,10 @@ pub enum BreakpointStopAction {
     /// conditional breakpoint. It has been stepped over and the VM resumed, so
     /// the caller should keep waiting.
     Resumed,
+    /// A hit absorbed as for `Resumed` but kept where it is, for a break-in
+    /// out of retries (see [`Session::interrupt_classified`]): the target
+    /// stays halted on the site, which the next resume steps over.
+    Held,
     /// `rip` is not one of our breakpoints (a genuine exception or manual pause).
     NotBreakpoint,
 }
@@ -824,6 +828,10 @@ pub struct Session {
     /// module trap while being run past it, before executing it: its next
     /// hit on that event's trap is the same event, not a new one.
     module_trap_interrupted: Option<(ModuleEvent, u64)>,
+    /// A break-in's last try is classifying a stop: a hit a filter declines
+    /// is held as the pause rather than resumed (see
+    /// [`Session::interrupt_classified`]).
+    hold_declined_hits: bool,
     /// Whether a detected reload has not yet been surfaced to the host: the
     /// guest-state rebuild failed at the detection stop, so no
     /// [`ContinueOutcome::TargetReloaded`] went out. While set, the eventual

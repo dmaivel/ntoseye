@@ -12,7 +12,8 @@ const INTERRUPT_MAX_RESUMES: usize = 8;
 impl Session {
     /// Break in and classify the stop, breaking in again past one that is
     /// resumed (a hit a filter declines), up to [`INTERRUPT_MAX_RESUMES`]
-    /// times; then the last stop surfaces as a plain one. With it, whether
+    /// times; the last try holds a declined hit as the pause, and a stop
+    /// still resumed then surfaces as a plain one. With it, whether
     /// the stop is the break-in itself rather than one already pending.
     pub fn interrupt_classified(&mut self) -> Result<(StopResolution, bool)> {
         let mut resumed = 0;
@@ -24,8 +25,13 @@ impl Session {
                 event.thread_id,
                 event.program_counter
             );
-            let resolution = self.classify_stop_event(event)?;
-            match resolution {
+            // The last try holds a hit a filter declines as the pause: hits
+            // that come faster than the target polls for the break-in would
+            // otherwise be all a break-in ever collects.
+            self.hold_declined_hits = resumed + 1 >= INTERRUPT_MAX_RESUMES;
+            let resolution = self.classify_stop_event(event);
+            self.hold_declined_hits = false;
+            match resolution? {
                 StopResolution::Resumed => {
                     resumed += 1;
                     step_trace!("break-in resumed past a declined stop ({resumed})");

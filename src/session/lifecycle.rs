@@ -422,6 +422,7 @@ impl Session {
             bugcheck_trap: None,
             module_traps: Vec::new(),
             module_trap_interrupted: None,
+            hold_declined_hits: false,
             reload_surface_pending: false,
             parked_stop: None,
             pending_walk: None,

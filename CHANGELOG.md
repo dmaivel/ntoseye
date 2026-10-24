@@ -12,8 +12,6 @@ Keeping this file:
 - Link only with absolute https://ntoseye.com/... URLs. The same text is shown in the GitHub release, in this file on GitHub, and on the docs site, which each resolve a relative link differently.
 - To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes, under the tag as the release title.
 -->
-- Over KD, connecting while a user thread was running (or Windows was stopped in a user process) no longer makes that process the kernel's for the session: ntoseye took the stopped processor's page tables for the kernel's, so the process showed as `kernel`, its addresses went unsymbolized, and its modules showed in every other process. The kernel's are now the System process's.
-- The stack of a WOW64 thread in a user-mode minidump goes on into its x86 frames, from the x86 context its TEB's CPU area saved, as on a kernel target.
 
 ## Unreleased
 
@@ -95,6 +93,9 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - A hardware execute breakpoint (`ba e`) is no longer missed when the stop's DR6 does not say which slot fired, as Windows under KVM reports some hits. Such a hit was taken for a stray single step and resumed, so it faulted again, and could surface as an unexplained single-step exception: a `ba /p` watch on a shared DLL stopped in other processes.
 - Over KD, the first `g` no longer stops at once at `nt!DbgBreakPointWithStatus` when ntoseye connected to a guest already halted at a break of its own, such as a user-mode `int 3` or a resource timeout. The kernel kept the break-in the connect sent and took it on its first clock tick.
 - Over KD, a user-mode image that Windows reports with `!gflag +ksl` is no longer taken for a kernel module: each one triggered a refresh of the kernel module list, and its base was offered as a hint at where the kernel is.
+- Over KD, connecting while a user thread was running (or Windows was stopped in a user process) no longer makes that process the kernel's for the session: ntoseye took the stopped processor's page tables for the kernel's, so the process showed as `kernel`, its addresses went unsymbolized, and its modules showed in every other process. The kernel's are now the System process's.
+- Ctrl+C while a filtered breakpoint fires faster than Windows polls for the break-in (a `ba /p` watch on a shared DLL) stops as a pause. After its retries it surfaced as an unexplained single-step exception in whatever process hit the watch last.
+- The stack of a WOW64 thread in a user-mode minidump goes on into its x86 frames, from the x86 context its TEB's CPU area saved, as on a kernel target.
 
 ### Removed
 

@@ -3591,6 +3591,41 @@ fn an_execute_hit_whose_dr6_names_no_cause_is_the_slot_at_the_pc() {
     assert_eq!(hit_at(0x2000, EFLAGS_BASE), (None, false));
 }
 
+/// A break-in that keeps landing on hits a filter declines (a watched
+/// address other threads run faster than the target polls for the
+/// break-in) holds the last one as the pause: the stop is a pause, not the
+/// hit's exception, and the target stays halted on the site.
+#[test]
+fn a_break_in_out_of_retries_holds_a_declined_hit_as_the_pause() {
+    let mut backend = MockBackend::default().running();
+    backend.set("dr6", 1);
+    backend.set("rip", 0x1000);
+    for _ in 0..8 {
+        backend.queue_interrupt(single_step_event());
+    }
+    let continues = Arc::clone(&backend.continues);
+    let mut session = session_with_mock(backend);
+    session.breakpoints = manager_with_hw(0, HwBreakpointAccess::Execute, true);
+    session
+        .set_breakpoint_condition(7, Some("0".into()))
+        .unwrap();
+
+    let outcome = session.halt().unwrap();
+
+    assert!(
+        matches!(
+            outcome,
+            ContinueOutcome::Stopped {
+                exception_code: None,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(continues.load(Ordering::Relaxed), 7);
+    assert!(!session.backend.is_running());
+}
+
 #[test]
 fn hardware_breakpoint_hit_sets_resume_flag_only_for_execute_watches() {
     for (access, want_rf) in [

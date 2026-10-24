@@ -34,8 +34,7 @@ impl Session {
     /// they can't drift on which int3 hits surface and which are silently resumed.
     pub fn resolve_breakpoint_stop(&mut self, rip: u64, cr3: u64) -> Result<BreakpointStopAction> {
         if self.returned_to_interrupted_hit(rip)? {
-            self.step_over_and_resume()?;
-            return Ok(BreakpointStopAction::Resumed);
+            return self.decline_hit();
         }
         match self
             .breakpoints
@@ -50,29 +49,25 @@ impl Session {
                     || !stopped_processor_matches(bp.processor, &self.current_thread)
                     || !self.stopped_stack_reaches(bp.min_stack_pointer)
                 {
-                    self.step_over_and_resume()?;
-                    return Ok(BreakpointStopAction::Resumed);
+                    return self.decline_hit();
                 }
                 let (caller_matches, caller) =
                     stopped_caller_matches(&mut self.target, &bp, &self.current_thread, cr3, rip);
                 if !caller_matches {
-                    self.step_over_and_resume()?;
-                    return Ok(BreakpointStopAction::Resumed);
+                    return self.decline_hit();
                 }
                 // Count every scoped physical hit before pass-count and
                 // condition evaluation. A pass skip uses the same canonical
                 // step-over/resume path as a false condition.
                 if self.breakpoints.record_hit(bp.id)? == BreakpointHitDisposition::SkipPass {
-                    self.step_over_and_resume()?;
-                    return Ok(BreakpointStopAction::Resumed);
+                    return self.decline_hit();
                 }
                 // A false condition is absorbed. Evaluation errors fail safe:
                 // surface the stop and carry the error to every host.
                 let condition_error =
                     match evaluate_hit_condition(&mut self.target, &bp, caller.as_ref()) {
                         Ok(false) => {
-                            self.step_over_and_resume()?;
-                            return Ok(BreakpointStopAction::Resumed);
+                            return self.decline_hit();
                         }
                         Ok(true) => None,
                         Err(error) => Some(error.to_string()),
@@ -100,8 +95,7 @@ impl Session {
                 // different address space): silently step over so the wrong
                 // process keeps running, then resume waiting for the right one.
                 if self.breakpoints.breakpoint_id_at_address(rip).is_some() {
-                    self.step_over_and_resume()?;
-                    return Ok(BreakpointStopAction::Resumed);
+                    return self.decline_hit();
                 }
 
                 Ok(BreakpointStopAction::NotBreakpoint)
@@ -136,6 +130,16 @@ impl Session {
 
     /// Silently continue past the breakpoint at the PC: step over it, rewrite
     /// whatever sites the stop dropped, and resume without surfacing anything.
+    /// Pass a hit no filter accepts: step over its site and resume; or,
+    /// while a break-in's last try holds declined hits, stay on it.
+    fn decline_hit(&mut self) -> Result<BreakpointStopAction> {
+        if self.hold_declined_hits {
+            return Ok(BreakpointStopAction::Held);
+        }
+        self.step_over_and_resume()?;
+        Ok(BreakpointStopAction::Resumed)
+    }
+
     fn step_over_and_resume(&mut self) -> Result<()> {
         self.step_over_site_at_pc()?;
         self.breakpoints
