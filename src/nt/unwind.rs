@@ -397,6 +397,17 @@ impl std::fmt::Display for SymbolName {
     }
 }
 
+/// What a compiler-generated funclet's name has (`Foo$filt$0`, `Foo$fin$1`).
+const FUNCLET_MARK: char = '$';
+
+/// Whether `symbol` names a funclet (see [`nearest_symbol`]).
+fn is_funclet(symbol: &SymbolName) -> bool {
+    symbol
+        .name
+        .as_deref()
+        .is_some_and(|name| name.contains(FUNCLET_MARK))
+}
+
 /// What `addr` is named after in the code `trace` runs: the nearest symbol
 /// below it, a split-off fragment's function, or the module it is in.
 pub fn symbol_name(debugger: &Target, trace: &ThreadTraceContext, addr: u64) -> Option<SymbolName> {
@@ -413,12 +424,18 @@ pub fn symbol_name(debugger: &Target, trace: &ThreadTraceContext, addr: u64) -> 
     };
 
     if let Some(module) = trace.module_for_address(addr) {
-        let symbol = find(module.dtb)
-            .or_else(|| {
-                ensure_module_symbols(debugger, trace, std::iter::once(addr));
-                find(module.dtb)
-            })
-            .or_else(|| split_function(debugger, trace, module.dtb, addr).map(named));
+        let split = || split_function(debugger, trace, module.dtb, addr).map(named);
+        let symbol = match find(module.dtb).or_else(|| {
+            ensure_module_symbols(debugger, trace, std::iter::once(addr));
+            find(module.dtb)
+        }) {
+            // See [`nearest_symbol`].
+            Some(found) if is_funclet(&found) => split()
+                .filter(|fragment| fragment.name != found.name)
+                .or(Some(found)),
+            Some(found) => Some(found),
+            None => split(),
+        };
         return Some(symbol.unwrap_or_else(|| {
             // The module has no PDB, or its fetch is still running.
             SymbolName {
@@ -454,14 +471,26 @@ pub fn nearest_symbol(
     dtb: Dtb,
     address: VirtAddr,
 ) -> Option<(String, String, u32)> {
-    debugger
+    let split = || {
+        let trace = resolve_thread_trace_context(debugger, dtb);
+        let module = trace.module_for_address(address.0)?;
+        split_function(debugger, &trace, module.dtb, address.0)
+    };
+    match debugger
         .symbols
         .find_closest_symbol_for_address(dtb, address)
-        .or_else(|| {
-            let trace = resolve_thread_trace_context(debugger, dtb);
-            let module = trace.module_for_address(address.0)?;
-            split_function(debugger, &trace, module.dtb, address.0)
-        })
+    {
+        // A funclet (`$filt$`, `$fin$`) is a small function the compiler
+        // generates, and the code after it is often a fragment split off
+        // from another function, which the funclet's name would claim:
+        // `nt!KiLockServiceTable$filt$0+0x2fe` is code of
+        // `nt!ExpWaitForResource`. Only then is the function table asked.
+        Some(found) if found.1.contains(FUNCLET_MARK) => split()
+            .filter(|(_, name, _)| *name != found.1)
+            .or(Some(found)),
+        Some(found) => Some(found),
+        None => split(),
+    }
 }
 
 /// `addr` named after its function when no symbol is near it but its code
@@ -604,6 +633,8 @@ pub fn try_format_symbol_at(debugger: &Target, cr3: u64, rip: u64) -> Option<Str
         && let Some(symbol) = debugger
             .symbols
             .format_closest_symbol_for_address(debugger.kernel_dtb(), VirtAddr(rip))
+        // A funclet's name is checked against the function table below.
+        && !symbol.contains(FUNCLET_MARK)
     {
         return Some(symbol);
     }
