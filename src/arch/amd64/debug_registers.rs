@@ -12,8 +12,13 @@ use crate::base::error::Result;
 const SLOTS: usize = 4;
 /// DR6's B0-B3.
 const STATUS_BITS: u64 = 0b1111;
+/// Every cause DR6 can name: B0-B3, BD (a debug-register access), BS (a
+/// single step) and BT (a task switch).
+const CAUSE_BITS: u64 = STATUS_BITS | (0b111 << 13);
 /// RFLAGS.RF: suppresses an execute breakpoint for one instruction.
 const RESUME_FLAG: u64 = 1 << 16;
+/// RFLAGS.TF: single-steps the next instruction.
+const TRAP_FLAG: u64 = 1 << 8;
 
 /// The register holding slot `slot`'s address.
 fn address_register(slot: usize) -> String {
@@ -74,17 +79,36 @@ impl DebugRegisters for Amd64 {
         map.contains("dr6")
     }
 
+    /// A debug exception whose DR6 names no cause at all, and that no trap
+    /// flag explains, is an execute fault that lost its status: Windows 11
+    /// with VBS on, under KVM, reports some execute hits so. An
+    /// execute breakpoint faults at its own address, so the slot armed to
+    /// execute at `pc` is the one; otherwise the hit would be taken for a
+    /// stray step, resumed without RF, and fault again.
     fn fired_slot(
         &self,
         map: &RegisterMap,
         registers: &[u8],
-        _pc: u64,
+        pc: u64,
         armed: &dyn Fn(usize) -> Option<HardwareWatch>,
     ) -> Option<usize> {
         let dr6 = map.read_u64("dr6", registers).ok()?;
-        (0..SLOTS)
-            .filter(|slot| dr6 & (1 << slot) != 0)
-            .find(|&slot| armed(slot).is_some())
+        if dr6 & CAUSE_BITS != 0 {
+            return (0..SLOTS)
+                .filter(|slot| dr6 & (1 << slot) != 0)
+                .find(|&slot| armed(slot).is_some());
+        }
+        let stepping = map
+            .read_u64("eflags", registers)
+            .is_ok_and(|eflags| eflags & TRAP_FLAG != 0);
+        if stepping {
+            return None;
+        }
+        (0..SLOTS).find(|&slot| {
+            armed(slot).is_some_and(|watch| {
+                watch.access == HwBreakpointAccess::Execute && watch.address == pc
+            })
+        })
     }
 
     /// The processor never clears B0-B3 itself; the rest of DR6 stays.

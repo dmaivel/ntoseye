@@ -3505,6 +3505,34 @@ fn hardware_breakpoint_hit_claims_matching_dr6_bit_and_clears_status() {
 }
 
 #[test]
+fn an_execute_hit_whose_dr6_names_no_cause_is_the_slot_at_the_pc() {
+    let manager = manager_with_hw(0, HwBreakpointAccess::Execute, true);
+    let map = Arch::Amd64.register_map();
+    let hit_at = |rip: u64, eflags: u64| {
+        let mut backend = MockBackend::default();
+        backend.set("dr6", 0xffff_0ff0);
+        backend.set("rip", rip);
+        backend.set("eflags", eflags);
+        let hit = hardware_breakpoint_hit(
+            &mut backend,
+            map,
+            &manager,
+            &single_step_event(),
+            Arch::Amd64,
+        )
+        .unwrap();
+        (hit.map(|bp| bp.id), backend.get("eflags") & (1 << 16) != 0)
+    };
+
+    // Claimed, and resumed past: without RF the instruction faults again.
+    assert_eq!(hit_at(0x1000, EFLAGS_BASE), (Some(7), true));
+    // A trap flag explains the exception: a step that landed on the site.
+    assert_eq!(hit_at(0x1000, EFLAGS_BASE | 0x100), (None, false));
+    // An execute breakpoint faults at its own address only.
+    assert_eq!(hit_at(0x2000, EFLAGS_BASE), (None, false));
+}
+
+#[test]
 fn hardware_breakpoint_hit_sets_resume_flag_only_for_execute_watches() {
     for (access, want_rf) in [
         (HwBreakpointAccess::Execute, true),
