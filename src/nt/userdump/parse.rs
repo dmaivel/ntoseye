@@ -31,13 +31,13 @@ const MEMORY_LIST_STREAM: u32 = 5;
 const EXCEPTION_STREAM: u32 = 6;
 pub const SYSTEM_INFO_STREAM: u32 = 7;
 pub const MEMORY64_LIST_STREAM: u32 = 9;
-const HANDLE_DATA_STREAM: u32 = 12;
+pub const HANDLE_DATA_STREAM: u32 = 12;
 const FUNCTION_TABLE_STREAM: u32 = 13;
-const UNLOADED_MODULE_LIST_STREAM: u32 = 14;
+pub const UNLOADED_MODULE_LIST_STREAM: u32 = 14;
 pub const MISC_INFO_STREAM: u32 = 15;
 pub const MEMORY_INFO_LIST_STREAM: u32 = 16;
 pub const THREAD_INFO_LIST_STREAM: u32 = 17;
-const THREAD_NAME_LIST_STREAM: u32 = 24;
+pub const THREAD_NAME_LIST_STREAM: u32 = 24;
 
 /// `VER_PLATFORM_WIN32_NT`, the only platform a Windows minidump names.
 pub const PLATFORM_WIN32_NT: u32 = 2;
@@ -46,20 +46,20 @@ pub const PROCESSOR_ARCHITECTURE_ARM64: u16 = 12;
 
 pub const MISC1_PROCESS_ID: u32 = 0x1;
 pub const MISC1_PROCESS_TIMES: u32 = 0x2;
-const MISC3_TIMEZONE: u32 = 0x40;
-const MISC4_BUILDSTRING: u32 = 0x100;
+pub const MISC3_TIMEZONE: u32 = 0x40;
+pub const MISC4_BUILDSTRING: u32 = 0x100;
 /// `MINIDUMP_MISC_INFO_3.TimeZoneId` and the `TIME_ZONE_INFORMATION` that
 /// follows it.
-const MISC_INFO_TIME_ZONE_ID: usize = 56;
-const MISC_INFO_TIME_ZONE: usize = 60;
+pub const MISC_INFO_TIME_ZONE_ID: usize = 56;
+pub const MISC_INFO_TIME_ZONE: usize = 60;
 const TIME_ZONE_INFORMATION_SIZE: usize = 172;
-const TIME_ZONE_ID_UNKNOWN: u32 = 0;
+pub const TIME_ZONE_ID_UNKNOWN: u32 = 0;
 const TIME_ZONE_ID_STANDARD: u32 = 1;
 const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
 /// `MINIDUMP_MISC_INFO_4.BuildString`: 260 UTF-16 units after the 232 bytes
 /// of `MINIDUMP_MISC_INFO_3`.
-const MISC_INFO_BUILD_STRING: usize = 232;
-const MISC_INFO_BUILD_STRING_UNITS: usize = 260;
+pub const MISC_INFO_BUILD_STRING: usize = 232;
+pub const MISC_INFO_BUILD_STRING_UNITS: usize = 260;
 
 /// More streams, records, or ranges than this is no dump a debugger wrote;
 /// the bounds keep a corrupt count from driving the parser for minutes.

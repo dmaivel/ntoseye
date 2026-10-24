@@ -768,8 +768,8 @@ fn misc_info_records_process_times_and_the_time_zone_in_effect() {
 #[test]
 fn a_written_minidump_reads_back_as_written() {
     use super::write::{
-        MinidumpModule, MinidumpProcess, MinidumpRegion, MinidumpSystem, MinidumpThread,
-        write_minidump,
+        MinidumpHandle, MinidumpModule, MinidumpProcess, MinidumpRegion, MinidumpSystem,
+        MinidumpThread, MinidumpUnloadedModule, write_minidump,
     };
     use crate::base::bytes::write_u32;
     use crate::nt::pe::headers::CodeView;
@@ -790,7 +790,7 @@ fn a_written_minidump_reads_back_as_written() {
     rsds.extend_from_slice(&[0x11; 16]);
     rsds.extend_from_slice(&3u32.to_le_bytes());
     rsds.extend_from_slice(b"app.pdb\0");
-    let thread = |tid, context, stack| MinidumpThread {
+    let thread = |tid, context, stack, name: Option<&str>| MinidumpThread {
         tid,
         teb: 0x7ff_e000 + u64::from(tid),
         priority: 8,
@@ -803,7 +803,16 @@ fn a_written_minidump_reads_back_as_written() {
         kernel_time: 20,
         user_time: 30,
         start_address: 0x7ff6_1000_0100,
+        name: name.map(str::to_string),
     };
+    // VS_FIXEDFILEINFO of version 10.0.26100.1.
+    let mut version = [0u32; 13];
+    version[0] = 0xfeef_04bd;
+    version[1] = 0x1_0000;
+    version[2] = 10 << 16;
+    version[3] = (26100 << 16) | 1;
+    version[4] = 10 << 16;
+    version[5] = (26100 << 16) | 1;
     let process = MinidumpProcess {
         system: MinidumpSystem {
             arch,
@@ -817,8 +826,13 @@ fn a_written_minidump_reads_back_as_written() {
         pid: 4242,
         times: Some((1_759_999_000, 3, 1)),
         threads: vec![
-            thread(0x1234, Some(context), Some(0x10_1f00..0x10_3000)),
-            thread(0x99, None, None),
+            thread(
+                0x1234,
+                Some(context),
+                Some(0x10_1f00..0x10_3000),
+                Some("worker"),
+            ),
+            thread(0x99, None, None, None),
         ],
         modules: vec![MinidumpModule {
             base: 0x7ff6_1000_0000,
@@ -827,6 +841,7 @@ fn a_written_minidump_reads_back_as_written() {
             time_date_stamp: 0x5000_0000,
             path: r"C:\app\app.exe".into(),
             codeview: Some(rsds),
+            version: Some(version),
         }],
         regions: vec![MinidumpRegion {
             base: 0x10_0000,
@@ -839,6 +854,24 @@ fn a_written_minidump_reads_back_as_written() {
         }],
         memory: vec![0x10_1000..0x10_3000, 0x20_0000..0x20_2000],
         zero: std::iter::once(0x20_1000..0x20_2000).collect(),
+        handles: Some(vec![MinidumpHandle {
+            handle: 0x10,
+            type_name: Some("File".into()),
+            object_name: Some(r"\Device\Null".into()),
+            attributes: 0,
+            granted_access: 0x12_019f,
+            handle_count: 1,
+            pointer_count: 32,
+        }]),
+        unloaded: vec![MinidumpUnloadedModule {
+            base: 0x7ff6_3000_0000,
+            size: 0x9000,
+            checksum: 3,
+            time_date_stamp: 0x6000_0000,
+            name: "old.dll".into(),
+        }],
+        build_string: Some("26100.1.amd64fre.ge_release.240331-1435".into()),
+        time_zone_bias: Some(300),
     };
     let path = std::env::temp_dir().join(format!(
         "ntoseye-minidump-writer-{}.dmp",
@@ -894,6 +927,8 @@ fn a_written_minidump_reads_back_as_written() {
     assert_eq!((times.kernel_time, times.user_time), (20, 30));
     assert_eq!(times.create_time, 133_000_000_000_000_000);
     assert!(info.threads[1].context.is_err());
+    assert_eq!(first.name.as_deref(), Some("worker"));
+    assert_eq!(info.threads[1].name, None);
 
     let module = &info.modules[0];
     assert_eq!((module.base, module.size), (0x7ff6_1000_0000, 0x2_0000));
@@ -903,6 +938,34 @@ fn a_written_minidump_reads_back_as_written() {
         panic!("expected an RSDS record, got {:?}", module.codeview);
     };
     assert_eq!((*age, path.as_str()), (3, "app.pdb"));
+    assert_eq!(
+        module.version,
+        Some(("10.0.26100.1".to_string(), "10.0.26100.1".to_string()))
+    );
+
+    let handles = info.handles.as_ref().expect("handle data");
+    let handle = &handles[0];
+    assert_eq!(handles.len(), 1);
+    assert_eq!(handle.handle, 0x10);
+    assert_eq!(handle.type_name.as_deref(), Some("File"));
+    assert_eq!(handle.object_name.as_deref(), Some(r"\Device\Null"));
+    assert_eq!(
+        (
+            handle.granted_access,
+            handle.handle_count,
+            handle.pointer_count
+        ),
+        (0x12_019f, 1, 32)
+    );
+    let unloaded = &info.unloaded_modules[0];
+    assert_eq!(info.unloaded_modules.len(), 1);
+    assert_eq!((unloaded.base, unloaded.size), (0x7ff6_3000_0000, 0x9000));
+    assert_eq!(unloaded.name, "old.dll");
+    assert_eq!(
+        info.build_string.as_deref(),
+        Some("26100.1.amd64fre.ge_release.240331-1435")
+    );
+    assert_eq!(info.time_zone.as_ref().map(|zone| zone.bias), Some(300));
 
     let regions = info.regions.as_ref().expect("a memory-info list");
     assert_eq!(regions.len(), 1);

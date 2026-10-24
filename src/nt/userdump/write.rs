@@ -17,29 +17,44 @@ use crate::base::memory::PAGE_SIZE;
 use crate::nt::dump_writer::{PartialDumpCleanup, create_temporary_file};
 
 use super::parse::{
-    MEMORY_INFO_LIST_STREAM, MEMORY64_LIST_STREAM, MINIDUMP_SIGNATURE, MINIDUMP_VERSION,
-    MISC_INFO_STREAM, MISC1_PROCESS_ID, MISC1_PROCESS_TIMES, MODULE_LIST_STREAM, PLATFORM_WIN32_NT,
+    HANDLE_DATA_STREAM, MEMORY_INFO_LIST_STREAM, MEMORY64_LIST_STREAM, MINIDUMP_SIGNATURE,
+    MINIDUMP_VERSION, MISC_INFO_BUILD_STRING, MISC_INFO_BUILD_STRING_UNITS, MISC_INFO_STREAM,
+    MISC_INFO_TIME_ZONE, MISC_INFO_TIME_ZONE_ID, MISC1_PROCESS_ID, MISC1_PROCESS_TIMES,
+    MISC3_TIMEZONE, MISC4_BUILDSTRING, MODULE_LIST_STREAM, PLATFORM_WIN32_NT,
     PROCESSOR_ARCHITECTURE_AMD64, PROCESSOR_ARCHITECTURE_ARM64, SYSTEM_INFO_STREAM,
-    THREAD_INFO_LIST_STREAM, THREAD_LIST_STREAM,
+    THREAD_INFO_LIST_STREAM, THREAD_LIST_STREAM, THREAD_NAME_LIST_STREAM, TIME_ZONE_ID_UNKNOWN,
+    UNLOADED_MODULE_LIST_STREAM,
 };
 
-/// `MINIDUMP_TYPE`: all of the process's memory, every region's state, and
-/// each thread's times and start address.
+/// `MINIDUMP_TYPE`: all of the process's memory, its handles, its unloaded
+/// modules, every region's state, and each thread's times and start
+/// address.
 const MINIDUMP_WITH_FULL_MEMORY: u64 = 0x2;
+const MINIDUMP_WITH_HANDLE_DATA: u64 = 0x4;
+const MINIDUMP_WITH_UNLOADED_MODULES: u64 = 0x20;
 const MINIDUMP_WITH_FULL_MEMORY_INFO: u64 = 0x800;
 const MINIDUMP_WITH_THREAD_INFO: u64 = 0x1000;
 
 const HEADER_SIZE: usize = 32;
 const DIRECTORY_ENTRY_SIZE: usize = 12;
-const STREAM_COUNT: usize = 7;
+/// The streams every minidump has: system and misc info, threads and their
+/// info, modules, regions, and memory.
+const BASE_STREAMS: usize = 7;
 /// `MINIDUMP_THREAD_INFO_LIST` and `MINIDUMP_MEMORY_INFO_LIST` headers and
 /// entries.
 const THREAD_INFO_HEADER_SIZE: u32 = 12;
 const THREAD_INFO_ENTRY_SIZE: u32 = 64;
 const MEMORY_INFO_HEADER_SIZE: u32 = 16;
 const MEMORY_INFO_ENTRY_SIZE: u32 = 48;
-/// `MINIDUMP_MISC_INFO`, the first version: process ID and times.
-const MISC_INFO_SIZE: u32 = 24;
+/// `MINIDUMP_MISC_INFO_4`: process ID and times, the time zone, and the
+/// build string.
+const MISC_INFO_SIZE: usize = 832;
+/// `MINIDUMP_HANDLE_DATA_STREAM` and `MINIDUMP_HANDLE_DESCRIPTOR`.
+const HANDLE_HEADER_SIZE: u32 = 16;
+const HANDLE_DESCRIPTOR_SIZE: u32 = 32;
+/// `MINIDUMP_UNLOADED_MODULE_LIST` and `MINIDUMP_UNLOADED_MODULE`.
+const UNLOADED_HEADER_SIZE: u32 = 12;
+const UNLOADED_ENTRY_SIZE: u32 = 24;
 
 /// A user-mode minidump that `.dump /u` wrote.
 #[record]
@@ -92,6 +107,8 @@ pub struct MinidumpThread {
     pub kernel_time: u64,
     pub user_time: u64,
     pub start_address: u64,
+    /// Its description (`SetThreadDescription`).
+    pub name: Option<String>,
 }
 
 /// A module the process's loader lists hold.
@@ -104,6 +121,30 @@ pub struct MinidumpModule {
     pub path: String,
     /// The image's CodeView record, as its debug directory holds it.
     pub codeview: Option<Vec<u8>>,
+    /// Its `VS_FIXEDFILEINFO`, from its version resource.
+    pub version: Option<[u32; 13]>,
+}
+
+/// A handle of the process (`MINIDUMP_HANDLE_DESCRIPTOR`).
+#[derive(Debug, Clone)]
+pub struct MinidumpHandle {
+    pub handle: u64,
+    pub type_name: Option<String>,
+    pub object_name: Option<String>,
+    pub attributes: u32,
+    pub granted_access: u32,
+    pub handle_count: u32,
+    pub pointer_count: u32,
+}
+
+/// A module the process unloaded (`MINIDUMP_UNLOADED_MODULE`).
+#[derive(Debug, Clone)]
+pub struct MinidumpUnloadedModule {
+    pub base: u64,
+    pub size: u32,
+    pub checksum: u32,
+    pub time_date_stamp: u32,
+    pub name: String,
 }
 
 /// A region of the address space (`MINIDUMP_MEMORY_INFO`).
@@ -135,6 +176,14 @@ pub struct MinidumpProcess {
     /// The pages of `memory` that were never touched (demand-zero): written
     /// as zeros, not read. Ascending, not overlapping.
     pub zero: Vec<Range<u64>>,
+    /// The process's handles, `None` when they could not be read.
+    pub handles: Option<Vec<MinidumpHandle>>,
+    /// The modules it unloaded, most recent last.
+    pub unloaded: Vec<MinidumpUnloadedModule>,
+    /// The system's build string (`26100.1.amd64fre.ge_release.240331-1435`).
+    pub build_string: Option<String>,
+    /// UTC minus local time, in minutes, daylight saving included.
+    pub time_zone_bias: Option<i32>,
 }
 
 /// The streams before the memory data, laid out in one buffer whose first
@@ -235,12 +284,21 @@ pub fn write_minidump(
         )));
     }
 
-    let directory_size = STREAM_COUNT * DIRECTORY_ENTRY_SIZE;
+    let named_threads = process
+        .threads
+        .iter()
+        .filter(|thread| thread.name.is_some())
+        .count();
+    let stream_count = BASE_STREAMS
+        + usize::from(process.handles.is_some())
+        + usize::from(!process.unloaded.is_empty())
+        + usize::from(named_threads != 0);
+    let directory_size = stream_count * DIRECTORY_ENTRY_SIZE;
     let mut streams = Streams {
         base: HEADER_SIZE + directory_size,
         bytes: Vec::new(),
     };
-    let mut directory: Vec<(u32, u32, u32)> = Vec::with_capacity(STREAM_COUNT);
+    let mut directory: Vec<(u32, u32, u32)> = Vec::with_capacity(stream_count);
 
     // SystemInfoStream: MINIDUMP_SYSTEM_INFO and its (empty) CSD version.
     let system_rva = streams.rva();
@@ -262,24 +320,130 @@ pub fn write_minidump(
     let csd = streams.string("");
     streams.patch_u32(csd_at, csd);
 
-    // MiscInfoStream: MINIDUMP_MISC_INFO.
+    // MiscInfoStream: MINIDUMP_MISC_INFO_4.
     streams.align(4);
     let misc_rva = streams.rva();
     let (create, user, kernel) = process.times.unwrap_or((0, 0, 0));
-    streams.u32(MISC_INFO_SIZE);
-    streams.u32(
-        MISC1_PROCESS_ID
-            | if process.times.is_some() {
-                MISC1_PROCESS_TIMES
-            } else {
-                0
-            },
-    );
-    streams.u32(process.pid);
-    streams.u32(create);
-    streams.u32(user);
-    streams.u32(kernel);
-    directory.push((MISC_INFO_STREAM, MISC_INFO_SIZE, misc_rva));
+    let mut misc = vec![0u8; MISC_INFO_SIZE];
+    let mut flags = MISC1_PROCESS_ID;
+    if process.times.is_some() {
+        flags |= MISC1_PROCESS_TIMES;
+    }
+    if let Some(bias) = process.time_zone_bias {
+        flags |= MISC3_TIMEZONE;
+        // An unknown zone ID applies TIME_ZONE_INFORMATION.Bias as it is.
+        misc[MISC_INFO_TIME_ZONE_ID..MISC_INFO_TIME_ZONE_ID + 4]
+            .copy_from_slice(&TIME_ZONE_ID_UNKNOWN.to_le_bytes());
+        misc[MISC_INFO_TIME_ZONE..MISC_INFO_TIME_ZONE + 4].copy_from_slice(&bias.to_le_bytes());
+    }
+    if let Some(build) = &process.build_string {
+        flags |= MISC4_BUILDSTRING;
+        for (index, unit) in build
+            .encode_utf16()
+            .take(MISC_INFO_BUILD_STRING_UNITS - 1)
+            .enumerate()
+        {
+            let at = MISC_INFO_BUILD_STRING + index * 2;
+            misc[at..at + 2].copy_from_slice(&unit.to_le_bytes());
+        }
+    }
+    for (index, value) in [
+        MISC_INFO_SIZE as u32,
+        flags,
+        process.pid,
+        create,
+        user,
+        kernel,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        misc[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    streams.bytes.extend_from_slice(&misc);
+    directory.push((MISC_INFO_STREAM, MISC_INFO_SIZE as u32, misc_rva));
+
+    // HandleDataStream: MINIDUMP_HANDLE_DATA_STREAM, after the type and
+    // object names it points at.
+    if let Some(handles) = &process.handles {
+        let names: Vec<(u32, u32)> = handles
+            .iter()
+            .map(|handle| {
+                let type_name = handle
+                    .type_name
+                    .as_deref()
+                    .map_or(0, |name| streams.string(name));
+                let object_name = handle
+                    .object_name
+                    .as_deref()
+                    .map_or(0, |name| streams.string(name));
+                (type_name, object_name)
+            })
+            .collect();
+        streams.align(4);
+        let handles_rva = streams.rva();
+        streams.u32(HANDLE_HEADER_SIZE);
+        streams.u32(HANDLE_DESCRIPTOR_SIZE);
+        streams.u32(handles.len() as u32);
+        streams.u32(0);
+        for (handle, (type_name, object_name)) in handles.iter().zip(names) {
+            streams.u64(handle.handle);
+            streams.u32(type_name);
+            streams.u32(object_name);
+            streams.u32(handle.attributes);
+            streams.u32(handle.granted_access);
+            streams.u32(handle.handle_count);
+            streams.u32(handle.pointer_count);
+        }
+        directory.push((HANDLE_DATA_STREAM, streams.rva() - handles_rva, handles_rva));
+    }
+
+    // UnloadedModuleListStream: MINIDUMP_UNLOADED_MODULE_LIST.
+    if !process.unloaded.is_empty() {
+        let names: Vec<u32> = process
+            .unloaded
+            .iter()
+            .map(|module| streams.string(&module.name))
+            .collect();
+        streams.align(4);
+        let unloaded_rva = streams.rva();
+        streams.u32(UNLOADED_HEADER_SIZE);
+        streams.u32(UNLOADED_ENTRY_SIZE);
+        streams.u32(process.unloaded.len() as u32);
+        for (module, name) in process.unloaded.iter().zip(names) {
+            streams.u64(module.base);
+            streams.u32(module.size);
+            streams.u32(module.checksum);
+            streams.u32(module.time_date_stamp);
+            streams.u32(name);
+        }
+        directory.push((
+            UNLOADED_MODULE_LIST_STREAM,
+            streams.rva() - unloaded_rva,
+            unloaded_rva,
+        ));
+    }
+
+    // ThreadNameListStream: MINIDUMP_THREAD_NAME_LIST.
+    if named_threads != 0 {
+        let names: Vec<(u32, u32)> = process
+            .threads
+            .iter()
+            .filter_map(|thread| Some((thread.tid, streams.string(thread.name.as_deref()?))))
+            .collect();
+        streams.align(4);
+        let names_rva = streams.rva();
+        streams.u32(names.len() as u32);
+        for (tid, name) in names {
+            streams.u32(tid);
+            streams.u64(u64::from(name));
+        }
+        directory.push((
+            THREAD_NAME_LIST_STREAM,
+            streams.rva() - names_rva,
+            names_rva,
+        ));
+    }
 
     // The memory data starts where the streams end, which is not known
     // until they are laid out, and threads point into it; the stack
@@ -365,7 +529,9 @@ pub fn write_minidump(
         streams.u32(module.checksum);
         streams.u32(module.time_date_stamp);
         streams.u32(name);
-        streams.bytes.extend_from_slice(&[0; 52]); // VS_FIXEDFILEINFO
+        for word in module.version.unwrap_or([0; 13]) {
+            streams.u32(word);
+        }
         streams.u32(cv_size);
         streams.u32(cv_rva);
         streams.u64(0); // MiscRecord
@@ -434,15 +600,20 @@ pub fn write_minidump(
     let mut header = Vec::with_capacity(HEADER_SIZE + directory_size);
     header.extend_from_slice(&MINIDUMP_SIGNATURE.to_le_bytes());
     header.extend_from_slice(&u32::from(MINIDUMP_VERSION).to_le_bytes());
-    header.extend_from_slice(&(STREAM_COUNT as u32).to_le_bytes());
+    header.extend_from_slice(&(stream_count as u32).to_le_bytes());
     header.extend_from_slice(&(HEADER_SIZE as u32).to_le_bytes());
     header.extend_from_slice(&0u32.to_le_bytes()); // CheckSum
     header.extend_from_slice(&process.time_date_stamp.to_le_bytes());
-    header.extend_from_slice(
-        &(MINIDUMP_WITH_FULL_MEMORY | MINIDUMP_WITH_FULL_MEMORY_INFO | MINIDUMP_WITH_THREAD_INFO)
-            .to_le_bytes(),
-    );
-    debug_assert_eq!(directory.len(), STREAM_COUNT);
+    let mut dump_type =
+        MINIDUMP_WITH_FULL_MEMORY | MINIDUMP_WITH_FULL_MEMORY_INFO | MINIDUMP_WITH_THREAD_INFO;
+    if process.handles.is_some() {
+        dump_type |= MINIDUMP_WITH_HANDLE_DATA;
+    }
+    if !process.unloaded.is_empty() {
+        dump_type |= MINIDUMP_WITH_UNLOADED_MODULES;
+    }
+    header.extend_from_slice(&dump_type.to_le_bytes());
+    debug_assert_eq!(directory.len(), stream_count);
     for (stream_type, size, rva) in directory {
         header.extend_from_slice(&stream_type.to_le_bytes());
         header.extend_from_slice(&size.to_le_bytes());

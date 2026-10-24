@@ -11,7 +11,7 @@ use pelite::image::{IMAGE_DEBUG_TYPE_CODEVIEW, IMAGE_DIRECTORY_ENTRY_DEBUG};
 
 use crate::arch::Arch;
 use crate::backend::phys::PhysMem;
-use crate::base::bytes::write_u32;
+use crate::base::bytes::{utf16le_lossy, utf16le_nul_terminated, write_u32};
 use crate::base::error::Result;
 use crate::base::memory::{AddressSpace, MemoryOps, PAGE_SIZE};
 use crate::base::types::{MAX_PROCESSORS, VirtAddr};
@@ -20,7 +20,8 @@ use crate::nt::dump_writer::{DumpException, DumpMetadata, context_from_registers
 use crate::nt::guest::{ModuleInfo, ProcessInfo};
 use crate::nt::kuser_shared::KuserSharedData;
 use crate::nt::pe::headers::{MAX_CODEVIEW_BYTES, decode_headers, read_debug_directory};
-use crate::nt::pe::read_pe_header_page;
+use crate::nt::pe::{read_pe_fixed_file_info, read_pe_header_page};
+use crate::nt::target::DiagnosticValue;
 use crate::nt::target::mm::{
     MEM_COMMIT, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE, MEM_RESERVE, MemoryRegionInfo, VadType,
     page_protection,
@@ -28,7 +29,8 @@ use crate::nt::target::mm::{
 use crate::nt::target::{KTHREAD_STATE_TERMINATED, Target, ThreadInfo};
 use crate::nt::unwind::{RecoveredStackTrace, build_parked_thread_recovered_stack};
 use crate::nt::userdump::write::{
-    MinidumpModule, MinidumpProcess, MinidumpRegion, MinidumpSystem, MinidumpThread,
+    MinidumpHandle, MinidumpModule, MinidumpProcess, MinidumpRegion, MinidumpSystem,
+    MinidumpThread, MinidumpUnloadedModule,
 };
 use crate::session::Session;
 
@@ -44,6 +46,18 @@ const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
 const FILETIME_SECOND: u64 = 10_000_000;
 /// `NT_TIB64.StackBase`.
 const NT_TIB_STACK_BASE: u64 = 8;
+/// The most handles a minidump lists: far more than any process holds.
+const MAX_HANDLES: usize = 1 << 20;
+/// `RTL_UNLOAD_EVENT_TRACE` on a 64-bit process: `BaseAddress`,
+/// `SizeOfImage`, then `Sequence`, `TimeDateStamp`, `CheckSum`, and
+/// `ImageName[32]`. ntdll names the element size and count.
+const UNLOAD_SIZE: u64 = 8;
+const UNLOAD_TIME_DATE_STAMP: u64 = 20;
+const UNLOAD_CHECKSUM: u64 = 24;
+const UNLOAD_NAME: u64 = 28;
+const UNLOAD_NAME_UNITS: usize = 32;
+/// 100 ns units in a minute.
+const FILETIME_MINUTE: i64 = 600_000_000;
 
 const WINDOWS_MAJOR_VERSION: u32 = 0xf;
 
@@ -238,6 +252,7 @@ fn minidump_module(memory: &AddressSpace<'_, PhysMem>, module: &ModuleInfo) -> M
             .unwrap_or(0),
         path: module.path.clone().unwrap_or_else(|| module.name.clone()),
         codeview: codeview_record(memory, module.base_address),
+        version: read_pe_fixed_file_info(module.base_address, memory),
     }
 }
 
@@ -287,6 +302,141 @@ fn present_runs(memory: &AddressSpace<'_, PhysMem>, vad: &MemoryRegionInfo) -> V
         regions.push(region(at, vad.end.0, false));
     }
     regions
+}
+
+/// A `UNICODE_STRING` at `address` in the kernel's space.
+fn kernel_unicode_string(target: &Target, address: VirtAddr) -> Option<String> {
+    let kernel = target.kernel_address_space();
+    let length: u16 = kernel.read(address).ok()?;
+    let buffer: u64 = kernel.read(address + 8u64).ok()?;
+    let mut bytes = vec![0u8; usize::from(length)];
+    kernel.read_bytes(VirtAddr(buffer), &mut bytes).ok()?;
+    Some(utf16le_lossy(&bytes))
+}
+
+/// `GetPriorityClass`'s value for `EPROCESS.PriorityClass`
+/// (`PROCESS_PRIORITY_CLASS_*`).
+fn priority_class(class: u8) -> u32 {
+    match class {
+        1 => 0x40,   // IDLE_PRIORITY_CLASS
+        3 => 0x80,   // HIGH_PRIORITY_CLASS
+        4 => 0x100,  // REALTIME_PRIORITY_CLASS
+        5 => 0x4000, // BELOW_NORMAL_PRIORITY_CLASS
+        6 => 0x8000, // ABOVE_NORMAL_PRIORITY_CLASS
+        _ => 0x20,   // NORMAL_PRIORITY_CLASS
+    }
+}
+
+/// The handles of `process`, each with its object's handle and pointer
+/// counts from its object header; `None` when its handle table cannot be
+/// read.
+fn process_handles(target: &Target, process: &ProcessInfo) -> Option<Vec<MinidumpHandle>> {
+    let table = target
+        .enumerate_process_handles(process.clone(), MAX_HANDLES)
+        .ok()?;
+    let header = target
+        .guest()
+        .ok()?
+        .ntoskrnl
+        .types()
+        .layout("_OBJECT_HEADER")
+        .ok()?;
+    let body = header.field_offset("Body").ok()?;
+    let pointer_count = header.field_offset("PointerCount").ok()?;
+    let handle_count = header.field_offset("HandleCount").ok()?;
+    let kernel = target.kernel_address_space();
+    let value = |diagnostic: &DiagnosticValue<u32>| match diagnostic {
+        DiagnosticValue::Available(value) => *value,
+        DiagnosticValue::Unavailable(_) => 0,
+    };
+    let text = |diagnostic: &DiagnosticValue<Option<String>>| match diagnostic {
+        DiagnosticValue::Available(text) => text.clone().filter(|text| !text.is_empty()),
+        DiagnosticValue::Unavailable(_) => None,
+    };
+    Some(
+        table
+            .entries
+            .iter()
+            .map(|entry| {
+                let counts = match entry.object {
+                    DiagnosticValue::Available(object) => {
+                        let header = object - body;
+                        let count = |offset: u64| {
+                            kernel
+                                .read::<i64>(header + offset)
+                                .map_or(0, |count| count.max(0) as u32)
+                        };
+                        (count(handle_count), count(pointer_count))
+                    }
+                    DiagnosticValue::Unavailable(_) => (0, 0),
+                };
+                MinidumpHandle {
+                    handle: entry.handle,
+                    type_name: text(&entry.type_name),
+                    object_name: text(&entry.name),
+                    attributes: value(&entry.attributes),
+                    granted_access: value(&entry.granted_access),
+                    handle_count: counts.0,
+                    pointer_count: counts.1,
+                }
+            })
+            .collect(),
+    )
+}
+
+/// The modules `process` unloaded, from ntdll's unload event trace, the
+/// array `RtlpUnloadEventTraceEx` points at with `RtlpUnloadEventTraceExSize`
+/// bytes per element and `RtlpUnloadEventTraceExNumber` elements; oldest
+/// first, by sequence.
+fn unloaded_modules(target: &Target, process: &ProcessInfo) -> Vec<MinidumpUnloadedModule> {
+    let memory = target.address_space(process.dtb);
+    let symbol = |name: &str| {
+        target
+            .symbols
+            .find_symbol_across_modules(process.dtb, name)
+            .ok()
+            .flatten()
+    };
+    let (Some(array), Some(size), Some(number)) = (
+        symbol("ntdll!RtlpUnloadEventTraceEx").and_then(|at| memory.read::<u64>(at).ok()),
+        symbol("ntdll!RtlpUnloadEventTraceExSize").and_then(|at| memory.read::<u32>(at).ok()),
+        symbol("ntdll!RtlpUnloadEventTraceExNumber").and_then(|at| memory.read::<u32>(at).ok()),
+    ) else {
+        return Vec::new();
+    };
+    let size = u64::from(size);
+    if array == 0 || size < UNLOAD_NAME + 2 * UNLOAD_NAME_UNITS as u64 || number > 1024 {
+        return Vec::new();
+    }
+    let mut modules: Vec<(u32, MinidumpUnloadedModule)> = (0..u64::from(number))
+        .filter_map(|index| {
+            let mut entry = vec![0u8; size as usize];
+            memory
+                .read_bytes(VirtAddr(array + index * size), &mut entry)
+                .ok()?;
+            let word = |at: u64| {
+                u32::from_le_bytes(entry[at as usize..at as usize + 4].try_into().unwrap())
+            };
+            let base = u64::from_le_bytes(entry[..8].try_into().unwrap());
+            if base == 0 {
+                return None;
+            }
+            let name = &entry[UNLOAD_NAME as usize..UNLOAD_NAME as usize + 2 * UNLOAD_NAME_UNITS];
+            Some((
+                word(16),
+                MinidumpUnloadedModule {
+                    base,
+                    size: u64::from_le_bytes(entry[UNLOAD_SIZE as usize..16].try_into().unwrap())
+                        as u32,
+                    checksum: word(UNLOAD_CHECKSUM),
+                    time_date_stamp: word(UNLOAD_TIME_DATE_STAMP),
+                    name: utf16le_nul_terminated(name),
+                },
+            ))
+        })
+        .collect();
+    modules.sort_by_key(|(sequence, _)| *sequence);
+    modules.into_iter().map(|(_, module)| module).collect()
 }
 
 /// Where a thread's user stack is in use: from `sp` to its TEB's
@@ -418,12 +568,53 @@ pub fn collect_process_minidump(
             cpu_seconds("KernelTime").unwrap_or(0),
         )
     });
-    let suspend_offset = guest
+    let kthread = guest.ntoskrnl.types().layout("_KTHREAD").ok();
+    let kthread_field = |name: &str| {
+        kthread
+            .as_ref()
+            .and_then(|layout| layout.field_offset(name).ok())
+    };
+    let suspend_offset = kthread_field("SuspendCount");
+    let base_priority_offset = kthread_field("BasePriority");
+    let saturation_offset = kthread_field("Saturation");
+    let thread_name_offset = guest
         .ntoskrnl
         .types()
-        .layout("_KTHREAD")
+        .layout("_ETHREAD")
         .ok()
-        .and_then(|kthread| kthread.field_offset("SuspendCount").ok());
+        .and_then(|ethread| ethread.field_offset("ThreadName").ok());
+    let process_byte = |offset: Option<u64>| {
+        offset.and_then(|offset| kernel.read::<u8>(process.eprocess + offset).ok())
+    };
+    let process_base_priority = process_byte(eprocess.field_offset("Pcb").ok().and_then(|pcb| {
+        guest
+            .ntoskrnl
+            .types()
+            .layout("_KPROCESS")
+            .ok()?
+            .field_offset("BasePriority")
+            .ok()
+            .map(|offset| pcb + offset)
+    }))
+    .map(|priority| priority as i8);
+    let process_priority_class =
+        priority_class(process_byte(eprocess.field_offset("PriorityClass").ok()).unwrap_or(2));
+    let thread_byte = |thread: &ThreadInfo, offset: Option<u64>| {
+        offset.and_then(|offset| kernel.read::<u8>(thread.kthread + offset).ok())
+    };
+    // GetThreadPriority: the thread's base priority over its process's, or
+    // THREAD_PRIORITY_TIME_CRITICAL / _IDLE when saturated.
+    let relative_priority = |thread: &ThreadInfo| -> i32 {
+        match thread_byte(thread, saturation_offset).map(|value| value as i8) {
+            Some(saturation) if saturation > 0 => 15,
+            Some(saturation) if saturation < 0 => -15,
+            _ => thread_byte(thread, base_priority_offset)
+                .zip(process_base_priority)
+                .map_or(0, |(base, process)| {
+                    i32::from(base as i8) - i32::from(process)
+                }),
+        }
+    };
 
     let thread_times = session.target.kernel_thread_times_of(&threads)?;
     let user = session.target.address_space(process.dtb);
@@ -442,8 +633,8 @@ pub fn collect_process_minidump(
         minidump_threads.push(MinidumpThread {
             tid: thread.tid.unwrap_or(0) as u32,
             teb,
-            priority: 0,
-            priority_class: 0,
+            priority: relative_priority(thread) as u32,
+            priority_class: process_priority_class,
             suspend_count: suspend_offset
                 .and_then(|offset| kernel.read::<u8>(thread.kthread + offset).ok())
                 .map_or(0, u32::from),
@@ -461,6 +652,11 @@ pub fn collect_process_minidump(
                 .win32_start_address
                 .or(thread.start_address)
                 .map_or(0, |address| address.0),
+            name: thread_name_offset
+                .and_then(|offset| kernel.read::<u64>(thread.ethread + offset).ok())
+                .filter(|&pointer| pointer != 0)
+                .and_then(|pointer| kernel_unicode_string(&session.target, VirtAddr(pointer)))
+                .filter(|name| !name.is_empty()),
         });
     }
 
@@ -507,5 +703,11 @@ pub fn collect_process_minidump(
         regions,
         memory,
         zero,
+        handles: process_handles(&session.target, process),
+        unloaded: unloaded_modules(&session.target, process),
+        build_string: version.build_lab.clone(),
+        time_zone_bias: kuser
+            .time_zone_bias()
+            .map(|bias| (bias / FILETIME_MINUTE) as i32),
     })
 }

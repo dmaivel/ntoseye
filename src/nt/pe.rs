@@ -679,16 +679,26 @@ pub fn section_name_at<'a, B: MemoryOps<PhysAddr>>(
     None
 }
 
-/// Read VS_FIXEDFILEINFO from a PE image's resource section in guest memory.
-///
-/// Reads only the header page + the `.rsrc` section (not the full image) to
-/// extract file version and product version strings. Returns `None` if the
-/// image has no resources, the resource section is paged out, or no
-/// RT_VERSION resource is present.
+/// Read VS_FIXEDFILEINFO from a PE image's resource section in guest memory,
+/// as its file and product version strings (see
+/// [`read_pe_fixed_file_info`]).
 pub fn read_pe_version_info<B: MemoryOps<PhysAddr>>(
     base: VirtAddr,
     memory: &memory::AddressSpace<'_, B>,
 ) -> Option<(String, String)> {
+    read_pe_fixed_file_info(base, memory).map(|info| version_strings(&info))
+}
+
+/// Read VS_FIXEDFILEINFO, its 13 words, from a PE image's resource section
+/// in guest memory.
+///
+/// Reads only the header page + the `.rsrc` section (not the full image).
+/// Returns `None` if the image has no resources, the resource section is
+/// paged out, or no RT_VERSION resource is present.
+pub fn read_pe_fixed_file_info<B: MemoryOps<PhysAddr>>(
+    base: VirtAddr,
+    memory: &memory::AddressSpace<'_, B>,
+) -> Option<[u32; 13]> {
     use pelite::image::IMAGE_DIRECTORY_ENTRY_RESOURCE;
 
     let header_buf = read_pe_header_page(base, memory).ok()?;
@@ -717,7 +727,7 @@ pub fn read_pe_version_info<B: MemoryOps<PhysAddr>>(
     let ver_offset_in_rsrc = (ver_rva as usize).checked_sub(rsrc_rva as usize)?;
     let ver_data = rsrc_buf.get(ver_offset_in_rsrc..ver_offset_in_rsrc + ver_size)?;
 
-    parse_vs_fixedfileinfo(ver_data)
+    fixed_file_info(ver_data)
 }
 
 const RT_VERSION: u32 = 16;
@@ -792,36 +802,25 @@ fn first_resource_entry(rsrc: &[u8], parent_entry: u32) -> Option<u32> {
     get_u32(rsrc, first_entry_off + 4)
 }
 
-fn parse_vs_fixedfileinfo(data: &[u8]) -> Option<(String, String)> {
-    // Search for VS_FIXEDFILEINFO signature
+/// The 13 words of the VS_FIXEDFILEINFO in a VS_VERSIONINFO blob.
+fn fixed_file_info(data: &[u8]) -> Option<[u32; 13]> {
     let sig_bytes = VS_FIXEDFILEINFO_SIGNATURE.to_le_bytes();
     let pos = data.windows(4).position(|w| w == sig_bytes)?;
-    if pos + 52 > data.len() {
-        return None;
+    let info = data.get(pos..pos + 52)?;
+    let mut words = [0u32; 13];
+    for (index, word) in words.iter_mut().enumerate() {
+        *word = read_u32(info, index * 4);
     }
-    let info = &data[pos..];
+    Some(words)
+}
 
-    // dwFileVersionMS: HIWORD = Major, LOWORD = Minor
-    // dwFileVersionLS: HIWORD = Build, LOWORD = Revision
-    let file_minor = read_u16(info, 8);
-    let file_major = read_u16(info, 10);
-    let file_revision = read_u16(info, 12);
-    let file_build = read_u16(info, 14);
-
-    let prod_minor = read_u16(info, 16);
-    let prod_major = read_u16(info, 18);
-    let prod_revision = read_u16(info, 20);
-    let prod_build = read_u16(info, 22);
-
-    let file_ver = format!(
-        "{}.{}.{}.{}",
-        file_major, file_minor, file_build, file_revision
-    );
-    let prod_ver = format!(
-        "{}.{}.{}.{}",
-        prod_major, prod_minor, prod_build, prod_revision
-    );
-    Some((file_ver, prod_ver))
+/// The file and product versions of a VS_FIXEDFILEINFO, as
+/// `major.minor.build.revision`: each MS word holds major and minor, each
+/// LS word build and revision.
+pub fn version_strings(info: &[u32; 13]) -> (String, String) {
+    let version =
+        |ms: u32, ls: u32| format!("{}.{}.{}.{}", ms >> 16, ms & 0xffff, ls >> 16, ls & 0xffff);
+    (version(info[2], info[3]), version(info[4], info[5]))
 }
 
 /// Build a complete (hole-free) `PeImage` from an on-disk PE file by mapping its
