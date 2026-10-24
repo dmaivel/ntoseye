@@ -81,6 +81,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - `k` on a WOW64 thread stopped in its x86 code, as at a breakpoint in x86 `kernelbase`, lists its x86 frames up to `_RtlUserThreadStart`, and `gu` there steps out to the caller. The stack showed only the frame it stopped in, and `gu` said it could not find the caller's return address.
 - `!vad` shows each region's commit charge, in pages, on Windows 11 24H2 and later, where the VAD keeps it in a field of its own. It showed `-` for every region.
 - `!handle` names the handles whose objects have no name of their own, as WinDbg's does: a file by its path on its device (`\Device\HarddiskVolume3\Windows\System32\en-US\csrss.exe.mui`), a registry key by its path as the hive names it (`\REGISTRY\MACHINE\SYSTEM\ControlSet001\Control\Session Manager`), a process by its image and PID, a thread by its TID and process. They showed `-`.
+- `!locks <address>` shows each owner's real acquire count. It showed eight times the count on Windows 10 and later, where the count is a bitfield above three flags.
 
 ### Removed
 

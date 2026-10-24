@@ -1606,12 +1606,16 @@ impl Target {
                 .read_pointer("OwnerThread")?
                 .0)
         };
+        // A 29-bit field above three flags from Windows 10, a whole LONG
+        // before.
+        let owner_count = |entry: VirtAddr| -> Result<i32> {
+            Ok(self.extract_kernel_layout_bits(&owner_layout, entry, "OwnerCount")? as i32)
+        };
         let owners = DiagnosticValue::from_result((|| -> Result<Vec<ResourceOwner>> {
             let mut owners = Vec::new();
             let owner_entry = address + layout.field_offset("OwnerEntry")?;
             let thread = owner_thread(owner_entry)?;
-            let count: i32 =
-                self.read_kernel_layout_field(&owner_layout, owner_entry, "OwnerCount")?;
+            let count = owner_count(owner_entry)?;
             if thread & !3 != 0 && count != 0 {
                 owners.push(ResourceOwner {
                     thread: VirtAddr(thread & !3),
@@ -1635,8 +1639,7 @@ impl Target {
             for index in 1..table_size as usize {
                 let entry = table + (index * owner_layout.size) as u64;
                 let thread = owner_thread(entry)?;
-                let count: i32 =
-                    self.read_kernel_layout_field(&owner_layout, entry, "OwnerCount")?;
+                let count = owner_count(entry)?;
                 if thread & !3 != 0 && count != 0 {
                     owners.push(ResourceOwner {
                         thread: VirtAddr(thread & !3),
