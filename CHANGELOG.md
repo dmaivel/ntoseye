@@ -26,6 +26,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - The prompt marks where each command and its output start and end (OSC 133), as a shell does for its terminal, so a terminal that reads the marks can jump between commands, select one's output, or flag one that reported an error.
 - When the target ran for 10 seconds or more before it stopped, the terminal shows a desktop notification of the stop (`ntoseye: breakpoint #0 hit at nt!NtClose on processor 2`): kitty only while its window is out of view, terminals that read OSC 9 (Ghostty, iTerm2) each time. A stop you cause with Ctrl+C or `break` sends none.
 - The window title names the prompt's processor and backend, and where the target stopped or that it runs (`ntoseye - 3: kd - nt!NtClose+0x5`), and is given back on exit.
+- A stop at an `int3` that Windows executes on purpose says why it broke in. The first is a resource timeout: when a thread waits for an executive resource (ERESOURCE) longer than the timeout, Windows breaks in at `nt!ExpWaitForResource`, and the stop now says so and points to `!locks`.
 
 ### Changed
 

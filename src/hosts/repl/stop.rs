@@ -617,6 +617,13 @@ pub fn print_break_context_at(
             format!("{} {}", ui::muted("stopped at"), ui::symbol(&stop_symbol))
         });
     let mut children: Vec<String> = Vec::new();
+    // An int3 Windows makes on purpose says why it made it. One of the
+    // debugger's own breakpoints is not one, its site masked or not.
+    if session.breakpoints.breakpoint_id_at_address(rip).is_none()
+        && let Some(reason) = debugger.windows_break_reason(VirtAddr(rip))
+    {
+        children.push(reason.to_string());
+    }
     // At a stop in the Windows hypervisor NT is what is inspected: where it
     // left off becomes the context, `.cxr` returns to the hypervisor's.
     let saved_context = debugger.select_saved_vtl0(&thread_id);

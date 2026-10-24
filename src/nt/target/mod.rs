@@ -7,6 +7,7 @@ use parking_lot::Mutex;
 
 pub mod alpc;
 pub mod apic;
+pub mod breaks;
 pub mod classpnp;
 mod context;
 pub mod cpu;
