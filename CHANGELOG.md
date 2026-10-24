@@ -49,6 +49,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - `r` with a frame or a context selected shows the register grid, with `-` for a register the frame did not save, as plain `r` does. It listed the registers one per line, sorted by name as text.
 - A bad argument to a hypervisor command (`!hvvps`, `!hvept`, `!hvcalls`, `!hvd`, `.partition` and the others) says which argument is wrong, then the usage line. They printed the whole help text.
 - `attach` and `.process /i` also select a thread of the process, so `!teb`, `!gle`, and `k` show it without a `.thread`: the thread a processor runs, with its live registers, else its first whose kernel stack is resident. They say which they selected. `.process` without `/i` still keeps the current thread, as WinDbg's does.
+- `threads` with no filter, while attached to a process, lists that process's threads, as `!for_each_thread` and `!uniqstack` do; `threads *` lists every thread. Its start address is the thread's own entry (its Win32 start address, such as `ping!wmainCRTStartup`), named where symbols are loaded, the kernel's and the attached process's. It showed `StartAddress`, which for a process's first thread is a pool address, unnamed.
 
 ### Fixed
 
