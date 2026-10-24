@@ -1,0 +1,519 @@
+//! Field offsets of the kernel's memory-compression store, read from the
+//! kernel's own code. The PDB names the store manager's functions but has no
+//! types for its structures, and the offsets move between Windows releases
+//! (and once within 24H2's servicing), so each one comes from a function
+//! that uses it.
+
+use std::collections::HashMap;
+
+use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction};
+
+use crate::base::error::{Error, Result};
+
+use super::hv_layout::ImageView;
+
+/// The kernel image and the addresses of its functions, by undecorated name.
+pub struct KernelCode<'a> {
+    pub image: ImageView<'a>,
+    pub functions: &'a HashMap<String, u64>,
+}
+
+/// Where the store keeps what a page lookup needs. `SMKM_STORE` offsets are
+/// from the store; `ST_STORE` offsets are from the store's embedded
+/// `ST_STORE`, at `st_store` in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreLayout {
+    /// `SMKM_STORE`: the process whose address space holds the regions.
+    pub owner_process: u32,
+    /// `SMKM_STORE`: the pointer to the array of region entries.
+    pub region_array: u32,
+    /// `SMKM_STORE`: the byte and bit set when regions are virtual.
+    pub virtual_flag: (u32, u8),
+    /// `ST_STORE`: the pointer back to the store that embeds it.
+    pub back_pointer: u32,
+}
+
+/// The store layout `code` uses, when every anchor is found and agrees.
+pub fn derive(code: &KernelCode<'_>) -> Result<StoreLayout> {
+    let owner_process = owner_process(code)?;
+    let (region_array, virtual_flag, back_pointer) = region_fields(code)?;
+    Ok(StoreLayout {
+        owner_process,
+        region_array,
+        virtual_flag,
+        back_pointer,
+    })
+}
+
+fn layout_error(detail: impl std::fmt::Display) -> Error {
+    Error::DebugInfo(format!(
+        "memory-compression store layout not recognized: {detail}"
+    ))
+}
+
+impl KernelCode<'_> {
+    /// The address of the function named `name`.
+    fn address(&self, name: &str) -> Result<u64> {
+        self.functions
+            .get(name)
+            .copied()
+            .ok_or_else(|| layout_error(format_args!("no {name}")))
+    }
+
+    /// The instructions reachable from `address` through branches, calls
+    /// not followed, in address order: a function with its split-off chunks.
+    fn instructions(&self, address: u64) -> Vec<Instruction> {
+        const MAX: usize = 8192;
+        let mut seen = std::collections::BTreeMap::new();
+        let mut pending = vec![address];
+        while let Some(start) = pending.pop() {
+            let mut ip = start;
+            while !seen.contains_key(&ip) && seen.len() < MAX {
+                let Some(code) = self.image.code_at(ip) else {
+                    break;
+                };
+                let instruction = Decoder::with_ip(64, code, ip, DecoderOptions::NONE).decode();
+                if instruction.is_invalid() {
+                    break;
+                }
+                seen.insert(ip, instruction);
+                match instruction.flow_control() {
+                    FlowControl::UnconditionalBranch => {
+                        pending.extend(near_target(&instruction));
+                        break;
+                    }
+                    FlowControl::ConditionalBranch => pending.extend(near_target(&instruction)),
+                    FlowControl::Next | FlowControl::Call | FlowControl::IndirectCall => {}
+                    _ => break,
+                }
+                ip = instruction.next_ip();
+            }
+        }
+        seen.into_values().collect()
+    }
+
+    /// The functions whose name starts with `prefix`.
+    fn functions_named(&self, prefix: &str) -> Vec<u64> {
+        self.functions
+            .iter()
+            .filter(|(name, _)| name.starts_with(prefix))
+            .map(|(_, address)| *address)
+            .collect()
+    }
+}
+
+fn near_target(instruction: &Instruction) -> Option<u64> {
+    (instruction.op0_kind() == iced_x86::OpKind::NearBranch64).then(|| instruction.near_branch64())
+}
+
+/// `[reg+D]`'s `D`, for a memory operand with a base and no index.
+fn based_offset(instruction: &Instruction) -> Option<u32> {
+    use iced_x86::Register;
+    (instruction.memory_index() == Register::None
+        && !matches!(instruction.memory_base(), Register::None | Register::RIP))
+    .then(|| u32::try_from(instruction.memory_displacement64()).ok())
+    .flatten()
+}
+
+/// The value most of `votes` agree on, when at least two do and no other
+/// value has as many.
+fn agreed(votes: &HashMap<u32, usize>, what: &str) -> Result<u32> {
+    let mut ranked: Vec<(u32, usize)> = votes.iter().map(|(v, n)| (*v, *n)).collect();
+    ranked.sort_by_key(|(value, count)| (std::cmp::Reverse(*count), *value));
+    match ranked.as_slice() {
+        [(value, count), rest @ ..] if *count >= 2 && rest.first().is_none_or(|r| r.1 < *count) => {
+            Ok(*value)
+        }
+        _ => Err(layout_error(format_args!(
+            "{what}: no agreement in {ranked:x?}"
+        ))),
+    }
+}
+
+/// The value with the most `votes`, when no other has as many.
+fn most(votes: &HashMap<u32, usize>, what: &str) -> Result<u32> {
+    let mut ranked: Vec<(u32, usize)> = votes.iter().map(|(v, n)| (*v, *n)).collect();
+    ranked.sort_by_key(|(value, count)| (std::cmp::Reverse(*count), *value));
+    match ranked.as_slice() {
+        [(value, count), rest @ ..] if rest.first().is_none_or(|r| r.1 < *count) => Ok(*value),
+        _ => Err(layout_error(format_args!(
+            "{what}: no single value in {ranked:x?}"
+        ))),
+    }
+}
+
+/// The store's owner-process field: the store methods switch to the
+/// process that holds the regions with `KeStackAttachProcess` (or
+/// `KiStackAttachProcess`), its first argument loaded from the store.
+fn owner_process(code: &KernelCode<'_>) -> Result<u32> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    let attach: Vec<u64> = ["KeStackAttachProcess", "KiStackAttachProcess"]
+        .iter()
+        .filter_map(|name| code.address(name).ok())
+        .collect();
+    let mut votes: HashMap<u32, usize> = HashMap::new();
+    for function in code.functions_named("SMKM_STORE<SM_TRAITS>::") {
+        let mut found = None;
+        let mut rcx = None;
+        for instruction in code.instructions(function) {
+            if instruction.mnemonic() == Mnemonic::Call {
+                if near_target(&instruction).is_some_and(|t| attach.contains(&t)) {
+                    found = found.or(rcx);
+                }
+                rcx = None;
+            } else if instruction.op0_kind() == OpKind::Register
+                && instruction.op0_register().full_register() == Register::RCX
+            {
+                rcx = (instruction.mnemonic() == Mnemonic::Mov
+                    && instruction.op1_kind() == OpKind::Memory)
+                    .then(|| based_offset(&instruction))
+                    .flatten();
+            }
+        }
+        if let Some(offset) = found {
+            *votes.entry(offset).or_default() += 1;
+        }
+    }
+    agreed(&votes, "owner process")
+}
+
+/// The offsets `A` (0x100 or more) of `mov r,[x+A]` loads whose register is
+/// then indexed by 8 (`[r+i*8]`): fields that point to arrays of pointers.
+fn pointer_arrays(instructions: &[Instruction]) -> HashMap<u32, usize> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    let mut loaded: HashMap<Register, u32> = HashMap::new();
+    let mut found: HashMap<u32, usize> = HashMap::new();
+    for instruction in instructions {
+        if matches!(instruction.mnemonic(), Mnemonic::Mov | Mnemonic::Lea)
+            && instruction.op1_kind() == OpKind::Memory
+            && instruction.memory_index() != Register::None
+            && instruction.memory_index_scale() == 8
+            && let Some(offset) = loaded.get(&instruction.memory_base().full_register())
+        {
+            *found.entry(*offset).or_default() += 1;
+        }
+        if instruction.op0_kind() == OpKind::Register {
+            let register = instruction.op0_register().full_register();
+            match (instruction.mnemonic() == Mnemonic::Mov
+                && instruction.op1_kind() == OpKind::Memory)
+                .then(|| based_offset(instruction))
+                .flatten()
+                .filter(|offset| *offset >= 0x100)
+            {
+                Some(offset) => loaded.insert(register, offset),
+                None => loaded.remove(&register),
+            };
+        }
+    }
+    found
+}
+
+/// The store's region array (from `SmStMapVirtualRegion`, which indexes
+/// it), and from `StDmpSinglePageRetrieve` the `ST_STORE`'s back pointer to
+/// the store (the `rcx` it passes to `SmStMapVirtualRegion`) and the flag it
+/// tests on the store first: set when regions are virtual.
+fn region_fields(code: &KernelCode<'_>) -> Result<(u32, (u32, u8), u32)> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    let map = code.address("SMKM_STORE<SM_TRAITS>::SmStMapVirtualRegion")?;
+    let mut arrays = pointer_arrays(&code.instructions(map));
+    arrays.retain(|_, count| *count > 0);
+    let array = match arrays.keys().copied().collect::<Vec<_>>().as_slice() {
+        [array] => *array,
+        other => return Err(layout_error(format_args!("region array: {other:x?}"))),
+    };
+    let retrieve = code.address("ST_STORE<SM_TRAITS>::StDmpSinglePageRetrieve")?;
+    let store_methods = code.functions_named("SMKM_STORE<SM_TRAITS>::");
+    // Registers loaded from `[x+B]`, by register: the `B`.
+    let mut loaded: HashMap<Register, u32> = HashMap::new();
+    let mut back_pointers: HashMap<u32, usize> = HashMap::new();
+    let mut tests: Vec<(u32, u32, u8)> = Vec::new();
+    for instruction in code.instructions(retrieve) {
+        match instruction.mnemonic() {
+            Mnemonic::Call => {
+                // A store method's first argument is the store.
+                if near_target(&instruction).is_some_and(|t| store_methods.contains(&t))
+                    && let Some(back) = loaded.get(&Register::RCX)
+                {
+                    *back_pointers.entry(*back).or_default() += 1;
+                }
+                continue;
+            }
+            Mnemonic::Test
+                if instruction.op0_kind() == OpKind::Memory
+                    && instruction.op1_kind() == OpKind::Immediate8
+                    && instruction.memory_size().size() == 1
+                    && instruction.immediate(1).count_ones() == 1 =>
+            {
+                if let (Some(back), Some(flag)) = (
+                    loaded.get(&instruction.memory_base().full_register()),
+                    based_offset(&instruction),
+                ) {
+                    tests.push((*back, flag, instruction.immediate(1).trailing_zeros() as u8));
+                }
+                continue;
+            }
+            _ => {}
+        }
+        if instruction.op0_kind() == OpKind::Register {
+            let register = instruction.op0_register().full_register();
+            let value = match (instruction.mnemonic(), instruction.op1_kind()) {
+                (Mnemonic::Mov, OpKind::Memory) => based_offset(&instruction),
+                (Mnemonic::Mov, OpKind::Register) => loaded
+                    .get(&instruction.op1_register().full_register())
+                    .copied(),
+                _ => None,
+            };
+            match value {
+                Some(offset) => loaded.insert(register, offset),
+                None => loaded.remove(&register),
+            };
+        }
+    }
+    let back = most(&back_pointers, "back pointer")?;
+    let mut flags: Vec<(u32, u8)> = tests
+        .into_iter()
+        .filter(|(through, _, _)| *through == back)
+        .map(|(_, flag, bit)| (flag, bit))
+        .collect();
+    flags.sort();
+    flags.dedup();
+    match flags.as_slice() {
+        [flag] => Ok((array, *flag, back)),
+        other => Err(layout_error(format_args!(
+            "virtual-region flag: {other:x?}"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced_x86::code_asm::*;
+
+    const BASE: u64 = 0x1_4000_0000;
+
+    /// Functions assembled one per 0x100 bytes, by name.
+    struct Builder {
+        bytes: Vec<u8>,
+        next: u32,
+        functions: HashMap<String, u64>,
+    }
+
+    impl Builder {
+        fn new() -> Self {
+            let mut builder = Self {
+                bytes: vec![0xcc; 0x4000],
+                next: 0x1000,
+                functions: HashMap::new(),
+            };
+            builder.function("KeStackAttachProcess", |a| a.ret().unwrap());
+            builder
+        }
+
+        fn function(&mut self, name: &str, body: impl FnOnce(&mut CodeAssembler)) -> u64 {
+            let address = BASE + u64::from(self.next);
+            let mut a = CodeAssembler::new(64).unwrap();
+            body(&mut a);
+            let code = a.assemble(address).unwrap();
+            let start = self.next as usize;
+            self.bytes[start..start + code.len()].copy_from_slice(&code);
+            self.next += 0x100;
+            self.functions.insert(name.to_string(), address);
+            address
+        }
+
+        /// A store method that switches to the process at `owner`.
+        fn attaching_method(&mut self, name: &str, owner: u32) {
+            let attach = self.functions["KeStackAttachProcess"];
+            self.function(&format!("SMKM_STORE<SM_TRAITS>::{name}"), |a| {
+                a.mov(rcx, qword_ptr(rbx + owner)).unwrap();
+                a.call(attach).unwrap();
+                a.ret().unwrap();
+            });
+        }
+
+        /// 24H2's page retrieval: the store through the back pointer, its
+        /// virtual-region flag, then the region mapping, which indexes the
+        /// region array.
+        fn retrieval(&mut self, back: u32, flag: u32, array: u32) {
+            let map = self.function("SMKM_STORE<SM_TRAITS>::SmStMapVirtualRegion", |a| {
+                a.mov(rax, qword_ptr(rcx + array)).unwrap();
+                a.lea(r14, qword_ptr(rax + rdi * 8)).unwrap();
+                a.ret().unwrap();
+            });
+            self.function("ST_STORE<SM_TRAITS>::StDmpSinglePageRetrieve", |a| {
+                let mut physical = a.create_label();
+                a.mov(rdi, qword_ptr(rbp + back)).unwrap();
+                a.test(byte_ptr(rdi + flag), 4).unwrap();
+                a.je(physical).unwrap();
+                a.mov(rcx, rdi).unwrap();
+                a.call(map).unwrap();
+                a.set_label(&mut physical).unwrap();
+                a.ret().unwrap();
+            });
+        }
+
+        fn derive(&self) -> Result<StoreLayout> {
+            derive(&KernelCode {
+                image: ImageView {
+                    base: BASE,
+                    bytes: &self.bytes,
+                    code: vec![(0x1000, 0x4000)],
+                    data: Vec::new(),
+                },
+                functions: &self.functions,
+            })
+        }
+    }
+
+    #[test]
+    fn derives_the_store_fields_from_the_functions_that_use_them() {
+        let mut builder = Builder::new();
+        builder.attaching_method("SmStSwapStore", 0x1d00);
+        builder.attaching_method("SmStTrimWsStore", 0x1d00);
+        builder.retrieval(0x320, 0x1a95, 0x1b68);
+        assert_eq!(
+            builder.derive().unwrap(),
+            StoreLayout {
+                owner_process: 0x1d00,
+                region_array: 0x1b68,
+                virtual_flag: (0x1a95, 2),
+                back_pointer: 0x320,
+            }
+        );
+    }
+
+    #[test]
+    fn owner_loads_that_disagree_refuse_the_layout() {
+        let mut builder = Builder::new();
+        builder.attaching_method("SmStSwapStore", 0x1d00);
+        builder.attaching_method("SmStTrimWsStore", 0x1d08);
+        builder.retrieval(0x320, 0x1a95, 0x1b68);
+        assert!(builder.derive().is_err());
+    }
+
+    #[test]
+    fn a_flag_tested_on_another_pointer_is_not_the_virtual_flag() {
+        let mut builder = Builder::new();
+        builder.attaching_method("SmStSwapStore", 0x1d00);
+        builder.attaching_method("SmStTrimWsStore", 0x1d00);
+        builder.function("SMKM_STORE<SM_TRAITS>::SmStMapVirtualRegion", |a| {
+            a.mov(rax, qword_ptr(rcx + 0x1b68)).unwrap();
+            a.lea(r14, qword_ptr(rax + rdi * 8)).unwrap();
+            a.ret().unwrap();
+        });
+        let map = builder.functions["SMKM_STORE<SM_TRAITS>::SmStMapVirtualRegion"];
+        builder.function("ST_STORE<SM_TRAITS>::StDmpSinglePageRetrieve", |a| {
+            // A byte of a different object, then the store's flag.
+            a.mov(rsi, qword_ptr(rbp + 0x578)).unwrap();
+            a.test(byte_ptr(rsi + 0x8ea), 1).unwrap();
+            a.mov(rdi, qword_ptr(rbp + 0x320)).unwrap();
+            a.test(byte_ptr(rdi + 0x1a95), 4).unwrap();
+            a.mov(rcx, rdi).unwrap();
+            a.call(map).unwrap();
+            a.ret().unwrap();
+        });
+        assert_eq!(builder.derive().unwrap().virtual_flag, (0x1a95, 2));
+    }
+
+    /// A kernel file's mapped image and its functions by undecorated name.
+    struct LoadedKernel {
+        bytes: Vec<u8>,
+        base: u64,
+        code: Vec<(u32, u32)>,
+        functions: HashMap<String, u64>,
+    }
+
+    /// `exe` mapped, with its functions from its PDB's public symbols.
+    fn load_kernel(exe: &std::path::Path) -> LoadedKernel {
+        use pdb2::FallibleIterator;
+        use pelite::pe64::{Pe, PeFile};
+        let file = std::fs::read(exe).unwrap();
+        let pe = PeFile::from_bytes(&file).unwrap();
+        let base = pe.optional_header().ImageBase;
+        let size = pe.optional_header().SizeOfImage as usize;
+        let mut bytes = vec![0u8; size];
+        let mut code = Vec::new();
+        for section in pe.section_headers() {
+            let start = section.VirtualAddress;
+            let raw = pe.get_section_bytes(section).unwrap_or(&[]);
+            let len = raw.len().min(size.saturating_sub(start as usize));
+            bytes[start as usize..start as usize + len].copy_from_slice(&raw[..len]);
+            if section.Characteristics & 0x2000_0000 != 0 {
+                code.push((start, start + section.VirtualSize.max(len as u32)));
+            }
+        }
+        let pdb_file = std::fs::File::open(exe.with_extension("pdb")).unwrap();
+        let mut pdb = pdb2::PDB::open(pdb_file).unwrap();
+        let map = pdb.address_map().unwrap();
+        let globals = pdb.global_symbols().unwrap();
+        let mut symbols = globals.iter();
+        let mut functions = HashMap::new();
+        while let Some(symbol) = symbols.next().unwrap() {
+            if let Ok(pdb2::SymbolData::Public(public)) = symbol.parse()
+                && let Some(rva) = public.offset.to_rva(&map)
+            {
+                let name = public.name.to_string();
+                let name = undname::demangle(&name, undname::Flags::NAME_ONLY)
+                    .unwrap_or_else(|_| name.into_owned());
+                functions.insert(name, base + u64::from(rva.0));
+            }
+        }
+        LoadedKernel {
+            bytes,
+            base,
+            code,
+            functions,
+        }
+    }
+
+    /// The layout of every `ntoskrnl-<version>.exe` (with its `.pdb`) in
+    /// `NTOSEYE_NTOSKRNL_DIR`, as `tools/fetch_ntoskrnl.py` downloads them.
+    /// `cargo test --lib store_layout -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs kernels in NTOSEYE_NTOSKRNL_DIR"]
+    fn derives_the_layout_of_real_kernels() {
+        let dir = std::env::var("NTOSEYE_NTOSKRNL_DIR").expect("NTOSEYE_NTOSKRNL_DIR");
+        let mut kernels: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|e| e == "exe"))
+            .collect();
+        kernels.sort();
+        let mut failures = Vec::new();
+        for exe in kernels {
+            let LoadedKernel {
+                bytes,
+                base,
+                code,
+                functions,
+            } = load_kernel(&exe);
+            let kernel = KernelCode {
+                image: ImageView {
+                    base,
+                    bytes: &bytes,
+                    code,
+                    data: Vec::new(),
+                },
+                functions: &functions,
+            };
+            match derive(&kernel) {
+                Ok(layout) => println!("{}: {layout:x?}", exe.display()),
+                // 1507 and 1511 lay the store out differently; they are not
+                // supported.
+                Err(error) if build(&exe) < 14393 => println!("{}: {error}", exe.display()),
+                Err(error) => failures.push(format!("{}: {error}", exe.display())),
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// The build number in `ntoskrnl-10.0.<build>.<revision>.exe`.
+    fn build(exe: &std::path::Path) -> u32 {
+        let name = exe.file_stem().unwrap().to_string_lossy();
+        name.split('.')
+            .nth(2)
+            .and_then(|b| b.parse().ok())
+            .unwrap_or(0)
+    }
+}
