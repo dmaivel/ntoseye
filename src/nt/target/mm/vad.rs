@@ -291,9 +291,19 @@ impl Target {
         let private_memory = flags.zip(flags_layout).and_then(|(raw, layout)| {
             Self::bitfield_value(layout, "PrivateMemory", raw).map(|v| v != 0)
         });
-        let commit_charge = flags
-            .zip(flags_layout)
-            .and_then(|(raw, layout)| Self::bitfield_value(layout, "CommitCharge", raw));
+        // A field of its own from Windows 11 24H2 (with its high bits in
+        // CommitChargeHigh), a bitfield of the flags before.
+        let commit_charge = match Self::read_integer_field(memory, vad_layout, vad, "CommitCharge")
+        {
+            Some(low) => {
+                let high = Self::read_integer_field(memory, vad_layout, vad, "CommitChargeHigh")
+                    .unwrap_or(0);
+                Some(low | (high << 32))
+            }
+            None => flags
+                .zip(flags_layout)
+                .and_then(|(raw, layout)| Self::bitfield_value(layout, "CommitCharge", raw)),
+        };
         let details = modules
             .iter()
             .find(|module| {
