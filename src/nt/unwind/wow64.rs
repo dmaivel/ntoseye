@@ -8,9 +8,15 @@
 
 use std::collections::HashMap;
 
-use super::{FrameSource, RecoveredFrame, RecoveredStackTrace, ThreadTraceContext, expand_frame};
+use iced_x86::{Code, Decoder, DecoderOptions, FlowControl, Register};
+
+use super::{
+    FrameSource, RecoveredFrame, RecoveredStackTrace, ThreadTraceContext, expand_frame,
+    nearest_symbol,
+};
+use crate::arch::amd64::COMPATIBILITY_MODE_CS;
 use crate::base::memory::MemoryOps;
-use crate::base::types::VirtAddr;
+use crate::base::types::{CodeMachine, VirtAddr};
 use crate::nt::target::{Target, ThreadInfo};
 
 /// `WOW64_TLS_CPURESERVED`: the TLS slot of the 64-bit TEB that points at
@@ -28,6 +34,14 @@ const CONTEXT_ESP: u64 = 0xc4;
 const MAX_FRAME_DISTANCE: u64 = 16 << 20;
 /// The modules the native walk leaves x86 code through.
 const CPU_LAYER_MODULES: [&str; 2] = ["wow64cpu", "xtajit"];
+/// How far above a stopped x86 thread's `esp` its return address is looked
+/// for when `ebp` bounds nothing.
+const RETURN_SCAN: u64 = 0x400;
+/// How far into a function its prolog is looked for (see [`frame_is_set`]).
+const PROLOG_WINDOW: u64 = 0x80;
+/// The bytes before a return address that hold its call: x86's longest,
+/// `call [disp32]` with a prefix, is 7.
+const RETURN_CALL_BYTES: usize = 7;
 
 /// Add `thread`'s x86 frames to its native `stack` after the last frame in
 /// the CPU layer, where the x86 code called out. Only a stack that passed
@@ -97,7 +111,7 @@ fn walk_x86(
     in_image: &dyn Fn(u64) -> bool,
     limit: usize,
 ) -> Vec<(u64, u64, FrameSource)> {
-    let X86Registers { eip, esp, mut ebp } = registers;
+    let X86Registers { eip, esp, ebp } = registers;
     if eip == 0 || esp == 0 {
         return Vec::new();
     }
@@ -113,8 +127,88 @@ fn walk_x86(
     if let Some(caller) = return_in_image(caller_slot) {
         raw.push((caller, caller_slot + 4, FrameSource::Unwind));
     }
+    follow_frame_pointers(u32_at, &mut raw, esp, ebp, limit);
+    raw
+}
+
+/// `(ip, sp, source)` for each x86 frame of a thread stopped in its x86 code,
+/// from its registers. Once the stopped function has set up its frame
+/// (`frame_set`), its return address is `[ebp+4]`, and the locals below it
+/// may hold stale ones. Before that, in its prolog, `ebp` is still the
+/// caller's and `[esp]` need not be one (a pushed handler): the return
+/// address is the first slot above `esp` that holds one (an address that
+/// follows a call, `returns_after_call`), no further up than `[ebp+4]`.
+/// Then the `ebp` chain.
+fn walk_live_x86(
+    u32_at: &dyn Fn(u64) -> Option<u32>,
+    registers: X86Registers,
+    returns_after_call: &dyn Fn(u64) -> bool,
+    frame_set: bool,
+    limit: usize,
+) -> Vec<(u64, u64, FrameSource)> {
+    let X86Registers { eip, esp, ebp } = registers;
+    if eip == 0 || esp == 0 {
+        return Vec::new();
+    }
+    let mut raw = vec![(eip, esp, FrameSource::Current)];
+    let has_frame = ebp > esp && ebp - esp < MAX_FRAME_DISTANCE;
+    let return_slot = |slot: u64| {
+        u32_at(slot)
+            .map(u64::from)
+            .filter(|ret| returns_after_call(*ret))
+            .map(|ret| (slot, ret))
+    };
+    let found = match return_slot(ebp + 4) {
+        Some(found) if frame_set && has_frame => Some(found),
+        _ => {
+            let last_slot = if has_frame {
+                ebp + 4
+            } else {
+                esp + RETURN_SCAN
+            };
+            (esp..=last_slot).step_by(4).find_map(return_slot)
+        }
+    };
+    if let Some((slot, ret)) = found {
+        raw.push((ret, slot + 4, FrameSource::Unwind));
+    }
+    follow_frame_pointers(u32_at, &mut raw, esp, ebp, limit);
+    raw
+}
+
+/// Whether the x86 code from `function` up to `eip` has set up its frame:
+/// `mov ebp, esp` ran, or a call, which in a prolog is to the `_SEH_prolog`
+/// helper that sets it up. Past `PROLOG_WINDOW` the body is taken to have
+/// one, as Windows' x86 system DLLs keep frame pointers.
+fn frame_is_set(code: &[u8], function: u64, eip: u64) -> bool {
+    let mut decoder = Decoder::with_ip(32, code, function, DecoderOptions::NONE);
+    while decoder.can_decode() && decoder.ip() < eip {
+        let instruction = decoder.decode();
+        let ebp_from_esp = matches!(instruction.code(), Code::Mov_r32_rm32 | Code::Mov_rm32_r32)
+            && instruction.op0_register() == Register::EBP
+            && instruction.op1_register() == Register::ESP;
+        if ebp_from_esp || instruction.flow_control() == FlowControl::Call {
+            return true;
+        }
+    }
+    false
+}
+
+/// Add to `raw` the frames of the `ebp` chain from `ebp`, while it climbs
+/// the stack from `esp` and holds plausible return addresses, up to `limit`.
+fn follow_frame_pointers(
+    u32_at: &dyn Fn(u64) -> Option<u32>,
+    raw: &mut Vec<(u64, u64, FrameSource)>,
+    esp: u64,
+    mut ebp: u64,
+    limit: usize,
+) {
     let mut previous = esp;
-    while raw.len() < limit && ebp >= previous && ebp - esp < MAX_FRAME_DISTANCE && ebp % 4 == 0 {
+    while raw.len() < limit
+        && ebp >= previous
+        && ebp - esp < MAX_FRAME_DISTANCE
+        && ebp.is_multiple_of(4)
+    {
         let Some(ret) = u32_at(ebp + 4)
             .map(u64::from)
             .filter(|ret| *ret >= 0x1_0000)
@@ -132,7 +226,6 @@ fn walk_x86(
         ebp = next;
     }
     raw.truncate(limit);
-    raw
 }
 
 /// The x86 frames from the thread's saved context (see [`walk_x86`]).
@@ -168,27 +261,81 @@ fn x86_frames(
     };
     let in_image = |address| trace.module_for_address(address).is_some();
     let raw = walk_x86(&u32_at, registers, &in_image, limit);
-    if raw.is_empty() {
+    (!raw.is_empty()).then(|| recovered_frames(debugger, trace, raw))
+}
+
+/// The frames of `raw` (see [`walk_x86`]), each with the `eip` and `esp` it
+/// is at, its inline frames expanded.
+fn recovered_frames(
+    debugger: &Target,
+    trace: &ThreadTraceContext,
+    raw: Vec<(u64, u64, FrameSource)>,
+) -> Vec<RecoveredFrame> {
+    raw.into_iter()
+        .flat_map(|(ip, sp, source)| {
+            let returned = source == FrameSource::Unwind;
+            expand_frame(debugger, trace, ip, sp, source, None, returned)
+                .into_iter()
+                .map(move |frame| RecoveredFrame {
+                    frame,
+                    registers: HashMap::from([("eip".to_string(), ip), ("esp".to_string(), sp)]),
+                    frame_base: None,
+                })
+        })
+        .collect()
+}
+
+/// The stack of a thread stopped in its x86 code, a WOW64 program's running
+/// in compatibility mode, from the registers it stopped with (`values`):
+/// the x86 code runs with their low halves, and no native unwind data
+/// describes it (see [`walk_live_x86`]). Its first frame keeps every
+/// register. `None` for a stop in native code.
+pub(super) fn live_x86_stack(
+    debugger: &Target,
+    trace: &ThreadTraceContext,
+    values: &HashMap<String, u64>,
+    limit: usize,
+) -> Option<RecoveredStackTrace> {
+    if values.get("cs") != Some(&COMPATIBILITY_MODE_CS) {
         return None;
     }
-
-    Some(
-        raw.into_iter()
-            .flat_map(|(ip, sp, source)| {
-                let returned = source == FrameSource::Unwind;
-                expand_frame(debugger, trace, ip, sp, source, None, returned)
-                    .into_iter()
-                    .map(move |frame| RecoveredFrame {
-                        frame,
-                        registers: HashMap::from([
-                            ("eip".to_string(), ip),
-                            ("esp".to_string(), sp),
-                        ]),
-                        frame_base: None,
-                    })
-            })
-            .collect(),
-    )
+    let low = |name: &str| values.get(name).map(|value| value & 0xffff_ffff);
+    let registers = X86Registers {
+        eip: low("rip")?,
+        esp: low("rsp")?,
+        ebp: low("rbp")?,
+    };
+    let memory = debugger.address_space(trace.dtb());
+    let u32_at = |address: u64| memory.read::<u32>(VirtAddr(address)).ok();
+    let returns_after_call = |ret: u64| {
+        let mut before = [0u8; RETURN_CALL_BYTES];
+        trace.module_for_address(ret).is_some()
+            && ret
+                .checked_sub(RETURN_CALL_BYTES as u64)
+                .is_some_and(|at| memory.read_bytes(VirtAddr(at), &mut before).is_ok())
+            && CodeMachine::X86.instruction_set().ends_in_call(&before)
+    };
+    let frame_set = nearest_symbol(debugger, trace.dtb(), VirtAddr(registers.eip))
+        .map(|(_, _, offset)| u64::from(offset))
+        .is_none_or(|offset| {
+            let function = registers.eip - offset;
+            let mut code = [0u8; PROLOG_WINDOW as usize];
+            offset >= PROLOG_WINDOW
+                || memory
+                    .read_bytes(VirtAddr(function), &mut code[..offset as usize])
+                    .is_ok_and(|()| frame_is_set(&code[..offset as usize], function, registers.eip))
+        });
+    let raw = walk_live_x86(&u32_at, registers, &returns_after_call, frame_set, limit);
+    let mut frames = recovered_frames(debugger, trace, raw);
+    if let Some(first) = frames.first_mut() {
+        first.registers = values.clone();
+    }
+    Some(RecoveredStackTrace {
+        frames,
+        truncated: 0,
+        dtb: trace.dtb(),
+        thread: None,
+    })
 }
 
 #[cfg(test)]
@@ -250,5 +397,51 @@ mod tests {
                 0x0051_a52c
             ]
         );
+    }
+
+    /// A WOW64 ping stopped in x86 `kernelbase!SleepEx`'s prolog, before
+    /// `_SEH_prolog4` sets up its frame: `[esp]` is the exception handler it
+    /// pushed, a code address no call precedes, and `ebp` is still its
+    /// caller's. The return into `Sleep` is found above it, then the chain.
+    /// Once a function has its frame, its return is `[ebp+4]`, whatever its
+    /// locals hold, and is not listed twice.
+    #[test]
+    fn a_live_x86_stop_finds_its_return_then_the_frame_chain() {
+        let stack: HashMap<u64, u32> = HashMap::from([
+            (0x5eef08, 0x7662_1a30), // the pushed handler, kernelbase!_except_handler4
+            (0x5eef0c, 0x38),
+            (0x5eef10, 0x7652_a18f), // return into kernelbase!Sleep+0xf
+            (0x5eef1c, 0x5eef30),    // Sleep's frame: saved ebp
+            (0x5eef20, 0x0005_316c), // return into ping!wmain+0xec9
+            (0x5eef30, 0x5eff00),
+            (0x5eef34, 0x0005_33a0), // return into ping!__wmainCRTStartup
+        ]);
+        let u32_at = |address: u64| stack.get(&address).copied();
+        let after_call = |ret: u64| [0x7652_a18f, 0x0005_316c, 0x0005_33a0].contains(&ret);
+        let ips = |registers, frame_set| -> Vec<u64> {
+            walk_live_x86(&u32_at, registers, &after_call, frame_set, 16)
+                .iter()
+                .map(|(ip, _, _)| *ip)
+                .collect()
+        };
+
+        let in_prolog = X86Registers {
+            eip: 0x7652_a1a7,
+            esp: 0x5eef08,
+            ebp: 0x5eef1c,
+        };
+        assert_eq!(
+            ips(in_prolog, false),
+            [0x7652_a1a7, 0x7652_a18f, 0x0005_316c, 0x0005_33a0]
+        );
+
+        // In Sleep's body, its frame set: its return is [ebp+4], though its
+        // locals below hold a stale return of an earlier call.
+        let in_body = X86Registers {
+            eip: 0x7652_a189,
+            esp: 0x5eef08,
+            ebp: 0x5eef1c,
+        };
+        assert_eq!(ips(in_body, true), [0x7652_a189, 0x0005_316c, 0x0005_33a0]);
     }
 }

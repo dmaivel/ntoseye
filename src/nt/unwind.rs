@@ -1168,6 +1168,9 @@ fn build_stacktrace_from_values(
         .unwrap_or(0);
     let context = FrameRegisters::from_lookup(debugger.arch(), |name| values.get(name).copied());
     let trace = resolve_thread_trace_context_at(debugger, cr3, context.pc);
+    if let Some(stack) = wow64::live_x86_stack(debugger, &trace, &values, limit) {
+        return stack;
+    }
     build_recovered_stacktrace_seeded(
         debugger,
         &trace,

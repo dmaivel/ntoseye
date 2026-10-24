@@ -76,6 +76,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - `pt`, `tc`, `pc` and the other walks step over a system call that user-mode code makes (`syscall`, or `int 0x2e`), as `p` does, and go on after it. They stopped with `nt!KiSystemCall64Shadow ... is in ntoskrnl's KVASCODE section`, from planting a breakpoint where the processor enters the kernel.
 - `t` and `p` on an instruction that takes long, such as a system call that waits, finish in the stepped thread when another thread hits a breakpoint meanwhile. A hit outside the breakpoint's scope, such as another process's on a `bp /p` site in a shared DLL, is passed over; any other stop, such as an in-scope hit, ends the step there and says what it is. The step ended in the other process, at the breakpoint site, with nothing saying why.
 - `gu`, `p` over a call, `tc` and the other walks step a thread of another process than the one `.process` or `attach` selected, such as one a breakpoint stopped in, in that thread's own address space. `gu` said the return address `is not mapped in` the selected process, and the walks failed with `bad virtual address` on the thread's code.
+- `k` on a WOW64 thread stopped in its x86 code, as at a breakpoint in x86 `kernelbase`, lists its x86 frames up to `_RtlUserThreadStart`, and `gu` there steps out to the caller. The stack showed only the frame it stopped in, and `gu` said it could not find the caller's return address.
 
 ### Removed
 

@@ -88,6 +88,10 @@ pub const ENCODED_REGISTERS: [&str; 16] = [
     "r14", "r15",
 ];
 
+/// The code selector Windows runs a WOW64 thread's x86 code with: the
+/// compatibility-mode segment of its GDT, at privilege level 3.
+pub const COMPATIBILITY_MODE_CS: u64 = 0x23;
+
 /// The registers a call clobbers (rax, rcx, rdx, r8–r11), by their
 /// [`ENCODED_REGISTERS`] number.
 pub const VOLATILE_REGISTERS: [usize; 7] = [0, 1, 2, 8, 9, 10, 11];

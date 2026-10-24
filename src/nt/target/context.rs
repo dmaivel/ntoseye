@@ -6,6 +6,7 @@ use super::{
     ThreadInfo, lookup_register, process_matches,
 };
 use crate::arch::Arch;
+use crate::arch::amd64::COMPATIBILITY_MODE_CS;
 use crate::{
     base::{
         bytes::c_string_lossy,
@@ -20,7 +21,6 @@ use crate::{
     },
 };
 
-const COMPATIBILITY_MODE_CS: u64 = 0x23;
 const WOW64_ADDRESS_LIMIT: u64 = 1 << 32;
 
 fn decide_bitness(
