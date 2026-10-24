@@ -1145,8 +1145,9 @@ pub fn build_stacktrace_with_context(
 }
 
 /// [`build_stacktrace_with_context`] for the registers of `thread`, the
-/// Windows thread they belong to: a WOW64 thread's walk goes on into its x86
-/// frames where it left x86 code (see [`wow64`]).
+/// Windows thread they belong to (on a user-mode minidump, its selected
+/// thread): a WOW64 thread's walk goes on into its x86 frames where it left
+/// x86 code (see [`wow64`]).
 pub fn build_thread_stacktrace(
     debugger: &Target,
     register_map: &RegisterMap,
@@ -1155,9 +1156,17 @@ pub fn build_thread_stacktrace(
     limit: usize,
 ) -> RecoveredStackTrace {
     let mut stack = build_stacktrace_with_context(debugger, register_map, regs, limit);
-    if let Some(thread) = thread {
+    // A user-mode minidump's thread is its selected one.
+    let teb = match thread {
+        Some(thread) => thread.teb,
+        None => debugger
+            .user_thread()
+            .map(|thread| VirtAddr(thread.teb))
+            .filter(|teb| !teb.is_zero()),
+    };
+    if let Some(teb) = teb {
         let trace = resolve_thread_trace_context(debugger, stack.dtb);
-        wow64::add_x86_frames(debugger, &trace, thread, &mut stack, limit);
+        wow64::add_x86_frames(debugger, &trace, teb, &mut stack, limit);
     }
     stack
 }
@@ -1368,7 +1377,9 @@ pub fn build_parked_thread_recovered_stack(
                     limit,
                     HashMap::from([(debugger.arch().dtb_register().to_string(), process_dtb)]),
                 );
-                wow64::add_x86_frames(debugger, &trace, thread, &mut stacktrace, limit);
+                if let Some(teb) = thread.teb {
+                    wow64::add_x86_frames(debugger, &trace, teb, &mut stacktrace, limit);
+                }
                 stacktrace.thread = Some(thread.ethread);
                 return Ok(ThreadRecoveredStack {
                     source: ThreadStackSource::ContextSwitch { kernel_stack },
@@ -1398,7 +1409,9 @@ pub fn build_parked_thread_recovered_stack(
                     limit,
                     HashMap::from([(debugger.arch().dtb_register().to_string(), process_dtb)]),
                 );
-                wow64::add_x86_frames(debugger, &trace, thread, &mut stacktrace, limit);
+                if let Some(teb) = thread.teb {
+                    wow64::add_x86_frames(debugger, &trace, teb, &mut stacktrace, limit);
+                }
                 stacktrace.thread = Some(thread.ethread);
                 return Ok(ThreadRecoveredStack {
                     source: ThreadStackSource::TrapFrame { address },

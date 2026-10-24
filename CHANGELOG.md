@@ -13,6 +13,7 @@ Keeping this file:
 - To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes, under the tag as the release title.
 -->
 - Over KD, connecting while a user thread was running (or Windows was stopped in a user process) no longer makes that process the kernel's for the session: ntoseye took the stopped processor's page tables for the kernel's, so the process showed as `kernel`, its addresses went unsymbolized, and its modules showed in every other process. The kernel's are now the System process's.
+- The stack of a WOW64 thread in a user-mode minidump goes on into its x86 frames, from the x86 context its TEB's CPU area saved, as on a kernel target.
 
 ## Unreleased
 

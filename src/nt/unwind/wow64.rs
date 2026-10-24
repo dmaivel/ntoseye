@@ -16,8 +16,8 @@ use super::{
 };
 use crate::arch::amd64::COMPATIBILITY_MODE_CS;
 use crate::base::memory::MemoryOps;
-use crate::base::types::{CodeMachine, VirtAddr};
-use crate::nt::target::{Target, ThreadInfo};
+use crate::base::types::{CodeMachine, Dtb, VirtAddr};
+use crate::nt::target::Target;
 
 /// `WOW64_TLS_CPURESERVED`: the TLS slot of the 64-bit TEB that points at
 /// the thread's CPU area, `{ u16 Flags; u16 Machine; }` then the context.
@@ -43,14 +43,16 @@ const PROLOG_WINDOW: u64 = 0x80;
 /// `call [disp32]` with a prefix, is 7.
 const RETURN_CALL_BYTES: usize = 7;
 
-/// Add `thread`'s x86 frames to its native `stack` after the last frame in
-/// the CPU layer, where the x86 code called out. Only a stack that passed
-/// through that layer gets them: then the saved context is where the x86
-/// code left off, while a thread running x86 code has moved on from it.
+/// Add the x86 frames of the thread whose TEB is `teb` to its native
+/// `stack` after the last frame in the CPU layer, where the x86 code called
+/// out. Only a stack that passed through that layer gets them: then the
+/// saved context is where the x86 code left off, while a thread running x86
+/// code has moved on from it. Only a WOW64 thread passes through it, and
+/// only its CPU area names an x86 machine.
 pub(super) fn add_x86_frames(
     debugger: &Target,
     trace: &ThreadTraceContext,
-    thread: &ThreadInfo,
+    teb: VirtAddr,
     stack: &mut RecoveredStackTrace,
     limit: usize,
 ) {
@@ -65,10 +67,7 @@ pub(super) fn add_x86_frames(
     }) else {
         return;
     };
-    if !is_wow64_thread(debugger, thread) {
-        return;
-    }
-    let Some(frames) = x86_frames(debugger, trace, thread, limit) else {
+    let Some(frames) = x86_frames(debugger, trace, teb, limit) else {
         return;
     };
     let at = cpu_layer + 1;
@@ -79,16 +78,14 @@ pub(super) fn add_x86_frames(
     }
 }
 
-fn is_wow64_thread(debugger: &Target, thread: &ThreadInfo) -> bool {
-    let (Some(eprocess), Ok(guest)) = (thread.eprocess, debugger.guest()) else {
-        return false;
+/// `_TEB.TlsSlots`, from the kernel's layout, or ntdll's on a user-mode
+/// minidump, which has no kernel.
+fn tls_slots_offset(debugger: &Target, dtb: Dtb) -> Option<u64> {
+    let layout = match debugger.guest() {
+        Ok(guest) => guest.ntoskrnl.types().layout("_TEB"),
+        Err(_) => debugger.types_in(dtb).layout("ntdll!_TEB"),
     };
-    let Ok(layout) = guest.ntoskrnl.types().layout("_EPROCESS") else {
-        return false;
-    };
-    debugger
-        .read_kernel_layout_field::<u64>(&layout, eprocess, "WoW64Process")
-        .is_ok_and(|wow64| wow64 != 0)
+    layout.ok()?.field_offset("TlsSlots").ok()
 }
 
 #[derive(Clone, Copy)]
@@ -232,19 +229,10 @@ fn follow_frame_pointers(
 fn x86_frames(
     debugger: &Target,
     trace: &ThreadTraceContext,
-    thread: &ThreadInfo,
+    teb: VirtAddr,
     limit: usize,
 ) -> Option<Vec<RecoveredFrame>> {
-    let teb = thread.teb?;
-    let tls_slots = debugger
-        .guest()
-        .ok()?
-        .ntoskrnl
-        .types()
-        .layout("_TEB")
-        .ok()?
-        .field_offset("TlsSlots")
-        .ok()?;
+    let tls_slots = tls_slots_offset(debugger, trace.dtb())?;
     let memory = debugger.address_space(trace.dtb());
     let u32_at = |address: u64| memory.read::<u32>(VirtAddr(address)).ok();
     let area: u64 = memory
