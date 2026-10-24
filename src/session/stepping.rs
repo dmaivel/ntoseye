@@ -34,7 +34,7 @@ use crate::session::hits::{reported_watch_hit, stack_pointer};
 use crate::session::{
     CallTrace, CallTraceEnd, CallTraceFrame, Cancel, CancelBehavior, ContinueOutcome, ControlState,
     CurrentInstruction, ModuleTrap, PendingWalk, STATUS_BREAKPOINT, STATUS_SINGLE_STEP, Session,
-    StepKind, StepMode, StepStack,
+    StepKind, StepMode, StepStack, StopResolution,
 };
 
 impl Session {
@@ -93,15 +93,11 @@ impl Session {
                 &self.breakpoints,
                 &self.current_thread,
             )?,
-            None => {
-                step_one_and_clear_tf(
-                    self.target.arch(),
-                    self.backend.as_mut(),
-                    &self.register_map,
-                    &self.target.interrupt,
-                )?;
-                RunPast::Reached
-            }
+            None => match self.trap_flag_step()? {
+                None => RunPast::Reached,
+                // Another thread's stop came first, and is the step's.
+                Some(outcome) => return Ok((outcome, RunPast::Reached)),
+            },
         };
         for id in self.breakpoints.one_shot_hit_ids() {
             self.breakpoints
@@ -155,6 +151,53 @@ impl Session {
             )));
         }
         Ok((ContinueOutcome::Step { rip }, stepped))
+    }
+
+    /// Single-step the current thread by the trap flag, as
+    /// [`step_one_and_clear_tf`] does, past what other threads stop on
+    /// meanwhile; `None` when the step's own trap ended it. KD runs every
+    /// processor during a step, so while the instruction takes long (a
+    /// system call that waits), another thread can reach a breakpoint first.
+    /// A stop the session absorbs, such as a hit in another process on a site
+    /// scoped to this thread's, or the single step an absorb left another
+    /// thread, is passed and the wait goes on. Any other is where the step
+    /// stops, and is returned, the trap flag cleared on the stepping thread if
+    /// its processor still runs it.
+    fn trap_flag_step(&mut self) -> Result<Option<ContinueOutcome>> {
+        let arch = self.target.arch();
+        let stepping = self.current_thread.clone();
+        let stepping_thread = nt_thread_on(&self.target, &stepping);
+        self.backend.step()?;
+        loop {
+            let event = wait_for_step_stop(self.backend.as_mut(), &self.target.interrupt)?;
+            // The step's own stop is its thread's, on whichever processor it
+            // finished; one whose thread is not known is taken for it.
+            let reporter = event
+                .thread_id
+                .as_deref()
+                .and_then(|reported| nt_thread_on(&self.target, reported));
+            let foreign = stepping_thread
+                .zip(reporter)
+                .is_some_and(|(stepping, reporter)| reporter != stepping);
+            if !foreign {
+                clear_trap_flag(arch, self.backend.as_mut(), &self.register_map)?;
+                step_stop_error(&event)?;
+                return Ok(None);
+            }
+            match self.classify_stop_event(event)? {
+                StopResolution::Resumed | StopResolution::ModulesChanged => {}
+                resolution => {
+                    let outcome = self.continue_outcome_from_resolution(resolution);
+                    if nt_thread_on(&self.target, &stepping) == stepping_thread {
+                        let reported = self.current_thread.clone();
+                        self.backend.set_current_thread(&stepping)?;
+                        clear_trap_flag(arch, self.backend.as_mut(), &self.register_map)?;
+                        self.backend.set_current_thread(&reported)?;
+                    }
+                    return Ok(Some(outcome));
+                }
+            }
+        }
     }
 
     /// Step the thread on the VP selected in a partition view past its
@@ -1200,6 +1243,13 @@ pub fn step_one_and_clear_tf(
     backend.step()?;
     let event = wait_for_step_stop(backend, interrupt)?;
     clear_trap_flag(arch, backend, register_map)?;
+    step_stop_error(&event)
+}
+
+/// The error the stop `event` that ended a step makes, when it is not the
+/// step's trap: a bugcheck, or an exception other than a single step or a
+/// breakpoint.
+fn step_stop_error(event: &StopEvent) -> Result<()> {
     if event.is_bugcheck {
         return Err(Error::DebugInfo(
             "target bugchecked while single-stepping".into(),

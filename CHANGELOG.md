@@ -74,6 +74,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - `ba` takes its options after the access and size too, as WinDbg writes them (`ba e1 /p 4 kernelbase!SleepEx`); it took them only before (`ba /p 4 e1 ...`) and said `/p` was an invalid expression.
 - Over `kd` and `kdnet`, `t`, `p` and `pc` step a WOW64 program's x86 code. Windows reports a step there as `STATUS_WX86_SINGLE_STEP`, and each step failed with `target raised exception 0x4000001e while single-stepping`, though it had stepped. `p` over a call to a helper that allocates its caller's frame, such as `_SEH_prolog4` or `_chkstk`, stops after the call instead of running on to the next breakpoint.
 - `pt`, `tc`, `pc` and the other walks step over a system call that user-mode code makes (`syscall`, or `int 0x2e`), as `p` does, and go on after it. They stopped with `nt!KiSystemCall64Shadow ... is in ntoskrnl's KVASCODE section`, from planting a breakpoint where the processor enters the kernel.
+- `t` and `p` on an instruction that takes long, such as a system call that waits, finish in the stepped thread when another thread hits a breakpoint meanwhile. A hit outside the breakpoint's scope, such as another process's on a `bp /p` site in a shared DLL, is passed over; any other stop, such as an in-scope hit, ends the step there and says what it is. The step ended in the other process, at the breakpoint site, with nothing saying why.
 
 ### Removed
 
