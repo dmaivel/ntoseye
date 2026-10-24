@@ -109,9 +109,10 @@ pub struct DumpMetadata {
     pub runs: Vec<(u64, u64)>,
 }
 
-struct PartialDumpCleanup<'a> {
-    path: &'a Path,
-    keep: bool,
+/// Removes a dump's temporary file unless the dump completed.
+pub struct PartialDumpCleanup<'a> {
+    pub path: &'a Path,
+    pub keep: bool,
 }
 
 impl Drop for PartialDumpCleanup<'_> {
@@ -181,7 +182,9 @@ impl DumpMetadata {
     }
 }
 
-fn create_temporary_file(destination: &Path) -> Result<(PathBuf, File)> {
+/// A new file, private to the user, beside `destination`, for a dump to be
+/// written to and then renamed into place.
+pub fn create_temporary_file(destination: &Path) -> Result<(PathBuf, File)> {
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     let name = destination.file_name().ok_or_else(|| {
         Error::DebugInfo(format!(

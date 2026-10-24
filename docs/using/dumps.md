@@ -260,7 +260,7 @@ To write a dump from a live halted target, use the WinDbg-compatible command:
 .dump [/f] [/ma] <file>
 ```
 
-It streams a `PAGEDU64` full kernel dump one page at a time. It needs a live halted target with memory introspection, so a static crash-dump session cannot write another dump.
+It streams a `PAGEDU64` full kernel dump one page at a time. It needs a live halted target with memory introspection, so a static crash-dump session cannot write another kernel dump; it can write a [minidump of one process](#a-minidump-of-one-process).
 
 The command supports AMD64 and ARM64 targets, and the `MachineImageType` in the header and the embedded `CONTEXT` record follow the architecture of the target. It accepts `/f` and `/ma` as full-dump switches. To open the file again, use `ntoseye --dump <file>`.
 
@@ -269,6 +269,24 @@ The command first writes to a temporary file with mode `0600` in the same direct
 If you press Ctrl+C or the write fails, the command removes the temporary file and an existing dump at the destination does not change. This means that replacing a dump needs disk space for the new file and the old file at the same time.
 
 If the command cannot read a guest page, it writes zeros for that page and shows the number of these pages in its output. If a target has more than 42 physical-memory runs, the command gives an error and does not write a dump, because the full dump would be incomplete.
+
+### A minidump of one process
+
+`.dump /u <file>` writes a user-mode minidump (`MDMP`) of the current process: the process that {command}`.process` or {command}`attach` selected, else the owner of the current thread. It works on a live target and on a kernel dump, so you can take one process out of a kernel dump and open it with `ntoseye --dump`, WinDbg, or another minidump reader. The minidump holds:
+
+- each thread, with the user-mode registers that its stack walk recovers, its TEB, the used part of its user stack, and its times;
+- each module of the process's loader lists, with its CodeView record, so the PDBs are found without the images;
+- the regions of the address space as `VirtualQuery` reports them, so {command}`!address` and {command}`!vprot` work on the minidump;
+- every committed page of the process that is in physical memory, as a full-memory minidump holds it.
+
+A page that is in the page file is not in the minidump, and a region larger than 64 MiB, such as the CFG bitmap's reservation, is split by which of its pages are in memory. A thread whose kernel stack is not in memory, which is common in a kernel dump, has no registers in the minidump, and the command says how many threads have none. The minidump has no handle data.
+
+```text
+attach 680
+.dump /u /tmp/csrss.dmp
+```
+
+The file is written and replaced the same way as a kernel dump, and Ctrl+C cancels it.
 
 ## Generating dumps
 

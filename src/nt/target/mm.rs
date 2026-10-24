@@ -25,7 +25,8 @@ mod vm;
 mod vprot;
 
 pub use vprot::{
-    MEM_COMMIT, MEM_FREE, MEM_IMAGE, memory_state_name, memory_type_name, page_protection_name,
+    MEM_COMMIT, MEM_FREE, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE, MEM_RESERVE, memory_state_name,
+    memory_type_name, page_protection, page_protection_name,
 };
 
 const MAX_MI_FIELDS: usize = 64;

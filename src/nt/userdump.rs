@@ -25,6 +25,7 @@ pub mod backend;
 pub mod parse;
 #[cfg(test)]
 mod tests;
+pub mod write;
 
 pub use backend::UserDumpBackend;
 pub use parse::is_minidump;

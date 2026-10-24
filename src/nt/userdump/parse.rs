@@ -22,30 +22,30 @@ use crate::nt::pe::headers::{MAX_CODEVIEW_BYTES, decode_codeview};
 /// `MINIDUMP_SIGNATURE`: "MDMP" read as a little-endian `u32`.
 pub const MINIDUMP_SIGNATURE: u32 = 0x504d_444d;
 /// The low word of `MINIDUMP_HEADER.Version`.
-const MINIDUMP_VERSION: u16 = 0xa793;
+pub const MINIDUMP_VERSION: u16 = 0xa793;
 
 const UNUSED_STREAM: u32 = 0;
-const THREAD_LIST_STREAM: u32 = 3;
-const MODULE_LIST_STREAM: u32 = 4;
+pub const THREAD_LIST_STREAM: u32 = 3;
+pub const MODULE_LIST_STREAM: u32 = 4;
 const MEMORY_LIST_STREAM: u32 = 5;
 const EXCEPTION_STREAM: u32 = 6;
-const SYSTEM_INFO_STREAM: u32 = 7;
-const MEMORY64_LIST_STREAM: u32 = 9;
+pub const SYSTEM_INFO_STREAM: u32 = 7;
+pub const MEMORY64_LIST_STREAM: u32 = 9;
 const HANDLE_DATA_STREAM: u32 = 12;
 const FUNCTION_TABLE_STREAM: u32 = 13;
 const UNLOADED_MODULE_LIST_STREAM: u32 = 14;
-const MISC_INFO_STREAM: u32 = 15;
-const MEMORY_INFO_LIST_STREAM: u32 = 16;
-const THREAD_INFO_LIST_STREAM: u32 = 17;
+pub const MISC_INFO_STREAM: u32 = 15;
+pub const MEMORY_INFO_LIST_STREAM: u32 = 16;
+pub const THREAD_INFO_LIST_STREAM: u32 = 17;
 const THREAD_NAME_LIST_STREAM: u32 = 24;
 
 /// `VER_PLATFORM_WIN32_NT`, the only platform a Windows minidump names.
-const PLATFORM_WIN32_NT: u32 = 2;
-const PROCESSOR_ARCHITECTURE_AMD64: u16 = 9;
-const PROCESSOR_ARCHITECTURE_ARM64: u16 = 12;
+pub const PLATFORM_WIN32_NT: u32 = 2;
+pub const PROCESSOR_ARCHITECTURE_AMD64: u16 = 9;
+pub const PROCESSOR_ARCHITECTURE_ARM64: u16 = 12;
 
-const MISC1_PROCESS_ID: u32 = 0x1;
-const MISC1_PROCESS_TIMES: u32 = 0x2;
+pub const MISC1_PROCESS_ID: u32 = 0x1;
+pub const MISC1_PROCESS_TIMES: u32 = 0x2;
 const MISC3_TIMEZONE: u32 = 0x40;
 const MISC4_BUILDSTRING: u32 = 0x100;
 /// `MINIDUMP_MISC_INFO_3.TimeZoneId` and the `TIME_ZONE_INFORMATION` that

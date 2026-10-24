@@ -758,3 +758,170 @@ fn misc_info_records_process_times_and_the_time_zone_in_effect() {
     assert_eq!(zone.bias, 240);
     assert_eq!(zone.name, "Eastern Daylight Time");
 }
+
+/// A minidump that `.dump /u` writes reads back as what it was written
+/// from: the system, the process's ID and times, each thread with its TEB,
+/// context, captured stack and times (a thread without a context says so),
+/// each module with its path and CodeView record, the regions, and the
+/// memory, with a page that could not be read as zeros.
+#[test]
+fn a_written_minidump_reads_back_as_written() {
+    use super::write::{
+        MinidumpModule, MinidumpProcess, MinidumpRegion, MinidumpSystem, MinidumpThread,
+        write_minidump,
+    };
+    use crate::base::bytes::write_u32;
+    use crate::nt::pe::headers::CodeView;
+
+    let arch = Arch::Amd64;
+    let map = arch.register_map();
+    let mut context = vec![0u8; arch.context_size()];
+    map.write_u64("rip", &mut context, 0x7ff6_1000_1234)
+        .unwrap();
+    map.write_u64("rsp", &mut context, 0x10_1f00).unwrap();
+    let flags = arch.context_flags();
+    write_u32(
+        &mut context,
+        flags.offset,
+        flags.control | flags.integer | flags.segments,
+    );
+    let mut rsds = b"RSDS".to_vec();
+    rsds.extend_from_slice(&[0x11; 16]);
+    rsds.extend_from_slice(&3u32.to_le_bytes());
+    rsds.extend_from_slice(b"app.pdb\0");
+    let thread = |tid, context, stack| MinidumpThread {
+        tid,
+        teb: 0x7ff_e000 + u64::from(tid),
+        priority: 8,
+        priority_class: 0x20,
+        suspend_count: 1,
+        context,
+        stack,
+        create_time: 133_000_000_000_000_000,
+        exit_time: 0,
+        kernel_time: 20,
+        user_time: 30,
+        start_address: 0x7ff6_1000_0100,
+    };
+    let process = MinidumpProcess {
+        system: MinidumpSystem {
+            arch,
+            major: 10,
+            minor: 0,
+            build: 26100,
+            processors: 4,
+            product_type: 1,
+        },
+        time_date_stamp: 1_760_000_000,
+        pid: 4242,
+        times: Some((1_759_999_000, 3, 1)),
+        threads: vec![
+            thread(0x1234, Some(context), Some(0x10_1f00..0x10_3000)),
+            thread(0x99, None, None),
+        ],
+        modules: vec![MinidumpModule {
+            base: 0x7ff6_1000_0000,
+            size: 0x2_0000,
+            checksum: 7,
+            time_date_stamp: 0x5000_0000,
+            path: r"C:\app\app.exe".into(),
+            codeview: Some(rsds),
+        }],
+        regions: vec![MinidumpRegion {
+            base: 0x10_0000,
+            allocation_base: 0x10_0000,
+            allocation_protect: 4,
+            size: 0x4000,
+            state: 0x1000,
+            protect: 4,
+            kind: 0x2_0000,
+        }],
+        memory: vec![0x10_1000..0x10_3000, 0x20_0000..0x20_1000],
+    };
+    let path = std::env::temp_dir().join(format!(
+        "ntoseye-minidump-writer-{}.dmp",
+        std::process::id()
+    ));
+    let unreadable = write_minidump(
+        &path,
+        &process,
+        |address, page| {
+            // The last page is unreadable; every other byte is its page's.
+            page.fill((address >> 12) as u8);
+            address != 0x20_0000
+        },
+        || false,
+        || {},
+    )
+    .unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(unreadable, 1);
+
+    let parsed = parse::parse(&bytes).unwrap();
+    let info = &parsed.info;
+    assert_eq!(info.arch, Arch::Amd64);
+    assert_eq!(info.time_date_stamp, 1_760_000_000);
+    assert_eq!(
+        (
+            info.system.major_version,
+            info.system.minor_version,
+            info.system.build_number,
+            info.system.number_of_processors,
+        ),
+        (10, 0, 26100, 4)
+    );
+    assert_eq!(info.process_id, Some(4242));
+    assert_eq!(info.process_create_time, Some(1_759_999_000));
+    assert_eq!(info.process_cpu_times, Some((3, 1)));
+
+    assert_eq!(info.threads.len(), 2);
+    let first = &info.threads[0];
+    assert_eq!(
+        (first.tid, first.teb, first.suspend_count),
+        (0x1234, 0x7ff_f234, 1)
+    );
+    let context = first.context.as_ref().expect("a usable context");
+    assert_eq!(map.read_u64("rip", context).unwrap(), 0x7ff6_1000_1234);
+    assert_eq!(map.read_u64("rsp", context).unwrap(), 0x10_1f00);
+    let stack = first.stack.as_ref().expect("the stack is captured");
+    assert_eq!((stack.start, stack.size), (0x10_1f00, 0x1100));
+    let times = first.times.as_ref().expect("thread times");
+    assert_eq!((times.kernel_time, times.user_time), (20, 30));
+    assert_eq!(times.create_time, 133_000_000_000_000_000);
+    assert!(info.threads[1].context.is_err());
+
+    let module = &info.modules[0];
+    assert_eq!((module.base, module.size), (0x7ff6_1000_0000, 0x2_0000));
+    assert_eq!((module.checksum, module.time_date_stamp), (7, 0x5000_0000));
+    assert_eq!(module.path, r"C:\app\app.exe");
+    let Some(CodeView::Rsds { age, path, .. }) = &module.codeview else {
+        panic!("expected an RSDS record, got {:?}", module.codeview);
+    };
+    assert_eq!((*age, path.as_str()), (3, "app.pdb"));
+
+    let regions = info.regions.as_ref().expect("a memory-info list");
+    assert_eq!(regions.len(), 1);
+    assert_eq!(
+        (regions[0].base, regions[0].size, regions[0].state),
+        (0x10_0000, 0x4000, 0x1000)
+    );
+
+    let ranges: Vec<(u64, u64)> = parsed
+        .memory
+        .iter()
+        .map(|range| (range.start, range.length))
+        .collect();
+    assert_eq!(ranges, [(0x10_1000, 0x2000), (0x20_0000, 0x1000)]);
+    let at = |address: u64| {
+        let range = parsed
+            .memory
+            .iter()
+            .find(|range| range.start <= address && address < range.start + range.length)
+            .unwrap();
+        bytes[(range.offset + address - range.start) as usize]
+    };
+    assert_eq!(at(0x10_1000), 0x01);
+    assert_eq!(at(0x10_2fff), 0x02);
+    assert_eq!(at(0x20_0000), 0);
+}

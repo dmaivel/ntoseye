@@ -8,7 +8,7 @@ use ntoseye_macros::record;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::nt::kuser_shared::KuserSharedData;
-use crate::nt::target::{KTHREAD_STATE_TERMINATED, Target};
+use crate::nt::target::{KTHREAD_STATE_TERMINATED, Target, ThreadInfo};
 
 /// FILETIME (100 ns units since 1601) at the Unix epoch.
 const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
@@ -29,6 +29,15 @@ pub struct ThreadTime {
     /// one, when the dump was written on a dump. Until it exited, for one
     /// that has.
     pub elapsed: Option<u64>,
+}
+
+/// A kernel thread's times (see [`Target::kernel_thread_times_of`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KernelThreadTimes {
+    pub create_time: Option<u64>,
+    pub exit_time: Option<u64>,
+    pub kernel_time: Option<u64>,
+    pub user_time: Option<u64>,
 }
 
 /// The processor times of a process's threads (`!runaway`).
@@ -86,41 +95,21 @@ impl Target {
 
     fn kernel_thread_times(&self) -> Result<ThreadTimes> {
         let process = self.selected_process_info()?;
-        let guest = self.guest()?;
-        // A clock tick, in 100 ns units.
-        let tick = u64::from(guest.ntoskrnl.symbol("KeMaximumIncrement")?.read::<u32>()?);
         let now = KuserSharedData::new(self).system_time();
-        let ethread = guest.ntoskrnl.types().layout("_ETHREAD")?;
-        let memory = self.kernel_address_space();
-        let threads = self
-            .enumerate_threads_for_process_info(&process)?
-            .into_iter()
-            .map(|thread| {
-                let detail = self.thread_detail(thread, None);
-                let thread = &detail.thread;
-                let created = ethread
-                    .field_offset("CreateTime")
-                    .ok()
-                    .and_then(|offset| memory.read::<u64>(thread.ethread + offset).ok());
-                // An exited thread's ExitTime shares its storage with fields
-                // a live one uses.
-                let ended = if thread.state == Some(KTHREAD_STATE_TERMINATED) {
-                    ethread
-                        .field_offset("ExitTime")
-                        .ok()
-                        .and_then(|offset| memory.read::<u64>(thread.ethread + offset).ok())
-                } else {
-                    now
-                };
-                ThreadTime {
-                    tid: thread.tid.unwrap_or(0),
-                    index: None,
-                    user_time: detail.user_time.map(|ticks| ticks * tick),
-                    kernel_time: detail.kernel_time.map(|ticks| ticks * tick),
-                    elapsed: created.zip(ended).and_then(|(created, ended)| {
-                        ended.checked_sub(created).filter(|_| created != 0)
-                    }),
-                }
+        let threads = self.enumerate_threads_for_process_info(&process)?;
+        let times = self.kernel_thread_times_of(&threads)?;
+        let threads = threads
+            .iter()
+            .zip(times)
+            .map(|(thread, times)| ThreadTime {
+                tid: thread.tid.unwrap_or(0),
+                index: None,
+                user_time: times.user_time,
+                kernel_time: times.kernel_time,
+                elapsed: times
+                    .create_time
+                    .zip(times.exit_time.or(now))
+                    .and_then(|(created, ended)| ended.checked_sub(created)),
             })
             .collect::<Vec<_>>();
         if threads.is_empty() {
@@ -134,5 +123,39 @@ impl Target {
             pid: Some(process.pid),
             threads,
         })
+    }
+
+    /// The times of each of `threads` on a kernel target: when it started
+    /// (`ETHREAD.CreateTime`) and, once it has exited, ended
+    /// (`ETHREAD.ExitTime`, which shares its storage with fields a live
+    /// thread uses), as FILETIMEs; and its CPU time, its `KTHREAD` tick
+    /// counts times `KeMaximumIncrement`, in 100 ns units.
+    pub fn kernel_thread_times_of(&self, threads: &[ThreadInfo]) -> Result<Vec<KernelThreadTimes>> {
+        let guest = self.guest()?;
+        // A clock tick, in 100 ns units.
+        let tick = u64::from(guest.ntoskrnl.symbol("KeMaximumIncrement")?.read::<u32>()?);
+        let ethread = guest.ntoskrnl.types().layout("_ETHREAD")?;
+        let memory = self.kernel_address_space();
+        let field = |thread: &ThreadInfo, name: &str| {
+            ethread
+                .field_offset(name)
+                .ok()
+                .and_then(|offset| memory.read::<u64>(thread.ethread + offset).ok())
+                .filter(|&value| value != 0)
+        };
+        Ok(threads
+            .iter()
+            .map(|thread| {
+                let detail = self.thread_detail(thread.clone(), None);
+                KernelThreadTimes {
+                    create_time: field(thread, "CreateTime"),
+                    exit_time: (thread.state == Some(KTHREAD_STATE_TERMINATED))
+                        .then(|| field(thread, "ExitTime"))
+                        .flatten(),
+                    kernel_time: detail.kernel_time.map(|ticks| ticks * tick),
+                    user_time: detail.user_time.map(|ticks| ticks * tick),
+                }
+            })
+            .collect())
     }
 }

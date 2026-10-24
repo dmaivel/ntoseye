@@ -2,11 +2,14 @@ use crate::backend::dbg_backend::DebugCapability;
 use crate::backend::kd::{KdFileMapping, kd_files, load_map_file};
 use crate::base::diagnostics::print_warning;
 use crate::base::error::{Error, Result};
+use crate::base::memory::{MemoryOps, PAGE_SIZE};
 use crate::base::output;
+use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::hosts::repl::*;
 use crate::nt::dump_writer::{DumpWrite, write_kernel_dump};
-use crate::session::dump::collect_dump_metadata;
+use crate::nt::userdump::write::{MinidumpWrite, write_minidump as write_minidump_file};
+use crate::session::dump::{collect_dump_metadata, collect_process_minidump};
 use crate::session::{Motion, Session};
 use indicatif::ProgressStyle;
 use ntoseye_macros::{command, grammar};
@@ -62,10 +65,18 @@ fn crash(session: &mut Session) -> Result<Motion> {
     Ok(Motion::Wait)
 }
 
-/// Write a full PAGEDU64 kernel dump from the halted target.
+/// Write a full kernel dump of the halted target, or with /u a user-mode
+/// minidump of the current process.
 ///
-/// .dump accepts both /f and /ma as WinDbg-compatible full-dump switches.
-/// ntoseye writes the dump as a stream, page by page, and you can cancel it
+/// Without /u, .dump writes a full PAGEDU64 kernel dump of a live target;
+/// it accepts /f and /ma as WinDbg's full-dump switches. With /u, it writes
+/// a user-mode minidump (MDMP) of the current process: the one that .process
+/// selected, else the owner of the current thread. The minidump holds the
+/// process's threads with the user-mode registers their stacks give, its
+/// modules with their CodeView records, its regions as VirtualQuery reports
+/// them, and every committed page of its memory that is in physical memory;
+/// a page in the page file is not in it. It works on a kernel dump too, and WinDbg and ntoseye --dump
+/// open it. .dump writes either file as a stream, and you can cancel it
 /// with Ctrl+C.
 #[command(
     names = [".dump", "dump"],
@@ -73,12 +84,31 @@ fn crash(session: &mut Session) -> Result<Motion> {
     kind = Action,
     target = Nt,
     state = Halted,
-    live_only,
     capability = MemoryIntrospection,
     writes = [Files],
-    python = Debugger,
+    forms = [write_kernel_dump_file, write_minidump],
 )]
-fn write_dump(session: &mut Session, #[arg(parse = dump_path)] path: String) -> Result<DumpWrite> {
+fn write_dump(
+    session: &mut Session,
+    #[arg(parse = dump_request)] request: DumpRequest,
+) -> Result<DumpWritten> {
+    if request.minidump {
+        write_minidump(session, request.path).map(DumpWritten::Minidump)
+    } else {
+        write_kernel_dump_file(session, request.path).map(DumpWritten::Kernel)
+    }
+}
+
+/// Write a full PAGEDU64 kernel dump of the live target (`.dump`).
+#[command(form_of = write_dump, live_only, python = Debugger, python_name = "write_dump")]
+fn write_kernel_dump_file(session: &mut Session, path: String) -> Result<DumpWrite> {
+    if session.target.phys.is_dump() {
+        return Err(Error::InvalidArgument(
+            "a full kernel dump is written from a live target; .dump /u writes a minidump of \
+             the current process"
+                .into(),
+        ));
+    }
     let (metadata, total_pages) = collect_dump_metadata(session)
         .and_then(|metadata| metadata.total_pages().map(|pages| (metadata, pages)))
         .map_err(|error| Error::DebugInfo(format!("cannot prepare dump: {error}")))?;
@@ -105,27 +135,119 @@ fn write_dump(session: &mut Session, #[arg(parse = dump_path)] path: String) -> 
     })
 }
 
-impl Render for DumpWrite {
+/// Write a user-mode minidump of the process (`.dump /u`): its threads with
+/// their user-mode registers, its modules, its regions, and its memory that
+/// is in physical memory.
+#[command(form_of = write_dump, python = Process)]
+fn write_minidump(session: &mut Session, path: String) -> Result<MinidumpWrite> {
+    let process = session.target.selected_process_info()?;
+    let model = collect_process_minidump(session, &process)
+        .map_err(|error| Error::DebugInfo(format!("cannot prepare the minidump: {error}")))?;
+    let pages: u64 = model
+        .memory
+        .iter()
+        .map(|range| (range.end - range.start) / PAGE_SIZE as u64)
+        .sum();
+    let progress = output::progress_bar(pages, "writing minidump");
+    progress.set_style(
+        ProgressStyle::with_template("Writing minidump [{bar:40}] {pos}/{len}")?
+            .progress_chars("#-"),
+    );
+    let interrupt = Arc::clone(&session.target.interrupt);
+    interrupt.store(false, Ordering::SeqCst);
+    let memory = session.target.address_space(process.dtb);
+    let result = write_minidump_file(
+        Path::new(&path),
+        &model,
+        |address, page| memory.read_bytes(VirtAddr(address), page).is_ok(),
+        || interrupt.swap(false, Ordering::SeqCst),
+        || progress.inc(1),
+    );
+    progress.finish_and_clear();
+    let unreadable_pages = result
+        .map_err(|error| Error::DebugInfo(format!("failed to write the minidump: {error}")))?;
+    Ok(MinidumpWrite {
+        path,
+        process: process.name,
+        pid: process.pid,
+        threads: model.threads.len(),
+        threads_without_context: model
+            .threads
+            .iter()
+            .filter(|thread| thread.context.is_none())
+            .count(),
+        modules: model.modules.len(),
+        regions: model.regions.len(),
+        captured_bytes: pages * PAGE_SIZE as u64,
+        unreadable_pages,
+    })
+}
+
+/// What `.dump` wrote.
+enum DumpWritten {
+    Kernel(DumpWrite),
+    Minidump(MinidumpWrite),
+}
+
+impl Render for DumpWritten {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
-        if self.unreadable_pages != 0 {
-            outln!("{} pages unreadable (zero-filled)", self.unreadable_pages);
+        match self {
+            Self::Kernel(dump) => {
+                if dump.unreadable_pages != 0 {
+                    outln!("{} pages unreadable (zero-filled)", dump.unreadable_pages);
+                }
+                outln!("wrote full kernel dump to {}", dump.path);
+            }
+            Self::Minidump(dump) => {
+                if dump.unreadable_pages != 0 {
+                    outln!("{} pages unreadable (zero-filled)", dump.unreadable_pages);
+                }
+                outln!(
+                    "wrote a minidump of {} (PID {}) to {}: {} threads, {} modules, {} regions, \
+                     {} MiB of memory",
+                    dump.process,
+                    dump.pid,
+                    dump.path,
+                    dump.threads,
+                    dump.modules,
+                    dump.regions,
+                    dump.captured_bytes >> 20
+                );
+                if dump.threads_without_context != 0 {
+                    outln!(
+                        "{}",
+                        ui::muted(&format!(
+                            "{} threads have no context: their stacks gave no user-mode registers",
+                            dump.threads_without_context
+                        ))
+                    );
+                }
+            }
         }
-        outln!("wrote full kernel dump to {}", self.path)
     }
 }
 
-/// `.dump`'s file, among the full-dump switches.
-#[grammar(usage = "[/f] [/ma] <file>", complete = None)]
-fn dump_path(
+/// What `.dump` writes, and where.
+pub struct DumpRequest {
+    pub path: String,
+    /// `/u`: a user-mode minidump of the current process.
+    pub minidump: bool,
+}
+
+/// `.dump`'s file, among its switches.
+#[grammar(usage = "[/f] [/ma] [/u] <file>", complete = None)]
+fn dump_request(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
-) -> std::result::Result<String, ArgError> {
+) -> std::result::Result<DumpRequest, ArgError> {
     let mut path = None;
+    let mut minidump = false;
     while let Some(argument) = cursor.word() {
         if argument.starts_with('/') {
             match argument.to_ascii_lowercase().as_str() {
                 "/f" | "/ma" => {}
-                // Unix absolute paths also start with `/`; once both known
+                "/u" => minidump = true,
+                // Unix absolute paths also start with `/`; once the known
                 // switches are excluded, treat the first such token as the
                 // requested file rather than rejecting `/tmp/out.dmp`.
                 _ if path.is_none() => path = Some(argument.into_owned()),
@@ -135,7 +257,10 @@ fn dump_path(
             return Err(ArgError::Missing);
         }
     }
-    path.ok_or(ArgError::Missing)
+    Ok(DumpRequest {
+        path: path.ok_or(ArgError::Missing)?,
+        minidump,
+    })
 }
 
 /// What `.kdfiles` does to the driver replacement map.

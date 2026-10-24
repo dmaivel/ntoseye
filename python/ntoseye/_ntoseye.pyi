@@ -3514,11 +3514,7 @@ class Debugger:
         """
     def write_dump(self, /, path: str) -> DumpWrite:
         """
-        Write a full PAGEDU64 kernel dump from the halted target.
-        
-        .dump accepts both /f and /ma as WinDbg-compatible full-dump switches.
-        ntoseye writes the dump as a stream, page by page, and you can cancel it
-        with Ctrl+C.
+        Write a full PAGEDU64 kernel dump of the live target (`.dump`).
         """
 
 @final
@@ -11054,6 +11050,40 @@ class MemorySearchMatch(BaseRecord):
         """
 
 @final
+class MinidumpWrite(BaseRecord):
+    """
+    A user-mode minidump that `.dump /u` wrote.
+    """
+    __match_args__: Final[tuple[Literal["path"], Literal["process"], Literal["pid"], Literal["threads"], Literal["threads_without_context"], Literal["modules"], Literal["regions"], Literal["captured_bytes"], Literal["unreadable_pages"]]]
+    @property
+    def captured_bytes(self, /) -> int:
+        """
+        The bytes of memory the minidump holds.
+        """
+    @property
+    def modules(self, /) -> int: ...
+    @property
+    def path(self, /) -> str: ...
+    @property
+    def pid(self, /) -> int: ...
+    @property
+    def process(self, /) -> str: ...
+    @property
+    def regions(self, /) -> int: ...
+    @property
+    def threads(self, /) -> int: ...
+    @property
+    def threads_without_context(self, /) -> int:
+        """
+        The threads whose user-mode registers their stacks did not give.
+        """
+    @property
+    def unreadable_pages(self, /) -> int:
+        """
+        The pages that translated but could not be read, written as zeros.
+        """
+
+@final
 class Module:
     """
     One loaded image in the kernel address space or in a process address space.
@@ -15040,6 +15070,12 @@ class Process:
         """
         The 32-bit PEB of a WOW64 process (`_EPROCESS.WoW64Process`), `None`
         for a native process.
+        """
+    def write_minidump(self, /, path: str) -> MinidumpWrite:
+        """
+        Write a user-mode minidump of the process (`.dump /u`): its threads with
+        their user-mode registers, its modules, its regions, and its memory that
+        is in physical memory.
         """
 
 @final

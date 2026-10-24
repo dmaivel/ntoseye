@@ -457,10 +457,63 @@ impl Target {
             });
         };
         let mut walk = self.page_walk(process, region)?;
-        let (state, mut end) = walk.state_at(base.0)?;
+        let run = self.scan_run(&mut walk, base.0, region.end.0)?;
+        Ok(Self::basic_information(
+            process, region, &walk, address, base, run,
+        ))
+    }
+
+    /// Every region within `vads` (`process`'s VADs, as
+    /// [`Self::enumerate_vad_regions_for_process_info`] lists them) whose
+    /// pages share one state and protection, in address order, as
+    /// `VirtualQuery` reports them from each VAD's start: what a minidump's
+    /// memory-info list records. The free gaps between VADs are not listed.
+    /// A VAD whose pages cannot be read past some point lists the rest as
+    /// one reserved region.
+    pub fn virtual_query_regions(
+        &self,
+        process: &ProcessInfo,
+        vads: &[MemoryRegionInfo],
+    ) -> Result<Vec<MemoryBasicInformation>> {
+        let mut regions = Vec::new();
+        for vad in vads {
+            let mut walk = self.page_walk(process, vad)?;
+            let mut base = vad.start.0;
+            while base < vad.end.0 {
+                if self.interrupted() {
+                    return Err(Error::DebugInfo("interrupted".into()));
+                }
+                let run = self
+                    .scan_run(&mut walk, base, vad.end.0)
+                    .unwrap_or((None, vad.end.0, true));
+                let end = run.1;
+                regions.push(Self::basic_information(
+                    process,
+                    vad,
+                    &walk,
+                    VirtAddr(base),
+                    VirtAddr(base),
+                    run,
+                ));
+                base = end;
+            }
+        }
+        Ok(regions)
+    }
+
+    /// From `base`, up to `region_end`, the run of pages `walk` reads as
+    /// sharing one state: that state, the run's end, and whether the scan
+    /// stopped at its step bound or an unreadable page rather than a change.
+    fn scan_run(
+        &self,
+        walk: &mut PageWalk<'_>,
+        base: u64,
+        region_end: u64,
+    ) -> Result<(PageState, u64, bool)> {
+        let (state, mut end) = walk.state_at(base)?;
         let mut truncated = false;
         let mut steps = 1;
-        while end < region.end.0 {
+        while end < region_end {
             if steps >= MAX_VPROT_STEPS || self.interrupted() {
                 truncated = true;
                 break;
@@ -475,7 +528,19 @@ impl Target {
                 }
             }
         }
-        let end = end.min(region.end.0);
+        Ok((state, end.min(region_end), truncated))
+    }
+
+    /// The `VirtualQuery` answer for `run` (a [`Self::scan_run`]) of
+    /// `region` from `base`, asked at `address`.
+    fn basic_information(
+        process: &ProcessInfo,
+        region: &MemoryRegionInfo,
+        walk: &PageWalk<'_>,
+        address: VirtAddr,
+        base: VirtAddr,
+        (state, end, truncated): (PageState, u64, bool),
+    ) -> MemoryBasicInformation {
         let kind = if region.vad_type == Some(VadType::ImageMap) {
             MEM_IMAGE
         } else if walk.vad.private {
@@ -483,7 +548,7 @@ impl Target {
         } else {
             MEM_MAPPED
         };
-        Ok(MemoryBasicInformation {
+        MemoryBasicInformation {
             process: Some(process.clone()),
             address,
             base_address: base,
@@ -499,7 +564,7 @@ impl Target {
             kind,
             vad: Some(region.node_address),
             truncated,
-        })
+        }
     }
 
     /// `!vprot` on a user-mode minidump: the region of its memory-info list
