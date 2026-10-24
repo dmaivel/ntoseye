@@ -3054,6 +3054,7 @@ fn module_trap(event: ModuleEvent, address: u64) -> ModuleTrap {
             address: VirtAddr(address),
             original: vec![0x48],
         },
+        user: false,
     }
 }
 

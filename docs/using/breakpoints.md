@@ -180,14 +180,17 @@ On the `gdb` backend, `ntoseye` plants an unload trap the same way as the load t
 
 ## Stopping at a user-mode DLL load
 
-Over KD and KDNET, Windows reports the user-mode images that processes map only while the `ksl` global flag (`FLG_ENABLE_KDEBUG_SYMBOL_LOAD`) is set. {command}`!gflag` `+ksl` sets it at once, until the next boot. With the flag set, the `ld` and `ud` filters apply to DLLs and executables as they do to kernel images, so `sxe ld:mydll` stops when a process maps `mydll.dll`, and `sxn ld` shows a `ModLoad:` line for each image.
+`sxe ld:mydll` stops when a process maps `mydll.dll`, and `sxn ld` shows a `ModLoad:` line for each user-mode image as well as each kernel image. Windows reports user-mode images to a kernel debugger only while the `ksl` global flag is set, and then only for the first process that maps each image. `ntoseye` therefore sets its own trap, the user-image trap, at `nt!PsCallImageNotifyRoutines`, which the kernel runs for every image that it maps into every process. The trap works on KD, KDNET, and the `gdb` backend.
 
-A deferred breakpoint scoped to a process waits for the module in that process: `bu /p <pid> mydll!DllMain` is armed as `mydll.dll` is mapped into that process, before its entry point runs. At that point the loader has not yet added the DLL to the process's module lists, so `ntoseye` loads its symbols from the image itself. If the PDB cannot be found, `ntoseye` says so, and the breakpoint stays deferred. The page that holds the breakpoint is usually not in memory yet, so `ntoseye` hands the breakpoint to the target's KD breakpoint table, which writes it when the process first runs that page.
+The trap is in place only while something waits for a user-mode load: a deferred breakpoint scoped to a process, or an `ld` filter that can name a DLL, which is bare `ld` or a filter for any module that is not a `.sys` driver. `ntoseye` sets the trap when the target resumes and says so, and it removes the trap at the first resume after which nothing waits. While the trap is in place, every image that any process maps halts the target briefly, so starting a process takes noticeably longer.
 
-Windows reports each image once while the image stays in memory. The first process to map the image after `ksl` is set reports it, and later mappings of the same image, in that process or another, do not. A DLL that another process has already loaded therefore does not stop `sxe ld` again, and a `bu /p` that waits for it stays deferred. Set such a breakpoint after the DLL has loaded in the process, or use {command}`ba` `e1`. The `gdb` backend reports no user-mode loads.
+Windows maps some images more than once: the loader can map a DLL again, and an image can be mapped for its resources. `ntoseye` reports each mapping.
+
+A deferred breakpoint scoped to a process waits for the module in that process: `bu /p <pid> mydll!DllMain` is armed as `mydll.dll` is mapped into that process, before its entry point runs. At that point the loader has not yet added the DLL to the process's module lists, so `ntoseye` loads its symbols from the image itself. If the PDB cannot be found, `ntoseye` says so, and the breakpoint stays deferred. The process has not touched the page that holds the breakpoint yet, so on KD `ntoseye` hands the breakpoint to the target's breakpoint table, which writes it when the process first runs that page. The `gdb` backend sets no software breakpoint in user space (see below).
+
+The kernel has no notify routine for a user-mode image that is unmapped. Over KD with {command}`!gflag` `+ksl` set, Windows reports those unloads, and the `ud` filters apply to them.
 
 ```text
-!gflag +ksl
 bu /p 4140 mydll!DllMain
 g
 ```

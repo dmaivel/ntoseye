@@ -253,7 +253,9 @@ impl Session {
         else {
             return self.step_over_breakpoint_at_pc();
         };
-        let ModuleTrap { event, site: trap } = self.module_traps[index].clone();
+        let ModuleTrap {
+            event, site: trap, ..
+        } = self.module_traps[index].clone();
         let cr3 = self
             .register_map
             .read_u64(self.target.arch().dtb_register(), &regs)

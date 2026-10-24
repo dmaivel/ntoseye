@@ -294,11 +294,15 @@ impl Session {
     /// runs them, and a trap a killed session leaves behind stops the next
     /// one with no debugger to take it.
     fn sync_module_traps(&mut self) {
+        self.sync_user_image_trap();
         if self.backend_supports(DebugCapability::ModuleLoadEvents) {
             return;
         }
         for event in [ModuleEvent::Load, ModuleEvent::Unload] {
-            let planted = self.module_traps.iter().any(|trap| trap.event == event);
+            let planted = self
+                .module_traps
+                .iter()
+                .any(|trap| trap.event == event && !trap.user);
             match (planted, self.module_event_awaited(event)) {
                 (false, true) => {
                     let (what, needs) = match event {
@@ -315,22 +319,83 @@ impl Session {
                     };
                     for symbol in module_trap_symbols(event) {
                         if let Some(site) = self.plant_trap(symbol, what, needs) {
-                            self.module_traps.push(ModuleTrap { event, site });
+                            self.module_traps.push(ModuleTrap {
+                                event,
+                                site,
+                                user: false,
+                            });
                         }
                     }
                 }
-                (true, false) => self.lift_module_traps(event),
+                (true, false) => self.lift_module_traps(event, false),
                 _ => {}
             }
         }
     }
 
-    /// Lift the traps for `event`. One that cannot be lifted stays, so a
-    /// later resume tries again.
-    fn lift_module_traps(&mut self, event: ModuleEvent) {
+    /// Keep the user-image trap ([`USER_IMAGE_TRAP`]) exactly while a
+    /// user-mode image load is waited on ([`Self::user_image_load_awaited`]).
+    /// Windows reports user-mode images to a kernel debugger only with
+    /// `!gflag +ksl`, and then only an image's first mapping; the trap sees
+    /// every mapping, in every process, on every backend. Each one halts the
+    /// target while the trap is planted.
+    fn sync_user_image_trap(&mut self) {
+        let planted = self.module_traps.iter().any(|trap| trap.user);
+        match (planted, self.user_image_load_awaited()) {
+            (false, true) => {
+                if let Some(site) = self.plant_trap(
+                    USER_IMAGE_TRAP,
+                    "a user-image load trap",
+                    "reports no user-mode image loads by itself; it stays while a breakpoint \
+                     scoped to a process waits for its module or an sx ld filter can name a DLL",
+                ) {
+                    self.module_traps.push(ModuleTrap {
+                        event: ModuleEvent::Load,
+                        site,
+                        user: true,
+                    });
+                }
+            }
+            (true, false) => self.lift_module_traps(ModuleEvent::Load, true),
+            _ => {}
+        }
+    }
+
+    /// Whether something waits on a user-mode image load: a deferred
+    /// breakpoint scoped to a process, or an `sxe`/`sxn ld` filter that can
+    /// name one (bare `ld`, or a module that is not a `.sys` driver).
+    fn user_image_load_awaited(&self) -> bool {
+        self.breakpoints
+            .list()
+            .iter()
+            .any(|bp| !bp.resolved && matches!(bp.scope, BreakpointScope::Process { .. }))
+            || self
+                .exception_policies
+                .module_event_entries()
+                .any(|policy| {
+                    policy.event == ModuleEvent::Load
+                        && matches!(
+                            policy.mode,
+                            ExceptionPolicyMode::Break | ExceptionPolicyMode::Notify
+                        )
+                        && policy
+                            .module
+                            .as_deref()
+                            .is_none_or(|module| !module.to_ascii_lowercase().ends_with(".sys"))
+                })
+    }
+
+    /// Whether the user-image trap is planted.
+    pub fn user_image_trap_planted(&self) -> bool {
+        self.module_traps.iter().any(|trap| trap.user)
+    }
+
+    /// Lift the traps for `event` (the user-image one, or the others). One
+    /// that cannot be lifted stays, so a later resume tries again.
+    fn lift_module_traps(&mut self, event: ModuleEvent, user: bool) {
         let mut kept = Vec::new();
         for trap in take(&mut self.module_traps) {
-            if trap.event != event {
+            if trap.event != event || trap.user != user {
                 kept.push(trap);
                 continue;
             }
@@ -363,10 +428,14 @@ impl Session {
     ) -> Result<()> {
         self.exception_policies
             .set_module_event(event, module, mode, command);
-        if !self.module_traps.iter().any(|trap| trap.event == event)
+        let kernel_trap_wanted = !self
+            .module_traps
+            .iter()
+            .any(|trap| trap.event == event && !trap.user)
             && self.module_event_awaited(event)
-            && !self.backend_supports(DebugCapability::ModuleLoadEvents)
-        {
+            && !self.backend_supports(DebugCapability::ModuleLoadEvents);
+        let user_trap_wanted = !self.user_image_trap_planted() && self.user_image_load_awaited();
+        if kernel_trap_wanted || user_trap_wanted {
             self.with_target_halted(|session| {
                 session.sync_module_traps();
                 Ok(())
@@ -861,6 +930,11 @@ impl Session {
 /// reported by `DbgUnLoadImageSymbolsUnicode` (current builds) or
 /// `DbgUnLoadImageSymbols`, after the driver's unload routine and before the
 /// image leaves the module list.
+/// The kernel function every user-mode image map runs, with the image's
+/// name, the mapping process's ID and its `IMAGE_INFO` as its first three
+/// arguments, as image-load notify routines get them.
+pub const USER_IMAGE_TRAP: &str = "nt!PsCallImageNotifyRoutines";
+
 fn module_trap_symbols(event: ModuleEvent) -> &'static [&'static str] {
     match event {
         ModuleEvent::Load => &["nt!DbgLoadImageSymbols"],

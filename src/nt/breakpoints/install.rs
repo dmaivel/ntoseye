@@ -316,6 +316,18 @@ impl BreakpointManager {
             }
             Err(error) => return Err(error),
         }
+        // A page the process has not touched is read through its section's
+        // prototype, and one in transition through its frame, but neither
+        // is the process's own to write: the target owes the site the same
+        // way, writing it when the process faults the page in.
+        let mapped = matches!(
+            memory.virt_to_phys(address),
+            Ok(Some(translation)) if translation.residency == Residency::Mapped
+        );
+        if !mapped && client.debug_traps_reach_target() && Self::stopped_in_scope(debugger, scope) {
+            plant_target_site(client, debugger, address, None)?;
+            return Ok(BreakpointBackend::Kernel { original: None });
+        }
         journal_site(debugger, &memory, address, original.as_slice());
         write_user_code(debugger, dtb, address, opcode)?;
         // The kernel does not know about a breakpoint patched through
@@ -437,9 +449,16 @@ impl BreakpointManager {
             Ok(None) if debugger.arch().paging().is_kernel_address(address) => None,
             // A user-space site is this debugger's own `int3` in that page,
             // and there is no page to put it in, unless the target can owe
-            // it (see `install_breakpoint`).
-            Ok(None) if Self::stopped_in_scope(debugger, scope) => None,
-            Ok(None) => return Err(Self::non_resident_site_error(debugger, dtb, address, scope)),
+            // it (see `install_breakpoint`). A view just being mapped can
+            // have no translation to read at all yet.
+            Ok(None) | Err(Error::BadVirtualAddress(_))
+                if Self::stopped_in_scope(debugger, scope) =>
+            {
+                None
+            }
+            Ok(None) | Err(Error::BadVirtualAddress(_)) => {
+                return Err(Self::non_resident_site_error(debugger, dtb, address, scope));
+            }
             Err(error) => return Err(error),
         };
 

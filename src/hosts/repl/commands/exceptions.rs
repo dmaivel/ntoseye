@@ -131,9 +131,10 @@ fn module_event_label(mode: ExceptionPolicyMode) -> &'static str {
 /// ld` prints a `ModLoad:` line and continues, `sxn ud` prints an `Unload
 /// module` line and continues, and `sxd` and `sxi` let the load or unload
 /// continue with no output. A named filter has precedence over bare `ld` or
-/// `ud`. Over KD, with the ksl global flag set (!gflag +ksl), the load and
-/// unload filters also apply to the user-mode images processes map; Windows
-/// reports each such image once, when the first process maps it.
+/// `ud`. The load filters apply to the user-mode images processes map too:
+/// while one can name a DLL, ntoseye traps nt!PsCallImageNotifyRoutines,
+/// which runs for every image a process maps. Over KD with the ksl global
+/// flag set (!gflag +ksl), the unload filters apply to user-mode images.
 // The forms are SDK-only: the line's grammar (`-c`, `-f` and the event in
 // any order, `ld:<module>`) has no form words, so `sxe` parses it and calls
 // the operation the event names.

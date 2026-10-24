@@ -653,13 +653,16 @@ pub struct TrapSite {
     pub original: Vec<u8>,
 }
 
-/// A trap on a kernel function that reports a module `event`, planted for
-/// a backend that reports no module events itself. The image base is the
-/// function's second argument.
+/// A trap on a kernel function that reports a module `event`: for a
+/// backend that reports no module events itself, one on the function that
+/// reports a kernel image, whose base is its second argument; on any
+/// backend, `user` on the one every user-mode image map runs
+/// (`nt!PsCallImageNotifyRoutines`), which Windows reports to no debugger.
 #[derive(Debug, Clone)]
 pub struct ModuleTrap {
     pub event: ModuleEvent,
     pub site: TrapSite,
+    pub user: bool,
 }
 
 /// What [`Session::page_in`] observed once the target came back.
