@@ -38,6 +38,7 @@ thiserror = "2.0.18"
 hex = "0.4.3"
 derive_more = { version = "2.1.1", features = ["full"] }
 pdb2 = "0.10.1"
+undname = "2.1.2"
 spin = "0.12.1"
 dashmap = "6.1.0"
 memchr = "2.8"

@@ -1,6 +1,8 @@
 //! Building a PDB's searchable indexes: parsing its symbol, line, and type
 //! streams under the PDB lock, then publishing the derived indexes.
 
+use std::borrow::Cow;
+
 use super::{
     AddressEntry, IndexedSymbol, LoadedModule, ProcedureSpan, SourceChecksum, SourceLineEntry,
     SourceLocation, SymbolIndex, SymbolIndexDiagnostic, SymbolRvas, SymbolStore, SymbolVisibility,
@@ -47,7 +49,8 @@ struct ParsedTypes {
 
 /// The C name under an x86 public symbol's calling-convention decoration:
 /// `_name` (cdecl), `_name@N` (stdcall), `@name@N` (fastcall). C++ names
-/// (`?...`) are left as they are, as on x64, where C names are undecorated.
+/// (`?...`) are left to [`undecorate_cpp`], as on x64, where C names are
+/// undecorated.
 pub(super) fn undecorate_x86(name: &str) -> &str {
     let Some(bare) = name.strip_prefix('_').or_else(|| name.strip_prefix('@')) else {
         return name;
@@ -59,6 +62,37 @@ pub(super) fn undecorate_x86(name: &str) -> &str {
             stem
         }
         _ => bare,
+    }
+}
+
+/// The name WinDbg shows for an MSVC-decorated C++ name (`?...`): the
+/// qualified name without its signature (`wil::details::DebugBreak`), and
+/// `` `string' `` for a string literal. ARM64EC's `$$h` marker, which the
+/// demangler does not read, is dropped for a second try. Any other name, and
+/// one that does not demangle, stays as it is.
+pub fn undecorate_cpp(name: &str) -> Cow<'_, str> {
+    if !name.starts_with('?') {
+        return Cow::Borrowed(name);
+    }
+    if name.starts_with("??_C@") {
+        return Cow::Borrowed("`string'");
+    }
+    let demangle = |name: &str| undname::demangle(name, undname::Flags::NAME_ONLY).ok();
+    demangle(name)
+        .or_else(|| {
+            name.contains("$$h")
+                .then(|| demangle(&name.replacen("$$h", "", 1)))
+                .flatten()
+        })
+        .map_or(Cow::Borrowed(name), Cow::Owned)
+}
+
+/// [`undecorate_cpp`] for a name already owned, which most names keep.
+fn undecorate_cpp_owned(name: String) -> String {
+    if name.starts_with('?') {
+        undecorate_cpp(&name).into_owned()
+    } else {
+        name
     }
 }
 
@@ -382,8 +416,9 @@ impl SymbolStore {
         let mut rvas = SymbolRvas::default();
         let mut index_names = Vec::new();
         for (name, rva) in names {
-            index_names.push(name.to_string());
-            insert_symbol_rva(&mut rvas, name, rva, SymbolVisibility::Public, None);
+            let name = undecorate_cpp(name);
+            insert_symbol_rva(&mut rvas, &name, rva, SymbolVisibility::Public, None);
+            index_names.push(name.into_owned());
         }
         // The index's names are sorted and deduped, as a PDB load leaves them.
         index_names.sort_unstable();
@@ -517,6 +552,7 @@ fn parse_module_streams(
                         if let Some((name, offset)) = named_offset
                             && let Some(rva) = offset.to_rva(address_map)
                         {
+                            let name = undecorate_cpp_owned(name);
                             insert_symbol_rva(
                                 rvas,
                                 &name,
@@ -695,7 +731,8 @@ fn collect_tmf_annotation(
     }
 }
 
-/// Public symbols from the global symbol stream, undecorated when `x86`.
+/// Public symbols from the global symbol stream, their C++ names undecorated
+/// ([`undecorate_cpp`]), and their C names too when `x86`.
 fn parse_public_symbols(
     pdb: &mut pdb2::PDB<'static, Cursor<&'static [u8]>>,
     address_map: &AddressMap<'_>,
@@ -710,10 +747,11 @@ fn parse_public_symbols(
     while let Some(symbol) = symbols.next()? {
         match symbol.parse() {
             Ok(pdb2::SymbolData::Public(data)) => {
-                let name: String = if x86 {
-                    undecorate_x86(&data.name.to_string()).to_string()
+                let name = data.name.to_string();
+                let name = if x86 {
+                    undecorate_cpp(undecorate_x86(&name)).into_owned()
                 } else {
-                    data.name.to_string().into()
+                    undecorate_cpp_owned(name.into_owned())
                 };
                 if data.offset.offset <= offset_limit
                     && let Some(rva) = data.offset.to_rva(address_map)

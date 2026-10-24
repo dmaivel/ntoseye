@@ -405,6 +405,70 @@ fn public_symbol_is_the_unique_resolution_for_a_duplicate_name() {
 }
 
 #[test]
+fn cpp_public_names_are_shown_and_found_undecorated() {
+    let store = SymbolStore::new();
+    let dtb = 0x1000_u64;
+    let base = VirtAddr(0x0000_0001_8000_0000);
+    store.modules.insert(
+        SymbolStore::module_key(dtb, base),
+        LoadedModule {
+            name: "kernelbase.dll".to_string(),
+            short_name: "kernelbase".to_string(),
+            guid: 1,
+            base_address: base,
+            size: 0x10000,
+            dtb,
+        },
+    );
+    let interface_qualified =
+        "?GetMessageW@?QIServerCall@@StandardComServerCall@@UEBAPEAUtagRPCOLEMESSAGE@@XZ";
+    store.publish_public_names(
+        1,
+        [
+            ("?DebugBreak@details@wil@@YAXXZ", 0x100),
+            // ARM64EC's `$$h` marker, as an ARM64X image's PDB has it.
+            ("?eat@XmlInputBuffer@@$$hQEAAXK@Z", 0x200),
+            (
+                "?StDmpSinglePageInsert@?$ST_STORE@USM_TRAITS@@@@SAJPEAU_ST_DATA_MGR@1@PEAU_ST_IO_PARAMS@1@PEAU_ST_PAGE_RECORD@1@@Z",
+                0x300,
+            ),
+            ("??_C@_0BA@HKDEHBAO@RtlAllocateHeap@", 0x400),
+            ("RtlAllocateHeap", 0x500),
+            // An explicit interface qualifier, which the demangler cannot read.
+            (interface_qualified, 0x600),
+        ],
+    );
+
+    let closest = |rva: u64| store.closest_symbol(1, base, base + rva);
+    assert_eq!(
+        closest(0x102),
+        Some(("wil::details::DebugBreak".to_string(), 2))
+    );
+    assert_eq!(closest(0x200), Some(("XmlInputBuffer::eat".to_string(), 0)));
+    assert_eq!(
+        closest(0x300),
+        Some(("ST_STORE<SM_TRAITS>::StDmpSinglePageInsert".to_string(), 0))
+    );
+    assert_eq!(closest(0x404), Some(("`string'".to_string(), 4)));
+    assert_eq!(closest(0x500), Some(("RtlAllocateHeap".to_string(), 0)));
+    assert_eq!(closest(0x600), Some((interface_qualified.to_string(), 0)));
+
+    for (name, rva) in [
+        ("kernelbase!wil::details::DebugBreak", 0x100_u64),
+        (
+            "kernelbase!ST_STORE<SM_TRAITS>::StDmpSinglePageInsert",
+            0x300,
+        ),
+    ] {
+        assert_eq!(
+            store.find_symbol_with_module(dtb, name).unwrap(),
+            Some((base + rva, "kernelbase".to_string())),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn closest_symbol_picks_nearest_lower_record_and_prefers_public_at_ties() {
     let store = SymbolStore::new();
     let base = VirtAddr(0x0000_0001_8000_0000);

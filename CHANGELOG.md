@@ -99,6 +99,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - `.dump /u` puts committed pages that the process never touched in the minidump, as the zeros they hold. They were left out as if their contents were unknown: in csrss from the kernel dump, 7 MiB.
 - `.dump` writes the whole exception record of the stop into a kernel dump's header: its flags and parameters (an access violation's access type and address) were zeros.
 - `dt` reads a word after the type that names one of its fields as that field, as WinDbg does, even when the word would also evaluate: `dt nt!_KPROCESS BasePriority` showed the whole type, because `basepriority` is a pseudo-register. The address may come before or after the fields (`dt nt!_EPROCESS UniqueProcessId <address>`).
+- C++ functions and variables of public PDBs are shown and looked up by their undecorated names, as in WinDbg (`sechost!ScDispatcherLoop`, `nt!ST_STORE<SM_TRAITS>::StDmpSinglePageInsert`, `` `string' ``), instead of their decorated names (`?ScDispatcherLoop@@YAXPEAPEAX@Z`).
 
 ### Removed
 

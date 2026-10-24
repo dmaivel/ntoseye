@@ -1654,6 +1654,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "nonmax"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "610a5acd306ec67f907abe5567859a3c693fb9886eb1f012ab8f2a47bef3db51"
+
+[[package]]
 name = "ntoseye"
 version = "0.51.0"
 dependencies = [
@@ -1717,6 +1723,7 @@ dependencies = [
  "tokio-util",
  "tower",
  "tower-http 0.7.0",
+ "undname",
  "winnow",
  "zerocopy",
 ]
@@ -3087,6 +3094,20 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "undname"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39c24bc2141770ebc4a3703143f0cbdf275ed8d03cf7f5dda754c2f60c758ed4"
+dependencies = [
+ "arrayvec",
+ "bitflags 2.13.0",
+ "bumpalo",
+ "nonmax",
+ "smallvec",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "unicase"

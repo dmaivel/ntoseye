@@ -139,6 +139,10 @@ Frame numbers include inline frames, so `.frame N` selects an inline frame like 
 
 An inline frame has no registers of its own and uses the registers of its physical frame. Stop headers and {command}`ln` show the name of the physical procedure.
 
+## C++ names
+
+Microsoft's public PDBs record C++ functions and variables by their decorated names only, such as `?ScDispatcherLoop@@YAXPEAPEAX@Z`. ntoseye shows these as WinDbg does, as the qualified name without the signature: `sechost!ScDispatcherLoop`, `kernelbase!wil::details::DebugBreak`, `nt!ST_STORE<SM_TRAITS>::StDmpSinglePageInsert`, and `` `string' `` for a string literal. Commands take the same names, for example `bp nt!ST_STORE<SM_TRAITS>::StDmpSinglePageInsert` or `x kernelbase!wil::*`. Overloads of a function share one name: {command}`x` lists each of them, and a command that needs one address reports the name as ambiguous and lists the candidates with their addresses. A name that the demangler cannot read keeps its decorated form.
+
 ## Code split off from its function
 
 Profile-guided optimization moves the rarely run blocks of a function, such as error paths, away from the function's other code, often to near the end of the image. No public symbol is near such a block, but its unwind data chains to its function's. ntoseye names the block after that function, with the offset from the function's start, so {command}`k`, {command}`ln`, and disassembly show `nt!IopXxxControlFile+0x22bddf` instead of `nt+0xb1552f`, and the name evaluates back to the same address. This needs the module's PDB, and works only for x64 code.
