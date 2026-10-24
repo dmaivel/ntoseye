@@ -104,6 +104,18 @@ impl HaltClock {
 }
 
 impl PhysMem {
+    /// Write `buf` at `addr` through the host mapping of a live VM's RAM,
+    /// whether or not the target could service the write; `None` without a
+    /// host mapping. It bypasses everything a target-mediated write does
+    /// (see [`Source::Live`]), so it is for writes that mean to reach the
+    /// frame itself.
+    pub fn write_through_host(&self, addr: PhysAddr, buf: &[u8]) -> Option<Result<()>> {
+        match &self.source {
+            Source::Live { host, .. } => Some(host.write_bytes(addr, buf)),
+            _ => None,
+        }
+    }
+
     fn from_source(source: Source) -> Self {
         Self {
             source,

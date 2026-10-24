@@ -145,4 +145,4 @@ A bugcheck stops the session at the crash and shows the faulting frame and `!ana
 
 For the framework state and the In-Flight Recorder log of a KMDF driver, see [KMDF drivers](kmdf.md). `ntoseye` formats WPP messages with the private PDB. See [Symbols](symbols.md).
 
-With VBS on, KD cannot write breakpoints into user-mode code, so use hardware breakpoints (`ba e1`) to debug a user-mode client of the driver. See [Troubleshooting](../get-started/troubleshooting.md#breakpoints-and-stepping).
+With VBS on, KD cannot write breakpoints into some user-mode code, such as ntdll's. On an x86 VM whose memory `ntoseye` reads from the VM process, it writes them into that memory itself; otherwise, use hardware breakpoints (`ba e1`) to debug a user-mode client of the driver. See [Troubleshooting](../get-started/troubleshooting.md#breakpoints-and-stepping).

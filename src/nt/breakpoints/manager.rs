@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::BreakpointScope;
-use super::install::{BreakpointBackend, forget_site};
+use super::install::{BreakpointBackend, forget_site, write_user_code};
 use super::spec::CodeSite;
 use super::{BreakpointConfig, BreakpointInfo, BreakpointManager, PartitionFilter, StepFrame};
 #[cfg(test)]
@@ -14,7 +14,6 @@ use super::{HardwareBreakpoint, install::BreakpointPatch};
 use crate::arch::HwBreakpointAccess;
 use crate::backend::dbg_backend::DebugBackend;
 use crate::base::error::{Error, Result};
-use crate::base::memory::MemoryOps;
 use crate::base::types::{Dtb, VirtAddr};
 use crate::nt::target::Target;
 
@@ -489,9 +488,8 @@ impl BreakpointManager {
 
         match &bp.backend {
             BreakpointBackend::GuestMemoryPatch { original } => {
-                let memory = debugger.address_space(dtb);
-                memory.write_bytes(bp.address, original.as_slice())?;
-                forget_site(debugger, &memory, bp.address);
+                write_user_code(debugger, dtb, bp.address, original.as_slice())?;
+                forget_site(debugger, &debugger.address_space(dtb), bp.address);
                 client.note_breakpoint_uninstalled(bp.address.0);
                 bp.enabled = false;
                 Ok(())

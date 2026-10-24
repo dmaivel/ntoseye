@@ -6,13 +6,12 @@ use pelite::{PeView, image::IMAGE_SCN_MEM_EXECUTE};
 
 use super::journal::site_window;
 use super::{BreakpointInfo, BreakpointManager, BreakpointScope};
-use crate::arch::Arch;
+use crate::arch::{Arch, Family};
 use crate::backend::dbg_backend::{DebugBackend, DebugCapability};
-use crate::backend::kd::api::DBGKD_WRITE_PHYSICAL_MEMORY;
 use crate::backend::phys::PhysMem;
 use crate::base::error::{Error, Result};
-use crate::base::memory::{AddressSpace, MemoryOps, PAGE_SIZE};
-use crate::base::types::{Dtb, VirtAddr};
+use crate::base::memory::{AddressSpace, MemoryOps, PAGE_SIZE, Residency};
+use crate::base::types::{Dtb, PhysAddr, VirtAddr};
 use crate::nt::guest::ModuleInfo;
 use crate::nt::pe::read_pe_header_page;
 use crate::nt::target::Target;
@@ -310,9 +309,7 @@ impl BreakpointManager {
             Err(error) => return Err(error),
         }
         journal_site(debugger, &memory, address, original.as_slice());
-        memory
-            .write_bytes(address, opcode)
-            .map_err(|error| user_patch_error(debugger, address, error))?;
+        write_user_code(debugger, dtb, address, opcode)?;
         // The kernel does not know about a breakpoint patched through
         // host memory, so update the backend's stop bookkeeping.
         client.note_breakpoint_installed(address.0);
@@ -338,9 +335,12 @@ impl BreakpointManager {
             ) => {
                 let memory = debugger.address_space(*dtb);
                 journal_site(debugger, &memory, bp.address, original.as_slice());
-                memory
-                    .write_bytes(bp.address, debugger.arch().breakpoint_instruction())
-                    .map_err(|error| user_patch_error(debugger, bp.address, error))?;
+                write_user_code(
+                    debugger,
+                    *dtb,
+                    bp.address,
+                    debugger.arch().breakpoint_instruction(),
+                )?;
                 client.note_breakpoint_installed(bp.address.0);
                 Ok(())
             }
@@ -369,9 +369,8 @@ impl BreakpointManager {
                 BreakpointScope::Process { dtb, .. },
                 BreakpointBackend::GuestMemoryPatch { original },
             ) => {
-                let memory = debugger.address_space(*dtb);
-                memory.write_bytes(bp.address, original.as_slice())?;
-                forget_site(debugger, &memory, bp.address);
+                write_user_code(debugger, *dtb, bp.address, original.as_slice())?;
+                forget_site(debugger, &debugger.address_space(*dtb), bp.address);
                 client.note_breakpoint_uninstalled(bp.address.0);
                 Ok(())
             }
@@ -616,23 +615,88 @@ impl BreakpointManager {
     }
 }
 
-/// `error` from patching a breakpoint into the code at `address`, saying,
-/// when the target refused a user-mode site's write, the likely cause: with
-/// VBS enabled, Windows refuses KD writes to user-mode code (its status says
-/// nothing more). Writes go through KD whatever memory source reads use, and
-/// a hardware execution breakpoint there still fires.
-fn user_patch_error(debugger: &Target, address: VirtAddr, error: Error) -> Error {
+/// Write `bytes` over the user-mode code at `address` in `dtb`'s address
+/// space: a host-patched site's breakpoint instruction, or the instruction it
+/// displaced. The target writes it where it will. With VBS enabled, Windows
+/// refuses to write some user-mode code, such as ntdll's and kernelbase's,
+/// and on an x86 guest, whose processors see a write from outside it at once,
+/// the site's frame is then written through the host mapping of the guest's
+/// RAM, where there is one. That reaches the frame as the target's own write
+/// would have: a site in a shared image page is seen by every process mapping
+/// it either way (see the KD backend's `write_virtual_direct`).
+pub fn write_user_code(debugger: &Target, dtb: Dtb, address: VirtAddr, bytes: &[u8]) -> Result<()> {
+    let memory = debugger.address_space(dtb);
+    let refused = match memory.write_bytes(address, bytes) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    let frame = match memory.virt_to_phys(address) {
+        Ok(Some(translation)) if translation.residency == Residency::Mapped => translation.address,
+        _ => return Err(refused),
+    };
+    write_frame_through_host(debugger, frame, bytes)
+        .unwrap_or_else(|| Err(refused_patch_error(debugger, refused)))
+}
+
+/// Write a host-patched site's `bytes` at guest-physical `address` through
+/// the host mapping of the guest's RAM, on an x86 guest that has one: `None`
+/// otherwise. An ARM64 processor would go on running what its instruction
+/// cache holds, which the guest invalidates only for writes it makes itself.
+fn write_frame_through_host(
+    debugger: &Target,
+    address: PhysAddr,
+    bytes: &[u8],
+) -> Option<Result<()>> {
+    if debugger.arch().family() != Family::X86 {
+        return None;
+    }
+    debugger.phys.write_through_host(address, bytes)
+}
+
+/// `error`, from the target refusing to write a user-mode breakpoint site
+/// that is mapped, saying why and what works instead. Windows says nothing
+/// more than its status, or that it would not write the address.
+fn refused_patch_error(debugger: &Target, error: Error) -> Error {
+    let instead = if debugger.arch().family() == Family::X86 {
+        "read memory from the host (--memory-source host) for ntoseye to write the site itself, \
+         or use a hardware execution breakpoint, ba e1"
+    } else {
+        "use a hardware execution breakpoint, ba e1"
+    };
     match error {
-        Error::KdStatus { api, .. }
-            if api == DBGKD_WRITE_PHYSICAL_MEMORY
-                && !debugger.arch().paging().is_kernel_address(address) =>
-        {
-            Error::Breakpoint(format!(
-                "{error} (with VBS enabled, Windows refuses KD writes to user-mode code; use a \
-                 hardware execution breakpoint, ba e1, instead)"
-            ))
-        }
+        Error::KdStatus { .. } | Error::BadVirtualAddress(_) => Error::Breakpoint(format!(
+            "Windows refused to write the breakpoint ({error}): with VBS enabled, it refuses to \
+             write some user-mode code, such as ntdll's and kernelbase's; {instead}"
+        )),
         error => error,
+    }
+}
+
+/// Guest-physical memory as a host-patched site is restored in it: through
+/// the target, or, where the target refuses, the way [`write_user_code`]
+/// writes a site. The site journal repairs what a dead session left with it.
+pub struct SiteFrames<'a> {
+    debugger: &'a Target,
+}
+
+impl<'a> SiteFrames<'a> {
+    pub fn new(debugger: &'a Target) -> Self {
+        Self { debugger }
+    }
+}
+
+impl MemoryOps<PhysAddr> for SiteFrames<'_> {
+    fn read_bytes(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
+        self.debugger.phys.read_bytes(addr, buf)
+    }
+
+    fn write_bytes(&self, addr: PhysAddr, buf: &[u8]) -> Result<()> {
+        self.debugger
+            .phys
+            .write_bytes(addr, buf)
+            .or_else(|refused| {
+                write_frame_through_host(self.debugger, addr, buf).unwrap_or(Err(refused))
+            })
     }
 }
 

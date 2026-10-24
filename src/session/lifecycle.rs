@@ -17,7 +17,7 @@ use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::notice::Notice;
 use crate::base::types::VirtAddr;
-use crate::nt::breakpoints::{BreakpointManager, SiteJournal};
+use crate::nt::breakpoints::{BreakpointManager, SiteFrames, SiteJournal};
 use crate::nt::bugchecks::plausible_bugcheck_code;
 use crate::nt::cpu_state;
 use crate::nt::dmp::{DmpBackend, DmpInfo};
@@ -322,7 +322,8 @@ impl Session {
         let key = instance_key(resource);
         let journal = SiteJournal::open(&dir, &key, kernel_base.0);
         let opcode = self.target.arch().breakpoint_instruction();
-        let mut repair = journal.repair(self.target.phys.as_ref(), opcode);
+        let frames = SiteFrames::new(&self.target);
+        let mut repair = journal.repair(&frames, opcode);
         let orphaned = std::fs::read_dir(&dir)
             .into_iter()
             .flatten()
@@ -332,13 +333,7 @@ impl Session {
             let Some(_lock) = instance_lock(&other).ok().filter(SingleInstance::is_single) else {
                 continue;
             };
-            let found = SiteJournal::repair_orphaned(
-                &dir,
-                &other,
-                kernel_base.0,
-                self.target.phys.as_ref(),
-                opcode,
-            );
+            let found = SiteJournal::repair_orphaned(&dir, &other, kernel_base.0, &frames, opcode);
             repair.restored += found.restored;
             repair.failed += found.failed;
         }
