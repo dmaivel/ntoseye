@@ -1462,8 +1462,8 @@ fn successors_cover_both_branch_arms_and_resolve_returns_and_indirect_calls() {
 
 /// Transfers whose target is not a branch operand: `sysret` returns to RCX,
 /// `iretq` pops an 8-byte RIP and a 64-bit-mode `retf` a 4-byte one, a far
-/// `jmp [m16:32]` reads a 4-byte offset, and a hypercall comes back to the
-/// next instruction.
+/// `jmp [m16:32]` reads a 4-byte offset, and a hypercall and a user-mode
+/// system call come back to the next instruction.
 #[test]
 fn successors_follow_privilege_and_far_transfers() {
     let mut memory = vec![0x90u8; 0x80];
@@ -1472,6 +1472,8 @@ fn successors_follow_privilege_and_far_transfers() {
     memory[0x10] = 0xcb; // retf
     memory[0x18..0x1b].copy_from_slice(&[0x0f, 0x01, 0xc1]); // vmcall
     memory[0x20..0x22].copy_from_slice(&[0xff, 0x2b]); // jmp far [rbx]
+    memory[0x28..0x2a].copy_from_slice(&[0x0f, 0x05]); // syscall
+    memory[0x30..0x32].copy_from_slice(&[0xcd, 0x2e]); // int 0x2e
     memory[0x40..0x48].copy_from_slice(&0x1111_2222_3333_4444u64.to_le_bytes());
     memory[0x50..0x58].copy_from_slice(&0x5555_6666_7777_8888u64.to_le_bytes());
     let session = session_over_memory(0x1000, &memory);
@@ -1489,6 +1491,9 @@ fn successors_follow_privilege_and_far_transfers() {
     assert_eq!(successors(0x1010), [0x3333_4444]);
     assert_eq!(successors(0x1018), [0x101b]);
     assert_eq!(successors(0x1020), [0x7777_8888]);
+    // A user-mode system call comes back to the next instruction.
+    assert_eq!(successors(0x1028), [0x102a]);
+    assert_eq!(successors(0x1030), [0x1032]);
 }
 
 fn stepping_session(code: &[u8], backend: MockBackend) -> Session {

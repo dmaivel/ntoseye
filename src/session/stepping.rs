@@ -2238,6 +2238,10 @@ fn rip_of(
     register_map.read_u64(arch.pc_register(), &registers).ok()
 }
 
+/// `int 0x2e`: the system call of x86 Windows, which x64 ntdll's stubs still
+/// make when `SharedUserData` says `syscall` is not to be used.
+const SYSTEM_SERVICE_VECTOR: u8 = 0x2e;
+
 /// Every address execution can continue at after the instruction at `rip`,
 /// decoded from the guest (the site is already lifted) and resolved against
 /// the stopped vCPU's registers and memory. `thread` is the backend thread
@@ -2329,7 +2333,16 @@ fn instruction_successors(
             format!("{:?}", instruction.mnemonic()).to_ascii_lowercase()
         )));
     }
+    // A system call made from user mode continues, for the code that made
+    // it, at the next instruction once the kernel returns. The kernel's
+    // entry is where the processor goes, but nothing can be planted there
+    // (KVASCODE), and the thread comes back here.
+    let user_mode = !debugger.arch().paging().is_kernel_address(VirtAddr(rip));
     let mut successors = match instruction.code() {
+        Code::Syscall if user_mode => vec![instruction.next_ip()],
+        Code::Int_imm8 if user_mode && instruction.immediate8() == SYSTEM_SERVICE_VECTOR => {
+            vec![instruction.next_ip()]
+        }
         Code::Syscall => vec![system_call_entry(debugger, bitness)?],
         // `sysret` returns to RCX, `sysexit` to RDX; the 32-bit forms to
         // their low halves.
