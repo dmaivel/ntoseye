@@ -31,17 +31,25 @@ pub struct StoreLayout {
     pub virtual_flag: (u32, u8),
     /// `ST_STORE`: the pointer back to the store that embeds it.
     pub back_pointer: u32,
+    /// `ST_STORE`: the shift that takes a region key to its region index.
+    pub region_shift: u32,
+    /// `ST_STORE`: the mask that takes a region key to its offset in the
+    /// region, in 16-byte units.
+    pub region_offset_mask: u32,
 }
 
 /// The store layout `code` uses, when every anchor is found and agrees.
 pub fn derive(code: &KernelCode<'_>) -> Result<StoreLayout> {
     let owner_process = owner_process(code)?;
     let (region_array, virtual_flag, back_pointer) = region_fields(code)?;
+    let (region_shift, region_offset_mask) = region_key_fields(code)?;
     Ok(StoreLayout {
         owner_process,
         region_array,
         virtual_flag,
         back_pointer,
+        region_shift,
+        region_offset_mask,
     })
 }
 
@@ -285,12 +293,115 @@ fn region_fields(code: &KernelCode<'_>) -> Result<(u32, (u32, u8), u32)> {
     }
 }
 
+/// The `ST_STORE` fields that split a region key, from
+/// `StDmpSinglePageRetrieve`: the shift count (`mov ecx,[st+X]` then
+/// `shr r,cl`) and the offset mask (a field loaded or ANDed into the value
+/// that is then shifted left by 4, to bytes).
+fn region_key_fields(code: &KernelCode<'_>) -> Result<(u32, u32)> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    let retrieve = code.address("ST_STORE<SM_TRAITS>::StDmpSinglePageRetrieve")?;
+    // The `[x+D]` fields each register's value came from.
+    let mut origins: HashMap<Register, Vec<u32>> = HashMap::new();
+    let mut shifts: HashMap<u32, usize> = HashMap::new();
+    let mut masks: HashMap<u32, usize> = HashMap::new();
+    let instructions = code.instructions(retrieve);
+    for (index, instruction) in instructions.iter().enumerate() {
+        let instruction = *instruction;
+        let destination = (instruction.op0_kind() == OpKind::Register)
+            .then(|| instruction.op0_register().full_register());
+        let field = (instruction.op_count() > 1 && instruction.op1_kind() == OpKind::Memory)
+            .then(|| based_offset(&instruction))
+            .flatten();
+        match instruction.mnemonic() {
+            Mnemonic::Shr
+                if instruction.op1_kind() == OpKind::Register
+                    && instruction.op1_register() == Register::CL =>
+            {
+                if let Some([shift]) = origins.get(&Register::RCX).map(Vec::as_slice) {
+                    // A page-record lookup inlined here shifts too, then
+                    // takes the result's highest set bit; the region shift
+                    // does not.
+                    let shifted = instruction.op0_register().full_register();
+                    let chunk = instructions[index + 1..].iter().take(4).any(|next| {
+                        next.mnemonic() == Mnemonic::Bsr
+                            && next.op1_kind() == OpKind::Register
+                            && next.op1_register().full_register() == shifted
+                    });
+                    if !chunk {
+                        *shifts.entry(*shift).or_default() += 1;
+                    }
+                }
+                continue;
+            }
+            Mnemonic::Shl
+                if instruction.op1_kind() == OpKind::Immediate8
+                    && instruction.immediate8() == 4 =>
+            {
+                if let Some(fields) = destination.and_then(|r| origins.get(&r)) {
+                    // The key itself comes from a page record's first
+                    // fields; the store's own fields are further in.
+                    for field in fields.iter().filter(|field| **field >= 0x100) {
+                        *masks.entry(*field).or_default() += 1;
+                    }
+                }
+                continue;
+            }
+            Mnemonic::And if field.is_some() => {
+                if let Some(register) = destination {
+                    origins.entry(register).or_default().extend(field);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        let Some(register) = destination else {
+            continue;
+        };
+        let value = match (instruction.mnemonic(), instruction.op1_kind()) {
+            (Mnemonic::Mov, OpKind::Memory) => field.map(|f| vec![f]),
+            (Mnemonic::Mov, OpKind::Register) => origins
+                .get(&instruction.op1_register().full_register())
+                .cloned(),
+            // An AND with a register keeps both origins.
+            (Mnemonic::And, OpKind::Register) => {
+                let mut both = origins.get(&register).cloned().unwrap_or_default();
+                both.extend(
+                    origins
+                        .get(&instruction.op1_register().full_register())
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+                Some(both)
+            }
+            _ => None,
+        };
+        match value {
+            Some(fields) => origins.insert(register, fields),
+            None => origins.remove(&register),
+        };
+    }
+    Ok((
+        most(&shifts, "region shift")?,
+        most(&masks, "region offset mask")?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use iced_x86::code_asm::*;
 
     const BASE: u64 = 0x1_4000_0000;
+
+    /// A region key in r9d split as the retrieval does: its index by the
+    /// shift at 0x32c, its byte offset by the mask at 0x328.
+    fn region_key(a: &mut CodeAssembler) {
+        a.mov(ecx, dword_ptr(rbp + 0x32c)).unwrap();
+        a.mov(r12d, dword_ptr(rbp + 0x328)).unwrap();
+        a.and(r12d, r9d).unwrap();
+        a.shr(r9d, cl).unwrap();
+        a.shl(r12d, 4).unwrap();
+    }
 
     /// Functions assembled one per 0x100 bytes, by name.
     struct Builder {
@@ -345,6 +456,7 @@ mod tests {
                 let mut physical = a.create_label();
                 a.mov(rdi, qword_ptr(rbp + back)).unwrap();
                 a.test(byte_ptr(rdi + flag), 4).unwrap();
+                region_key(a);
                 a.je(physical).unwrap();
                 a.mov(rcx, rdi).unwrap();
                 a.call(map).unwrap();
@@ -379,6 +491,8 @@ mod tests {
                 region_array: 0x1b68,
                 virtual_flag: (0x1a95, 2),
                 back_pointer: 0x320,
+                region_shift: 0x32c,
+                region_offset_mask: 0x328,
             }
         );
     }
@@ -390,6 +504,35 @@ mod tests {
         builder.attaching_method("SmStTrimWsStore", 0x1d08);
         builder.retrieval(0x320, 0x1a95, 0x1b68);
         assert!(builder.derive().is_err());
+    }
+
+    #[test]
+    fn an_inlined_page_record_lookup_is_not_the_region_shift() {
+        let mut builder = Builder::new();
+        builder.attaching_method("SmStSwapStore", 0x1d00);
+        builder.attaching_method("SmStTrimWsStore", 0x1d00);
+        builder.function("SMKM_STORE<SM_TRAITS>::SmStMapVirtualRegion", |a| {
+            a.mov(rax, qword_ptr(rcx + 0x1b68)).unwrap();
+            a.lea(r14, qword_ptr(rax + rdi * 8)).unwrap();
+            a.ret().unwrap();
+        });
+        let map = builder.functions["SMKM_STORE<SM_TRAITS>::SmStMapVirtualRegion"];
+        builder.function("ST_STORE<SM_TRAITS>::StDmpSinglePageRetrieve", |a| {
+            // The chunk index, twice (a record and its redirect), as 24H2
+            // RTM inlines it, before the region key's own split.
+            for _ in 0..2 {
+                a.mov(ecx, dword_ptr(rbp + 0x1c8)).unwrap();
+                a.shr(edx, cl).unwrap();
+                a.bsr(ecx, edx).unwrap();
+            }
+            a.mov(rdi, qword_ptr(rbp + 0x320)).unwrap();
+            a.test(byte_ptr(rdi + 0x1a95), 4).unwrap();
+            region_key(a);
+            a.mov(rcx, rdi).unwrap();
+            a.call(map).unwrap();
+            a.ret().unwrap();
+        });
+        assert_eq!(builder.derive().unwrap().region_shift, 0x32c);
     }
 
     #[test]
@@ -409,6 +552,7 @@ mod tests {
             a.test(byte_ptr(rsi + 0x8ea), 1).unwrap();
             a.mov(rdi, qword_ptr(rbp + 0x320)).unwrap();
             a.test(byte_ptr(rdi + 0x1a95), 4).unwrap();
+            region_key(a);
             a.mov(rcx, rdi).unwrap();
             a.call(map).unwrap();
             a.ret().unwrap();
