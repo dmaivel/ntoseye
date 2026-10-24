@@ -763,7 +763,8 @@ fn misc_info_records_process_times_and_the_time_zone_in_effect() {
 /// from: the system, the process's ID and times, each thread with its TEB,
 /// context, captured stack and times (a thread without a context says so),
 /// each module with its path and CodeView record, the regions, and the
-/// memory, with a page that could not be read as zeros.
+/// memory, with a page that could not be read and a demand-zero page, which
+/// is not read, as zeros.
 #[test]
 fn a_written_minidump_reads_back_as_written() {
     use super::write::{
@@ -836,7 +837,8 @@ fn a_written_minidump_reads_back_as_written() {
             protect: 4,
             kind: 0x2_0000,
         }],
-        memory: vec![0x10_1000..0x10_3000, 0x20_0000..0x20_1000],
+        memory: vec![0x10_1000..0x10_3000, 0x20_0000..0x20_2000],
+        zero: std::iter::once(0x20_1000..0x20_2000).collect(),
     };
     let path = std::env::temp_dir().join(format!(
         "ntoseye-minidump-writer-{}.dmp",
@@ -846,7 +848,9 @@ fn a_written_minidump_reads_back_as_written() {
         &path,
         &process,
         |address, page| {
-            // The last page is unreadable; every other byte is its page's.
+            // 0x20_0000 is unreadable, and the demand-zero page after it
+            // is never read; every other byte is its page's.
+            assert_ne!(address, 0x20_1000, "a demand-zero page was read");
             page.fill((address >> 12) as u8);
             address != 0x20_0000
         },
@@ -912,7 +916,7 @@ fn a_written_minidump_reads_back_as_written() {
         .iter()
         .map(|range| (range.start, range.length))
         .collect();
-    assert_eq!(ranges, [(0x10_1000, 0x2000), (0x20_0000, 0x1000)]);
+    assert_eq!(ranges, [(0x10_1000, 0x2000), (0x20_0000, 0x2000)]);
     let at = |address: u64| {
         let range = parsed
             .memory
@@ -924,4 +928,5 @@ fn a_written_minidump_reads_back_as_written() {
     assert_eq!(at(0x10_1000), 0x01);
     assert_eq!(at(0x10_2fff), 0x02);
     assert_eq!(at(0x20_0000), 0);
+    assert_eq!(at(0x20_1fff), 0);
 }

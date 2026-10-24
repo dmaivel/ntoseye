@@ -96,6 +96,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - Over KD, connecting while a user thread was running (or Windows was stopped in a user process) no longer makes that process the kernel's for the session: ntoseye took the stopped processor's page tables for the kernel's, so the process showed as `kernel`, its addresses went unsymbolized, and its modules showed in every other process. The kernel's are now the System process's.
 - Ctrl+C while a filtered breakpoint fires faster than Windows polls for the break-in (a `ba /p` watch on a shared DLL) stops as a pause. After its retries it surfaced as an unexplained single-step exception in whatever process hit the watch last.
 - The stack of a WOW64 thread in a user-mode minidump goes on into its x86 frames, from the x86 context its TEB's CPU area saved, as on a kernel target.
+- `.dump /u` puts committed pages that the process never touched in the minidump, as the zeros they hold. They were left out as if their contents were unknown: in csrss from the kernel dump, 7 MiB.
 
 ### Removed
 

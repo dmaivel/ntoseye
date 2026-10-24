@@ -179,6 +179,7 @@ fn write_minidump(session: &mut Session, path: String) -> Result<MinidumpWrite> 
         modules: model.modules.len(),
         regions: model.regions.len(),
         captured_bytes: pages * PAGE_SIZE as u64,
+        demand_zero_bytes: model.zero.iter().map(|range| range.end - range.start).sum(),
         unreadable_pages,
     })
 }
@@ -202,9 +203,17 @@ impl Render for DumpWritten {
                 if dump.unreadable_pages != 0 {
                     outln!("{} pages unreadable (zero-filled)", dump.unreadable_pages);
                 }
+                let zeros = if dump.demand_zero_bytes == 0 {
+                    String::new()
+                } else {
+                    format!(
+                        " ({} MiB of it never touched, so zeros)",
+                        dump.demand_zero_bytes >> 20
+                    )
+                };
                 outln!(
                     "wrote a minidump of {} (PID {}) to {}: {} threads, {} modules, {} regions, \
-                     {} MiB of memory",
+                     {} MiB of memory{zeros}",
                     dump.process,
                     dump.pid,
                     dump.path,

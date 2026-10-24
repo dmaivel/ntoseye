@@ -296,26 +296,33 @@ fn used_stack(memory: &AddressSpace<'_, PhysMem>, teb: u64, sp: u64) -> Option<R
     (sp < base && base - sp <= 1 << 30).then_some(sp..base)
 }
 
-/// The memory a minidump of the process captures in `regions`: each region
-/// of at most [`PAGE_BY_PAGE_REGION`] wherever its pages translate, which
-/// takes pages in transition and shared pages not yet touched too; each
-/// larger one where its pages are present.
+/// The memory a minidump of the process captures in `regions`, and the
+/// part of it that is demand-zero: each committed region of at most
+/// [`PAGE_BY_PAGE_REGION`] wherever its pages translate, which takes pages
+/// in transition and shared pages not yet touched too, or are demand-zero
+/// (committed, never touched: zeros); each larger one where its pages are
+/// present.
 fn captured_memory(
     memory: &AddressSpace<'_, PhysMem>,
     regions: &[MinidumpRegion],
-) -> Vec<Range<u64>> {
+) -> (Vec<Range<u64>>, Vec<Range<u64>>) {
     let page = PAGE_SIZE as u64;
-    let mut ranges: Vec<Range<u64>> = Vec::new();
-    let mut add = |start: u64, end: u64| match ranges.last_mut() {
+    let add = |ranges: &mut Vec<Range<u64>>, start: u64, end: u64| match ranges.last_mut() {
         Some(last) if last.end == start => last.end = end,
         _ => ranges.push(start..end),
     };
+    let mut ranges = Vec::new();
+    let mut zero = Vec::new();
     for region in regions.iter().filter(|region| region.state == MEM_COMMIT) {
         let end = region.base + region.size;
         if region.size <= PAGE_BY_PAGE_REGION {
+            let private = region.kind == MEM_PRIVATE;
             for address in (region.base..end).step_by(PAGE_SIZE) {
                 if matches!(memory.virt_to_phys(VirtAddr(address)), Ok(Some(_))) {
-                    add(address, address + page);
+                    add(&mut ranges, address, address + page);
+                } else if memory.page_is_demand_zero(VirtAddr(address), private) {
+                    add(&mut ranges, address, address + page);
+                    add(&mut zero, address, address + page);
                 }
             }
         } else {
@@ -324,13 +331,13 @@ fn captured_memory(
                 VirtAddr(end),
                 |va, _, length| {
                     let start = va.0 & !(page - 1);
-                    add(start, (va.0 + length).next_multiple_of(page));
+                    add(&mut ranges, start, (va.0 + length).next_multiple_of(page));
                     ControlFlow::Continue(())
                 },
             );
         }
     }
-    ranges
+    (ranges, zero)
 }
 
 /// The model of a user-mode minidump of `process` (`.dump /u`), from a
@@ -488,7 +495,7 @@ pub fn collect_process_minidump(
             regions.extend(present_runs(&user, vad));
         }
     }
-    let memory = captured_memory(&user, &regions);
+    let (memory, zero) = captured_memory(&user, &regions);
 
     Ok(MinidumpProcess {
         system,
@@ -499,5 +506,6 @@ pub fn collect_process_minidump(
         modules,
         regions,
         memory,
+        zero,
     })
 }

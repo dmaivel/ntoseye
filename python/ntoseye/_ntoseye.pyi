@@ -11054,11 +11054,17 @@ class MinidumpWrite(BaseRecord):
     """
     A user-mode minidump that `.dump /u` wrote.
     """
-    __match_args__: Final[tuple[Literal["path"], Literal["process"], Literal["pid"], Literal["threads"], Literal["threads_without_context"], Literal["modules"], Literal["regions"], Literal["captured_bytes"], Literal["unreadable_pages"]]]
+    __match_args__: Final[tuple[Literal["path"], Literal["process"], Literal["pid"], Literal["threads"], Literal["threads_without_context"], Literal["modules"], Literal["regions"], Literal["captured_bytes"], Literal["demand_zero_bytes"], Literal["unreadable_pages"]]]
     @property
     def captured_bytes(self, /) -> int:
         """
         The bytes of memory the minidump holds.
+        """
+    @property
+    def demand_zero_bytes(self, /) -> int:
+        """
+        Of those, the bytes of committed pages never touched, which are
+        zeros.
         """
     @property
     def modules(self, /) -> int: ...

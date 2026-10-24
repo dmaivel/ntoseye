@@ -277,7 +277,7 @@ If the command cannot read a guest page, it writes zeros for that page and shows
 - each thread, with the user-mode registers that its stack walk recovers, its TEB, the used part of its user stack, and its times;
 - each module of the process's loader lists, with its CodeView record, so the PDBs are found without the images;
 - the regions of the address space as `VirtualQuery` reports them, so {command}`!address` and {command}`!vprot` work on the minidump;
-- every committed page of the process that is in physical memory, as a full-memory minidump holds it.
+- every committed page of the process that is in physical memory, as a full-memory minidump holds it, and every committed page the process has never touched, which holds zeros.
 
 A page that is in the page file is not in the minidump, and a region larger than 64 MiB, such as the CFG bitmap's reservation, is split by which of its pages are in memory. A thread whose kernel stack is not in memory, which is common in a kernel dump, has no registers in the minidump, and the command says how many threads have none. The minidump has no handle data.
 

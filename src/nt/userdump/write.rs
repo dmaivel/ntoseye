@@ -54,6 +54,9 @@ pub struct MinidumpWrite {
     pub regions: usize,
     /// The bytes of memory the minidump holds.
     pub captured_bytes: u64,
+    /// Of those, the bytes of committed pages never touched, which are
+    /// zeros.
+    pub demand_zero_bytes: u64,
     /// The pages that translated but could not be read, written as zeros.
     pub unreadable_pages: u64,
 }
@@ -129,6 +132,9 @@ pub struct MinidumpProcess {
     pub regions: Vec<MinidumpRegion>,
     /// The memory to capture: page-aligned, ascending, not overlapping.
     pub memory: Vec<Range<u64>>,
+    /// The pages of `memory` that were never touched (demand-zero): written
+    /// as zeros, not read. Ascending, not overlapping.
+    pub zero: Vec<Range<u64>>,
 }
 
 /// The streams before the memory data, laid out in one buffer whose first
@@ -453,12 +459,16 @@ pub fn write_minidump(
     writer.write_all(&streams.bytes)?;
     let mut buffer = vec![0u8; PAGE_SIZE];
     let mut unreadable = 0;
+    let mut zero = process.zero.iter().peekable();
     for range in &process.memory {
         for address in (range.start..range.end).step_by(PAGE_SIZE) {
             if should_cancel() {
                 return Err(Error::DebugInfo("dump canceled".into()));
             }
-            if !read_page(address, &mut buffer) {
+            while zero.next_if(|zero| zero.end <= address).is_some() {}
+            if zero.peek().is_some_and(|zero| zero.start <= address) {
+                buffer.fill(0);
+            } else if !read_page(address, &mut buffer) {
                 buffer.fill(0);
                 unreadable += 1;
             }

@@ -412,6 +412,18 @@ impl PageTableEntry {
         Some(VirtAddr(((self.0 as i64) >> 16) as u64))
     }
 
+    /// A Windows demand-zero PTE, its L1TF swizzle undone: a software PTE
+    /// that is neither a prototype nor in transition and has no page-file
+    /// location (`PageFileLow` bits 12-15, `PageFileHigh` bits 32-63). The
+    /// page is committed and was never touched, so it reads as zeros.
+    pub const fn is_demand_zero(self) -> bool {
+        const PAGE_FILE_BITS: u64 = 0xffff_ffff_0000_f000;
+        !self.is_present()
+            && !self.is_prototype()
+            && !self.is_transition()
+            && self.0 & PAGE_FILE_BITS == 0
+    }
+
     pub const fn page_frame(self) -> u64 {
         self.0 & PFN_MASK
     }
