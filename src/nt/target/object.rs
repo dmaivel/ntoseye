@@ -527,12 +527,18 @@ pub struct ResourceList {
     pub termination: ListTermination,
 }
 
+/// `_CM_KEY_NODE` (and KCB) flag of a hive's root key.
+const KEY_HIVE_ENTRY: u64 = 0x4;
+
 struct ObjectNameLayout {
     body_offset: u64,
     info_mask_offset: u64,
     creator_info_size: Option<u64>,
     name_info_size: u64,
     name_offset: u64,
+    /// `_OBJECT_HEADER_NAME_INFO.Directory`, the directory the object is
+    /// named in.
+    directory_offset: Option<u64>,
 }
 
 impl ObjectNameLayout {
@@ -689,7 +695,187 @@ impl Target {
             creator_info_size,
             name_info_size: name_info_type.size as u64,
             name_offset: name_info_type.field_offset("Name")?,
+            directory_offset: name_info_type.field_offset("Directory").ok(),
         })
+    }
+
+    /// The full path of a named object, through the directories it is named
+    /// in (`\Device\HarddiskVolume3`); `None` for an unnamed one.
+    fn kernel_object_path(&self, object: VirtAddr) -> Result<Option<String>> {
+        const MAX_DEPTH: usize = 32;
+        let layout = self.object_name_layout()?;
+        let memory = self.guest()?.ntoskrnl.memory();
+        let mut components = Vec::new();
+        let mut current = object;
+        for _ in 0..MAX_DEPTH {
+            let header = current - layout.body_offset;
+            let info_mask: u8 = memory.read(header + layout.info_mask_offset)?;
+            let Some(name_info) = layout.name_info_address(header, info_mask)? else {
+                break;
+            };
+            let name = self.read_kernel_unicode_string(name_info + layout.name_offset)?;
+            // The root directory is named `\`.
+            if name != "\\" {
+                components.push(name);
+            }
+            let Some(directory) = layout
+                .directory_offset
+                .map(|offset| memory.read_pointer(name_info + offset))
+                .transpose()?
+                .filter(|directory| !directory.is_zero())
+            else {
+                break;
+            };
+            current = directory;
+        }
+        if components.is_empty() {
+            return Ok(None);
+        }
+        components.reverse();
+        Ok(Some(format!("\\{}", components.join("\\"))))
+    }
+
+    /// A name for the object at `body` of type `type_name` that has none in
+    /// its header, as WinDbg's `!handle` gives one: a file's path on its
+    /// device, a process's image and PID, a thread's TID and process.
+    /// `None` for other types; keys are named by [`Self::name_key_handles`].
+    fn unnamed_object_name(&self, type_name: &str, body: VirtAddr) -> Result<Option<String>> {
+        let types = self.guest()?.ntoskrnl.types_in(self.kernel_dtb());
+        match type_name {
+            "File" => {
+                let file = types.struct_at("_FILE_OBJECT", body)?;
+                let name = file.unicode_string("FileName").unwrap_or_default();
+                let device = file
+                    .read_pointer("DeviceObject")
+                    .ok()
+                    .filter(|device| !device.is_zero())
+                    .and_then(|device| self.kernel_object_path(device).ok().flatten());
+                Ok(match (device, name.is_empty()) {
+                    (Some(device), _) => Some(format!("{device}{name}")),
+                    (None, false) => Some(name),
+                    (None, true) => None,
+                })
+            }
+            // Named in one pass per listing (see `name_key_handles`), which
+            // reads the registry once.
+            "Key" => Ok(None),
+            "Process" => {
+                let process = types.struct_at("_EPROCESS", body)?;
+                let pid = process.read_pointer("UniqueProcessId")?.0;
+                let image = process.read_field_bytes("ImageFileName", 15)?;
+                let end = image
+                    .iter()
+                    .position(|&byte| byte == 0)
+                    .unwrap_or(image.len());
+                Ok(Some(format!(
+                    "{} (PID {pid})",
+                    String::from_utf8_lossy(&image[..end])
+                )))
+            }
+            "Thread" => {
+                let thread = self.thread_info_from_ethread(body)?;
+                Ok(thread
+                    .tid
+                    .map(|tid| match (&thread.process_name, thread.pid) {
+                        (Some(process), Some(pid)) => format!("TID {tid} ({process}, PID {pid})"),
+                        _ => format!("TID {tid}"),
+                    }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Name the key handles of `entries` with their registry paths, reading
+    /// the registry once: as the hives name the keys, else, upper-cased, from
+    /// the names their control blocks keep.
+    fn name_key_handles(&self, entries: &mut [HandleEntry]) {
+        let Ok(types) = self
+            .guest()
+            .map(|guest| guest.ntoskrnl.types_in(self.kernel_dtb()))
+        else {
+            return;
+        };
+        let keys: Vec<(usize, VirtAddr)> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                matches!(&entry.type_name, DiagnosticValue::Available(Some(name)) if name == "Key")
+                    && matches!(entry.name, DiagnosticValue::Available(None))
+            })
+            .filter_map(|(index, entry)| {
+                let DiagnosticValue::Available(body) = entry.object else {
+                    return None;
+                };
+                let kcb = types
+                    .struct_at("_CM_KEY_BODY", body)
+                    .and_then(|key| key.read_pointer("KeyControlBlock"))
+                    .ok()?;
+                Some((index, kcb))
+            })
+            .collect();
+        if keys.is_empty() {
+            return;
+        }
+        let kcbs: Vec<VirtAddr> = keys.iter().map(|&(_, kcb)| kcb).collect();
+        let paths = self.registry_key_paths(&kcbs);
+        for ((index, kcb), path) in keys.into_iter().zip(paths) {
+            if let Some(path) = path.or_else(|| self.key_path(kcb).ok()) {
+                entries[index].name = DiagnosticValue::Available(Some(path));
+            }
+        }
+    }
+
+    /// The registry path of the key whose control block is `kcb`, from the
+    /// names it and its parents keep, upper-cased
+    /// (`\REGISTRY\MACHINE\SOFTWARE`).
+    fn key_path(&self, kcb: VirtAddr) -> Result<String> {
+        const MAX_DEPTH: usize = 512;
+        let types = self.guest()?.ntoskrnl.types_in(self.kernel_dtb());
+        let kcb_layout = types.layout("_CM_KEY_CONTROL_BLOCK")?;
+        let name_layout = types.layout("_CM_NAME_CONTROL_BLOCK")?;
+        let name_offset = name_layout.field_offset("Name")?;
+        let memory = self.kernel_address_space();
+        let mut components = Vec::new();
+        let mut current = kcb;
+        for _ in 0..MAX_DEPTH {
+            if current.is_zero() {
+                break;
+            }
+            let block: VirtAddr =
+                VirtAddr(self.read_kernel_layout_field(&kcb_layout, current, "NameBlock")?);
+            let compressed =
+                self.extract_kernel_layout_bits(&name_layout, block, "Compressed")? != 0;
+            let length: u16 = self.read_kernel_layout_field(&name_layout, block, "NameLength")?;
+            let mut bytes = vec![0u8; usize::from(length)];
+            memory.read_bytes(block + name_offset, &mut bytes)?;
+            // A compressed name keeps one byte per character.
+            components.push(if compressed {
+                bytes.iter().map(|&byte| char::from(byte)).collect()
+            } else {
+                let units: Vec<u16> = bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&pair| u16::from_le_bytes(pair))
+                    .collect();
+                String::from_utf16_lossy(&units)
+            });
+            let parent =
+                VirtAddr(self.read_kernel_layout_field(&kcb_layout, current, "ParentKcb")?);
+            // A hive's root (KEY_HIVE_ENTRY) hangs under the hive's link in
+            // the master hive, which has the same name: the path names it
+            // once.
+            let hive_root = self.extract_kernel_layout_bits(&kcb_layout, current, "Flags")?
+                & KEY_HIVE_ENTRY
+                != 0;
+            current = if hive_root && !parent.is_zero() {
+                VirtAddr(self.read_kernel_layout_field(&kcb_layout, parent, "ParentKcb")?)
+            } else {
+                parent
+            };
+        }
+        components.reverse();
+        Ok(format!("\\{}", components.join("\\")))
     }
 
     fn read_kernel_object_name(
@@ -1203,7 +1389,12 @@ impl Target {
             Err(error) => DiagnosticValue::unavailable(error.to_string()),
         };
         let name = match &header {
-            Ok(header) => DiagnosticValue::Available(header.name.clone()),
+            Ok(header) => DiagnosticValue::Available(header.name.clone().or_else(|| {
+                let type_name = header.type_name.as_deref()?;
+                self.unnamed_object_name(type_name, header.body)
+                    .ok()
+                    .flatten()
+            })),
             Err(error) => DiagnosticValue::unavailable(error.to_string()),
         };
 
@@ -1292,6 +1483,7 @@ impl Target {
                 entries.push(decoded);
             }
         }
+        self.name_key_handles(&mut entries);
         Ok(HandleTable {
             process,
             table,
@@ -1321,7 +1513,10 @@ impl Target {
             )));
         }
         let entry = self.handle_entry_address(table_base, level, index, entry_layout.size)?;
-        Ok(self.decode_handle_entry(&entry_layout, entry, handle))
+        let mut entries = [self.decode_handle_entry(&entry_layout, entry, handle)];
+        self.name_key_handles(&mut entries);
+        let [entry] = entries;
+        Ok(entry)
     }
 
     /// Decode a `_FILE_OBJECT` strictly from the loaded kernel PDB layout.
@@ -2044,6 +2239,7 @@ mod tests {
             creator_info_size: Some(0x20),
             name_info_size: 0x20,
             name_offset: 0x08,
+            directory_offset: Some(0x00),
         };
         let header = VirtAddr(0x1000);
 
@@ -2070,6 +2266,7 @@ mod tests {
             creator_info_size: None,
             name_info_size: 0x20,
             name_offset: 0x08,
+            directory_offset: Some(0x00),
         };
 
         let error = layout

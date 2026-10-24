@@ -1816,6 +1816,37 @@ impl Target {
     pub fn registry_subkey_names(&self, path: &str) -> Result<Vec<String>> {
         self.registry()?.1.subkey_names(path)
     }
+
+    /// The full path of the key each key control block (KCB) in `kcbs`
+    /// stands for, as its hive names it (`\REGISTRY\MACHINE\SOFTWARE\Microsoft`),
+    /// from its hive and cell; `None` for one whose key does not read. The
+    /// registry is read once for all of them.
+    pub fn registry_key_paths(&self, kcbs: &[VirtAddr]) -> Vec<Option<String>> {
+        let Ok((_, registry)) = self.registry() else {
+            return vec![None; kcbs.len()];
+        };
+        let Ok(layout) = self
+            .guest()
+            .and_then(|guest| guest.ntoskrnl.types().layout("_CM_KEY_CONTROL_BLOCK"))
+        else {
+            return vec![None; kcbs.len()];
+        };
+        kcbs.iter()
+            .map(|&kcb| {
+                let hive = VirtAddr(
+                    self.read_kernel_layout_field(&layout, kcb, "KeyHive")
+                        .ok()?,
+                );
+                let cell: u32 = self
+                    .read_kernel_layout_field(&layout, kcb, "KeyCell")
+                    .ok()?;
+                let location = registry.cell_location(hive, cell).ok()?;
+                // The node follows the cell's size field.
+                let key = registry.key_at(hive, location.address + 4u64).ok()?;
+                Some(key.path)
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
