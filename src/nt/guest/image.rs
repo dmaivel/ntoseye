@@ -225,6 +225,11 @@ impl Image {
     /// Resolve this object's struct/type namespace, read in its own address
     /// space. Use [`types_in`](Self::types_in) to read the same types from a
     /// different `dtb` (e.g. ntoskrnl's kernel types against a process's space).
+    /// The symbol store the image's symbols load into.
+    pub fn symbols(&self) -> &Arc<SymbolStore> {
+        &self.symbols
+    }
+
     pub fn types(&self) -> Types<'_> {
         self.types_in(self.dtb)
     }

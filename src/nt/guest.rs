@@ -576,7 +576,7 @@ impl Guest {
     }
 
     fn with_kernel(ntoskrnl: Image) -> Result<Self> {
-        let ntoskrnl = ntoskrnl.load_symbols()?;
+        let ntoskrnl = Self::in_system_space(ntoskrnl.load_symbols()?)?;
         // Type/enum layout lookups prefer the kernel's definitions over
         // same-named user-mode types once attached to a process; tell the
         // symbol store which guid is the kernel's.
@@ -652,10 +652,67 @@ impl Guest {
             }
             Err(e) => return Err(e),
         };
+        let ntoskrnl = if is_triage {
+            ntoskrnl
+        } else {
+            Self::in_system_space(ntoskrnl)?
+        };
 
         ntoskrnl.register_as_kernel();
         Ok(Self::from_kernel(ntoskrnl))
     }
+
+    /// `ntoskrnl`, its symbols loaded in the address space a transport
+    /// named, moved to the System process's. KD names the stopped
+    /// processor's, which is a user process's when the break-in interrupted
+    /// one, and a dump header the one current at the crash; the kernel's
+    /// modules are keyed by the kernel's space, which the symbol store shows
+    /// from every process, so under a user process's space that process's
+    /// own modules would show from every process too. The PDB is loaded
+    /// already, so the second load only registers the module. AArch64's
+    /// kernel root is TTBR1, which no process switch changes, and a
+    /// process's `DirectoryTableBase` is its TTBR0, so it is left alone.
+    fn in_system_space(ntoskrnl: Image) -> Result<Image> {
+        if ntoskrnl.arch() != Arch::Amd64 {
+            return Ok(ntoskrnl);
+        }
+        let Some(system) = system_dtb(&ntoskrnl) else {
+            return Ok(ntoskrnl);
+        };
+        let mask = ntoskrnl.arch().dtb_page_mask();
+        if system == ntoskrnl.dtb() & mask {
+            return Ok(ntoskrnl);
+        }
+        ntoskrnl.symbols().clear_modules_for_dtb(ntoskrnl.dtb());
+        Image::new(
+            ntoskrnl.phys.clone(),
+            ntoskrnl.symbols().clone(),
+            system,
+            ntoskrnl.base_address,
+            ntoskrnl.arch(),
+        )
+        .load_symbols()
+    }
+}
+
+/// The System process's address-space root, `PsInitialSystemProcess`'s
+/// `KPROCESS.DirectoryTableBase`, masked to its page as a transport's
+/// kernel root is.
+fn system_dtb(kernel: &Image) -> Option<Dtb> {
+    let system = kernel
+        .symbol("PsInitialSystemProcess")
+        .ok()?
+        .read_pointer()
+        .ok()?;
+    let types = kernel.types();
+    let pcb = types.layout("_EPROCESS").ok()?.field_offset("Pcb").ok()?;
+    let offset = types
+        .layout("_KPROCESS")
+        .ok()?
+        .field_offset("DirectoryTableBase")
+        .ok()?;
+    let dtb = kernel.memory().read::<u64>(system + pcb + offset).ok()?;
+    Some(dtb & kernel.arch().dtb_page_mask()).filter(|dtb| *dtb != 0)
 }
 
 /// The kernel's `MiState.Hardware.InvalidPteMask`: the bits it sets in a
