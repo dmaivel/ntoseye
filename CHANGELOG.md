@@ -48,6 +48,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - Stacks are numbered as `k` numbers them (`00`, `01`) everywhere, the stop's and `!thread`'s too, and every stack in `k`'s layout has its header row (` # Child-SP  IP  Call Site`). A frame without a symbol shows its address in the call site, and a stop names its thread as `!thread` does (`thread ffffb10918a7f080  TID 10236  PID 6532  process svchost.exe`).
 - `r` with a frame or a context selected shows the register grid, with `-` for a register the frame did not save, as plain `r` does. It listed the registers one per line, sorted by name as text.
 - A bad argument to a hypervisor command (`!hvvps`, `!hvept`, `!hvcalls`, `!hvd`, `.partition` and the others) says which argument is wrong, then the usage line. They printed the whole help text.
+- `attach` and `.process /i` also select a thread of the process, so `!teb`, `!gle`, and `k` show it without a `.thread`: the thread a processor runs, with its live registers, else its first whose kernel stack is resident. They say which they selected. `.process` without `/i` still keeps the current thread, as WinDbg's does.
 
 ### Fixed
 

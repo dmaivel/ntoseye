@@ -8,8 +8,11 @@ use crate::backend::dbg_backend::{DebugCapability, processor_index_from_backend_
 use crate::base::error::{Error, Result};
 use crate::base::memory::DTB_IDENTITY;
 use crate::base::types::VirtAddr;
+use crate::nt::guest::ProcessInfo;
 use crate::nt::guest::hypervisor::guest_vp_label;
-use crate::nt::target::{HYPERVISOR_CONTEXT, SelectedFrame, Target, ThreadInfo};
+use crate::nt::target::{
+    HYPERVISOR_CONTEXT, KTHREAD_STATE_TERMINATED, SelectedFrame, Target, ThreadInfo,
+};
 use crate::nt::unwind::{
     UNKNOWN_CONTEXT, guest_vp_running, halted_in_windows_hypervisor, resolve_thread_trace_context,
     resolve_thread_trace_context_at, saved_vtls, try_format_symbol,
@@ -792,6 +795,49 @@ impl Session {
     /// included), sorted by `(pid, tid)`. Returns the threads plus a map of
     /// `ETHREAD -> vCPU id` for those currently running; hosts apply their own
     /// filtering/rendering.
+    /// Select a thread of `process` (see [`Self::select_windows_thread`]):
+    /// one a processor runs, whose registers are live, else, by its stack,
+    /// its first whose kernel stack is resident, or its first that has not
+    /// terminated. What a host selects after switching
+    /// to a process, so the thread's own views (`!teb`, `!gle`, `k`) are the
+    /// process's. `None` when the process has no thread to select.
+    pub fn select_process_thread(
+        &mut self,
+        process: &ProcessInfo,
+    ) -> Result<Option<(ThreadInfo, ThreadContext)>> {
+        let running = if self.backend.is_running() {
+            None
+        } else {
+            self.active_thread_map()
+                .into_values()
+                .map(|(_, thread)| thread)
+                .filter(|thread| thread.eprocess == Some(process.eprocess))
+                .min_by_key(|thread| thread.tid)
+        };
+        let thread = match running {
+            Some(thread) => thread,
+            None => {
+                let threads: Vec<ThreadInfo> = self
+                    .target
+                    .enumerate_threads_for_process_info(process)?
+                    .into_iter()
+                    .filter(|thread| thread.state != Some(KTHREAD_STATE_TERMINATED))
+                    .collect();
+                // One whose kernel stack is resident can be walked.
+                let walkable = threads
+                    .iter()
+                    .position(|thread| thread.kernel_stack_resident == Some(true))
+                    .unwrap_or(0);
+                match threads.into_iter().nth(walkable) {
+                    Some(thread) => thread,
+                    None => return Ok(None),
+                }
+            }
+        };
+        let context = self.select_windows_thread(&thread)?;
+        Ok(Some((thread, context)))
+    }
+
     pub fn windows_threads(&mut self) -> Result<(Vec<ThreadInfo>, HashMap<u64, String>)> {
         let active = self.active_thread_map();
         let mut threads = self.target.enumerate_threads()?;

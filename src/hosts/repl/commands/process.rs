@@ -4,6 +4,7 @@ use tabled::builder::Builder;
 
 use ntoseye_macros::{command, grammar};
 
+use crate::base::diagnostics;
 use crate::base::error::{Error, Result};
 use crate::base::time::filetime_to_iso;
 use crate::base::types::VirtAddr;
@@ -15,7 +16,7 @@ use crate::nt::guest::ProcessInfo;
 use crate::nt::symbols::glob_matches;
 use crate::nt::target::sched::ProcessDetail;
 use crate::nt::target::{AttachReport, decimal_pid_literal, process_by_name, process_matches};
-use crate::session::Session;
+use crate::session::{Session, ThreadContext};
 
 use super::thread::{THREAD_STACK_LIMIT, print_thread_detail};
 
@@ -220,9 +221,11 @@ fn process_context_selector(
 
 /// Select a process address space to inspect.
 ///
-/// In this debugger, `/i` is the same as attach. `/p` and `/r` select the
-/// same non-invasive context. With no argument, the command prints the
-/// current process context.
+/// In this debugger, `/i` is the same as attach: it also selects a thread
+/// of the process, one a processor runs if there is one, else its first, so
+/// `!teb`, `!gle`, and `k` show that thread. `/p` and `/r` select the same
+/// non-invasive context, keeping the current thread. With no argument, the
+/// command prints the current process context.
 #[command(
     names = [".process"],
     category = "processes and modules",
@@ -232,7 +235,7 @@ fn process_context_selector(
 )]
 fn process_context(
     state: &mut ReplState<'_>,
-    #[arg(switch = "/i")] _invasive: bool,
+    #[arg(switch = "/i")] invasive: bool,
     #[arg(switch = "/p")] _translate: bool,
     #[arg(switch = "/r")] _reload: bool,
     #[arg(parse = process_context_selector)] selection: Option<ProcessContext>,
@@ -262,10 +265,46 @@ fn process_context(
         if process.is_wow64() { ", WOW64" } else { "" },
     );
     print_user_modules(&report);
+    if invasive {
+        select_process_thread(state, &process);
+    }
     Ok(())
 }
 
+/// Select a thread of `process`, which a host just switched to, and say
+/// which: the one a processor runs, else its first (see
+/// [`Session::select_process_thread`]).
+fn select_process_thread(state: &mut ReplState<'_>, process: &ProcessInfo) {
+    match state.ctx.select_process_thread(process) {
+        Ok(Some((thread, context))) => {
+            let tid = thread
+                .tid
+                .map_or_else(|| "-".to_string(), |tid| tid.to_string());
+            match context {
+                ThreadContext::Live(vcpu) | ThreadContext::SavedVtl0(vcpu) => outln!(
+                    "thread {} (TID {tid}), running on {}",
+                    ui::addr(thread.ethread.0),
+                    ui::thread(&vcpu)
+                ),
+                ThreadContext::Parked => outln!(
+                    "thread {} (TID {tid}), by its stack: no processor runs a thread of the process",
+                    ui::addr(thread.ethread.0)
+                ),
+            }
+            state.caches.refresh_symbol_context(&state.ctx.target);
+        }
+        Ok(None) => outln!("{}", ui::muted("the process has no thread to select")),
+        Err(error) => {
+            diagnostics::print_warning(format!("did not select a thread of the process: {error}"))
+        }
+    }
+}
+
 /// Attach to a process by PID.
+///
+/// The command also selects a thread of the process, as .process /i does:
+/// one a processor runs, whose registers are live, else its first, by its
+/// stack.
 #[command(
     names = ["attach"],
     category = "processes and modules",
@@ -294,6 +333,7 @@ fn attach(state: &mut ReplState<'_>, #[arg(complete = Process)] pid: String) -> 
             state.clear_selected_frame();
             outln!("attached to {} (PID {})", report.name, process.pid);
             print_user_modules(&report);
+            select_process_thread(state, &process);
         }
         Err(e) => error!("failed to attach: {}", e),
     }
