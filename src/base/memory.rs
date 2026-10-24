@@ -665,7 +665,7 @@ impl<'a, B: MemoryOps<PhysAddr>> MemoryOps<VirtAddr> for AddressSpace<'a, B> {
                     return Err(Error::PartialWrite(offset));
                 }
                 return Err(Error::DebugInfo(format!(
-                    "{curr_vaddr} is resident but not mapped ({reason}); \
+                    "{curr_vaddr:#x} is resident but not mapped ({reason}); \
                      it cannot be written until the target faults it back in"
                 )));
             }
