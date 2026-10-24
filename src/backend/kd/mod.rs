@@ -81,6 +81,21 @@ pub use file_io::*;
 mod event_loop;
 pub use event_loop::*;
 
+/// `DBGKD_LOAD_SYMBOLS64`, and the image path KD sends after the state
+/// change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LoadSymbols {
+    base: VirtAddr,
+    size: u32,
+    /// `ProcessId`, which for a user-mode image carries the low 32 bits of
+    /// the `EPROCESS` mapping it: Windows passes the process object and KD
+    /// keeps 32 bits of it.
+    process: u64,
+    /// `UnloadSymbols`: the image is unloading.
+    unload: bool,
+    path: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct StateChange {
     processor: u16,
@@ -90,11 +105,12 @@ pub struct StateChange {
     exception_first_chance: Option<bool>,
     exception_address: Option<u64>,
     program_counter: u64,
+    /// The base of the kernel image a load-symbols state change reports
+    /// (the kernel's own, for the first after a boot).
     kernel_base_hint: Option<VirtAddr>,
-    /// `DBGKD_LOAD_SYMBOLS64.UnloadSymbols` of a load-symbols state change:
-    /// the image at `kernel_base_hint` is unloading. False for every other
+    /// What a load-symbols state change reports; `None` for every other
     /// kind.
-    unload_symbols: bool,
+    load_symbols: Option<LoadSymbols>,
     is_bugcheck: bool,
     bugcheck: Option<BugcheckInfo>,
     target_reloaded: bool,

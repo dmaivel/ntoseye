@@ -8,7 +8,9 @@ use super::stepping::{
 };
 use super::*;
 use crate::arch::{Arch, HwBreakpointAccess, RegisterInfo, amd64::REGISTER_BUFFER_SIZE, arm64};
-use crate::backend::dbg_backend::{ContinueDisposition, TrapState, clear_trap_flag};
+use crate::backend::dbg_backend::{
+    ContinueDisposition, ModuleNotification, TrapState, clear_trap_flag,
+};
 use crate::backend::partition_backend::PartitionVp;
 use crate::base::memory::PAGE_SIZE;
 use crate::base::types::VirtAddr;
@@ -3353,7 +3355,13 @@ fn a_kd_module_notification_stops_only_for_its_own_filter() {
     let notification = |event| {
         let mut stop = module_change_event();
         stop.target_kernel_base_hint = Some(VirtAddr(0x2000));
-        stop.module_event = Some((event, VirtAddr(0x2000)));
+        stop.module_event = Some(ModuleNotification {
+            kind: event,
+            base: VirtAddr(0x2000),
+            size: 0,
+            path: None,
+            process: None,
+        });
         stop
     };
 
@@ -3404,6 +3412,56 @@ fn a_kd_module_notification_stops_only_for_its_own_filter() {
         panic!("expected a module-unload stop, got {resolution:?}");
     };
     assert_eq!(module.name, "driver.sys");
+    assert_eq!(continues.load(Ordering::Relaxed), 1);
+}
+
+/// With `!gflag +ksl`, KD reports the user-mode images processes map. The
+/// kernel module list does not hold them, so the `ld` filters match the
+/// path the notification names: a filter for the DLL stops there, one for
+/// another module lets the load continue.
+#[test]
+fn a_user_image_notification_is_filtered_by_its_path() {
+    let user_load = || {
+        let mut stop = module_change_event();
+        stop.modules_changed = false;
+        stop.module_event = Some(ModuleNotification {
+            kind: ModuleEvent::Load,
+            base: VirtAddr(0x7ff8_0000_0000),
+            size: 0x4_0000,
+            path: Some(r"\Windows\System32\MyDll.dll".to_string()),
+            process: Some(0xf63e_c080),
+        });
+        stop
+    };
+
+    let (mut session, _, _, continues) = session_at_module_trap(ModuleEvent::Load);
+    session.module_traps.clear();
+    session.exception_policies.set_module_event(
+        ModuleEvent::Load,
+        Some("other".into()),
+        ExceptionPolicyMode::Break,
+        None,
+    );
+    assert!(matches!(
+        session.classify_stop_event(user_load()).unwrap(),
+        StopResolution::ModulesChanged
+    ));
+    assert_eq!(continues.load(Ordering::Relaxed), 1);
+
+    session.exception_policies.set_module_event(
+        ModuleEvent::Load,
+        Some("mydll".into()),
+        ExceptionPolicyMode::Break,
+        None,
+    );
+    let resolution = session.classify_stop_event(user_load()).unwrap();
+    let StopResolution::ModuleLoad { module, .. } = resolution else {
+        panic!("expected a module-load stop, got {resolution:?}");
+    };
+    assert_eq!(module.name, "MyDll.dll");
+    assert_eq!(module.short_name, "mydll");
+    assert_eq!(module.base_address, VirtAddr(0x7ff8_0000_0000));
+    assert_eq!(module.end_address(), VirtAddr(0x7ff8_0004_0000));
     assert_eq!(continues.load(Ordering::Relaxed), 1);
 }
 

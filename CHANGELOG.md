@@ -29,6 +29,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - A stop at an `int3` that Windows executes on purpose says why it broke in. The first is a resource timeout: when a thread waits for an executive resource (ERESOURCE) longer than the timeout, Windows breaks in at `nt!ExpWaitForResource`, and the stop now says so and points to `!locks`.
 - `!runaway [flags]` shows how much processor time each thread of the current process has used, most first, as WinDbg's does: user-mode time (`1`, the default), kernel-mode time (`2`), and time since the thread started (`4`). It works on a kernel target, from each thread's tick counts, and on a user-mode minidump, from its thread-info stream. The SDK has it as `Process.thread_times()` and `UserProcess.thread_times()`.
 - `!cs [-l] [address]` lists the critical sections of the current process, as ntdll keeps them on `RtlCriticalSectionList`, or shows one: whether a thread holds it, the owner's TID, its recursion count, how many threads wait for it, and how often threads have waited. `-l` lists only the held ones. It works on a kernel target and on a user-mode minidump; the SDK has `Process.critical_sections()` and `critical_section(address)`, and the same on `UserProcess`.
+- Over KD and KDNET, with `!gflag +ksl` set, `sxe ld:<module>` and `sxn ld` apply to the user-mode DLLs and executables that processes map, and a deferred `bu /p <pid> <module>!<symbol>` is armed in that process as the module is mapped, before its entry point runs: its symbols load from the image, and a breakpoint in a page not yet in memory goes to the target's breakpoint table, which writes it when the page arrives. Windows reports each image once, when the first process maps it; see the breakpoints guide.
 
 ### Changed
 
@@ -90,6 +91,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - `!locks` shows an exclusively owned resource with its one owner. It also listed the shared owners its owner table kept from before, as if they owned it too.
 - A hardware execute breakpoint (`ba e`) is no longer missed when the stop's DR6 does not say which slot fired, as Windows with VBS on reports some hits under KVM. Such a hit was taken for a stray single step and resumed, so it faulted again, and could surface as an unexplained single-step exception: a `ba /p` watch on a shared DLL stopped in other processes.
 - Over KD, the first `g` no longer stops at once at `nt!DbgBreakPointWithStatus` when ntoseye connected to a guest already halted at a break of its own, such as a user-mode `int 3` or a resource timeout. The kernel kept the break-in the connect sent and took it on its first clock tick.
+- Over KD, a user-mode image that Windows reports with `!gflag +ksl` is no longer taken for a kernel module: each one triggered a refresh of the kernel module list, and its base was offered as a hint at where the kernel is.
 
 ### Removed
 

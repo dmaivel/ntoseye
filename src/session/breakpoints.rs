@@ -827,7 +827,7 @@ impl Session {
         self.reconcile_deferred_breakpoints();
     }
 
-    fn reconcile_deferred_breakpoints(&mut self) {
+    pub fn reconcile_deferred_breakpoints(&mut self) {
         // Deferred breakpoints name the target's symbols; a partition view's
         // are another kernel's, which would move them into the wrong guest.
         if self.partition().is_some() {

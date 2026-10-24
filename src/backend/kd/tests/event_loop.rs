@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::thread::spawn;
 use std::time::Instant;
 
-use crate::backend::dbg_backend::ModuleEvent;
+use crate::backend::dbg_backend::{ModuleEvent, ModuleNotification};
 use crate::backend::kd::amd64::{reported_dr7, trap_state};
 use crate::backend::kd::framing::{
     BREAKIN_BYTE, HEADER_SIZE, INITIAL_PACKET_ID, PACKET_TYPE_KD_ACKNOWLEDGE,
@@ -30,7 +30,7 @@ fn transparent_arm64_state_change_uses_arm64_continue_layout() {
         exception_address: None,
         program_counter: 0xffff_f800_1234_5678,
         kernel_base_hint: None,
-        unload_symbols: false,
+        load_symbols: None,
         is_bugcheck: false,
         bugcheck: None,
         target_reloaded: false,
@@ -140,7 +140,7 @@ fn load_symbols_unload_flag_separates_loads_from_unloads() {
     let load = stop_event(parse_state_change(&payload).unwrap());
     assert!(load.modules_changed);
     assert_eq!(
-        load.module_event,
+        load.module_event.map(|event| (event.kind, event.base)),
         Some((ModuleEvent::Load, VirtAddr(0xfffff807_12340000)))
     );
 
@@ -148,12 +148,43 @@ fn load_symbols_unload_flag_separates_loads_from_unloads() {
     let unload = stop_event(parse_state_change(&payload).unwrap());
     assert!(unload.modules_changed);
     assert_eq!(
-        unload.module_event,
+        unload.module_event.map(|event| (event.kind, event.base)),
         Some((ModuleEvent::Unload, VirtAddr(0xfffff807_12340000)))
     );
     assert_eq!(
         unload.target_kernel_base_hint,
         Some(VirtAddr(0xfffff807_12340000))
+    );
+}
+
+/// With `!gflag +ksl` the kernel reports each user-mode image it maps: the
+/// path follows the 240-byte state change, and `ProcessId` carries the
+/// mapping process's `EPROCESS`, of which KD keeps 32 bits. A user-mode base
+/// is no hint at the kernel, and the kernel's module list is unchanged.
+#[test]
+fn a_user_image_load_names_its_path_size_and_process() {
+    let path = b"\\Windows\\System32\\ws2_32.dll\0";
+    let mut payload = vec![0u8; 240];
+    payload[0..4].copy_from_slice(&DBG_KD_LOAD_SYMBOLS_STATE_CHANGE.to_le_bytes());
+    payload[8..12].copy_from_slice(&4u32.to_le_bytes());
+    payload[32..36].copy_from_slice(&(path.len() as u32).to_le_bytes());
+    payload[40..48].copy_from_slice(&0x7fff_a141_0000u64.to_le_bytes());
+    payload[48..56].copy_from_slice(&0xf63e_c080u64.to_le_bytes());
+    payload[60..64].copy_from_slice(&0x81000u32.to_le_bytes());
+    payload.extend_from_slice(path);
+
+    let load = stop_event(parse_state_change(&payload).unwrap());
+    assert!(!load.modules_changed);
+    assert_eq!(load.target_kernel_base_hint, None);
+    assert_eq!(
+        load.module_event,
+        Some(ModuleNotification {
+            kind: ModuleEvent::Load,
+            base: VirtAddr(0x7fff_a141_0000),
+            size: 0x81000,
+            path: Some(r"\Windows\System32\ws2_32.dll".to_string()),
+            process: Some(0xf63e_c080),
+        })
     );
 }
 
@@ -285,7 +316,7 @@ fn continue_drains_in_place_rebreak_stale_breakin_and_retired_breakpoint_trap() 
         exception_address: Some(pc),
         program_counter: pc,
         kernel_base_hint: None,
-        unload_symbols: false,
+        load_symbols: None,
         is_bugcheck: false,
         bugcheck: None,
         target_reloaded: false,

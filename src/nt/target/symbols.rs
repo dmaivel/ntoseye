@@ -225,6 +225,33 @@ impl Target {
         Ok(true)
     }
 
+    /// Load the symbols of `module`, an image just mapped into the address
+    /// space `dtb`, before its process's loader lists hold it: a load
+    /// notification arrives as the image is mapped. `None` when they were
+    /// loaded (or tried) already.
+    pub fn load_mapped_module_symbols(
+        &self,
+        dtb: Dtb,
+        module: ModuleInfo,
+    ) -> Result<Option<ModuleSymbolLoadReport>> {
+        if self
+            .symbols
+            .module_symbol_status(dtb, module.base_address)
+            .is_some()
+        {
+            return Ok(None);
+        }
+        self.guest()?
+            .load_symbols_for_modules(
+                &self.phys,
+                &self.symbols,
+                vec![module],
+                dtb,
+                PdbRecovery::Automatic,
+            )
+            .map(Some)
+    }
+
     pub fn refresh_kernel_module_symbols(&self) -> Result<ModuleSymbolLoadReport> {
         self.guest
             .as_ref()

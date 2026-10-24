@@ -298,12 +298,20 @@ impl BreakpointManager {
         let opcode = debugger.arch().breakpoint_instruction();
         let mut original = BreakpointPatch::new(opcode.len());
         // This debugger owns the byte at a user-space site, and it cannot
-        // write one into a page that is not there. Nothing reports the page
-        // arriving either, so say so now instead of accepting a site that
-        // would never arm.
+        // write one into a page that is not there; nothing tells it when the
+        // page arrives. The target's own table can owe the site instead
+        // when the processor that stopped runs in the scope's process: KD
+        // records a user-space site with the address space it was set in,
+        // and the kernel writes it when that process faults the page in (a
+        // deferred breakpoint armed as its image is mapped). Otherwise say
+        // so now instead of accepting a site that would never arm.
         match memory.read_bytes(address, original.as_mut_slice()) {
             Ok(()) => {}
             Err(Error::BadVirtualAddress(_) | Error::AddressNotInDump(_)) => {
+                if client.debug_traps_reach_target() && Self::stopped_in_scope(debugger, scope) {
+                    plant_target_site(client, debugger, address, None)?;
+                    return Ok(BreakpointBackend::Kernel { original: None });
+                }
                 return Err(Self::non_resident_site_error(debugger, dtb, address, scope));
             }
             Err(error) => return Err(error),
@@ -428,7 +436,9 @@ impl BreakpointManager {
             // target rather than pre-empting it.
             Ok(None) if debugger.arch().paging().is_kernel_address(address) => None,
             // A user-space site is this debugger's own `int3` in that page,
-            // and there is no page to put it in.
+            // and there is no page to put it in, unless the target can owe
+            // it (see `install_breakpoint`).
+            Ok(None) if Self::stopped_in_scope(debugger, scope) => None,
             Ok(None) => return Err(Self::non_resident_site_error(debugger, dtb, address, scope)),
             Err(error) => return Err(error),
         };
@@ -518,6 +528,16 @@ impl BreakpointManager {
     /// and no event tells the debugger it arrived. Name the module when one
     /// covers the address, since that distinguishes code that simply has not
     /// been touched yet from an address that is merely wrong.
+    /// Whether the processor that stopped runs in `scope`'s process: the
+    /// address space the target's breakpoint API records a user-space site
+    /// in.
+    fn stopped_in_scope(debugger: &Target, scope: &BreakpointScope) -> bool {
+        matches!(scope, BreakpointScope::Process { .. })
+            && debugger
+                .register_value(debugger.arch().dtb_register())
+                .is_some_and(|dtb| scope.matches_dtb(dtb, debugger.arch()))
+    }
+
     fn non_resident_site_error(
         debugger: &Target,
         dtb: Dtb,

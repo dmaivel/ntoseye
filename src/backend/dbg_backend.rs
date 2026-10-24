@@ -238,9 +238,9 @@ pub struct StopEvent {
     pub target_kernel_base_hint: Option<VirtAddr>,
     /// Set when the transport surfaced a kernel module load/unload notification.
     pub modules_changed: bool,
-    /// The load or unload a module notification reports, with the base of
-    /// the image; `None` for every other stop.
-    pub module_event: Option<(ModuleEvent, VirtAddr)>,
+    /// The load or unload a module notification reports; `None` for every
+    /// other stop.
+    pub module_event: Option<ModuleNotification>,
     /// Set when this stop was caused by a debugger-generated assist break-in
     /// during a target refresh/reconnect sequence, rather than by a user break
     /// or target exception.
@@ -250,8 +250,23 @@ pub struct StopEvent {
     pub break_in: bool,
 }
 
-/// A kernel image entering or leaving the module list: the events `sx* ld`
-/// and `sx* ud` filter, spelled as `sx` spells them.
+/// An image a module notification reports loading or unloading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleNotification {
+    pub kind: ModuleEvent,
+    pub base: VirtAddr,
+    /// The image's size; 0 when the transport does not say.
+    pub size: u32,
+    /// The image's path as the transport names it
+    /// (`\Windows\System32\ntdll.dll`), when it names one.
+    pub path: Option<String>,
+    /// For a user-mode image, the process mapping it as KD names it: the low
+    /// 32 bits of its `EPROCESS`. `None` for a kernel image.
+    pub process: Option<u64>,
+}
+
+/// An image entering or leaving a module list: the events `sx* ld` and
+/// `sx* ud` filter, spelled as `sx` spells them.
 #[record]
 #[derive(Copy, PartialEq, Eq)]
 pub enum ModuleEvent {

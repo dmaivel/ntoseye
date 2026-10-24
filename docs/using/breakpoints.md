@@ -178,6 +178,20 @@ k
 
 On the `gdb` backend, `ntoseye` plants an unload trap the same way as the load trap, at `nt!DbgUnLoadImageSymbols` and `nt!DbgUnLoadImageSymbolsUnicode`, the kernel functions that report an unload. The unload trap is in place only while an `sxe`/`sxn ud` filter is set, and a breakpoint that waits for its module does not keep it.
 
+## Stopping at a user-mode DLL load
+
+Over KD and KDNET, Windows reports the user-mode images that processes map only while the `ksl` global flag (`FLG_ENABLE_KDEBUG_SYMBOL_LOAD`) is set. {command}`!gflag` `+ksl` sets it at once, until the next boot. With the flag set, the `ld` and `ud` filters apply to DLLs and executables as they do to kernel images, so `sxe ld:mydll` stops when a process maps `mydll.dll`, and `sxn ld` shows a `ModLoad:` line for each image.
+
+A deferred breakpoint scoped to a process waits for the module in that process: `bu /p <pid> mydll!DllMain` is armed as `mydll.dll` is mapped into that process, before its entry point runs. At that point the loader has not yet added the DLL to the process's module lists, so `ntoseye` loads its symbols from the image itself. If the PDB cannot be found, `ntoseye` says so, and the breakpoint stays deferred. The page that holds the breakpoint is usually not in memory yet, so `ntoseye` hands the breakpoint to the target's KD breakpoint table, which writes it when the process first runs that page.
+
+Windows reports each image once while the image stays in memory. The first process to map the image after `ksl` is set reports it, and later mappings of the same image, in that process or another, do not. A DLL that another process has already loaded therefore does not stop `sxe ld` again, and a `bu /p` that waits for it stays deferred. Set such a breakpoint after the DLL has loaded in the process, or use {command}`ba` `e1`. The `gdb` backend reports no user-mode loads.
+
+```text
+!gflag +ksl
+bu /p 4140 mydll!DllMain
+g
+```
+
 ## User-mode breakpoints in shared pages
 
 The `gdb` backend sets no software breakpoint in user space, whatever the scope. A GDB stub writes and removes the `int3` through the page tables of the vCPU that it has selected, and that vCPU might not map the page, for example a vCPU that is stopped in the Windows hypervisor or that runs a Hyper-V guest. The byte would then stay in shared code after the session, and the next process to run it would trap in the guest. Under VBS, a step or {command}`wt` that goes on into user space marks each next instruction with a free hardware breakpoint slot instead. A step over a call or a {command}`gu` that returns there ends with an error. Use a hardware breakpoint ({command}`ba` `e1`) to stop in user space.

@@ -4,14 +4,18 @@
 use std::time::Duration;
 
 use crate::backend::dbg_backend::{
-    ContinueDisposition, DebugBackend, LastEvent, ModuleEvent, StopEvent, clear_trap_flag,
-    processor_index_from_backend_thread_id,
+    ContinueDisposition, DebugBackend, LastEvent, ModuleEvent, ModuleNotification, StopEvent,
+    clear_trap_flag, processor_index_from_backend_thread_id,
 };
 use crate::base::error::Result;
 use crate::base::memory::MemoryOps;
+use crate::base::notice::Notice;
 use crate::base::types::VirtAddr;
-use crate::nt::breakpoints::{BreakpointInfo, BreakpointManager};
+use crate::nt::breakpoints::{BreakpointInfo, BreakpointManager, BreakpointScope, BreakpointSpec};
 use crate::nt::guest::{ModuleInfo, ProcessInfo};
+use crate::nt::pe::headers::decode_headers;
+use crate::nt::pe::read_pe_header_page;
+use crate::nt::symbols::ModuleSymbolStatus;
 use crate::nt::target::{BreakpointStop, HYPERVISOR_CONTEXT, ThreadInfo};
 use crate::nt::unwind::{UNKNOWN_CONTEXT, thread_root, try_format_symbol_at};
 use crate::session::context::{
@@ -426,12 +430,24 @@ impl Session {
             ReloadDisposition::Ordinary => {}
         }
 
-        if event.modules_changed {
-            self.unreported_module_change = self.refresh_modules_on_stop();
-            if let Some((kind, module)) = event.module_event.and_then(|(kind, base)| {
-                self.module_event_to_surface(kind, base)
-                    .map(|module| (kind, module))
-            }) {
+        if event.modules_changed || event.module_event.is_some() {
+            let surfaced = match event.module_event.clone() {
+                // A user-mode image changes no kernel module list.
+                Some(notification) if notification.process.is_some() => self
+                    .user_module_event(&notification)
+                    .map(|module| (notification.kind, module)),
+                notification => {
+                    self.unreported_module_change = self.refresh_modules_on_stop();
+                    notification.and_then(|notification| {
+                        self.kernel_module_at(notification.base)
+                            .and_then(|module| {
+                                self.module_event_to_surface(notification.kind, module)
+                            })
+                            .map(|module| (notification.kind, module))
+                    })
+                }
+            };
+            if let Some((kind, module)) = surfaced {
                 let registers = self.backend.read_registers()?;
                 let rip = self
                     .register_map
@@ -627,7 +643,8 @@ impl Session {
         let module = self
             .argument_on_entry(1, |name| self.target.register_value(name))
             .filter(|_| !repeated)
-            .and_then(|base| self.module_event_to_surface(kind, VirtAddr(base)));
+            .and_then(|base| self.kernel_module_at(VirtAddr(base)))
+            .and_then(|module| self.module_event_to_surface(kind, module));
         if let Some(module) = module {
             let resolution = module_event_resolution(kind, module, event, rip);
             self.record_visible_stop(&resolution);
@@ -664,18 +681,24 @@ impl Session {
         Ok(StopResolution::ModulesChanged)
     }
 
-    /// Apply the `sx* ld` or `sx* ud` filters to `kind` for the kernel image
-    /// at `base`, with the module list already refreshed: the module to stop
-    /// for (`sxe`), else `None`, with its [`module_event_line`] queued as a
-    /// notice for `sxn`. An image the kernel module list does not hold
-    /// matches no filter; an unloading image is still in the list.
-    fn module_event_to_surface(&mut self, kind: ModuleEvent, base: VirtAddr) -> Option<ModuleInfo> {
-        let module = self
-            .target
+    /// The kernel image at `base`, from the module list as last refreshed;
+    /// an unloading image is still in the list.
+    fn kernel_module_at(&self, base: VirtAddr) -> Option<ModuleInfo> {
+        self.target
             .kernel_modules()
             .ok()?
             .into_iter()
-            .find(|module| module.base_address == base)?;
+            .find(|module| module.base_address == base)
+    }
+
+    /// Apply the `sx* ld` or `sx* ud` filters to `kind` for `module`: the
+    /// module to stop for (`sxe`), else `None`, with its
+    /// [`module_event_line`] queued as a notice for `sxn`.
+    fn module_event_to_surface(
+        &mut self,
+        kind: ModuleEvent,
+        module: ModuleInfo,
+    ) -> Option<ModuleInfo> {
         match self
             .exception_policies
             .module_event_policy(kind, &module.name)?
@@ -691,6 +714,130 @@ impl Session {
             }
             ExceptionPolicyMode::SecondChance | ExceptionPolicyMode::Ignore => None,
         }
+    }
+
+    /// A user-mode image mapped into or unmapped from a process, as KD
+    /// reports with `!gflag +ksl`: on a load, the deferred breakpoints that
+    /// wait on it in that process are armed in it before it runs; then the
+    /// `sx* ld`/`sx* ud` filters apply, as for a kernel image. The
+    /// notification comes as the image is mapped, before the loader lists
+    /// hold it, so the module is what the notification says.
+    fn user_module_event(&mut self, notification: &ModuleNotification) -> Option<ModuleInfo> {
+        let path = notification.path.as_deref()?;
+        let name = path.rsplit(['\\', '/']).next().unwrap_or(path).to_string();
+        let mut module = ModuleInfo {
+            short_name: ModuleInfo::derive_short_name(&name),
+            name,
+            path: Some(path.to_string()),
+            base_address: notification.base,
+            size: notification.size,
+            is_32bit: false,
+            entry_point: None,
+            time_date_stamp: None,
+            checksum: None,
+            file_version: None,
+            product_version: None,
+            codeview: None,
+        };
+        if notification.kind == ModuleEvent::Load
+            && let Some(process) = notification
+                .process
+                .and_then(|tag| self.deferred_process_for_module(tag, &module.short_name))
+        {
+            self.arm_deferred_in_user_module(&process, &mut module);
+        }
+        self.module_event_to_surface(notification.kind, module)
+    }
+
+    /// The process KD's `tag` (the low 32 bits of its `EPROCESS`) names, when
+    /// a deferred breakpoint scoped to it names the module `short_name`. An
+    /// `ntdll32!` breakpoint waits on an image named ntdll too: only its
+    /// header tells the WOW64 copy from the native one. Processes are only
+    /// walked when some deferred breakpoint names the module.
+    fn deferred_process_for_module(&self, tag: u64, short_name: &str) -> Option<ProcessInfo> {
+        let waiting: Vec<u64> = self
+            .breakpoints
+            .list()
+            .iter()
+            .filter(|bp| !bp.resolved)
+            .filter_map(|bp| match (&bp.scope, &bp.spec) {
+                (
+                    BreakpointScope::Process { pid, .. },
+                    Some(BreakpointSpec::Symbol { name, .. }),
+                ) => {
+                    let module = name.split_once('!')?.0.trim();
+                    let names_it = module.eq_ignore_ascii_case(short_name)
+                        || (short_name == "ntdll" && module.eq_ignore_ascii_case("ntdll32"));
+                    names_it.then_some(*pid)
+                }
+                _ => None,
+            })
+            .collect();
+        if waiting.is_empty() {
+            return None;
+        }
+        self.target
+            .guest
+            .as_ref()?
+            .enumerate_processes()
+            .ok()?
+            .into_iter()
+            .find(|process| {
+                process.eprocess.0 & 0xffff_ffff == tag && waiting.contains(&process.pid)
+            })
+    }
+
+    /// Load the symbols of `module`, just mapped into `process`, and arm the
+    /// deferred breakpoints they resolve. The stopped processor's registers
+    /// are read first: whether the target can owe a site in a page not yet
+    /// faulted in depends on which address space it stopped in.
+    fn arm_deferred_in_user_module(&mut self, process: &ProcessInfo, module: &mut ModuleInfo) {
+        let registers = self.backend.read_registers();
+        update_target_context_from_registers(&mut self.target, &self.register_map, registers);
+        let memory = self.target.address_space(process.dtb);
+        module.is_32bit = read_pe_header_page(module.base_address, &memory)
+            .ok()
+            .and_then(|headers| decode_headers(&headers[..]).ok())
+            .is_some_and(|headers| !headers.is_pe32_plus());
+        if module.is_32bit && module.short_name == "ntdll" {
+            module.short_name.push_str("32");
+        }
+        let failure = match self
+            .target
+            .load_mapped_module_symbols(process.dtb, module.clone())
+        {
+            Ok(Some(report)) if report.loaded == 0 => Some(
+                match self
+                    .target
+                    .symbols
+                    .module_symbol_status(process.dtb, module.base_address)
+                {
+                    Some(ModuleSymbolStatus::Failed(reason)) => reason,
+                    Some(ModuleSymbolStatus::MissingDebugInfo) => {
+                        "neither its image in memory nor the symbol server names a PDB".into()
+                    }
+                    status => report.diagnostics.first().map_or_else(
+                        || {
+                            status
+                                .map_or("no PDB was found", |status| status.label())
+                                .to_string()
+                        },
+                        |diagnostic| format!("{}: {}", diagnostic.phase, diagnostic.message),
+                    ),
+                },
+            ),
+            Ok(_) => None,
+            Err(error) => Some(error.to_string()),
+        };
+        if let Some(failure) = failure {
+            self.notices.push(Notice::warning(format!(
+                "{} loaded in {} (PID {}), but its symbols did not ({failure}); the breakpoints \
+                 waiting on it stay deferred",
+                module.name, process.name, process.pid
+            )));
+            return;
+        }
+        self.reconcile_deferred_breakpoints();
     }
 }
 

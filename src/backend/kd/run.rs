@@ -8,7 +8,9 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::arch::{Family, RegisterMap};
-use crate::backend::dbg_backend::{ContinueDisposition, ModuleEvent, StopEvent};
+use crate::backend::dbg_backend::{
+    ContinueDisposition, ModuleEvent, ModuleNotification, StopEvent,
+};
 use crate::base::error::{Error, Result};
 
 use super::breakpoints::{
@@ -25,7 +27,27 @@ use super::{
 const POST_BUGCHECK_RECONNECT_ASSIST_DELAY: Duration = Duration::from_secs(20);
 
 pub(super) fn stop_event(stop: StateChange) -> StopEvent {
-    let load_symbols = stop.new_state == DBG_KD_LOAD_SYMBOLS_STATE_CHANGE;
+    // The kernel's module list changes only for a kernel image; a user-mode
+    // one (`!gflag +ksl`) is mapped into one process.
+    let kernel_module_changed = stop.new_state == DBG_KD_LOAD_SYMBOLS_STATE_CHANGE
+        && stop
+            .load_symbols
+            .as_ref()
+            .is_none_or(|image| image.base.0 >> 63 == 1);
+    let module_event = stop.load_symbols.map(|image| {
+        let user = image.base.0 >> 63 == 0;
+        ModuleNotification {
+            kind: if image.unload {
+                ModuleEvent::Unload
+            } else {
+                ModuleEvent::Load
+            },
+            base: image.base,
+            size: image.size,
+            path: image.path,
+            process: user.then_some(image.process & 0xffff_ffff),
+        }
+    });
     StopEvent {
         thread_id: Some(thread_id_for(stop.processor)),
         exception_code: (stop.new_state == DBG_KD_EXCEPTION_STATE_CHANGE)
@@ -38,15 +60,8 @@ pub(super) fn stop_event(stop: StateChange) -> StopEvent {
         bugcheck: stop.bugcheck,
         target_reloaded: stop.target_reloaded,
         target_kernel_base_hint: stop.kernel_base_hint,
-        modules_changed: load_symbols,
-        module_event: stop.kernel_base_hint.filter(|_| load_symbols).map(|base| {
-            let event = if stop.unload_symbols {
-                ModuleEvent::Unload
-            } else {
-                ModuleEvent::Load
-            };
-            (event, base)
-        }),
+        modules_changed: kernel_module_changed,
+        module_event,
         assisted_breakin: stop.assisted_breakin,
         break_in: false,
     }
