@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use ntoseye_macros::record;
 
+use crate::base::bytes;
 use crate::base::error::{Error, Result};
 use crate::base::memory::{MemoryOps, PAGE_SIZE};
 use crate::base::types::VirtAddr;
@@ -526,6 +527,13 @@ pub struct ResourceList {
     pub resources: Vec<ExecutiveResource>,
     pub termination: ListTermination,
 }
+
+/// The most resources `!locks` walks: a guard against a corrupt list, far
+/// above what a system has.
+pub const MAX_RESOURCES: usize = 1 << 20;
+
+/// `_ERESOURCE.Flag` of a resource owned exclusively.
+pub const RESOURCE_OWNED_EXCLUSIVE: u16 = 0x80;
 
 /// `_CM_KEY_NODE` (and KCB) flag of a hive's root key.
 const KEY_HIVE_ENTRY: u64 = 0x4;
@@ -1683,23 +1691,77 @@ impl Target {
     /// list-head symbol and `_ERESOURCE.SystemResourcesList` metadata exist.
     /// There is deliberately no memory-scan fallback.
     pub fn enumerate_resources(&self, limit: usize) -> Result<ResourceList> {
-        let limit = limit.clamp(1, 1024);
+        let limit = limit.clamp(1, MAX_RESOURCES);
         let guest = self.guest()?;
         let head = guest.ntoskrnl.symbol("ExpSystemResourcesList")?.address();
         let layout = guest.ntoskrnl.types().layout("_ERESOURCE")?;
         let link_offset = layout.field_offset("SystemResourcesList")?;
         let memory = self.kernel_address_space();
-        let (records, termination) =
-            bounded_record_list_walk(head, link_offset, limit, |link| memory.read_pointer(link));
+        // Each resource is read whole, once: its link to the next is in it.
+        let mut read = Vec::new();
+        let (records, termination) = bounded_record_list_walk(head, link_offset, limit, |link| {
+            if link == head {
+                return memory.read_pointer(link);
+            }
+            let mut bytes = vec![0u8; layout.size];
+            memory.read_bytes(link - link_offset, &mut bytes)?;
+            let next = bytes::get_u64(&bytes, link_offset as usize)
+                .ok_or_else(|| Error::DebugInfo("_ERESOURCE link out of bounds".to_string()))?;
+            read.push(bytes);
+            Ok(VirtAddr(next))
+        });
         let resources = records
             .into_iter()
-            .map(|resource| self.inspect_resource(resource))
-            .collect::<Result<Vec<_>>>()?;
+            .zip(read)
+            .map(|(address, bytes)| self.resource_from_bytes(&layout, address, &bytes))
+            .collect();
         Ok(ResourceList {
             head,
             resources,
             termination,
         })
+    }
+
+    /// The resource at `address` from its bytes, `bytes`; its owners are read
+    /// only when it is held (a nonzero `ActiveCount`).
+    fn resource_from_bytes(
+        &self,
+        layout: &TypeInfo,
+        address: VirtAddr,
+        bytes: &[u8],
+    ) -> ExecutiveResource {
+        let field = |name: &str, size: usize| -> Result<u64> {
+            let offset = layout.field_offset(name)? as usize;
+            let raw = bytes
+                .get(offset..offset + size)
+                .ok_or_else(|| Error::DebugInfo(format!("_ERESOURCE.{name} out of bounds")))?;
+            let mut value = [0u8; 8];
+            value[..size].copy_from_slice(raw);
+            Ok(u64::from_le_bytes(value))
+        };
+        let active_count = field("ActiveCount", 2).map(|value| value as u16 as i16);
+        let owners = match active_count {
+            Ok(0) => DiagnosticValue::Available(Vec::new()),
+            _ => self.inspect_resource(address).map_or_else(
+                |error| DiagnosticValue::unavailable(error.to_string()),
+                |held| held.owners,
+            ),
+        };
+        ExecutiveResource {
+            address,
+            active_count: DiagnosticValue::from_result(active_count),
+            flags: DiagnosticValue::from_result(field("Flag", 2).map(|value| value as u16)),
+            contention_count: DiagnosticValue::from_result(
+                field("ContentionCount", 4).map(|value| value as u32),
+            ),
+            shared_waiters: DiagnosticValue::from_result(
+                field("NumberOfSharedWaiters", 4).map(|value| value as u32),
+            ),
+            exclusive_waiters: DiagnosticValue::from_result(
+                field("NumberOfExclusiveWaiters", 4).map(|value| value as u32),
+            ),
+            owners,
+        }
     }
 
     /// Decode the executive `_OBJECT_HEADER` for `addr`, accepting either the

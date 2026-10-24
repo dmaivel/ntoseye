@@ -50,6 +50,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - A bad argument to a hypervisor command (`!hvvps`, `!hvept`, `!hvcalls`, `!hvd`, `.partition` and the others) says which argument is wrong, then the usage line. They printed the whole help text.
 - `attach` and `.process /i` also select a thread of the process, so `!teb`, `!gle`, and `k` show it without a `.thread`: the thread a processor runs, with its live registers, else its first whose kernel stack is resident. They say which they selected. `.process` without `/i` still keeps the current thread, as WinDbg's does.
 - `threads` with no filter, while attached to a process, lists that process's threads, as `!for_each_thread` and `!uniqstack` do; `threads *` lists every thread. Its start address is the thread's own entry (its Win32 start address, such as `ping!wmainCRTStartup`), named where symbols are loaded, the kernel's and the attached process's. It showed `StartAddress`, which for a process's first thread is a pool address, unnamed.
+- `!locks` walks the whole system resource list and shows the resources that are held, as WinDbg's does, each with whether it is owned exclusively or shared and its owners' TIDs and processes; `!locks -v` shows every resource. It showed the first 256 resources, held or not, which on a system with tens of thousands of resources rarely included the one that blocks. A walk of 65,000 resources takes a few seconds, as each is read once.
 
 ### Fixed
 
