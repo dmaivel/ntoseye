@@ -313,6 +313,11 @@ pub struct KdBackend {
     reconnect_assist_after_continue: Option<Duration>,
     bp_handles: HashMap<u64, u32>,
     managed_bp_addresses: HashSet<u64>,
+    /// Where break-ins land: the connect's stop, when it was one, and the
+    /// kernel's break-in site once the host names it
+    /// ([`DebugBackend::note_breakin_site`]). A connect to a target already
+    /// halted at a break of its own collects that break instead, and the
+    /// kernel keeps the break-in for its next clock tick.
     breakin_addresses: HashSet<u64>,
     /// Our breakpoints removed since the target last resumed; see
     /// [`ContinueDrain`].
@@ -466,6 +471,10 @@ impl DebugBackend for KdBackend {
 
     fn surface_next_break_at(&mut self, address: Option<u64>) {
         self.surface_break_at = address;
+    }
+
+    fn note_breakin_site(&mut self, address: u64) {
+        self.breakin_addresses.insert(address);
     }
 
     fn write_registers(&mut self, data: &[u8]) -> Result<()> {

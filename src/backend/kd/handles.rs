@@ -134,6 +134,10 @@ impl DebugBackend for KdBackendHandle {
         self.lock().surface_next_break_at(address);
     }
 
+    fn note_breakin_site(&mut self, address: u64) {
+        self.lock().note_breakin_site(address);
+    }
+
     fn write_registers(&mut self, data: &[u8]) -> Result<()> {
         self.lock().write_registers(data)
     }

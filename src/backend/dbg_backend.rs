@@ -563,6 +563,13 @@ pub trait DebugBackend {
     /// One-shot, consumed by the next resume.
     fn surface_next_break_at(&mut self, _address: Option<u64>) {}
 
+    /// `address` is where the kernel's own break-ins land
+    /// (`nt!DbgBreakPointWithStatus`), so a stop there that no host asked
+    /// for is noise: a break-in the transport sent while the target was
+    /// already halted, which the kernel kept and takes on its next clock
+    /// tick.
+    fn note_breakin_site(&mut self, _address: u64) {}
+
     fn set_breakpoint(&mut self, addr: u64) -> Result<()>;
     fn remove_breakpoint(&mut self, addr: u64) -> Result<()>;
 

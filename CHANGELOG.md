@@ -89,6 +89,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - Code the compiler split off from a function and placed after a funclet (`$filt$`, `$fin$`) is named after its function, by its function-table entry, in stacks, stops, `u` and `ln`: `nt!ExpWaitForResource+0x4c011f` rather than `nt!KiLockServiceTable$filt$0+0x2fe`, a filter of another function that the address was merely nearest to.
 - `!locks` shows an exclusively owned resource with its one owner. It also listed the shared owners its owner table kept from before, as if they owned it too.
 - A hardware execute breakpoint (`ba e`) is no longer missed when the stop's DR6 does not say which slot fired, as Windows with VBS on reports some hits under KVM. Such a hit was taken for a stray single step and resumed, so it faulted again, and could surface as an unexplained single-step exception: a `ba /p` watch on a shared DLL stopped in other processes.
+- Over KD, the first `g` no longer stops at once at `nt!DbgBreakPointWithStatus` when ntoseye connected to a guest already halted at a break of its own, such as a user-mode `int 3` or a resource timeout. The kernel kept the break-in the connect sent and took it on its first clock tick.
 
 ### Removed
 

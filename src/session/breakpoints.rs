@@ -225,14 +225,34 @@ impl Session {
 
     /// Arm the debugger's own kernel traps the backend needs: the bugcheck
     /// trap ([`Self::arm_bugcheck_trap`]), and the module traps while
-    /// something waits on a load or unload ([`Self::sync_module_traps`]).
-    /// Called at attach, where the operator can see them reported, and on
-    /// every resume: the sites need kernel symbols, which can arrive late and
-    /// move across a reboot, and the guest runs only after a resume, so that
-    /// is where whether the module traps are wanted is decided.
+    /// something waits on a load or unload ([`Self::sync_module_traps`]);
+    /// and tell it where the kernel's break-ins land. Called at attach,
+    /// where the operator can see them reported, and on every resume: the
+    /// sites need kernel symbols, which can arrive late and move across a
+    /// reboot, and the guest runs only after a resume, so that is where
+    /// whether the module traps are wanted is decided.
     pub fn arm_traps(&mut self) {
         self.arm_bugcheck_trap();
         self.sync_module_traps();
+        self.note_breakin_site();
+    }
+
+    /// Name the kernel's break-in site to the backend (see
+    /// [`crate::backend::dbg_backend::DebugBackend::note_breakin_site`]). A KD connect learns it from its
+    /// first stop, which is somewhere else when the target was already
+    /// halted at a break of its own; the break-in the connect sent is then
+    /// still pending, and would stop the first resume there.
+    fn note_breakin_site(&mut self) {
+        let Some(kernel_dtb) = self.target.guest.as_ref().map(|guest| guest.ntoskrnl.dtb()) else {
+            return;
+        };
+        if let Ok(Some(address)) = self
+            .target
+            .symbols
+            .find_symbol_across_modules(kernel_dtb, "nt!DbgBreakPointWithStatus")
+        {
+            self.backend.note_breakin_site(address.0);
+        }
     }
 
     /// Whether the backend reports `capability` as supported.

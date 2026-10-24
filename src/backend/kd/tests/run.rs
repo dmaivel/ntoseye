@@ -229,6 +229,62 @@ fn a_breakin_answered_by_another_stop_is_absorbed_when_it_arrives_late() {
     assert!(!backend.mark_known_breakin_stop(guest_int3).assisted_breakin);
 }
 
+#[test]
+fn a_break_at_the_named_breakin_site_is_noise_after_a_connect_that_stopped_elsewhere() {
+    let (_kernel, host) = UnixStream::pair().unwrap();
+    let breakin_clone = host.try_clone().unwrap();
+    let pump_host = host.try_clone().unwrap();
+    let pump = PumpHandle {
+        join: spawn(move || KdFraming::new(pump_host.into())),
+        stop_rx: mpsc::channel().1,
+        shutdown: Arc::new(AtomicBool::new(false)),
+        reported_stop: Arc::new(AtomicBool::new(false)),
+        breakin_requested: Arc::new(AtomicBool::new(false)),
+    };
+    let mut backend = kd_backend_with_pump(pump, breakin_clone);
+    // The connect found the target halted at a user-mode `int 3` of its own
+    // and took that for the break-in's address; the kernel still holds the
+    // break-in the connect sent.
+    let guest_int3 = 0x7fff_a087_3122;
+    backend.breakin_addresses.insert(guest_int3);
+    let site = 0xffff_f805_7f50_e4e0;
+    let held = StateChange {
+        processor: 0,
+        number_processors: 1,
+        new_state: DBG_KD_EXCEPTION_STATE_CHANGE,
+        exception_code: STATUS_BREAKPOINT,
+        exception_first_chance: Some(true),
+        exception_address: Some(site),
+        program_counter: site,
+        kernel_base_hint: None,
+        unload_symbols: false,
+        is_bugcheck: false,
+        bugcheck: None,
+        target_reloaded: false,
+        assisted_breakin: false,
+        control_report: None,
+    };
+    assert!(
+        !backend
+            .mark_known_breakin_stop(held.clone())
+            .assisted_breakin,
+        "nothing has named the site yet"
+    );
+
+    backend.note_breakin_site(site);
+    assert!(
+        backend
+            .mark_known_breakin_stop(held.clone())
+            .assisted_breakin
+    );
+    let elsewhere = StateChange {
+        program_counter: 0xffff_f800_1234_0000,
+        exception_address: Some(0xffff_f800_1234_0000),
+        ..held
+    };
+    assert!(!backend.mark_known_breakin_stop(elsewhere).assisted_breakin);
+}
+
 /// An exception state change from `processor` of four at `pc`, whose
 /// control report carries `dr7`.
 fn processor_report(processor: u16, code: u32, pc: u64, dr7: u64) -> Vec<u8> {
