@@ -104,7 +104,9 @@ impl BreakpointManager {
 
     /// A one-shot breakpoint for a run to `address`; `frame` restricts it to
     /// a step's execution, and `partition` makes it a guest partition's (see
-    /// [`PartitionFilter`]), whose code only a debug register traps.
+    /// [`PartitionFilter`]), whose code only a debug register traps. `root` is
+    /// the address space the stepping thread runs in, which a user-space
+    /// `address` is in.
     pub fn add_temporary_code(
         &mut self,
         client: &mut dyn DebugBackend,
@@ -112,18 +114,17 @@ impl BreakpointManager {
         address: VirtAddr,
         frame: Option<StepFrame>,
         partition: Option<PartitionFilter>,
+        root: Dtb,
     ) -> Result<u32> {
         let config = BreakpointConfig {
             scope: match partition {
                 // `debugger` is the target, whose processes are not the
                 // partition's: the step's thread alone says whose hit it is.
                 Some(_) => Some(BreakpointScope::Kernel),
-                // A user-space target is in the process the stop is in,
-                // whichever process inspection is attached to.
+                // A user-space target is in the process the stepping thread
+                // runs, whichever process inspection is attached to.
                 None => (!debugger.arch().paging().is_kernel_address(address))
-                    .then(|| {
-                        debugger.process_for_cr3(debugger.normalize_dtb(debugger.current_dtb()))
-                    })
+                    .then(|| debugger.process_for_cr3(debugger.normalize_dtb(root)))
                     .flatten()
                     .map(|process| BreakpointScope::process(&process)),
             },

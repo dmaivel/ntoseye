@@ -404,8 +404,19 @@ impl Session {
         if partition.is_some() {
             self.require_partition_traps()?;
         }
+        // The stepping thread's own root, its processor's, whichever process
+        // inspection is attached to.
+        let root = self
+            .read_registers()
+            .ok()
+            .and_then(|registers| {
+                self.register_map
+                    .read_u64(self.target.arch().dtb_register(), &registers)
+                    .ok()
+            })
+            .unwrap_or_else(|| self.target.current_dtb());
         let (breakpoints, backend, target) = self.breakpoint_sites();
-        breakpoints.add_temporary_code(backend, target, address, frame, partition)
+        breakpoints.add_temporary_code(backend, target, address, frame, partition, root)
     }
 
     /// Surface the hit of `breakpoint`, partition `partition`'s, by its VP

@@ -411,14 +411,20 @@ impl Session {
         let arch = self.target.arch();
         let ip = self.register_map.read_u64(arch.pc_register(), &registers)?;
         let sp = self.register_map.read_u64(arch.sp_register(), &registers)?;
-        let dtb = self
+        let cr3 = self
             .register_map
             .read_u64(arch.dtb_register(), &registers)
-            .unwrap_or(0);
+            .ok();
+        let dtb = cr3.unwrap_or(0);
         let mut bytes = [0u8; 16];
         let machine = self.target.executing_machine(VirtAddr(ip));
         let length = machine.max_instruction_bytes();
-        self.read_masked(VirtAddr(ip), &mut bytes[..length])?;
+        // The thread's own code, whichever process inspection is attached to.
+        self.read_masked_in(
+            code_root(&self.target, cr3, ip),
+            VirtAddr(ip),
+            &mut bytes[..length],
+        )?;
         let state = ControlState {
             ip,
             sp,
