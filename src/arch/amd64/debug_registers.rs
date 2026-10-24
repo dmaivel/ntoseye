@@ -81,7 +81,7 @@ impl DebugRegisters for Amd64 {
 
     /// A debug exception whose DR6 names no cause at all, and that no trap
     /// flag explains, is an execute fault that lost its status: Windows 11
-    /// with VBS on, under KVM, reports some execute hits so. An
+    /// under KVM reports some execute hits so, with VBS on or off. An
     /// execute breakpoint faults at its own address, so the slot armed to
     /// execute at `pc` is the one; otherwise the hit would be taken for a
     /// stray step, resumed without RF, and fault again.
