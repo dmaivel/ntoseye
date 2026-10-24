@@ -1631,6 +1631,12 @@ impl Target {
                 });
             }
 
+            // An exclusive owner is OwnerEntry alone; the table keeps the
+            // entries of the shared owners before it, which no longer own.
+            let flag: u16 = self.read_kernel_layout_field(&layout, address, "Flag")?;
+            if flag & RESOURCE_OWNED_EXCLUSIVE != 0 {
+                return Ok(owners);
+            }
             let table = types
                 .struct_with_layout(Arc::clone(&layout), address)
                 .read_pointer("OwnerTable")?;

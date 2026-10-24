@@ -86,6 +86,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - `!handle` names the handles whose objects have no name of their own, as WinDbg's does: a file by its path on its device (`\Device\HarddiskVolume3\Windows\System32\en-US\csrss.exe.mui`), a registry key by its path as the hive names it (`\REGISTRY\MACHINE\SYSTEM\ControlSet001\Control\Session Manager`), a process by its image and PID, a thread by its TID and process. They showed `-`.
 - `!locks <address>` shows each owner's real acquire count. It showed eight times the count on Windows 10 and later, where the count is a bitfield above three flags.
 - Code the compiler split off from a function and placed after a funclet (`$filt$`, `$fin$`) is named after its function, by its function-table entry, in stacks, stops, `u` and `ln`: `nt!ExpWaitForResource+0x4c011f` rather than `nt!KiLockServiceTable$filt$0+0x2fe`, a filter of another function that the address was merely nearest to.
+- `!locks` shows an exclusively owned resource with its one owner. It also listed the shared owners its owner table kept from before, as if they owned it too.
 
 ### Removed
 
