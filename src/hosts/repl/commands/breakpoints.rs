@@ -314,7 +314,8 @@ fn set_pattern_breakpoints(
 /// Set a hardware (debug-register) breakpoint.
 ///
 /// The access is e=execute, r=read/write, or w=write, and the size is 1, 2,
-/// 4, or 8 bytes. An execute breakpoint has size 1. The command is not
+/// 4, or 8 bytes. An execute breakpoint has size 1. The options may also
+/// follow the access and size, as WinDbg writes them: ba e1 /p 4 kernelbase!SleepEx. The command is not
 /// available on a dump or on the `memory` backend. Example: ba w4
 /// nt!MyGlobal. In VTL1 (the .vtl 1 view or a vCPU stopped in VTL1), ntoseye
 /// accepts only `ba e1`, and only on GDB backends. This breakpoint is global,
@@ -995,6 +996,37 @@ struct BreakpointOptions {
     condition: Option<String>,
 }
 
+impl BreakpointOptions {
+    /// These options with `later`'s, which `ba` takes after its access and
+    /// size as WinDbg writes them. An option given in both places is refused.
+    fn merge(mut self, later: Self, command: &str) -> Result<Self> {
+        fn take<T>(
+            first: &mut Option<T>,
+            later: Option<T>,
+            flag: &str,
+            command: &str,
+        ) -> Result<()> {
+            match (first.is_some(), later) {
+                (true, Some(_)) => Err(Error::InvalidArgument(format!(
+                    "{command}: {flag} is given twice"
+                ))),
+                (_, Some(value)) => {
+                    *first = Some(value);
+                    Ok(())
+                }
+                (_, None) => Ok(()),
+            }
+        }
+        self.one_shot |= later.one_shot;
+        self.unchecked |= later.unchecked;
+        take(&mut self.pid, later.pid, "/p", command)?;
+        take(&mut self.thread, later.thread, "/t", command)?;
+        take(&mut self.processor, later.processor, "/c", command)?;
+        take(&mut self.condition, later.condition, "/w", command)?;
+        Ok(self)
+    }
+}
+
 /// Parse the options `argv` starts with, and the index of the first
 /// argument after them.
 fn parse_breakpoint_options(
@@ -1063,12 +1095,16 @@ fn parse_breakpoint_arguments(
     command: &str,
     wants_access_spec: bool,
 ) -> Result<ParsedBreakpointArgs> {
-    let (options, mut index) = parse_breakpoint_options(argv, radix, command)?;
+    let (mut options, mut index) = parse_breakpoint_options(argv, radix, command)?;
     let access_spec = if wants_access_spec {
         let access = argv
             .get(index)
             .ok_or_else(|| Error::InvalidArgument(format!("{command}: missing access/size")))?;
         index += 1;
+        // WinDbg writes `ba`'s options after the access and size.
+        let (later, used) = parse_breakpoint_options(&argv[index..], radix, command)?;
+        options = options.merge(later, command)?;
+        index += used;
         Some(access.as_ref().to_string())
     } else {
         None
@@ -1658,6 +1694,30 @@ mod tests {
         assert_eq!(pid("0x1f10", NumberRadix::Decimal).unwrap(), Some(0x1f10));
         assert_eq!(pid("7952", NumberRadix::Decimal).unwrap(), Some(7952));
         assert!(pid("notanumber", NumberRadix::Hexadecimal).is_err());
+    }
+
+    /// `ba` takes its options before the access and size or after them, as
+    /// WinDbg writes them, and refuses one given in both places.
+    #[test]
+    fn ba_options_may_follow_the_access_and_size() {
+        let parse = |words: &[&str]| {
+            let words: Vec<Cow<'_, str>> = words.iter().map(|&word| Cow::from(word)).collect();
+            parse_breakpoint_arguments(&words, NumberRadix::Hexadecimal, "ba", true)
+        };
+        for words in [
+            &["/p", "0n4", "/1", "e1", "kernelbase!SleepEx"][..],
+            &["e1", "/p", "0n4", "/1", "kernelbase!SleepEx"],
+            &["/1", "e1", "/p", "0n4", "kernelbase!SleepEx"],
+        ] {
+            let parsed = parse(words).unwrap();
+            assert_eq!(
+                (parsed.pid, parsed.one_shot, parsed.access_spec.as_deref()),
+                (Some(4), true, Some("e1")),
+                "{words:?}"
+            );
+            assert_eq!(parsed.target, "kernelbase!SleepEx");
+        }
+        assert!(parse(&["/p", "4", "e1", "/p", "8", "kernelbase!SleepEx"]).is_err());
     }
 
     #[test]

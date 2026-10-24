@@ -71,6 +71,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - `!address -summary` on a user-mode dump without a memory-info list prints the summary only, not every captured range.
 - `ntoseye mcp --http <address> --unsafe-http` answers requests addressed to the host's network address or name. Since v0.49.1 it refused every request whose `Host` was not a loopback name with `403 Forbidden`, so no other machine could use it.
 - On a VBS guest over `kd` or `kdnet`, `bp` in user-mode code that Windows will not let the debugger write, such as ntdll's and kernelbase's, works when `ntoseye` reads the VM's memory from the host: it writes the breakpoint into that memory itself, on x86 guests. So do `p` over a call that returns into such code, and the cleanup of such a breakpoint after a killed session. They failed with `NTSTATUS 0xc0000001` or `bad virtual address`; where the fallback is not available, the error now says that Windows refused the write and what to use instead.
+- `ba` takes its options after the access and size too, as WinDbg writes them (`ba e1 /p 4 kernelbase!SleepEx`); it took them only before (`ba /p 4 e1 ...`) and said `/p` was an invalid expression.
 
 ### Removed
 
