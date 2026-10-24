@@ -19,6 +19,7 @@ use pelite::{PeView, Wrap};
 
 pub mod address;
 pub mod handles;
+pub mod runaway;
 
 const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
 const IMAGE_SCN_MEM_DISCARDABLE: u32 = 0x0200_0000;

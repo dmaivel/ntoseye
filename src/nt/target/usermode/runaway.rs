@@ -1,0 +1,138 @@
+//! How much processor time each thread of a process has used (`!runaway`):
+//! user and kernel time, and how long ago each started. A kernel target
+//! counts them in clock ticks in each `KTHREAD`; a user-mode minidump's
+//! thread-info stream records them in 100 ns units.
+
+use ntoseye_macros::record;
+
+use crate::base::error::{Error, Result};
+use crate::base::memory::MemoryOps;
+use crate::nt::kuser_shared::KuserSharedData;
+use crate::nt::target::{KTHREAD_STATE_TERMINATED, Target};
+
+/// FILETIME (100 ns units since 1601) at the Unix epoch.
+const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
+/// 100 ns units in a second.
+const FILETIME_SECOND: u64 = 10_000_000;
+
+/// The times of one thread, in 100 ns units.
+#[record]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadTime {
+    pub tid: u64,
+    /// Its place in a user-mode minidump's thread list (`~` numbers), `None`
+    /// on a kernel target.
+    pub index: Option<usize>,
+    pub user_time: Option<u64>,
+    pub kernel_time: Option<u64>,
+    /// How long ago it started, at the time of the target: now on a live
+    /// one, when the dump was written on a dump. Until it exited, for one
+    /// that has.
+    pub elapsed: Option<u64>,
+}
+
+/// The processor times of a process's threads (`!runaway`).
+#[record]
+#[derive(Debug, Clone)]
+pub struct ThreadTimes {
+    /// The process's image name.
+    pub process: Option<String>,
+    pub pid: Option<u64>,
+    pub threads: Vec<ThreadTime>,
+}
+
+impl Target {
+    /// The processor times of the threads of the current process: the one
+    /// .process selected, else the owner of the current thread; on a
+    /// user-mode minidump, its one process.
+    pub fn thread_times(&self) -> Result<ThreadTimes> {
+        match self.user_dump_info() {
+            Some(info) => {
+                // MINIDUMP_HEADER.TimeDateStamp is in seconds since 1970.
+                let written =
+                    FILETIME_UNIX_EPOCH + u64::from(info.time_date_stamp) * FILETIME_SECOND;
+                let threads = info
+                    .threads
+                    .iter()
+                    .enumerate()
+                    .map(|(index, thread)| {
+                        let times = thread.times.as_ref();
+                        ThreadTime {
+                            tid: u64::from(thread.tid),
+                            index: Some(index),
+                            user_time: times.map(|times| times.user_time),
+                            kernel_time: times.map(|times| times.kernel_time),
+                            elapsed: times.and_then(|times| {
+                                let end = if times.exit_time != 0 {
+                                    times.exit_time
+                                } else {
+                                    written
+                                };
+                                end.checked_sub(times.create_time)
+                            }),
+                        }
+                    })
+                    .collect();
+                let process = info.process();
+                Ok(ThreadTimes {
+                    process: process.name,
+                    pid: process.pid.map(u64::from),
+                    threads,
+                })
+            }
+            None => self.kernel_thread_times(),
+        }
+    }
+
+    fn kernel_thread_times(&self) -> Result<ThreadTimes> {
+        let process = self.selected_process_info()?;
+        let guest = self.guest()?;
+        // A clock tick, in 100 ns units.
+        let tick = u64::from(guest.ntoskrnl.symbol("KeMaximumIncrement")?.read::<u32>()?);
+        let now = KuserSharedData::new(self).system_time();
+        let ethread = guest.ntoskrnl.types().layout("_ETHREAD")?;
+        let memory = self.kernel_address_space();
+        let threads = self
+            .enumerate_threads_for_process_info(&process)?
+            .into_iter()
+            .map(|thread| {
+                let detail = self.thread_detail(thread, None);
+                let thread = &detail.thread;
+                let created = ethread
+                    .field_offset("CreateTime")
+                    .ok()
+                    .and_then(|offset| memory.read::<u64>(thread.ethread + offset).ok());
+                // An exited thread's ExitTime shares its storage with fields
+                // a live one uses.
+                let ended = if thread.state == Some(KTHREAD_STATE_TERMINATED) {
+                    ethread
+                        .field_offset("ExitTime")
+                        .ok()
+                        .and_then(|offset| memory.read::<u64>(thread.ethread + offset).ok())
+                } else {
+                    now
+                };
+                ThreadTime {
+                    tid: thread.tid.unwrap_or(0),
+                    index: None,
+                    user_time: detail.user_time.map(|ticks| ticks * tick),
+                    kernel_time: detail.kernel_time.map(|ticks| ticks * tick),
+                    elapsed: created.zip(ended).and_then(|(created, ended)| {
+                        ended.checked_sub(created).filter(|_| created != 0)
+                    }),
+                }
+            })
+            .collect::<Vec<_>>();
+        if threads.is_empty() {
+            return Err(Error::DebugInfo(format!(
+                "{} (PID {}) has no threads",
+                process.name, process.pid
+            )));
+        }
+        Ok(ThreadTimes {
+            process: Some(process.name),
+            pid: Some(process.pid),
+            threads,
+        })
+    }
+}

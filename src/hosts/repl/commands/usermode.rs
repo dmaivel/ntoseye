@@ -3,6 +3,7 @@ use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::hosts::repl::*;
 use crate::hosts::ui;
+use crate::nt::target::usermode::runaway::{ThreadTime, ThreadTimes};
 use crate::nt::target::usermode::{
     ImageByteDiff, ImageCheck, ImageMismatchRange, ImageSectionCheck, ImageSelfPatchCounts,
     ImageSelfPatchRange, LastError, LoaderListHead, LoaderLists, LoaderModules, Peb, Peb32,
@@ -153,6 +154,80 @@ impl Render for LastError {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         print_last_error(self);
     }
+}
+
+/// Show how much processor time each thread of the current process has used.
+///
+/// The flags choose what to show, each as a list of the threads by that time,
+/// most first: 1 the user-mode time (the default), 2 the kernel-mode time,
+/// 4 the time since each thread started, so 7 shows all three. The current
+/// process is the one that .process selected, else the owner of the current
+/// thread; on a user-mode minidump, its one process, whose thread-info
+/// stream records the times. A kernel target counts them in clock ticks, so
+/// they are as precise as one tick (15.6 ms by default).
+#[command(
+    names = ["!runaway", "runaway"],
+    category = "user mode",
+    kind = Query,
+    target = Nt,
+    python = [Process, UserProcess],
+    python_name = "thread_times",
+)]
+fn runaway(session: &Session, #[arg(default = 1, render)] flags: u64) -> Result<ThreadTimes> {
+    session.target.thread_times()
+}
+
+impl Render<u64> for ThreadTimes {
+    fn render(&self, _: &mut ReplState<'_>, flags: u64) {
+        let flags = if flags & 7 == 0 { 1 } else { flags };
+        let sections: [Section; 3] = [
+            (1, "User Mode Time", |thread| thread.user_time),
+            (2, "Kernel Mode Time", |thread| thread.kernel_time),
+            (4, "Elapsed Time", |thread| thread.elapsed),
+        ];
+        if let (Some(process), Some(pid)) = (&self.process, self.pid) {
+            outln!("{}", ui::muted(&format!("{process} (PID {pid})")));
+        }
+        for (bit, title, time) in sections {
+            if flags & bit == 0 {
+                continue;
+            }
+            let mut threads: Vec<&ThreadTime> = self.threads.iter().collect();
+            threads.sort_by_key(|thread| std::cmp::Reverse(time(thread)));
+            outln!(" {}", ui::label(title));
+            let mut builder = Builder::default();
+            builder.push_record(["Thread", "Time"]);
+            for thread in threads {
+                let label = match thread.index {
+                    Some(index) => format!("{index}:{:x}", thread.tid),
+                    None => format!("TID {}", thread.tid),
+                };
+                builder.push_record([
+                    label,
+                    time(thread).map_or_else(|| "-".to_string(), format_thread_time),
+                ]);
+            }
+            print_padded_table(builder);
+        }
+    }
+}
+
+/// One list `!runaway` shows: its flag, its title, and the time it sorts by.
+type Section = (u64, &'static str, fn(&ThreadTime) -> Option<u64>);
+
+/// A time in 100 ns units as WinDbg's `!runaway` writes it:
+/// `0 days 0:00:01.453`.
+fn format_thread_time(time: u64) -> String {
+    let millis = time / 10_000;
+    let seconds = millis / 1000;
+    format!(
+        "{} days {}:{:02}:{:02}.{:03}",
+        seconds / 86_400,
+        seconds / 3600 % 24,
+        seconds / 60 % 60,
+        seconds % 60,
+        millis % 1000
+    )
 }
 
 /// `<module>`: the one word the switches leave; none, or more, print the

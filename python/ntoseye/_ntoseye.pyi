@@ -14923,6 +14923,18 @@ class Process:
         """
         The symbols, resolved in the address space of this process.
         """
+    def thread_times(self, /) -> ThreadTimes:
+        """
+        Show how much processor time each thread of the current process has used.
+        
+        The flags choose what to show, each as a list of the threads by that time,
+        most first: 1 the user-mode time (the default), 2 the kernel-mode time,
+        4 the time since each thread started, so 7 shows all three. The current
+        process is the one that .process selected, else the owner of the current
+        thread; on a user-mode minidump, its one process, whose thread-info
+        stream records the times. A kernel target counts them in clock ticks, so
+        they are as precise as one tick (15.6 ms by default).
+        """
     @property
     def threads(self, /) -> Threads:
         """
@@ -19088,6 +19100,48 @@ class ThreadStacks(BaseRecord):
     def threads(self, /) -> list[ThreadStack]: ...
 
 @final
+class ThreadTime(BaseRecord):
+    """
+    The times of one thread, in 100 ns units.
+    """
+    __match_args__: Final[tuple[Literal["tid"], Literal["index"], Literal["user_time"], Literal["kernel_time"], Literal["elapsed"]]]
+    @property
+    def elapsed(self, /) -> int |None:
+        """
+        How long ago it started, at the time of the target: now on a live
+        one, when the dump was written on a dump. Until it exited, for one
+        that has.
+        """
+    @property
+    def index(self, /) -> int |None:
+        """
+        Its place in a user-mode minidump's thread list (`~` numbers), `None`
+        on a kernel target.
+        """
+    @property
+    def kernel_time(self, /) -> int |None: ...
+    @property
+    def tid(self, /) -> int: ...
+    @property
+    def user_time(self, /) -> int |None: ...
+
+@final
+class ThreadTimes(BaseRecord):
+    """
+    The processor times of a process's threads (`!runaway`).
+    """
+    __match_args__: Final[tuple[Literal["process"], Literal["pid"], Literal["threads"]]]
+    @property
+    def pid(self, /) -> int |None: ...
+    @property
+    def process(self, /) -> str |None:
+        """
+        The process's image name.
+        """
+    @property
+    def threads(self, /) -> list[ThreadTime]: ...
+
+@final
 class Threads:
     """
     A collection of threads: `dbg.threads` (all threads) or `proc.threads`,
@@ -20231,6 +20285,18 @@ class UserProcess:
     def pid(self, /) -> int |None:
         """
         The process id, when the dump records it.
+        """
+    def thread_times(self, /) -> ThreadTimes:
+        """
+        Show how much processor time each thread of the current process has used.
+        
+        The flags choose what to show, each as a list of the threads by that time,
+        most first: 1 the user-mode time (the default), 2 the kernel-mode time,
+        4 the time since each thread started, so 7 shows all three. The current
+        process is the one that .process selected, else the owner of the current
+        thread; on a user-mode minidump, its one process, whose thread-info
+        stream records the times. A kernel target counts them in clock ticks, so
+        they are as precise as one tick (15.6 ms by default).
         """
     @property
     def threads(self, /) -> UserThreads:
