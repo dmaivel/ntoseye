@@ -18,6 +18,7 @@ use ntoseye_macros::record;
 use pelite::{PeView, Wrap};
 
 pub mod address;
+pub mod critsec;
 pub mod handles;
 pub mod runaway;
 

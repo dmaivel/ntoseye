@@ -28,6 +28,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - The window title names the prompt's processor and backend, and where the target stopped or that it runs (`ntoseye - 3: kd - nt!NtClose+0x5`), and is given back on exit.
 - A stop at an `int3` that Windows executes on purpose says why it broke in. The first is a resource timeout: when a thread waits for an executive resource (ERESOURCE) longer than the timeout, Windows breaks in at `nt!ExpWaitForResource`, and the stop now says so and points to `!locks`.
 - `!runaway [flags]` shows how much processor time each thread of the current process has used, most first, as WinDbg's does: user-mode time (`1`, the default), kernel-mode time (`2`), and time since the thread started (`4`). It works on a kernel target, from each thread's tick counts, and on a user-mode minidump, from its thread-info stream. The SDK has it as `Process.thread_times()` and `UserProcess.thread_times()`.
+- `!cs [-l] [address]` lists the critical sections of the current process, as ntdll keeps them on `RtlCriticalSectionList`, or shows one: whether a thread holds it, the owner's TID, its recursion count, how many threads wait for it, and how often threads have waited. `-l` lists only the held ones. It works on a kernel target and on a user-mode minidump; the SDK has `Process.critical_sections()` and `critical_section(address)`, and the same on `UserProcess`.
 
 ### Changed
 

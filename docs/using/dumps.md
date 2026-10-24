@@ -214,6 +214,7 @@ The commands that look at one process work on the dump's own records:
   ```
 
 - {command}`!vprot` shows the same region as `VirtualQuery` would, and {command}`!heap` walks the process's heaps.
+- {command}`!cs` lists the process's critical sections, as ntdll keeps them on `RtlCriticalSectionList`, with each one's owner and waiters; `!cs -l` lists only the held ones. {command}`!runaway` lists the threads by the processor time the dump's thread-info stream records: user-mode time, and with `!runaway 7` kernel-mode time and the time since each thread started.
 - {command}`.time` shows when the dump was written, in UTC and in the time zone the dump records, and the process's creation time, uptime, and CPU time. A user-mode minidump records no system time or system uptime, and `.time` says so rather than guessing. {command}`vertarget` shows the Windows version, the processors, the process, and the kinds of data the dump was written with:
 
   ```text

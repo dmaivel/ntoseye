@@ -2987,6 +2987,71 @@ class Cpus:
         """
 
 @final
+class CriticalSection(BaseRecord):
+    """
+    An `RTL_CRITICAL_SECTION` (`!cs <address>`).
+    """
+    __match_args__: Final[tuple[Literal["address"], Literal["symbol"], Literal["debug_info"], Literal["lock_count"], Literal["recursion_count"], Literal["owning_thread"], Literal["lock_semaphore"], Literal["spin_count"], Literal["contention_count"]]]
+    @property
+    def address(self, /) -> int: ...
+    @property
+    def contention_count(self, /) -> Diagnostic[int]:
+        """
+        How many times threads waited for it (the debug record's
+        `ContentionCount`).
+        """
+    @property
+    def debug_info(self, /) -> Diagnostic[int]: ...
+    @property
+    def lock_count(self, /) -> Diagnostic[int]:
+        """
+        `LockCount`: from Windows Server 2003 SP1, bit 0 is clear while the
+        section is held, bit 1 clear when a waiter was woken, and the bits
+        above count the waiters, inverted.
+        """
+    @property
+    def lock_semaphore(self, /) -> Diagnostic[int]: ...
+    @property
+    def locked(self, /) -> bool |None:
+        """
+        Whether a thread holds it.
+        """
+    @property
+    def owning_thread(self, /) -> Diagnostic[int]:
+        """
+        The thread that holds it, by its TID (`OwningThread`).
+        """
+    @property
+    def recursion_count(self, /) -> Diagnostic[int]: ...
+    @property
+    def spin_count(self, /) -> Diagnostic[int]: ...
+    @property
+    def symbol(self, /) -> str |None:
+        """
+        The symbol at its address (`ntdll!LdrpLoaderLock`), when it is a
+        global.
+        """
+    @property
+    def waiters(self, /) -> int |None:
+        """
+        How many threads wait for it.
+        """
+
+@final
+class CriticalSections(BaseRecord):
+    """
+    A process's critical sections, from `ntdll!RtlCriticalSectionList`
+    (`!cs`).
+    """
+    __match_args__: Final[tuple[Literal["list_head"], Literal["sections"], Literal["termination"]]]
+    @property
+    def list_head(self, /) -> int: ...
+    @property
+    def sections(self, /) -> list[CriticalSection]: ...
+    @property
+    def termination(self, /) -> ListTermination: ...
+
+@final
 class CulpritAttribution(BaseRecord):
     """
     What the available evidence identifies as the cause of the crash: a
@@ -14767,6 +14832,14 @@ class Process:
         """
         Decode the kernel and user APC queues of this process (`!apc`).
         """
+    def critical_section(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> CriticalSection:
+        """
+        Decode a critical section (`!cs address`).
+        """
+    def critical_sections(self, /) -> CriticalSections:
+        """
+        List the critical sections of the process (`!cs`).
+        """
     def decode_peb(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap |None = None) -> Peb:
         """
         Decode the process environment block and process parameters of the
@@ -20232,6 +20305,14 @@ class UserProcess:
     def __eq__(self, other: object, /) -> bool: ...
     def __hash__(self, /) -> int: ...
     def __repr__(self, /) -> str: ...
+    def critical_section(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> CriticalSection:
+        """
+        Decode a critical section (`!cs address`).
+        """
+    def critical_sections(self, /) -> CriticalSections:
+        """
+        List the critical sections of the process (`!cs`).
+        """
     def decode_peb(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap |None = None) -> Peb:
         """
         Decode the process environment block and process parameters of the
