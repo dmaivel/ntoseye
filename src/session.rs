@@ -413,7 +413,9 @@ pub struct PendingWalk {
 pub enum StepStack {
     /// Anywhere: a run through straight-line code, which may push.
     Any,
-    /// At or above the current one: the return from the call at the PC.
+    /// At or above the current one: the return from the call at the PC. In
+    /// x86 code anywhere, as a callee there may leave its caller's frame
+    /// allocated.
     CallReturn,
     /// Above the current frame: the return from the current function.
     FunctionReturn,

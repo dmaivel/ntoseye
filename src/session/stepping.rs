@@ -19,7 +19,7 @@ use crate::base::disasm::{ControlFlow, classify, decode_first};
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::notice::Notice;
-use crate::base::types::{Dtb, VirtAddr};
+use crate::base::types::{CodeMachine, Dtb, VirtAddr};
 use crate::nt::breakpoints::{
     BreakpointManager, StepFrame, ThreadScope, lift_target_site, plant_target_site,
 };
@@ -883,6 +883,16 @@ impl Session {
     /// find its stack per `stack`. `None` when the thread cannot be
     /// identified (a VTL1 stop, no kernel symbols): the run-to then stops for
     /// any thread.
+    /// Whether the instruction at the stepping thread's PC is x86 code: a
+    /// WOW64 program's, in compatibility mode.
+    fn pc_runs_x86(&mut self) -> Result<bool> {
+        let registers = self.read_registers()?;
+        let pc = self
+            .register_map
+            .read_u64(self.target.arch().pc_register(), &registers)?;
+        Ok(self.target.executing_machine(VirtAddr(pc)) == CodeMachine::X86)
+    }
+
     pub fn step_frame(&mut self, stack: StepStack) -> Result<Option<StepFrame>> {
         let Some(thread) = windows_thread_on_backend_thread(&self.target, &self.current_thread)
         else {
@@ -890,6 +900,11 @@ impl Session {
         };
         let min_stack_pointer = match stack {
             StepStack::Any => None,
+            // An x86 callee may return with the stack below where the call
+            // left it: `_SEH_prolog4` and `_chkstk` allocate their caller's
+            // frame. No floor then tells the call's return from a recursive
+            // call's, and the thread alone decides.
+            StepStack::CallReturn if self.pc_runs_x86()? => None,
             StepStack::CallReturn | StepStack::FunctionReturn => {
                 let registers = self.read_registers()?;
                 stack_pointer(self.target.arch(), &self.register_map, &registers).map(|sp| {
