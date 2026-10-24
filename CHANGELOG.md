@@ -98,6 +98,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 - The stack of a WOW64 thread in a user-mode minidump goes on into its x86 frames, from the x86 context its TEB's CPU area saved, as on a kernel target.
 - `.dump /u` puts committed pages that the process never touched in the minidump, as the zeros they hold. They were left out as if their contents were unknown: in csrss from the kernel dump, 7 MiB.
 - `.dump` writes the whole exception record of the stop into a kernel dump's header: its flags and parameters (an access violation's access type and address) were zeros.
+- `dt` reads a word after the type that names one of its fields as that field, as WinDbg does, even when the word would also evaluate: `dt nt!_KPROCESS BasePriority` showed the whole type, because `basepriority` is a pseudo-register. The address may come before or after the fields (`dt nt!_EPROCESS UniqueProcessId <address>`).
 
 ### Removed
 

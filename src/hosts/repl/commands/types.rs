@@ -31,7 +31,9 @@ const MAX_DL_WORDS: usize = 64;
 /// module defines a member type, ntoseye names the type with that module
 /// (wdf01000!_WDF_DRIVER_GLOBALS) and expands it from that PDB. If the PDB only
 /// declares the type (a driver's _EPROCESS*), ntoseye resolves it as a bare
-/// name. Nested field paths use dots, and field patterns support * and ?. With
+/// name. Nested field paths use dots, and field patterns support * and ?. A
+/// word that names a field of the type is a field pattern, so the address may
+/// come before or after the fields, as in WinDbg. With
 /// -l, the given address is the first element, as in WinDbg, so the walk
 /// includes all nodes until it returns to that address. In memory, a list head
 /// and a record link look the same, so if you start at a list head instead of
@@ -52,7 +54,7 @@ fn dt(state: &mut ReplState<'_>, #[arg(parse = dt_arguments)] parsed: ParsedDtAr
 
 /// `dt`'s words.
 #[grammar(
-    usage = "[-r[N]] [-a[N]] [-v] [-y] [-l <field>] [module!]<type> [address] [field-pattern]...",
+    usage = "[-r[N]] [-a[N]] [-v] [-y] [-l <field>] [module!]<type> [field-pattern]... [address] [field-pattern]...",
     complete = Type
 )]
 fn dt_arguments(
@@ -282,8 +284,9 @@ struct DtOptions {
 #[derive(Debug, Clone)]
 struct ParsedDtArgs {
     type_name: String,
-    address_text: Option<String>,
-    field_patterns: Vec<String>,
+    /// The words after the type: field patterns and at most one address,
+    /// told apart once the type's fields are known (see `ReplState::dt`).
+    words: Vec<String>,
     options: DtOptions,
 }
 
@@ -368,13 +371,13 @@ fn parse_dt_args(args: &[Cow<'_, str>]) -> std::result::Result<ParsedDtArgs, Str
         index += 1;
     }
 
-    let Some(type_name) = positional.first().cloned() else {
+    let mut positional = positional.into_iter();
+    let Some(type_name) = positional.next() else {
         return Err("missing type name".to_string());
     };
     Ok(ParsedDtArgs {
         type_name,
-        address_text: positional.get(1).cloned(),
-        field_patterns: positional.into_iter().skip(2).collect(),
+        words: positional.collect(),
         options,
     })
 }
@@ -403,17 +406,30 @@ fn parse_field_path(path: &str) -> std::result::Result<Vec<String>, String> {
 }
 
 fn field_matches(name: &str, patterns: &[String], prefix_match: bool) -> bool {
-    if patterns.is_empty() {
-        return true;
+    patterns.is_empty()
+        || patterns
+            .iter()
+            .any(|pattern| field_matches_pattern(name, pattern, prefix_match))
+}
+
+fn field_matches_pattern(name: &str, pattern: &str, prefix_match: bool) -> bool {
+    if prefix_match {
+        name.to_ascii_lowercase()
+            .starts_with(&pattern.to_ascii_lowercase())
+    } else {
+        glob_matches(pattern, name, true)
     }
-    patterns.iter().any(|pattern| {
-        if prefix_match {
-            name.to_ascii_lowercase()
-                .starts_with(&pattern.to_ascii_lowercase())
-        } else {
-            glob_matches(pattern, name, true)
-        }
-    })
+}
+
+/// Whether `word` reads as a field pattern of `type_info`: it matches one of
+/// its fields, or starts a dotted path at one (`Pcb.Header`).
+fn names_field(type_info: &TypeInfo, word: &str, prefix_match: bool) -> bool {
+    let first = word.split('.').next().unwrap_or(word);
+    !first.is_empty()
+        && type_info
+            .fields
+            .keys()
+            .any(|name| field_matches_pattern(name, first, prefix_match))
 }
 
 /// What `dt` shows for a type: its header, then its fields (or the
@@ -876,22 +892,33 @@ impl ReplState<'_> {
             }
         };
 
-        let address = parsed
-            .address_text
+        // As in WinDbg, a word that names a field of the type is a field
+        // pattern, even one that would also evaluate (a bare pseudo-register
+        // such as `BasePriority`, or a hex-looking name), and the first word
+        // that names none is the address, before or after the fields.
+        let mut address_text = None;
+        let mut patterns = Vec::with_capacity(parsed.words.len());
+        for word in std::mem::take(&mut parsed.words) {
+            if address_text.is_none()
+                && !names_field(&type_info, &word, parsed.options.prefix_match)
+            {
+                address_text = Some(word);
+            } else {
+                patterns.push(word);
+            }
+        }
+        let address = address_text
             .as_deref()
             .and_then(|text| Expr::eval_with_radix(text, &self.ctx.target, self.radix).ok());
         let base = address.filter(|address| !address.is_zero());
         parsed.options.show_values = base.is_some();
-        let patterns = if parsed.address_text.is_some() && address.is_some() {
-            parsed.field_patterns.clone()
-        } else if let Some(address_text) = parsed.address_text {
-            let mut all = Vec::with_capacity(parsed.field_patterns.len() + 1);
-            all.push(address_text);
-            all.extend(parsed.field_patterns);
-            all
-        } else {
-            parsed.field_patterns.clone()
-        };
+        // A word that is neither a field nor an expression is still tried
+        // as a pattern, which reports that nothing matches it.
+        if address.is_none()
+            && let Some(text) = address_text
+        {
+            patterns.insert(0, text);
+        }
 
         let body = if let Some(list_path) = parsed.options.list_field.as_ref() {
             self.dt_list(
@@ -1182,6 +1209,53 @@ mod tests {
             text.contains("+0x028 Links.blink : <?>* = 0x1000"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn dt_reads_a_word_that_names_a_field_as_a_field_in_either_order() {
+        let mut memory = [0u8; 0x10];
+        memory[0] = 0x11;
+        memory[4..8].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        let mut session = session_over_memory(0x1000, &memory);
+        let dtb = session.target.current_dtb();
+        session.target.symbols.set_kernel(Some(1), dtb);
+        let field = |offset, size, name: &str| FieldInfo {
+            offset,
+            size,
+            type_data: ParsedType::Primitive(name.to_string()),
+        };
+        session.target.symbols.inject_module_for_test(
+            1,
+            vec![TypeInfo {
+                name: "_HDR".to_string(),
+                pointer_size: 8,
+                size: 8,
+                fields: [
+                    // `Cafe` also evaluates, as the number 0xcafe.
+                    ("Cafe".to_string(), field(0, 1, "UCHAR")),
+                    ("Value".to_string(), field(4, 4, "ULONG")),
+                ]
+                .into_iter()
+                .collect(),
+            }],
+            &[],
+        );
+        let mut state = ReplState::for_oneshot(&mut session);
+
+        let (result, text) = capture(|| state.dispatch_line("dt _HDR Cafe"));
+        result.unwrap();
+        assert!(text.contains("+0x000 Cafe : UCHAR"), "{text}");
+        assert!(!text.contains("Value"), "the layout, filtered: {text}");
+
+        for line in ["dt _HDR Value 1000", "dt _HDR 1000 Value"] {
+            let (result, text) = capture(|| state.dispatch_line(line));
+            result.unwrap();
+            assert!(
+                text.contains("+0x004 Value : ULONG = 0x12345678"),
+                "{line}: {text}"
+            );
+            assert!(!text.contains("Cafe"), "{line}: {text}");
+        }
     }
 
     #[test]
