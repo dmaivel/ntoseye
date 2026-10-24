@@ -97,6 +97,23 @@ fn parse_state_change_extracts_exception_record_metadata() {
     assert_eq!(second.exception_first_chance, Some(false));
 }
 
+/// A trap in a WOW64 thread's x86 code reports `STATUS_WX86_SINGLE_STEP` or
+/// `STATUS_WX86_BREAKPOINT`; to the debugger they are a single step and a
+/// breakpoint, which is what ends a step and what a hit is.
+#[test]
+fn wow64_traps_parse_as_the_native_ones() {
+    let mut payload = vec![0u8; 188];
+    payload[0..4].copy_from_slice(&DBG_KD_EXCEPTION_STATE_CHANGE.to_le_bytes());
+    for (reported, native) in [
+        (0x4000_001eu32, 0x8000_0004u32),
+        (0x4000_001f, 0x8000_0003),
+        (0xc000_0005, 0xc000_0005),
+    ] {
+        payload[32..36].copy_from_slice(&reported.to_le_bytes());
+        assert_eq!(parse_state_change(&payload).unwrap().exception_code, native);
+    }
+}
+
 #[test]
 fn parse_load_symbols_state_change_extracts_base_hint() {
     let mut payload = vec![0u8; 64];

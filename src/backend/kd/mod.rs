@@ -135,6 +135,20 @@ const DBG_KD_COMMAND_STRING_STATE_CHANGE: u32 = 0x0000_3032;
 
 const STATUS_BREAKPOINT: u32 = 0x8000_0003;
 const STATUS_SINGLE_STEP: u32 = 0x8000_0004;
+/// The single step and breakpoint of a WOW64 thread's x86 code, which
+/// Windows reports for a trap taken in compatibility mode.
+const STATUS_WX86_SINGLE_STEP: u32 = 0x4000_001E;
+const STATUS_WX86_BREAKPOINT: u32 = 0x4000_001F;
+
+/// `code` as the trap it is to the debugger: a WOW64 thread's x86 single
+/// step and breakpoint are the native ones, whatever code Windows gave them.
+fn native_trap_code(code: u32) -> u32 {
+    match code {
+        STATUS_WX86_SINGLE_STEP => STATUS_SINGLE_STEP,
+        STATUS_WX86_BREAKPOINT => STATUS_BREAKPOINT,
+        code => code,
+    }
+}
 const KD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Bytes of configuration space per `DbgKdGetBusDataApi` request, well inside
 /// a KD packet.
