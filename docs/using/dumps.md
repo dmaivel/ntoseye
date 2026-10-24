@@ -279,6 +279,7 @@ If the command cannot read a guest page, it writes zeros for that page and shows
 - the modules the process unloaded, from ntdll's unload trace;
 - each handle of the process, with its type, object name, access, attributes, and counts, so {command}`!handle` works on the minidump;
 - the build string and the time-zone bias, so {command}`.time` shows local time;
+- when the target stopped at an exception that a thread of the process raised in user mode, that exception with the thread's context, so {command}`.ecxr` and {command}`!analyze` work on the minidump;
 - the regions of the address space as `VirtualQuery` reports them, so {command}`!address` and {command}`!vprot` work on the minidump;
 - every committed page of the process that is in physical memory, as a full-memory minidump holds it, and every committed page the process has never touched, which holds zeros.
 

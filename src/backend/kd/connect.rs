@@ -211,6 +211,7 @@ impl KdBackend {
             managed_bp_addresses: HashSet::new(),
             retired_bp_addresses: HashSet::new(),
             breakin_addresses,
+            last_exception_record: None,
             late_breakin: !initial_breakin,
             pending_write_breakpoint: None,
             reconnect_assist_after_continue: None,

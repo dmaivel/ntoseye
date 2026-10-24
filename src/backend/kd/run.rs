@@ -92,6 +92,7 @@ impl KdBackend {
     }
 
     pub(super) fn record_stop(&mut self, stop: &StateChange) {
+        self.last_exception_record = stop.exception_record.clone();
         if self.unmanaged_breakpoint_stop(stop) {
             self.late_breakin = false;
         }

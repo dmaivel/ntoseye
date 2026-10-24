@@ -29,9 +29,10 @@ use crate::nt::target::mm::{
 use crate::nt::target::{KTHREAD_STATE_TERMINATED, Target, ThreadInfo};
 use crate::nt::unwind::{RecoveredStackTrace, build_parked_thread_recovered_stack};
 use crate::nt::userdump::write::{
-    MinidumpHandle, MinidumpModule, MinidumpProcess, MinidumpRegion, MinidumpSystem,
-    MinidumpThread, MinidumpUnloadedModule,
+    MinidumpException, MinidumpHandle, MinidumpModule, MinidumpProcess, MinidumpRegion,
+    MinidumpSystem, MinidumpThread, MinidumpUnloadedModule,
 };
+use crate::session::ContinueOutcome;
 use crate::session::Session;
 
 /// Frames walked to find where a thread's user-mode code was.
@@ -131,11 +132,26 @@ pub fn collect_dump_metadata(session: &mut Session) -> Result<DumpMetadata> {
             }
         }
         if let Some(code) = stop.exception_code {
+            let record = session
+                .backend
+                .last_exception_record()
+                .filter(|record| record.code == code);
+            let mut parameters = [0u64; 15];
+            let parameter_count = record.as_ref().map_or(0, |record| {
+                for (slot, value) in parameters.iter_mut().zip(&record.parameters) {
+                    *slot = *value;
+                }
+                record.parameters.len().min(15) as u32
+            });
             exception = Some(DumpException {
                 code,
-                flags: 0,
-                address: stop.exception_address.or(stop.program_counter).unwrap_or(0),
-                ..DumpException::default()
+                flags: record.as_ref().map_or(0, |record| record.flags),
+                address: record.as_ref().map_or_else(
+                    || stop.exception_address.or(stop.program_counter).unwrap_or(0),
+                    |record| record.address,
+                ),
+                parameters,
+                parameter_count,
             });
         }
     }
@@ -302,6 +318,50 @@ fn present_runs(memory: &AddressSpace<'_, PhysMem>, vad: &MemoryRegionInfo) -> V
         regions.push(region(at, vad.end.0, false));
     }
     regions
+}
+
+/// The exception the target stopped at, when it is a thread of the process
+/// (one of `threads`, `active` mapping each running thread to its vCPU)
+/// that raised it in user mode, and the stop is the exception itself: not
+/// one of the debugger's breakpoints, steps or break-ins.
+fn stop_exception(
+    session: &Session,
+    active: &HashMap<u64, (String, ThreadInfo)>,
+    threads: &[ThreadInfo],
+) -> Option<MinidumpException> {
+    let Some(ContinueOutcome::Stopped {
+        exception_code: Some(code),
+        ..
+    }) = session.current_stop.as_ref()
+    else {
+        return None;
+    };
+    let record = session
+        .backend
+        .last_exception_record()
+        .filter(|record| record.code == *code)?;
+    if session
+        .target
+        .arch()
+        .paging()
+        .is_kernel_address(VirtAddr(record.address))
+    {
+        return None;
+    }
+    let (_, thread) = active
+        .values()
+        .find(|(vcpu, _)| *vcpu == session.current_thread)?;
+    threads
+        .iter()
+        .any(|candidate| candidate.ethread == thread.ethread)
+        .then(|| MinidumpException {
+            tid: thread.tid.unwrap_or(0) as u32,
+            code: record.code,
+            flags: record.flags,
+            record: record.record,
+            address: record.address,
+            parameters: record.parameters,
+        })
 }
 
 /// A `UNICODE_STRING` at `address` in the kernel's space.
@@ -511,8 +571,9 @@ pub fn collect_process_minidump(
         .into_iter()
         .filter(|thread| thread.state != Some(KTHREAD_STATE_TERMINATED))
         .collect();
-    let running: HashMap<u64, Option<HashMap<String, u64>>> = session
-        .active_thread_map()
+    let active = session.active_thread_map();
+    let exception = stop_exception(session, &active, &threads);
+    let running: HashMap<u64, Option<HashMap<String, u64>>> = active
         .into_iter()
         .filter(|(ethread, _)| threads.iter().any(|thread| thread.ethread.0 == *ethread))
         .map(|(ethread, (vcpu, _))| {
@@ -705,6 +766,7 @@ pub fn collect_process_minidump(
         zero,
         handles: process_handles(&session.target, process),
         unloaded: unloaded_modules(&session.target, process),
+        exception,
         build_string: version.build_lab.clone(),
         time_zone_bias: kuser
             .time_zone_bias()

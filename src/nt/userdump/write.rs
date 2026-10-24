@@ -17,10 +17,10 @@ use crate::base::memory::PAGE_SIZE;
 use crate::nt::dump_writer::{PartialDumpCleanup, create_temporary_file};
 
 use super::parse::{
-    HANDLE_DATA_STREAM, MEMORY_INFO_LIST_STREAM, MEMORY64_LIST_STREAM, MINIDUMP_SIGNATURE,
-    MINIDUMP_VERSION, MISC_INFO_BUILD_STRING, MISC_INFO_BUILD_STRING_UNITS, MISC_INFO_STREAM,
-    MISC_INFO_TIME_ZONE, MISC_INFO_TIME_ZONE_ID, MISC1_PROCESS_ID, MISC1_PROCESS_TIMES,
-    MISC3_TIMEZONE, MISC4_BUILDSTRING, MODULE_LIST_STREAM, PLATFORM_WIN32_NT,
+    EXCEPTION_STREAM, HANDLE_DATA_STREAM, MEMORY_INFO_LIST_STREAM, MEMORY64_LIST_STREAM,
+    MINIDUMP_SIGNATURE, MINIDUMP_VERSION, MISC_INFO_BUILD_STRING, MISC_INFO_BUILD_STRING_UNITS,
+    MISC_INFO_STREAM, MISC_INFO_TIME_ZONE, MISC_INFO_TIME_ZONE_ID, MISC1_PROCESS_ID,
+    MISC1_PROCESS_TIMES, MISC3_TIMEZONE, MISC4_BUILDSTRING, MODULE_LIST_STREAM, PLATFORM_WIN32_NT,
     PROCESSOR_ARCHITECTURE_AMD64, PROCESSOR_ARCHITECTURE_ARM64, SYSTEM_INFO_STREAM,
     THREAD_INFO_LIST_STREAM, THREAD_LIST_STREAM, THREAD_NAME_LIST_STREAM, TIME_ZONE_ID_UNKNOWN,
     UNLOADED_MODULE_LIST_STREAM,
@@ -125,6 +125,19 @@ pub struct MinidumpModule {
     pub version: Option<[u32; 13]>,
 }
 
+/// The exception the process stopped at (`MINIDUMP_EXCEPTION_STREAM`).
+#[derive(Debug, Clone)]
+pub struct MinidumpException {
+    /// The thread that raised it; its context is the exception's.
+    pub tid: u32,
+    pub code: u32,
+    pub flags: u32,
+    pub record: u64,
+    pub address: u64,
+    /// `ExceptionInformation`, at most 15.
+    pub parameters: Vec<u64>,
+}
+
 /// A handle of the process (`MINIDUMP_HANDLE_DESCRIPTOR`).
 #[derive(Debug, Clone)]
 pub struct MinidumpHandle {
@@ -184,6 +197,8 @@ pub struct MinidumpProcess {
     pub build_string: Option<String>,
     /// UTC minus local time, in minutes, daylight saving included.
     pub time_zone_bias: Option<i32>,
+    /// The exception the process stopped at, if it did.
+    pub exception: Option<MinidumpException>,
 }
 
 /// The streams before the memory data, laid out in one buffer whose first
@@ -290,6 +305,7 @@ pub fn write_minidump(
         .filter(|thread| thread.name.is_some())
         .count();
     let stream_count = BASE_STREAMS
+        + usize::from(process.exception.is_some())
         + usize::from(process.handles.is_some())
         + usize::from(!process.unloaded.is_empty())
         + usize::from(named_threads != 0);
@@ -479,6 +495,39 @@ pub fn write_minidump(
         streams.u32(rva);
     }
     directory.push((THREAD_LIST_STREAM, streams.rva() - threads_rva, threads_rva));
+
+    // ExceptionStream: MINIDUMP_EXCEPTION_STREAM, its context the raising
+    // thread's.
+    if let Some(exception) = &process.exception {
+        let (context_size, context_rva) = process
+            .threads
+            .iter()
+            .zip(&contexts)
+            .find(|(thread, _)| thread.tid == exception.tid)
+            .and_then(|(_, context)| *context)
+            .unwrap_or((0, 0));
+        streams.align(4);
+        let exception_rva = streams.rva();
+        streams.u32(exception.tid);
+        streams.u32(0);
+        streams.u32(exception.code);
+        streams.u32(exception.flags);
+        streams.u64(exception.record);
+        streams.u64(exception.address);
+        let parameters = &exception.parameters[..exception.parameters.len().min(15)];
+        streams.u32(parameters.len() as u32);
+        streams.u32(0);
+        for index in 0..15 {
+            streams.u64(parameters.get(index).copied().unwrap_or(0));
+        }
+        streams.u32(context_size);
+        streams.u32(context_rva);
+        directory.push((
+            EXCEPTION_STREAM,
+            streams.rva() - exception_rva,
+            exception_rva,
+        ));
+    }
 
     // ThreadInfoListStream: MINIDUMP_THREAD_INFO_LIST.
     let thread_info_rva = streams.rva();

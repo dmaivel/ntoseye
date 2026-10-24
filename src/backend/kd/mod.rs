@@ -9,7 +9,8 @@ use ntoseye_macros::record;
 use crate::arch::{Arch, HwBreakpointAccess, RegisterMap};
 use crate::backend::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability, DebugLog,
-    DebugOutputPage, PciConfigAddress, ProcessorRead, StopEvent, TebPath, TrapState,
+    DebugOutputPage, ExceptionRecord, PciConfigAddress, ProcessorRead, StopEvent, TebPath,
+    TrapState,
 };
 use crate::backend::debugger_data::DebuggerDataCandidate;
 use crate::backend::kd::framing::KdFraming;
@@ -111,6 +112,9 @@ pub struct StateChange {
     /// What a load-symbols state change reports; `None` for every other
     /// kind.
     load_symbols: Option<LoadSymbols>,
+    /// The `EXCEPTION_RECORD64` an exception state change reports; `None`
+    /// for every other kind.
+    exception_record: Option<ExceptionRecord>,
     is_bugcheck: bool,
     bugcheck: Option<BugcheckInfo>,
     target_reloaded: bool,
@@ -335,6 +339,8 @@ pub struct KdBackend {
     /// halted at a break of its own collects that break instead, and the
     /// kernel keeps the break-in for its next clock tick.
     breakin_addresses: HashSet<u64>,
+    /// The exception record of the last stop, when it was an exception.
+    last_exception_record: Option<ExceptionRecord>,
     /// Our breakpoints removed since the target last resumed; see
     /// [`ContinueDrain`].
     retired_bp_addresses: HashSet<u64>,
@@ -491,6 +497,10 @@ impl DebugBackend for KdBackend {
 
     fn note_breakin_site(&mut self, address: u64) {
         self.breakin_addresses.insert(address);
+    }
+
+    fn last_exception_record(&self) -> Option<ExceptionRecord> {
+        self.last_exception_record.clone()
     }
 
     fn write_registers(&mut self, data: &[u8]) -> Result<()> {

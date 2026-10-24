@@ -250,6 +250,18 @@ pub struct StopEvent {
     pub break_in: bool,
 }
 
+/// The exception record a stop reported (`EXCEPTION_RECORD64`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExceptionRecord {
+    pub code: u32,
+    pub flags: u32,
+    /// The record this one is chained to, 0 for none.
+    pub record: u64,
+    pub address: u64,
+    /// `ExceptionInformation[..NumberParameters]`.
+    pub parameters: Vec<u64>,
+}
+
 /// An image a module notification reports loading or unloading.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleNotification {
@@ -584,6 +596,12 @@ pub trait DebugBackend {
     /// already halted, which the kernel kept and takes on its next clock
     /// tick.
     fn note_breakin_site(&mut self, _address: u64) {}
+
+    /// The whole exception record of the last stop, when it was an
+    /// exception and the transport reports the record.
+    fn last_exception_record(&self) -> Option<ExceptionRecord> {
+        None
+    }
 
     fn set_breakpoint(&mut self, addr: u64) -> Result<()>;
     fn remove_breakpoint(&mut self, addr: u64) -> Result<()>;

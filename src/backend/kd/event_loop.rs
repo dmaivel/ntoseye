@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use super::transport::KdTransport;
 use crate::arch::{Arch, RegisterMap};
-use crate::backend::dbg_backend::DebugLog;
+use crate::backend::dbg_backend::{DebugLog, ExceptionRecord};
 use crate::backend::kd::api;
 use crate::backend::kd::framing::{
     KdFraming, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO, PACKET_TYPE_KD_STATE_CHANGE64,
@@ -85,6 +85,22 @@ pub fn parse_state_change(payload: &[u8]) -> Result<StateChange> {
     } else {
         None
     };
+    // DBGKM_EXCEPTION64 at 32: ExceptionCode u32 @32, ExceptionFlags u32
+    // @36, ExceptionRecord u64 @40, ExceptionAddress u64 @48,
+    // NumberParameters u32 @56, ExceptionInformation[15] u64 @64.
+    let exception_record = (new_state == DBG_KD_EXCEPTION_STATE_CHANGE && payload.len() >= 184)
+        .then(|| {
+            let count = (read_u32(payload, 56) as usize).min(EXCEPTION_MAXIMUM_PARAMETERS);
+            ExceptionRecord {
+                code: read_u32(payload, 32),
+                flags: read_u32(payload, 36),
+                record: read_u64(payload, 40),
+                address: read_u64(payload, 48),
+                parameters: (0..count)
+                    .map(|index| read_u64(payload, 64 + index * 8))
+                    .collect(),
+            }
+        });
     let exception_first_chance =
         if new_state == DBG_KD_EXCEPTION_STATE_CHANGE && payload.len() >= 188 {
             Some(read_u32(payload, 184) != 0)
@@ -125,6 +141,7 @@ pub fn parse_state_change(payload: &[u8]) -> Result<StateChange> {
         program_counter: read_u64(payload, 24),
         kernel_base_hint,
         load_symbols,
+        exception_record,
         is_bugcheck: false,
         bugcheck: None,
         target_reloaded: false,
@@ -132,6 +149,9 @@ pub fn parse_state_change(payload: &[u8]) -> Result<StateChange> {
         control_report: control_report(payload),
     })
 }
+
+/// `EXCEPTION_MAXIMUM_PARAMETERS`: the room `ExceptionInformation` has.
+const EXCEPTION_MAXIMUM_PARAMETERS: usize = 15;
 
 /// The `DBGKD_LOAD_SYMBOLS64` of a load-symbols state change, at 32:
 /// PathNameLength u32 @32, BaseOfDll u64 @40, ProcessId u64 @48, CheckSum

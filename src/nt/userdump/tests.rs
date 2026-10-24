@@ -768,8 +768,8 @@ fn misc_info_records_process_times_and_the_time_zone_in_effect() {
 #[test]
 fn a_written_minidump_reads_back_as_written() {
     use super::write::{
-        MinidumpHandle, MinidumpModule, MinidumpProcess, MinidumpRegion, MinidumpSystem,
-        MinidumpThread, MinidumpUnloadedModule, write_minidump,
+        MinidumpException, MinidumpHandle, MinidumpModule, MinidumpProcess, MinidumpRegion,
+        MinidumpSystem, MinidumpThread, MinidumpUnloadedModule, write_minidump,
     };
     use crate::base::bytes::write_u32;
     use crate::nt::pe::headers::CodeView;
@@ -872,6 +872,14 @@ fn a_written_minidump_reads_back_as_written() {
         }],
         build_string: Some("26100.1.amd64fre.ge_release.240331-1435".into()),
         time_zone_bias: Some(300),
+        exception: Some(MinidumpException {
+            tid: 0x1234,
+            code: 0xc000_0005,
+            flags: 0,
+            record: 0,
+            address: 0x7ff6_1000_1234,
+            parameters: vec![1, 0xdead],
+        }),
     };
     let path = std::env::temp_dir().join(format!(
         "ntoseye-minidump-writer-{}.dmp",
@@ -966,6 +974,17 @@ fn a_written_minidump_reads_back_as_written() {
         Some("26100.1.amd64fre.ge_release.240331-1435")
     );
     assert_eq!(info.time_zone.as_ref().map(|zone| zone.bias), Some(300));
+    let exception = info.exception.as_ref().expect("an exception stream");
+    assert_eq!(
+        (exception.thread_id, exception.code, exception.address),
+        (0x1234, 0xc000_0005, 0x7ff6_1000_1234)
+    );
+    assert_eq!(exception.parameters, [1, 0xdead]);
+    let context = exception
+        .context
+        .as_ref()
+        .expect("the raising thread's context");
+    assert_eq!(map.read_u64("rip", context).unwrap(), 0x7ff6_1000_1234);
 
     let regions = info.regions.as_ref().expect("a memory-info list");
     assert_eq!(regions.len(), 1);

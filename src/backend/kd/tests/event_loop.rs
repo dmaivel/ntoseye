@@ -31,6 +31,7 @@ fn transparent_arm64_state_change_uses_arm64_continue_layout() {
         program_counter: 0xffff_f800_1234_5678,
         kernel_base_hint: None,
         load_symbols: None,
+        exception_record: None,
         is_bugcheck: false,
         bugcheck: None,
         target_reloaded: false,
@@ -226,6 +227,16 @@ fn state_change_carries_the_amd64_control_report() {
     let stop = parse_state_change(&payload).unwrap();
     assert_eq!(stop.program_counter, 0x7ffa_7cc5_17e0);
     assert_eq!(stop.exception_code, STATUS_BREAKPOINT);
+    let record = stop.exception_record.as_ref().expect("an exception record");
+    assert_eq!(
+        (record.code, record.flags, record.address),
+        (STATUS_BREAKPOINT, 0, 0x7ffa_7cc5_17e0)
+    );
+    assert_eq!(
+        record.parameters,
+        [0],
+        "an int3's one parameter, BREAKPOINT_BREAK"
+    );
 
     let report = stop.control_report.expect("240 bytes carry a report");
     let trap = trap_state(&report).expect("AMD64 report");
@@ -317,6 +328,7 @@ fn continue_drains_in_place_rebreak_stale_breakin_and_retired_breakpoint_trap() 
         program_counter: pc,
         kernel_base_hint: None,
         load_symbols: None,
+        exception_record: None,
         is_bugcheck: false,
         bugcheck: None,
         target_reloaded: false,

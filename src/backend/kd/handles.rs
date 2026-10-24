@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use crate::arch::{HwBreakpointAccess, RegisterMap};
 use crate::backend::dbg_backend::{
-    BackendCapability, ContinueDisposition, DebugBackend, DebugOutputPage, PciConfigAddress,
-    ProcessorRead, StopEvent, TebPath, TrapState,
+    BackendCapability, ContinueDisposition, DebugBackend, DebugOutputPage, ExceptionRecord,
+    PciConfigAddress, ProcessorRead, StopEvent, TebPath, TrapState,
 };
 use crate::backend::debugger_data::DebuggerDataCandidate;
 use crate::backend::phys::PhysMem;
@@ -136,6 +136,10 @@ impl DebugBackend for KdBackendHandle {
 
     fn note_breakin_site(&mut self, address: u64) {
         self.lock().note_breakin_site(address);
+    }
+
+    fn last_exception_record(&self) -> Option<ExceptionRecord> {
+        self.lock().last_exception_record()
     }
 
     fn write_registers(&mut self, data: &[u8]) -> Result<()> {
