@@ -15,7 +15,7 @@ Keeping this file:
 
 ## Unreleased
 
-Stops and `u` now show where the code goes: the instructions around the stop in its function, jump and call targets by name, the jumps between them drawn as arrows, and whether the next one is taken. A bugcheck stop shows the registers the faulting instruction ran with, and its stack starts at the frame that faulted.
+Support for 64-bit Windows 7, 8.1, Vista and XP ([platform support](https://ntoseye.com/#platform-support)), UI improvements and many bug fixes. Stops and `u` now show where the code goes: the instructions around the stop in its function, jump and call targets by name, the jumps between them drawn as arrows, and whether the next one is taken; a bugcheck stop shows the registers the faulting instruction ran with, and its stack starts at the frame that faulted.
 
 ### Added
 
