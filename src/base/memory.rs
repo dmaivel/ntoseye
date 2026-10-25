@@ -433,7 +433,45 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         } else {
             0
         };
-        let _ = self.visit_table(self.root_for(start), 0, half, start.0, end.0, &mut visit)?;
+        let _ = self.visit_table(
+            self.root_for(start),
+            0,
+            half,
+            start.0,
+            end.0,
+            &mut visit,
+            &mut |_, _| {},
+        )?;
+        Ok(())
+    }
+
+    /// Each non-present, non-zero PTE-level entry that maps a page in
+    /// `[start, end)`, with the address of its page: pages that are paged
+    /// out or otherwise not in memory. Absent tables are skipped whole.
+    pub fn for_each_absent_pte(
+        &self,
+        start: VirtAddr,
+        end: VirtAddr,
+        mut visit: impl FnMut(VirtAddr, PageTableEntry),
+    ) -> Result<()> {
+        if start.0 >= end.0 || self.dtb == DTB_IDENTITY {
+            return Ok(());
+        }
+        let bits = self.arch.paging().levels()[0].shift() + 9;
+        let half = if start.0 & (1 << (bits - 1)) != 0 {
+            !0 << bits
+        } else {
+            0
+        };
+        let _ = self.visit_table(
+            self.root_for(start),
+            0,
+            half,
+            start.0,
+            end.0,
+            &mut |_, _, _| ControlFlow::Continue(()),
+            &mut visit,
+        )?;
         Ok(())
     }
 
@@ -448,6 +486,7 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         start: u64,
         end: u64,
         visit: &mut impl FnMut(VirtAddr, PhysAddr, u64) -> ControlFlow<()>,
+        absent: &mut impl FnMut(VirtAddr, PageTableEntry),
     ) -> Result<ControlFlow<()>> {
         let paging = self.arch.paging();
         let level = paging.levels()[depth];
@@ -468,14 +507,19 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             ));
             let entry_base = base + index * span;
             let flow = match paging.decode_entry(level, entry) {
-                TableEntry::Absent => continue,
+                TableEntry::Absent => {
+                    if level == PageTableLevel::Pte && entry.0 != 0 {
+                        absent(VirtAddr(entry_base), entry);
+                    }
+                    continue;
+                }
                 TableEntry::Leaf(frame) => {
                     let from = entry_base.max(start);
                     let to = (entry_base + (span - 1)).min(end - 1);
                     visit(VirtAddr(from), frame + (from - entry_base), to - from + 1)
                 }
                 TableEntry::Table(next) => {
-                    self.visit_table(next, depth + 1, entry_base, start, end, visit)?
+                    self.visit_table(next, depth + 1, entry_base, start, end, visit, absent)?
                 }
             };
             if flow.is_break() {
@@ -818,6 +862,48 @@ mod tests {
         )
     }
 
+    #[test]
+    fn absent_pte_walk_reports_non_present_ptes_in_range_only() {
+        // Kernel half: PML4[0x1f0] -> PDPT at 0x2000 -> PD at 0x3000. PD[0]
+        // -> PT at 0x4000: PTE 2 present, PTE 3 in transition, PTE 5 in a
+        // page file, PTE 6 zero. PD[1] is a non-present table entry, which
+        // maps no page itself.
+        let mut data = vec![0u8; 0x5000];
+        let mut put = |table: usize, index: usize, value: u64| {
+            data[table + index * 8..table + index * 8 + 8].copy_from_slice(&value.to_le_bytes());
+        };
+        put(0x1000, 0x1f0, 0x2000 | 0b11);
+        put(0x2000, 0, 0x3000 | 0b11);
+        put(0x3000, 0, 0x4000 | 0b11);
+        put(0x3000, 1, 0x0000_0012_0000_2080);
+        put(0x4000, 2, 0x9000 | 0b11);
+        put(0x4000, 3, 0xa000 | (1 << 11));
+        put(0x4000, 5, 0x0000_00ab_0000_2080);
+        let mem = FakePhysMem {
+            data,
+            invalid_pte_mask: 0,
+        };
+        let space = AddressSpace::new_amd64(&mem, 0x1000);
+        let base = 0xffff_f800_0000_0000u64;
+        let absent = |start: u64, end: u64| {
+            let mut visits = Vec::new();
+            space
+                .for_each_absent_pte(VirtAddr(base + start), VirtAddr(base + end), |va, pte| {
+                    visits.push((va.0 - base, pte.0));
+                })
+                .unwrap();
+            visits
+        };
+        assert_eq!(
+            absent(0, 0x4000_0000),
+            [
+                (0x3000, 0xa000 | (1 << 11)),
+                (0x5000, 0x0000_00ab_0000_2080)
+            ]
+        );
+        assert_eq!(absent(0x4000, 0x5000), []);
+        assert_eq!(absent(0x5000, 0x6000), [(0x5000, 0x0000_00ab_0000_2080)]);
+    }
     #[test]
     fn present_page_walk_skips_absent_tables_and_clips_large_pages() {
         // Kernel half: PML4[0x1f0] -> PDPT at 0x2000. PDPT[0] -> PD at

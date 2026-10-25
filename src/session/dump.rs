@@ -272,12 +272,40 @@ fn minidump_module(memory: &AddressSpace<'_, PhysMem>, module: &ModuleInfo) -> M
     }
 }
 
-/// A VAD too large to scan page by page (a reservation such as the CFG
-/// bitmap) as regions: the runs of its pages that are present, committed
-/// with its protection, and the rest reserved. A committed page that is
-/// paged out shows as reserved.
-fn present_runs(memory: &AddressSpace<'_, PhysMem>, vad: &MemoryRegionInfo) -> Vec<MinidumpRegion> {
+/// The runs of pages in `[start, end)` that are present or in the
+/// memory-compression store, in address order and merged.
+fn readable_runs(
+    memory: &AddressSpace<'_, PhysMem>,
+    start: VirtAddr,
+    end: VirtAddr,
+) -> Vec<Range<u64>> {
     let page = PAGE_SIZE as u64;
+    let mut runs = Vec::new();
+    let _ = memory.for_each_present_page(start, end, |va, _, length| {
+        runs.push(va.0 & !(page - 1)..(va.0 + length).next_multiple_of(page));
+        ControlFlow::Continue(())
+    });
+    let _ = memory.for_each_absent_pte(start, end, |va, _| {
+        if memory.page_is_compressed(va) {
+            runs.push(va.0..va.0 + page);
+        }
+    });
+    runs.sort_unstable_by_key(|run| run.start);
+    let mut merged: Vec<Range<u64>> = Vec::new();
+    for run in runs {
+        match merged.last_mut() {
+            Some(last) if last.end == run.start => last.end = run.end,
+            _ => merged.push(run),
+        }
+    }
+    merged
+}
+
+/// A VAD too large to scan page by page (a reservation such as the CFG
+/// bitmap) as regions: the runs of its pages that are present or in the
+/// memory-compression store, committed with its protection, and the rest
+/// reserved. A committed page that is paged out to disk shows as reserved.
+fn present_runs(memory: &AddressSpace<'_, PhysMem>, vad: &MemoryRegionInfo) -> Vec<MinidumpRegion> {
     let protect = vad.protection_value().map_or(0, page_protection);
     let kind = if vad.vad_type == Some(VadType::ImageMap) {
         MEM_IMAGE
@@ -295,19 +323,9 @@ fn present_runs(memory: &AddressSpace<'_, PhysMem>, vad: &MemoryRegionInfo) -> V
         protect: if committed { protect } else { 0 },
         kind,
     };
-    let mut present: Vec<Range<u64>> = Vec::new();
-    let _ = memory.for_each_present_page(vad.start, vad.end, |va, _, length| {
-        let start = va.0 & !(page - 1);
-        let end = (va.0 + length).next_multiple_of(page);
-        match present.last_mut() {
-            Some(last) if last.end == start => last.end = end,
-            _ => present.push(start..end),
-        }
-        ControlFlow::Continue(())
-    });
     let mut regions = Vec::new();
     let mut at = vad.start.0;
-    for run in present {
+    for run in readable_runs(memory, vad.start, vad.end) {
         if run.start > at {
             regions.push(region(at, run.start, false));
         }
@@ -511,7 +529,8 @@ fn used_stack(memory: &AddressSpace<'_, PhysMem>, teb: u64, sp: u64) -> Option<R
 /// [`PAGE_BY_PAGE_REGION`] wherever its pages translate, which takes pages
 /// in transition and shared pages not yet touched too, or are demand-zero
 /// (committed, never touched: zeros), or are in the memory-compression
-/// store; each larger one where its pages are present.
+/// store; each larger one where its pages are present or in the store
+/// ([`readable_runs`]).
 fn captured_memory(
     memory: &AddressSpace<'_, PhysMem>,
     regions: &[MinidumpRegion],
@@ -538,15 +557,9 @@ fn captured_memory(
                 }
             }
         } else {
-            let _ = memory.for_each_present_page(
-                VirtAddr(region.base),
-                VirtAddr(end),
-                |va, _, length| {
-                    let start = va.0 & !(page - 1);
-                    add(&mut ranges, start, (va.0 + length).next_multiple_of(page));
-                    ControlFlow::Continue(())
-                },
-            );
+            for run in readable_runs(memory, VirtAddr(region.base), VirtAddr(end)) {
+                add(&mut ranges, run.start, run.end);
+            }
         }
     }
     (ranges, zero)

@@ -283,7 +283,7 @@ If the command cannot read a guest page, it writes zeros for that page and shows
 - the regions of the address space as `VirtualQuery` reports them, so {command}`!address` and {command}`!vprot` work on the minidump;
 - every committed page of the process that is in physical memory, as a full-memory minidump holds it, and every committed page the process has never touched, which holds zeros.
 
-A page that is in the page file is not in the minidump, though a page in the memory-compression store is (see [Compressed memory](memory.md#compressed-memory)), and a region larger than 64 MiB, such as the CFG bitmap's reservation, is split by which of its pages are in memory. A thread whose kernel stack is not in memory, which is common in a kernel dump, has no registers in the minidump, and the command says how many threads have none. The time zone has its bias but not its names.
+A page that is in the page file is not in the minidump, though a page in the memory-compression store is (see [Compressed memory](memory.md#compressed-memory)), and a region larger than 64 MiB, such as the CFG bitmap's reservation, is split by which of its pages are in memory or in the store. A thread whose kernel stack is not in memory, which is common in a kernel dump, has no registers in the minidump, and the command says how many threads have none. The time zone has its bias but not its names.
 
 ```text
 attach 680
