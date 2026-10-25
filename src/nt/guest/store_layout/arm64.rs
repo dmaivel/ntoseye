@@ -53,6 +53,11 @@ enum Value {
 }
 
 impl Value {
+    /// Whether the value moves an address by a known amount.
+    fn offsets(&self) -> bool {
+        matches!(self, Self::Const(_) | Self::Offset(_))
+    }
+
     /// The constant part of an address formed from this value.
     fn displacement(&self) -> u64 {
         match self {
@@ -82,38 +87,44 @@ struct Memory {
 
 /// The memory operand of a load or store, if it has one.
 fn memory(instruction: &Instruction) -> Option<Memory> {
-    instruction.operands().iter().find_map(|operand| match operand {
-        Operand::MemReg(base) | Operand::MemPostIdxImm { reg: base, .. } => Some(Memory {
-            base: *base,
-            offset: 0,
-            index: None,
-        }),
-        Operand::MemOffset { reg, offset, .. } => Some(Memory {
-            base: *reg,
-            offset: immediate(offset),
-            index: None,
-        }),
-        Operand::MemPreIdx { reg, imm } => Some(Memory {
-            base: *reg,
-            offset: immediate(imm),
-            index: None,
-        }),
-        Operand::MemExt { regs, shift, .. } => {
-            let amount = match shift {
-                Some(
-                    Shift::LSL(n) | Shift::UXTW(n) | Shift::SXTW(n) | Shift::UXTX(n)
-                    | Shift::SXTX(n),
-                ) => *n,
-                _ => 0,
-            };
-            Some(Memory {
-                base: regs[0],
+    instruction
+        .operands()
+        .iter()
+        .find_map(|operand| match operand {
+            Operand::MemReg(base) | Operand::MemPostIdxImm { reg: base, .. } => Some(Memory {
+                base: *base,
                 offset: 0,
-                index: Some((regs[1], amount)),
-            })
-        }
-        _ => None,
-    })
+                index: None,
+            }),
+            Operand::MemOffset { reg, offset, .. } => Some(Memory {
+                base: *reg,
+                offset: immediate(offset),
+                index: None,
+            }),
+            Operand::MemPreIdx { reg, imm } => Some(Memory {
+                base: *reg,
+                offset: immediate(imm),
+                index: None,
+            }),
+            Operand::MemExt { regs, shift, .. } => {
+                let amount = match shift {
+                    Some(
+                        Shift::LSL(n)
+                        | Shift::UXTW(n)
+                        | Shift::SXTW(n)
+                        | Shift::UXTX(n)
+                        | Shift::SXTX(n),
+                    ) => *n,
+                    _ => 0,
+                };
+                Some(Memory {
+                    base: regs[0],
+                    offset: 0,
+                    index: Some((regs[1], amount)),
+                })
+            }
+            _ => None,
+        })
 }
 
 /// The general registers an instruction writes first: its destination,
@@ -149,23 +160,22 @@ fn loads(instruction: &Instruction) -> bool {
             | Op::LDARH
             | Op::LDP
             | Op::LDPSW
-    ) && destinations(instruction).iter().all(|r| slot(*r).is_some() || is_zero(*r))
+    ) && destinations(instruction)
+        .iter()
+        .all(|r| slot(*r).is_some() || is_zero(*r))
 }
 
 fn is_zero(register: Reg) -> bool {
     matches!(register, Reg::XZR | Reg::WZR)
 }
 
-/// The width in bytes of the register an instruction writes.
-fn width(register: Reg) -> usize {
-    register.size()
-}
-
 /// Register and stack-slot values through a function's instructions, in
 /// address order, as the AMD64 derivation reads them.
 struct Tracker {
     registers: [Option<Value>; 31],
-    /// Values stored to the frame, by offset from sp or fp.
+    /// Values stored to the frame, by their offset from sp or fp, taken
+    /// as one base: the functions read here set fp to sp at the end of
+    /// their prologue and move neither after it.
     stack: HashMap<u64, Value>,
 }
 
@@ -205,9 +215,7 @@ impl Tracker {
     fn operand(&self, operand: &Operand) -> Option<Value> {
         match operand {
             Operand::Reg { reg, .. } if is_zero(*reg) => Some(Value::Const(0)),
-            Operand::Reg { reg, .. } => {
-                Some(self.get(*reg).cloned().unwrap_or(Value::Opaque))
-            }
+            Operand::Reg { reg, .. } => Some(self.get(*reg).cloned().unwrap_or(Value::Opaque)),
             Operand::Imm32 { imm, shift } | Operand::Imm64 { imm, shift } => {
                 let value = immediate(imm);
                 Some(Value::Const(match shift {
@@ -237,7 +245,7 @@ impl Tracker {
             };
             let at = self.displacement(&memory);
             for (index, register) in destinations(instruction).into_iter().enumerate() {
-                let offset = at.wrapping_add((index * width(register)) as u64);
+                let offset = at.wrapping_add((index * register.size()) as u64);
                 let value = if frame(memory.base) {
                     self.stack.get(&offset).cloned()
                 } else {
@@ -260,9 +268,7 @@ impl Tracker {
                 })
                 .collect();
             for (index, register) in sources.into_iter().enumerate() {
-                let offset = memory
-                    .offset
-                    .wrapping_add((index * width(register)) as u64);
+                let offset = memory.offset.wrapping_add((index * register.size()) as u64);
                 match self.get(register).cloned() {
                     Some(value) => self.stack.insert(offset, value),
                     None => self.stack.remove(&offset),
@@ -270,7 +276,10 @@ impl Tracker {
             }
             return;
         }
-        let Some(Operand::Reg { reg: destination, .. }) = operands.first() else {
+        let Some(Operand::Reg {
+            reg: destination, ..
+        }) = operands.first()
+        else {
             return;
         };
         let destination = *destination;
@@ -281,11 +290,13 @@ impl Tracker {
                     (Some(Value::Const(a)), Some(Value::Const(b))) => {
                         Some(Value::Const(a.wrapping_add(b)))
                     }
-                    (Some(left), Some(right)) => u32::try_from(
-                        left.displacement().wrapping_add(right.displacement()),
-                    )
-                    .ok()
-                    .map(Value::Offset),
+                    // A register plus a known amount; the sum of two
+                    // unknown values is no offset into anything.
+                    (Some(left), Some(right)) if left.offsets() || right.offsets() => {
+                        u32::try_from(left.displacement().wrapping_add(right.displacement()))
+                            .ok()
+                            .map(Value::Offset)
+                    }
                     _ => None,
                 }
             }
@@ -309,10 +320,13 @@ fn is_call(op: Op) -> bool {
 
 /// A direct branch or call's target.
 fn target(instruction: &Instruction) -> Option<u64> {
-    instruction.operands().iter().find_map(|operand| match operand {
-        Operand::Label(imm) => Some(immediate(imm)),
-        _ => None,
-    })
+    instruction
+        .operands()
+        .iter()
+        .find_map(|operand| match operand {
+            Operand::Label(imm) => Some(immediate(imm)),
+            _ => None,
+        })
 }
 
 /// The A64 instructions reachable from `address` through branches, calls
@@ -342,11 +356,34 @@ fn instructions(code: &KernelCode<'_>, address: u64) -> Vec<Instruction> {
                     pending.extend(branch);
                     break;
                 }
-                Op::B_EQ | Op::B_NE | Op::B_CS | Op::B_CC | Op::B_MI | Op::B_PL | Op::B_VS
-                | Op::B_VC | Op::B_HI | Op::B_LS | Op::B_GE | Op::B_LT | Op::B_GT | Op::B_LE
-                | Op::CBZ | Op::CBNZ | Op::TBZ | Op::TBNZ => pending.extend(branch),
-                Op::RET | Op::RETAA | Op::RETAB | Op::BR | Op::BRAA | Op::BRAAZ | Op::BRAB
-                | Op::BRABZ | Op::BRK | Op::UDF => break,
+                Op::B_EQ
+                | Op::B_NE
+                | Op::B_CS
+                | Op::B_CC
+                | Op::B_MI
+                | Op::B_PL
+                | Op::B_VS
+                | Op::B_VC
+                | Op::B_HI
+                | Op::B_LS
+                | Op::B_GE
+                | Op::B_LT
+                | Op::B_GT
+                | Op::B_LE
+                | Op::CBZ
+                | Op::CBNZ
+                | Op::TBZ
+                | Op::TBNZ => pending.extend(branch),
+                Op::RET
+                | Op::RETAA
+                | Op::RETAB
+                | Op::BR
+                | Op::BRAA
+                | Op::BRAAZ
+                | Op::BRAB
+                | Op::BRABZ
+                | Op::BRK
+                | Op::UDF => break,
                 _ => {}
             }
             ip += 4;
@@ -415,11 +452,18 @@ fn region_array(code: &KernelCode<'_>) -> Result<u32> {
         let operands = instruction.operands();
         let indexed: Vec<Reg> = match (instruction.op(), operands) {
             // `add x22, x8, w25, uxtw #3` scales the index as it adds.
-            (Op::ADD, [_, Operand::Reg { reg: a, .. }, Operand::Reg { reg: b, .. } | Operand::ShiftReg { reg: b, .. }]) => {
+            (
+                Op::ADD,
+                [
+                    _,
+                    Operand::Reg { reg: a, .. },
+                    Operand::Reg { reg: b, .. } | Operand::ShiftReg { reg: b, .. },
+                ],
+            ) => {
                 vec![*a, *b]
             }
             _ if loads(&instruction)
-                && destinations(&instruction).iter().all(|r| width(*r) == 8) =>
+                && destinations(&instruction).iter().all(|r| r.size() == 8) =>
             {
                 memory(&instruction)
                     .and_then(|m| m.index.map(|(index, _)| vec![m.base, index]))
@@ -484,21 +528,27 @@ fn back_pointer_and_flag(code: &KernelCode<'_>) -> Result<(u32, (u32, u8))> {
     let mut tests = BTreeSet::new();
     for instruction in instructions(code, retrieve) {
         let operands = instruction.operands();
-        let tested = register(operands.first()).and_then(slot).and_then(|s| bytes.get(&s));
+        let tested = register(operands.first())
+            .and_then(slot)
+            .and_then(|s| bytes.get(&s));
         match instruction.op() {
             Op::BL if target(&instruction).is_some_and(|t| store_methods.contains(&t)) => {
                 back_pointers.extend(tracker.get(Reg::X0).and_then(field));
             }
             Op::TBZ | Op::TBNZ => {
-                if let (Some(&(through, at)), Some(Operand::Imm32 { imm, .. } | Operand::Imm64 { imm, .. })) =
-                    (tested, operands.get(1))
+                if let (
+                    Some(&(through, at)),
+                    Some(Operand::Imm32 { imm, .. } | Operand::Imm64 { imm, .. }),
+                ) = (tested, operands.get(1))
                 {
                     tests.insert((through, at, immediate(imm) as u8));
                 }
             }
             Op::TST => {
-                if let (Some(&(through, at)), Some(Operand::Imm32 { imm, .. } | Operand::Imm64 { imm, .. })) =
-                    (tested, operands.get(1))
+                if let (
+                    Some(&(through, at)),
+                    Some(Operand::Imm32 { imm, .. } | Operand::Imm64 { imm, .. }),
+                ) = (tested, operands.get(1))
                     && immediate(imm).count_ones() == 1
                 {
                     tests.insert((through, at, immediate(imm).trailing_zeros() as u8));
@@ -566,10 +616,23 @@ fn region_key_fields(code: &KernelCode<'_>) -> Result<(u32, u32)> {
                     }
                 }
             }
-            (Op::LSL, [_, Operand::Reg { reg: source, .. }, Operand::Imm32 { imm, .. } | Operand::Imm64 { imm, .. }])
-            | (Op::UBFIZ, [_, Operand::Reg { reg: source, .. }, Operand::Imm32 { imm, .. } | Operand::Imm64 { imm, .. }, _])
-                if immediate(imm) == 4 =>
-            {
+            (
+                Op::LSL,
+                [
+                    _,
+                    Operand::Reg { reg: source, .. },
+                    Operand::Imm32 { imm, .. } | Operand::Imm64 { imm, .. },
+                ],
+            )
+            | (
+                Op::UBFIZ,
+                [
+                    _,
+                    Operand::Reg { reg: source, .. },
+                    Operand::Imm32 { imm, .. } | Operand::Imm64 { imm, .. },
+                    _,
+                ],
+            ) if immediate(imm) == 4 => {
                 if let Some(value) = tracker.get(*source) {
                     masks.extend(value.origins().into_iter().filter(|f| *f >= 0x100));
                 }
@@ -600,11 +663,11 @@ fn chunk_fields(code: &KernelCode<'_>) -> Result<(u32, ChunkFields)> {
         {
             let at = tracker.displacement(&memory);
             let destinations = destinations(&instruction);
-            if memory.index.is_some() && destinations.iter().all(|r| width(*r) == 8) {
+            if memory.index.is_some() && destinations.iter().all(|r| r.size() == 8) {
                 arrays.extend(u32::try_from(at).ok().filter(|a| *a != 0));
             } else if memory.index.is_none() {
                 for (index, register) in destinations.iter().enumerate() {
-                    if width(*register) == 4
+                    if register.size() == 4
                         && let Ok(offset) = u32::try_from(at + 4 * index as u64)
                         && offset >= 0x40
                     {
@@ -647,7 +710,7 @@ fn compression(code: &KernelCode<'_>) -> Result<Compression> {
                     let [register] = destinations(load)[..] else {
                         return None;
                     };
-                    (width(register) == 4).then_some((m.offset, slot(register)?))
+                    (register.size() == 4).then_some((m.offset, slot(register)?))
                 });
             if let Some((offset, loaded)) = counted {
                 let tested = instructions[index + 1..].iter().take(4).any(|test| {
@@ -660,7 +723,9 @@ fn compression(code: &KernelCode<'_>) -> Result<Compression> {
             }
             tracker.step(load);
         }
-        return Err(layout_error("no algorithm count in SmStoreDecompressBuffer"));
+        return Err(layout_error(
+            "no algorithm count in SmStoreDecompressBuffer",
+        ));
     }
     let copy = code.address("ST_STORE<SM_TRAITS>::StDmSinglePageCopy")?;
     let decompress = code.functions.get("RtlDecompressBufferEx").copied();
@@ -668,15 +733,14 @@ fn compression(code: &KernelCode<'_>) -> Result<Compression> {
     let mut tracker = Tracker::new();
     let mut formats = Vec::new();
     for instruction in instructions(code, copy) {
-        if instruction.op() == Op::BL && target(&instruction) == decompress && decompress.is_some()
+        if instruction.op() == Op::BL && decompress.is_some_and(|d| target(&instruction) == Some(d))
         {
             formats.extend(tracker.get(Reg::X0).and_then(field));
         }
         if loads(&instruction)
             && let Some(memory) = memory(&instruction)
             && let Some((index, _)) = memory.index
-            && procs.is_some()
-            && tracker.get(memory.base) == procs.map(Value::Const).as_ref()
+            && procs.is_some_and(|procs| tracker.get(memory.base) == Some(&Value::Const(procs)))
         {
             formats.extend(tracker.get(index).and_then(field));
         }
@@ -703,7 +767,9 @@ fn redirect_next(code: &KernelCode<'_>) -> Result<u32> {
         let mut keys: HashMap<usize, Reg> = HashMap::new();
         for (i, compare) in instructions.iter().enumerate() {
             let operands = compare.operands();
-            let compared = register(operands.first()).and_then(slot).and_then(|s| keys.get(&s));
+            let compared = register(operands.first())
+                .and_then(slot)
+                .and_then(|s| keys.get(&s));
             let minus_one = match (compare.op(), operands.get(1)) {
                 (Op::CMN, Some(Operand::Imm32 { imm, .. } | Operand::Imm64 { imm, .. })) => {
                     immediate(imm) == 1
@@ -732,7 +798,7 @@ fn redirect_next(code: &KernelCode<'_>) -> Result<u32> {
                         let [register] = destinations(load)[..] else {
                             return None;
                         };
-                        (loads(load) && width(register) == 4 && m.offset != 0)
+                        (loads(load) && register.size() == 4 && m.offset != 0)
                             .then(|| u32::try_from(m.offset).ok())
                             .flatten()
                     });
@@ -748,7 +814,7 @@ fn redirect_next(code: &KernelCode<'_>) -> Result<u32> {
                 if let Some(slot) = slot(destination) {
                     keys.remove(&slot);
                     if let Some(record) = first_dword
-                        && width(destination) == 4
+                        && destination.size() == 4
                     {
                         keys.insert(slot, record);
                     }

@@ -176,12 +176,11 @@ impl PoolUsageRow {
     /// more allocations than frees, or bytes in use where no counts are
     /// kept.
     pub fn in_use(&self) -> bool {
-        let outstanding = |allocs: Option<i64>, frees: Option<i64>, bytes: Option<i64>| match (
-            allocs, frees,
-        ) {
-            (Some(allocs), Some(frees)) => allocs != frees,
-            _ => bytes.unwrap_or(0) != 0,
-        };
+        let outstanding =
+            |allocs: Option<i64>, frees: Option<i64>, bytes: Option<i64>| match (allocs, frees) {
+                (Some(allocs), Some(frees)) => allocs != frees,
+                _ => bytes.unwrap_or(0) != 0,
+            };
         outstanding(
             self.nonpaged_allocs,
             self.nonpaged_frees,

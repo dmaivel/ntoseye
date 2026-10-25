@@ -198,11 +198,20 @@ fn drvobj_flags(
 /// The device object a word names: an object path, where a bare name is
 /// one in `\Device` (`Null` for `\Device\Null`), or else an address
 /// expression. The name comes first, as for `!drvobj`: `Null` is also
-/// null.sys's module.
+/// null.sys's module. A long number is an address and nothing else, so it
+/// skips the directory walk, which costs a read per entry over KD.
 pub fn device_object_named(
     cx: &mut ArgCx<'_, '_>,
     text: &str,
 ) -> std::result::Result<VirtAddr, ArgError> {
+    let digits: String = text
+        .trim_start_matches("0x")
+        .chars()
+        .filter(|c| *c != '`')
+        .collect();
+    if digits.len() > 8 && digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return cx.eval(text);
+    }
     let path = if text.starts_with('\\') {
         text.to_string()
     } else {

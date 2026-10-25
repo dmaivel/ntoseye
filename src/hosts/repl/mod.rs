@@ -648,7 +648,7 @@ impl<'a> ReplState<'a> {
 /// What the command line asks of the REPL besides its prompt: command
 /// lists to run first (`-c`), and with `batch`, to quit after them instead
 /// of prompting, leaving out the startup summary and the stop.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug)]
 pub struct Startup {
     pub commands: Vec<String>,
     pub batch: bool,

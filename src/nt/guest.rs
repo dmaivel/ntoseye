@@ -356,25 +356,22 @@ impl Guest {
         // may be in the store, and is done once; the store itself is looked
         // for until it exists. The resolver holds the physical memory
         // weakly, since that memory holds the resolver.
-        {
-            let phys = Arc::downgrade(&ntoskrnl.phys);
-            let symbols = Arc::clone(ntoskrnl.symbols());
-            let (dtb, base, arch, guid) = (
-                ntoskrnl.dtb(),
-                ntoskrnl.base_address,
-                ntoskrnl.arch(),
-                ntoskrnl.guid,
-            );
-            let mut layout = None;
-            ntoskrnl
-                .phys
-                .set_compressed_pages(Box::new(move |interrupt: &AtomicBool| {
-                    let mut kernel =
-                        Image::new(phys.upgrade()?, Arc::clone(&symbols), dtb, base, arch);
-                    kernel.guid = guid;
-                    compressed_pages(&mut kernel, &mut layout, interrupt)
-                }));
-        }
+        let phys = Arc::downgrade(&ntoskrnl.phys);
+        let symbols = Arc::clone(ntoskrnl.symbols());
+        let (dtb, base, arch, guid) = (
+            ntoskrnl.dtb(),
+            ntoskrnl.base_address,
+            ntoskrnl.arch(),
+            ntoskrnl.guid,
+        );
+        let mut layout = None;
+        ntoskrnl
+            .phys
+            .set_compressed_pages(Box::new(move |interrupt: &AtomicBool| {
+                let mut kernel = Image::new(phys.upgrade()?, Arc::clone(&symbols), dtb, base, arch);
+                kernel.guid = guid;
+                compressed_pages(&mut kernel, &mut layout, interrupt)
+            }));
         if let Ok(pte_base) = ntoskrnl
             .symbol("MmPteBase")
             .and_then(|symbol| symbol.read_pointer())

@@ -202,15 +202,18 @@ impl Target {
         .collect();
         // Windows 10 allocates system PTEs from bitmaps, as `!sysptes` reads
         // them, and keeps none of these globals.
-        let pte = VmPteDetail {
-            counters: match self.system_ptes(false) {
-                Ok(ptes) if !legacy_ptes.iter().any(is_available) => vec![
+        let counters = if legacy_ptes.iter().any(is_available) {
+            legacy_ptes
+        } else {
+            match self.system_ptes(false) {
+                Ok(ptes) => vec![
                     counter("total system PTEs", ptes.total, None),
                     counter("free system PTEs", ptes.free, None),
                 ],
-                _ => legacy_ptes,
-            },
+                Err(_) => legacy_ptes,
+            }
         };
+        let pte = VmPteDetail { counters };
         let legacy_page_files: Vec<VmCounter> = [
             ("MmNumberOfPagingFiles", "number of paging files", None),
             (
@@ -248,14 +251,23 @@ impl Target {
     fn partition_paging_files(&self) -> Result<Vec<VmCounter>> {
         let kernel = &self.guest()?.ntoskrnl;
         let types = kernel.types();
-        let partition =
-            types.struct_at("_MI_PARTITION", kernel.symbol("MiSystemPartition")?.address())?;
+        let partition = types.struct_at(
+            "_MI_PARTITION",
+            kernel.symbol("MiSystemPartition")?.address(),
+        )?;
         let visible = partition.embedded("Vp")?;
         let count = visible.read_uint("NumberOfPagingFiles")?;
         let mut counters = vec![counter("number of paging files", count, None)];
-        let slots = visible.addr() + visible.layout().field_offset("PagingFile")?;
+        let slots_field = visible.layout().field("PagingFile")?;
+        let ParsedType::Array(_, capacity) = slots_field.type_data else {
+            return Err(Error::FieldTypeMismatch(
+                "PagingFile".to_string(),
+                "array".to_string(),
+            ));
+        };
+        let slots = visible.addr() + slots_field.offset as u64;
         let memory = self.kernel_address_space();
-        for index in 0..count.min(16) {
+        for index in 0..count.min(u64::from(capacity)) {
             let pointer = memory.read_pointer(slots + 8 * index)?;
             if pointer.is_zero() {
                 continue;
@@ -263,7 +275,10 @@ impl Target {
             let file = types.struct_at("_MMPAGING_FILE", pointer)?;
             let name = match file.unicode_string("PageFileName") {
                 Ok(name) if !name.is_empty() => name,
-                _ if file.read_bits("VirtualStorePagefile").is_ok_and(|bit| bit != 0) => {
+                _ if file
+                    .read_bits("VirtualStorePagefile")
+                    .is_ok_and(|bit| bit != 0) =>
+                {
                     "virtual store".to_string()
                 }
                 _ => format!("paging file {index}"),
@@ -278,7 +293,11 @@ impl Target {
                 ("free", free),
                 ("peak use", file.read_uint("PeakUsage")?),
             ] {
-                counters.push(counter(&format!("{name} {label}"), pages, Some(VmUnit::Pages)));
+                counters.push(counter(
+                    &format!("{name} {label}"),
+                    pages,
+                    Some(VmUnit::Pages),
+                ));
             }
         }
         Ok(counters)

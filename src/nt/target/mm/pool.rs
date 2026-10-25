@@ -14,7 +14,7 @@ use crate::base::types::VirtAddr;
 use crate::nt::symbols::glob_matches;
 use crate::nt::target::Target;
 use crate::nt::target::pool::{
-    BigPoolEntry, PoolUsageRow, NONPAGED_POOL, PAGED_POOL, POOL_ALIGN, POOL_PAGE_SIZE, PoolHeader,
+    BigPoolEntry, NONPAGED_POOL, PAGED_POOL, POOL_ALIGN, POOL_PAGE_SIZE, PoolHeader, PoolUsageRow,
     annotate_near_symbol, big_pool_layout, classify_pool_region, collect_pool_usage, find_big_pool,
     locate_pool_block_in_page, pool_block_state, pool_header_candidates, pool_layout,
     pool_page_blocks, pool_range, scan_big_pool_entries, scan_present_pool_pages,

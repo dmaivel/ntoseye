@@ -509,7 +509,7 @@ fn run(cli: Cli) -> Result<i32> {
 
     if let Some(command) = command {
         if !commands.is_empty() {
-            return Err(Error::DebugInfo(
+            return Err(Error::InvalidArgument(
                 "-c and --batch run commands at the prompt, which a subcommand does not have"
                     .to_string(),
             ));
