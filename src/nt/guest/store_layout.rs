@@ -2,7 +2,10 @@
 //! kernel's own code. The PDB names the store manager's functions but has no
 //! types for its structures, and the offsets move between Windows releases
 //! (and once within 24H2's servicing), so each one comes from a function
-//! that uses it.
+//! that uses it. ARM64 kernels read the same anchors from A64 code
+//! ([`arm64`]).
+
+pub mod arm64;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -930,7 +933,8 @@ mod tests {
     }
 
     /// The layout of every `ntoskrnl-<version>.exe` (with its `.pdb`) in
-    /// `NTOSEYE_NTOSKRNL_DIR`, as `tools/fetch_ntoskrnl.py` downloads them.
+    /// `NTOSEYE_NTOSKRNL_DIR`, x64 or ARM64, as `tools/fetch_ntoskrnl.py`
+    /// downloads them.
     /// `cargo test --lib store_layout -- --ignored --nocapture`.
     #[test]
     #[ignore = "needs kernels in NTOSEYE_NTOSKRNL_DIR"]
@@ -955,7 +959,12 @@ mod tests {
                 },
                 functions: &functions,
             };
-            match derive(&kernel) {
+            let machine = PeView::from_bytes(&bytes).unwrap().file_header().Machine;
+            let derived = match machine {
+                crate::arch::IMAGE_FILE_MACHINE_ARM64 => arm64::derive(&kernel),
+                _ => derive(&kernel),
+            };
+            match derived {
                 Ok(layout) => println!("{}: {layout:x?}", exe.display()),
                 // 1507 to 1607 lay the store out differently; they are not
                 // supported.

@@ -352,12 +352,11 @@ impl Guest {
         ntoskrnl
             .phys
             .set_section_views(section_layout(&ntoskrnl).map(SectionViews::new));
-        // The store layout is known for AMD64 kernels. Reading the kernel's
-        // code for it waits until a page may be in the store, and is done
-        // once; the store itself is looked for until it exists. The
-        // resolver holds the physical memory weakly, since that memory
-        // holds the resolver.
-        if ntoskrnl.arch() == Arch::Amd64 {
+        // Reading the kernel's code for the store layout waits until a page
+        // may be in the store, and is done once; the store itself is looked
+        // for until it exists. The resolver holds the physical memory
+        // weakly, since that memory holds the resolver.
+        {
             let phys = Arc::downgrade(&ntoskrnl.phys);
             let symbols = Arc::clone(ntoskrnl.symbols());
             let (dtb, base, arch, guid) = (
@@ -802,6 +801,7 @@ fn store_functions(kernel: &Image) -> Option<HashMap<String, u64>> {
         [
             "SmStoreDecompressBuffer",
             "RtlDecompressBufferEx",
+            "RtlDecompressBufferProcs",
             "KeStackAttachProcess",
             "KiStackAttachProcess",
         ]
@@ -818,8 +818,8 @@ fn store_functions(kernel: &Image) -> Option<HashMap<String, u64>> {
     )
 }
 
-/// The file names the symbol servers keep x64 kernels under: the usual
-/// one, and the kernel for 5-level paging.
+/// The file names the symbol servers keep kernels under: the usual one,
+/// and x64's kernel for 5-level paging.
 const KERNEL_FILE_NAMES: [&str; 2] = ["ntoskrnl.exe", "ntkrla57.exe"];
 
 /// The kernel's file, matched by its mapped header page `mapped`: from the
@@ -845,12 +845,13 @@ fn kernel_file(kernel: &Image, mapped: &[u8]) -> Option<Arc<PeImage>> {
 fn store_layout_of(kernel: &mut Image, interrupt: &AtomicBool) -> Option<StoreLayout> {
     let headers = kernel.view()?.image().to_vec();
     let functions = store_functions(kernel)?;
+    let arch = kernel.arch();
     let derive = |base: u64, bytes: &[u8], code: Vec<(u32, u32)>| {
         let functions = functions
             .iter()
             .map(|(name, rva)| (name.clone(), base + rva))
             .collect();
-        store_layout::derive(&store_layout::KernelCode {
+        let code = store_layout::KernelCode {
             image: hv_layout::ImageView {
                 base,
                 bytes,
@@ -858,7 +859,11 @@ fn store_layout_of(kernel: &mut Image, interrupt: &AtomicBool) -> Option<StoreLa
                 data: Vec::new(),
             },
             functions: &functions,
-        })
+        };
+        match arch {
+            Arch::Amd64 => store_layout::derive(&code),
+            Arch::Arm64 => store_layout::arm64::derive(&code),
+        }
         .ok()
     };
     if let Some(file) = kernel_file(kernel, &headers) {

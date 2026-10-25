@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Fetch x64 Windows kernels (ntoskrnl.exe) and their PDBs, for tests.
+"""Fetch x64 or ARM64 Windows kernels (ntoskrnl.exe) and their PDBs, for tests.
 
 Winbindex (https://winbindex.m417z.com) indexes every ntoskrnl.exe that
-Windows Update has shipped, with the timestamp and image size under which
+Windows Update has shipped, x64 and ARM64 in separate indexes, with the
+timestamp and image size under which
 Microsoft's symbol server files it. This downloads the images that the index
 lists, checks each against the index's SHA-256, and then downloads the PDB
 that the image's CodeView record names. Servicing updates of one build are
@@ -10,6 +11,7 @@ separate kernels: 26100 has dozens.
 
     python3 tools/fetch_ntoskrnl.py ~/ntoskrnl --builds 26100 --newest 2
     python3 tools/fetch_ntoskrnl.py ~/ntoskrnl --oldest 1 --newest 1
+    python3 tools/fetch_ntoskrnl.py ~/ntoskrnl-arm64 --arch arm64 --oldest 1 --newest 1
 
 Each version is saved as ntoskrnl-10.0.<build>.<revision>.exe with a
 matching .pdb. Files that are already there are kept. The images and PDBs
@@ -32,9 +34,18 @@ import struct
 import urllib.error
 import urllib.request
 
-INDEX = "https://winbindex.m417z.com/data/by_filename_compressed/ntoskrnl.exe.json.gz"
+# Each architecture's index, and the PE machine type of its kernels.
+INDEXES = {
+    "amd64": (
+        "https://winbindex.m417z.com/data/by_filename_compressed/ntoskrnl.exe.json.gz",
+        0x8664,
+    ),
+    "arm64": (
+        "https://m417z.com/winbindex-data-arm64/by_filename_compressed/ntoskrnl.exe.json.gz",
+        0xAA64,
+    ),
+}
 SYMBOLS = "https://msdl.microsoft.com/download/symbols"
-AMD64 = 0x8664
 USER_AGENT = "ntoseye-tools"
 
 
@@ -44,14 +55,21 @@ def get(url: str) -> bytes:
         return response.read()
 
 
-def versions() -> list[dict]:
-    """The x64 kernels the index lists, oldest build and revision first."""
+def versions(arch: str) -> list[dict]:
+    """The kernels of `arch` the index lists, oldest build and revision
+    first."""
+    index, machine = INDEXES[arch]
     found = []
-    for sha256, entry in json.loads(gzip.decompress(get(INDEX))).items():
+    for sha256, entry in json.loads(gzip.decompress(get(index))).items():
         info = entry.get("fileInfo") or {}
         version = info.get("version", "").split(" ")[0]
         parts = version.split(".")
-        if info.get("machineType") != AMD64 or len(parts) != 4:
+        if (
+            info.get("machineType") != machine
+            or len(parts) != 4
+            or not info.get("timestamp")
+            or not info.get("virtualSize")
+        ):
             continue
         found.append(
             {
@@ -146,13 +164,14 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("out_dir")
+    parser.add_argument("--arch", choices=sorted(INDEXES), default="amd64")
     parser.add_argument("--builds", type=int, nargs="*", default=[], help="as 19041 or 26100")
     parser.add_argument("--oldest", type=int, default=0, help="revisions per build, oldest first")
     parser.add_argument("--newest", type=int, default=0, help="revisions per build, newest first")
     parser.add_argument("--list", action="store_true", help="print the versions and stop")
     parser.add_argument("--jobs", type=int, default=8)
     args = parser.parse_args()
-    chosen = select(versions(), set(args.builds), args.oldest, args.newest)
+    chosen = select(versions(args.arch), set(args.builds), args.oldest, args.newest)
     if args.list:
         for item in chosen:
             print(item["version"])
