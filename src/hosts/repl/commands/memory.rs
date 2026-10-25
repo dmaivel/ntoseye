@@ -509,7 +509,7 @@ impl ReplState<'_> {
     pub fn display_symbol_range(&self, range: &AddressRange, item_size: usize) -> Result<()> {
         match symbol_values(self.ctx, range, item_size) {
             Ok(values) => values.show(self.ctx),
-            Err(error) => error!("{error}"),
+            Err(error) => crate::hosts::repl::report_error(self, &error),
         }
         Ok(())
     }

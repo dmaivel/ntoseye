@@ -442,7 +442,7 @@ impl ReplState<'_> {
         match root {
             Ok(root) if args.grid => print_dx_grid(&root),
             Ok(root) => print_dx(&root),
-            Err(error) => error!("{error}"),
+            Err(error) => crate::hosts::repl::report_error(self, &error),
         }
         Ok(())
     }

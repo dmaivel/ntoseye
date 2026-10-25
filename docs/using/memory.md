@@ -38,7 +38,7 @@ The memory source also controls when `ntoseye` [rebuilds a driver's PDB from gue
 
 ## Paged-out memory
 
-When the guest trims a page from a working set, the page usually stays in RAM on the standby list or the modified list, and its PTE stays in the *transition* state. Both the host page walk and target reads can read these pages, so reads of trimmed memory work normally.
+When the guest trims a page from a working set, the page usually stays in RAM on the standby list or the modified list, and its PTE stays in the *transition* state. Both the host page walk and target reads can read these pages, so reads of trimmed memory work normally. The same holds for a page table that the guest trimmed: the host page walk reads it from its frame and goes on to the pages under it.
 
 A write to a trimmed page fails. The kernel can use the frame for a different purpose or read the page from disk again, and the change would then be lost or go to an unrelated location.
 
@@ -51,6 +51,8 @@ With memory compression on, which is Windows' default on client editions, the gu
 This works on the `memory` backend, and on `kd` and `kdnet` with either memory source: with the `kd` source, a page that the target refuses to read is walked on the host. It also works in a dump that holds the memory of the store's process, `MemCompression`: a complete or active memory dump, a dump that {command}`.dump` writes, and a `virsh dump`. A kernel memory dump holds no process memory, so neither the page nor the store is in it. A page whose compressed data the guest moved to the page file reads as unavailable.
 
 `ntoseye` reads the store's layout from the kernel's own code the first time it needs it, because the PDB does not describe the store's structures and they change between Windows releases. It reads the code from the kernel's file in the symbol cache when the cache has the file. With the `kd` memory source, it downloads the file if the cache does not have it, because reading the kernel's 12 MiB of code through KD takes more than half a minute. It reads the code from guest memory only when it cannot get the file. This works for 64-bit Windows 10 1703 and later, for builds whose PDB types the partition's store fields (`_MI_PARTITION_STORES.VirtualPageFileNumber` and `StoreProcess`). Where the layout is not recognized, or memory compression is off, a page in the store reads as unavailable, as a page on disk does. Windows creates the store some time after boot, or when memory compression is turned on with `Enable-MMAgent -MemoryCompression`, which takes effect without a restart. Until the store exists, `ntoseye` looks for it again each time the target halts, or about once a second while the target runs.
+
+A page that `ntoseye` cannot read says where it is. {command}`!pte` adds a line after its table, such as `in page file 0 at page 0x3fe02f`, or, for a page in the memory-compression store that does not decode, why not; a command whose read failed adds the same as a note after its error.
 
 A read of a page that is on disk shows the page as unavailable. To get it, use {command}`.pagein`, which tells the guest to read the page into memory:
 

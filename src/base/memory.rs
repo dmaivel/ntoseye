@@ -497,7 +497,6 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
     /// skipped. With `absent`, it is handed each non-present PTE-level
     /// entry, and tables the guest trimmed are visited too
     /// ([`Self::absent_table`]).
-    #[allow(clippy::too_many_arguments)]
     fn visit_table(
         &self,
         table: TablePage,

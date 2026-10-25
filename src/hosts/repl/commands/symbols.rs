@@ -195,12 +195,12 @@ fn ev(
     {
         Ok(value) => value,
         Err(e) => {
-            error!("{}", e);
+            crate::hosts::repl::report_error(state, &e);
             return Ok(());
         }
     };
     if let Err(e) = state.print_expr_value(&value) {
-        error!("{}", e);
+        crate::hosts::repl::report_error(state, &e);
     }
 
     Ok(())
@@ -1035,7 +1035,7 @@ fn set(
                 .insert(name.to_string(), UserVar { value: v.0, source });
             outln!("${} = {}", name, ui::addr(v.0));
         }
-        Err(e) => error!("{}", e),
+        Err(e) => crate::hosts::repl::report_error(state, &e),
     }
 
     Ok(())
