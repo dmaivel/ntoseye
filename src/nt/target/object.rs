@@ -540,7 +540,7 @@ const KEY_HIVE_ENTRY: u64 = 0x4;
 
 struct ObjectNameLayout {
     body_offset: u64,
-    info_mask_offset: u64,
+    name_info_at: NameInfoAt,
     creator_info_size: Option<u64>,
     name_info_size: u64,
     name_offset: u64,
@@ -549,7 +549,36 @@ struct ObjectNameLayout {
     directory_offset: Option<u64>,
 }
 
+/// Where an object header records where its name info is.
+#[derive(Clone, Copy)]
+enum NameInfoAt {
+    /// The offset of `InfoMask` (Windows 7 on), whose bits say which
+    /// optional headers precede the header.
+    InfoMask(u64),
+    /// The offset of `NameInfoOffset` (Vista and earlier): how far before
+    /// the header the name info starts, 0 for none.
+    Offset(u64),
+}
+
 impl ObjectNameLayout {
+    /// The `_OBJECT_HEADER_NAME_INFO` of the object whose header is at
+    /// `header`; `None` for an unnamed object.
+    fn name_info(
+        &self,
+        memory: &impl MemoryOps<VirtAddr>,
+        header: VirtAddr,
+    ) -> Result<Option<VirtAddr>> {
+        match self.name_info_at {
+            NameInfoAt::InfoMask(offset) => {
+                self.name_info_address(header, memory.read(header + offset)?)
+            }
+            NameInfoAt::Offset(offset) => {
+                let back: u8 = memory.read(header + offset)?;
+                Ok((back != 0).then(|| header - u64::from(back)))
+            }
+        }
+    }
+
     fn name_info_address(&self, header: VirtAddr, info_mask: u8) -> Result<Option<VirtAddr>> {
         const CREATOR_INFO_BIT: u8 = 0x01;
         const NAME_INFO_BIT: u8 = 0x02;
@@ -697,9 +726,13 @@ impl Target {
             .symbols
             .find_type_across_modules(dtb, "_OBJECT_HEADER_NAME_INFO")
             .ok_or_else(|| Error::StructNotFound("_OBJECT_HEADER_NAME_INFO".to_string()))?;
+        let name_info_at = match header_type.field_offset("InfoMask") {
+            Ok(offset) => NameInfoAt::InfoMask(offset),
+            Err(_) => NameInfoAt::Offset(header_type.field_offset("NameInfoOffset")?),
+        };
         Ok(ObjectNameLayout {
             body_offset: header_type.field_offset("Body")?,
-            info_mask_offset: header_type.field_offset("InfoMask")?,
+            name_info_at,
             creator_info_size,
             name_info_size: name_info_type.size as u64,
             name_offset: name_info_type.field_offset("Name")?,
@@ -717,8 +750,7 @@ impl Target {
         let mut current = object;
         for _ in 0..MAX_DEPTH {
             let header = current - layout.body_offset;
-            let info_mask: u8 = memory.read(header + layout.info_mask_offset)?;
-            let Some(name_info) = layout.name_info_address(header, info_mask)? else {
+            let Some(name_info) = layout.name_info(&memory, header)? else {
                 break;
             };
             let name = self.read_kernel_unicode_string(name_info + layout.name_offset)?;
@@ -893,8 +925,7 @@ impl Target {
     ) -> Result<Option<String>> {
         let memory = self.guest()?.ntoskrnl.memory();
         let header = object - object_name.body_offset;
-        let info_mask: u8 = memory.read(header + object_name.info_mask_offset)?;
-        let Some(name_info) = object_name.name_info_address(header, info_mask)? else {
+        let Some(name_info) = object_name.name_info(&memory, header)? else {
             return Ok(None);
         };
         Ok(Some(self.read_kernel_unicode_string(
@@ -1789,7 +1820,13 @@ impl Target {
         let layout = guest.ntoskrnl.types().layout("_OBJECT_HEADER")?;
         let header_size = layout.size as u64;
         let body_off = layout.field_offset("Body")?;
-        let type_index_off = layout.field_offset("TypeIndex")?;
+        // Windows 7 on index their type; before, a header holds the type
+        // object's address in `Type`.
+        let type_index_off = layout.field_offset("TypeIndex").ok();
+        let type_pointer_off = match type_index_off {
+            Some(_) => None,
+            None => Some(layout.field_offset("Type")?),
+        };
         let object_name = self.object_name_layout().ok();
         // Windows 10 stores TypeIndex obfuscated: the real index is the
         // stored one ^ the second byte of the header's address ^
@@ -1817,8 +1854,15 @@ impl Target {
                 .is_some_and(|end| mem.read::<u8>(header).is_ok() && mem.read::<u8>(end).is_ok())
         };
         let candidate_type_object = |header: VirtAddr| -> Option<VirtAddr> {
-            let index = decode(mem.read(header + type_index_off).ok()?, header);
-            mem.read_pointer(type_table? + index * mem.arch().pointer_size())
+            let object = match (type_index_off, type_pointer_off) {
+                (Some(offset), _) => {
+                    let index = decode(mem.read(header + offset).ok()?, header);
+                    mem.read_pointer(type_table? + index * mem.arch().pointer_size())
+                }
+                (None, Some(offset)) => mem.read_pointer(header + offset),
+                (None, None) => return None,
+            };
+            object
                 .ok()
                 .filter(|object| looks_like_kernel_pointer(self.arch(), object.0))
         };
@@ -1854,36 +1898,31 @@ impl Target {
             .ok()
             .map(|raw| decode(raw, header));
 
-        // Resolve the type object via ObTypeIndexTable[index] and read its name.
-        // ObTypeIndexTable is the array itself, so index it directly.
-        let (type_object, type_name) = match (type_table, type_index) {
-            (Some(table), Some(index)) => {
-                let resolved = mem
-                    .read_pointer(table + index * mem.arch().pointer_size())
-                    .ok()
-                    .filter(|object| looks_like_kernel_pointer(self.arch(), object.0));
-                let name = resolved.and_then(|t| {
-                    let off = guest
-                        .ntoskrnl
-                        .types()
-                        .layout("_OBJECT_TYPE")
-                        .ok()?
-                        .field_offset("Name")
-                        .ok()?;
-                    self.read_kernel_unicode_string(t + off)
-                        .ok()
-                        .filter(|s| !s.is_empty())
-                });
-                (resolved, name)
-            }
-            _ => (None, None),
+        // The type object: ObTypeIndexTable[index] (the symbol is the array
+        // itself), or the header's own pointer before indexes.
+        let type_object = match (type_table, type_index) {
+            (Some(table), Some(index)) => mem
+                .read_pointer(table + index * mem.arch().pointer_size())
+                .ok()
+                .filter(|object| looks_like_kernel_pointer(self.arch(), object.0)),
+            _ => candidate_type_object(header),
         };
-
-        let name_info = info_mask.and_then(|mask| {
-            object_name
-                .as_ref()
-                .and_then(|layout| layout.name_info_address(header, mask).ok().flatten())
+        let type_name = type_object.and_then(|object| {
+            let off = guest
+                .ntoskrnl
+                .types()
+                .layout("_OBJECT_TYPE")
+                .ok()?
+                .field_offset("Name")
+                .ok()?;
+            self.read_kernel_unicode_string(object + off)
+                .ok()
+                .filter(|s| !s.is_empty())
         });
+
+        let name_info = object_name
+            .as_ref()
+            .and_then(|layout| layout.name_info(&mem, header).ok().flatten());
         let name = name_info.and_then(|info| {
             object_name.as_ref().and_then(|layout| {
                 self.read_kernel_unicode_string(info + layout.name_offset)
@@ -1947,12 +1986,25 @@ impl Target {
         let dtb = self.kernel_dtb();
         let mut out = Vec::new();
 
-        for (kind, symbol) in sets {
+        for &(kind, symbol) in &sets {
             let Ok(sym) = guest.ntoskrnl.symbol(symbol) else {
                 continue;
             };
             let base = sym.address();
-            for i in 0..MAX_NOTIFY {
+            // The array's size is in no global; it ends before the next of
+            // these arrays and their counts. XP's hold 8 slots each, packed
+            // together.
+            let slots = sets
+                .iter()
+                .flat_map(|(_, array)| {
+                    ["", "Count", "ExCount"].map(|suffix| format!("{array}{suffix}"))
+                })
+                .filter_map(|name| guest.ntoskrnl.symbol(name).ok())
+                .map(|global| global.address())
+                .filter(|global| *global > base)
+                .map(|global| (global.0 - base.0) / ex_callback_size)
+                .fold(MAX_NOTIFY, u64::min);
+            for i in 0..slots {
                 let entry = base + i * ex_callback_size;
                 let Ok(raw) = mem.read_pointer(entry) else {
                     continue;
@@ -2320,7 +2372,7 @@ mod tests {
     fn object_name_info_address_accounts_for_creator_info_only() {
         let layout = ObjectNameLayout {
             body_offset: 0x30,
-            info_mask_offset: 0x1a,
+            name_info_at: NameInfoAt::InfoMask(0x1a),
             creator_info_size: Some(0x20),
             name_info_size: 0x20,
             name_offset: 0x08,
@@ -2347,7 +2399,7 @@ mod tests {
     fn object_name_info_address_requires_present_creator_layout() {
         let layout = ObjectNameLayout {
             body_offset: 0x30,
-            info_mask_offset: 0x1a,
+            name_info_at: NameInfoAt::InfoMask(0x1a),
             creator_info_size: None,
             name_info_size: 0x20,
             name_offset: 0x08,

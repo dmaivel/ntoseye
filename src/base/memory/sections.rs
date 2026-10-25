@@ -149,6 +149,12 @@ impl SectionViews {
             if next == head || next.is_zero() {
                 break;
             }
+            // A link outside the kernel half is a torn or corrupt list: its
+            // "process" would be read through a user mapping, whose section
+            // pages are resolved by this very walk.
+            if next.0 >> 63 == 0 {
+                break;
+            }
             let eprocess = VirtAddr(next.0.wrapping_sub(self.layout.active_process_links));
             if let Some(root) = self.root_of(kernel, eprocess) {
                 by_root.insert(root, eprocess);

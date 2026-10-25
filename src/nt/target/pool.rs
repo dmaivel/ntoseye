@@ -569,7 +569,7 @@ fn collect_tracker_usage(
     let mut source = "PoolTrackTable";
     if let (Ok(array), Ok(processors)) = (
         kernel_symbol_address(debugger, "ExPoolTagTables"),
-        read_kernel_global_u32(debugger, "KeNumberProcessors"),
+        crate::nt::cpu_state::processor_count(debugger),
     ) && processors > 0
     {
         source = "ExPoolTagTables";

@@ -702,7 +702,8 @@ pub fn kthread_state_name(state: u8) -> &'static str {
         5 => "Waiting",
         6 => "Transition",
         7 => "DeferredReady",
-        8 => "GateWaitObsolete",
+        // Windows 10 names it GateWaitObsolete, no longer setting it.
+        8 => "GateWait",
         9 => "WaitingForProcessInSwap",
         _ => "?",
     }

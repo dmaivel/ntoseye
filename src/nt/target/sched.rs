@@ -158,7 +158,8 @@ pub struct KernelTimer {
 /// A timer in the timer table of a processor.
 #[record]
 pub struct TimerTableEntry {
-    pub processor: u16,
+    /// `None` in the one table all processors share before Windows 7.
+    pub processor: Option<u16>,
     /// The index of the timer-table bucket.
     pub bucket: u16,
     pub timer: KernelTimer,
@@ -167,7 +168,7 @@ pub struct TimerTableEntry {
 /// A timer-table bucket whose list walk did not end at its head.
 #[record]
 pub struct TimerBucketEnd {
-    pub processor: u16,
+    pub processor: Option<u16>,
     pub bucket: u16,
     pub termination: ListTermination,
 }
@@ -187,6 +188,17 @@ pub struct TimerTable {
     /// Whether the walk stopped at its entry limit.
     pub truncated: bool,
     pub errors: Vec<SchedulerError>,
+}
+
+/// The timer tables [`Target::timer_list`] walks, by processor (`None` for
+/// a table they share), and their bucket layout.
+struct TimerBuckets {
+    tables: Vec<(Option<u16>, VirtAddr)>,
+    count: usize,
+    stride: u64,
+    /// The list head's offset in a table, past its bucket's.
+    head_offset: u64,
+    errors: Vec<SchedulerError>,
 }
 
 /// The threads `!apc` inspects; `kind` says which.
@@ -1166,8 +1178,20 @@ impl Target {
                 let remaining = MAX_LIST_ENTRIES - total;
                 let (dpcs, termination) =
                     walk_list_records(self, head, dpc_link_offset.unwrap_or(0), remaining);
+                // A head the kernel never initialized, both links zero, is an
+                // empty queue: XP x64's threaded-DPC queue.
+                let never_initialized = || {
+                    let memory = self.kernel_address_space();
+                    let pointer_size = memory.arch().pointer_size();
+                    [head, head + pointer_size]
+                        .into_iter()
+                        .all(|link| memory.read_pointer(link).is_ok_and(|link| link.is_zero()))
+                };
                 let termination = match termination {
                     ListTermination::Null if singly_linked => ListTermination::Head,
+                    ListTermination::Null if dpcs.is_empty() && never_initialized() => {
+                        ListTermination::Head
+                    }
                     other => other,
                 };
                 let mut entries = Vec::with_capacity(dpcs.len());
@@ -1357,109 +1381,27 @@ impl Target {
         let interrupt_time = self.interrupt_time();
         let keys = self.timer_dpc_keys();
         let trace = resolve_thread_trace_context(self, self.kernel_dtb());
-        let prcb_layout = layout_for(self, "_KPRCB")?;
-        let timer_table_field = prcb_layout
-            .fields
-            .get("TimerTable")
-            .ok_or_else(|| Error::FieldNotFound("_KPRCB.TimerTable".to_string()))?;
-        let table_type = aggregate_type_name(&timer_table_field.type_data)
-            .ok_or_else(|| Error::DebugInfo("_KPRCB.TimerTable type unavailable".to_string()))?;
-        let table_layout = layout_for(self, table_type)?;
-        let entries = table_layout
-            .fields
-            .get("TimerEntries")
-            .ok_or_else(|| Error::FieldNotFound("_KTIMER_TABLE.TimerEntries".to_string()))?;
-        let resolved_entry_count = array_count(&entries.type_data, TIMER_BUCKET_COUNT);
-        let entry_type_name = array_element_type_name(&entries.type_data)
-            .or_else(|| aggregate_type_name(&entries.type_data))
-            .ok_or_else(|| Error::DebugInfo("_KTIMER_TABLE entry type unavailable".to_string()))?;
-        let entry_layout = layout_for(self, entry_type_name)?;
-        let entry_stride = entry_layout.size as u64;
-        if entry_stride == 0 {
-            return Err(Error::DebugInfo(format!(
-                "_KTIMER_TABLE.TimerEntries leaf type {entry_type_name} has no size"
-            )));
-        }
-        if entries.size != 0
-            && u64::try_from(resolved_entry_count)
-                .ok()
-                .and_then(|count| count.checked_mul(entry_stride))
-                != Some(entries.size)
-        {
-            return Err(Error::DebugInfo(format!(
-                "_KTIMER_TABLE.TimerEntries dimensions/size mismatch ({} entries * {:#x} != field size {:#x})",
-                resolved_entry_count, entry_stride, entries.size
-            )));
-        }
-        let entry_count = resolved_entry_count.min(MAX_LIST_ENTRIES);
-        let entry_name = if entry_layout.fields.contains_key("Entry") {
-            "Entry"
-        } else if entry_layout.fields.contains_key("TimerListEntry") {
-            "TimerListEntry"
-        } else {
-            return Err(Error::FieldNotFound(format!("{entry_type_name}.Entry")));
-        };
-        let entry = entry_layout
-            .fields
-            .get(entry_name)
-            .ok_or_else(|| Error::FieldNotFound(format!("{entry_type_name}.{entry_name}")))?;
+        let TimerBuckets {
+            tables,
+            count: entry_count,
+            stride: entry_stride,
+            head_offset,
+            errors,
+        } = self.timer_buckets()?;
         let timer_link_offset = link_offset(
             self,
             "_KTIMER",
             &["TimerListEntry", "TimerList", "ListEntry"],
         );
-        let processors = processor_indices(self)?;
         let mut list_entries = Vec::new();
         let mut terminations = Vec::new();
-        let mut errors = Vec::new();
         let mut total = 0usize;
-        for processor in processors {
-            let prcb = match kprcb_for_processor(self, processor) {
-                Ok(prcb) => prcb,
-                Err(error) => {
-                    errors.push(SchedulerError {
-                        processor: Some(processor),
-                        queue: None,
-                        message: error.to_string(),
-                    });
-                    continue;
-                }
-            };
-            let table = if matches!(timer_table_field.type_data, ParsedType::Pointer(_)) {
-                match self
-                    .guest()
-                    .and_then(|guest| guest.ntoskrnl.types().struct_at("_KPRCB", prcb))
-                    .and_then(|cursor| cursor.read_pointer("TimerTable"))
-                {
-                    Ok(address) if !address.is_zero() => address,
-                    Ok(_) => {
-                        errors.push(SchedulerError {
-                            processor: Some(processor),
-                            queue: None,
-                            message: "TimerTable is null".to_string(),
-                        });
-                        continue;
-                    }
-                    Err(error) => {
-                        errors.push(SchedulerError {
-                            processor: Some(processor),
-                            queue: None,
-                            message: error.to_string(),
-                        });
-                        continue;
-                    }
-                }
-            } else {
-                prcb + u64::from(timer_table_field.offset)
-            };
+        for (processor, table) in tables {
             for bucket in 0..entry_count {
                 if total >= MAX_LIST_ENTRIES {
                     break;
                 }
-                let head = table
-                    + u64::from(entries.offset)
-                    + bucket as u64 * entry_stride
-                    + u64::from(entry.offset);
+                let head = table + bucket as u64 * entry_stride + head_offset;
                 let remaining = MAX_LIST_ENTRIES - total;
                 let (timers, termination) =
                     walk_list_records(self, head, timer_link_offset.unwrap_or(0), remaining);
@@ -1508,6 +1450,119 @@ impl Target {
             terminations,
             total,
             truncated: total >= MAX_LIST_ENTRIES,
+            errors,
+        })
+    }
+
+    /// The timer tables to walk and how their buckets are laid out: each
+    /// processor's `_KPRCB.TimerTable`, or before Windows 7 the one table
+    /// they share, `KiTimerTableListHead` (`KiTimerTableSize` entries).
+    fn timer_buckets(&self) -> Result<TimerBuckets> {
+        let prcb_layout = layout_for(self, "_KPRCB")?;
+        let Some(timer_table_field) = prcb_layout.fields.get("TimerTable") else {
+            let nt = &self.guest()?.ntoskrnl;
+            let shared = nt
+                .symbol("KiTimerTableListHead")
+                .map_err(|_| Error::FieldNotFound("_KPRCB.TimerTable".to_string()))?
+                .address();
+            let size: u32 = nt.symbol("KiTimerTableSize")?.read()?;
+            let entry_layout = layout_for(self, "_KTIMER_TABLE_ENTRY")?;
+            return Ok(TimerBuckets {
+                tables: vec![(None, shared)],
+                count: (size as usize).min(MAX_LIST_ENTRIES),
+                stride: entry_layout.size as u64,
+                head_offset: entry_layout.field_offset("Entry")?,
+                errors: Vec::new(),
+            });
+        };
+        let table_type = aggregate_type_name(&timer_table_field.type_data)
+            .ok_or_else(|| Error::DebugInfo("_KPRCB.TimerTable type unavailable".to_string()))?;
+        let table_layout = layout_for(self, table_type)?;
+        let entries = table_layout
+            .fields
+            .get("TimerEntries")
+            .ok_or_else(|| Error::FieldNotFound("_KTIMER_TABLE.TimerEntries".to_string()))?;
+        let resolved_entry_count = array_count(&entries.type_data, TIMER_BUCKET_COUNT);
+        let entry_type_name = array_element_type_name(&entries.type_data)
+            .or_else(|| aggregate_type_name(&entries.type_data))
+            .ok_or_else(|| Error::DebugInfo("_KTIMER_TABLE entry type unavailable".to_string()))?;
+        let entry_layout = layout_for(self, entry_type_name)?;
+        let entry_stride = entry_layout.size as u64;
+        if entry_stride == 0 {
+            return Err(Error::DebugInfo(format!(
+                "_KTIMER_TABLE.TimerEntries leaf type {entry_type_name} has no size"
+            )));
+        }
+        if entries.size != 0
+            && u64::try_from(resolved_entry_count)
+                .ok()
+                .and_then(|count| count.checked_mul(entry_stride))
+                != Some(entries.size)
+        {
+            return Err(Error::DebugInfo(format!(
+                "_KTIMER_TABLE.TimerEntries dimensions/size mismatch ({} entries * {:#x} != field size {:#x})",
+                resolved_entry_count, entry_stride, entries.size
+            )));
+        }
+        let entry_name = if entry_layout.fields.contains_key("Entry") {
+            "Entry"
+        } else if entry_layout.fields.contains_key("TimerListEntry") {
+            "TimerListEntry"
+        } else {
+            return Err(Error::FieldNotFound(format!("{entry_type_name}.Entry")));
+        };
+        let entry = entry_layout
+            .fields
+            .get(entry_name)
+            .ok_or_else(|| Error::FieldNotFound(format!("{entry_type_name}.{entry_name}")))?;
+        let mut tables = Vec::new();
+        let mut errors = Vec::new();
+        for processor in processor_indices(self)? {
+            let prcb = match kprcb_for_processor(self, processor) {
+                Ok(prcb) => prcb,
+                Err(error) => {
+                    errors.push(SchedulerError {
+                        processor: Some(processor),
+                        queue: None,
+                        message: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+            let table = if matches!(timer_table_field.type_data, ParsedType::Pointer(_)) {
+                match self
+                    .guest()
+                    .and_then(|guest| guest.ntoskrnl.types().struct_at("_KPRCB", prcb))
+                    .and_then(|cursor| cursor.read_pointer("TimerTable"))
+                {
+                    Ok(address) if !address.is_zero() => address,
+                    Ok(_) => {
+                        errors.push(SchedulerError {
+                            processor: Some(processor),
+                            queue: None,
+                            message: "TimerTable is null".to_string(),
+                        });
+                        continue;
+                    }
+                    Err(error) => {
+                        errors.push(SchedulerError {
+                            processor: Some(processor),
+                            queue: None,
+                            message: error.to_string(),
+                        });
+                        continue;
+                    }
+                }
+            } else {
+                prcb + u64::from(timer_table_field.offset)
+            };
+            tables.push((Some(processor), table));
+        }
+        Ok(TimerBuckets {
+            tables,
+            count: resolved_entry_count.min(MAX_LIST_ENTRIES),
+            stride: entry_stride,
+            head_offset: u64::from(entries.offset) + u64::from(entry.offset),
             errors,
         })
     }
@@ -1616,7 +1671,12 @@ impl Target {
             session_id,
             peb: pointer("Peb"),
             parent_pid: parent_pid(&eprocess).ok(),
-            directory_table_base: field(&[&["Pcb", "DirectoryTableBase"], &["DirectoryTableBase"]]),
+            // `ULONGLONG[2]` on XP x64, the root first.
+            directory_table_base: field(&[&["Pcb", "DirectoryTableBase"], &["DirectoryTableBase"]])
+                .or_else(|| {
+                    let pcb = eprocess.embedded("Pcb").ok()?;
+                    read_uint_element(&pcb, "DirectoryTableBase", 0)
+                }),
             object_table,
             handle_count,
             vad_root: field(&[&["VadRoot", "Root"], &["VadRoot"]]).map(VirtAddr),

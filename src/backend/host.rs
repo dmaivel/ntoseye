@@ -119,15 +119,71 @@ mod platform {
         read_comm(pid).is_some_and(|comm| named_aarch64(&comm))
     }
 
-    fn ram_layout(pid: i32, hv: HvKind) -> RamLayout {
+    fn ram_layout(pid: i32, hv: HvKind, ram_size: u64) -> RamLayout {
         match hv {
             HvKind::Kvm if is_aarch64_qemu(pid) => RamLayout::Aarch64Virt,
-            HvKind::Kvm => RamLayout::X86 {
-                hole_start: 0x8000_0000,
-            },
+            HvKind::Kvm => {
+                let cmdline = fs::read(format!("/proc/{}/cmdline", pid)).unwrap_or_default();
+                let args = cmdline
+                    .split(|&byte| byte == 0)
+                    .map(String::from_utf8_lossy)
+                    .collect::<Vec<_>>();
+                RamLayout::X86 {
+                    hole_start: qemu_x86_hole_start(
+                        qemu_x86_machine(args.iter().map(|arg| arg.as_ref())),
+                        ram_size,
+                    ),
+                }
+            }
             HvKind::Vmware => RamLayout::X86 {
                 hole_start: 0xC000_0000,
             },
+        }
+    }
+
+    /// QEMU's two x86 PC machines, which split RAM around the 32-bit MMIO
+    /// hole differently.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum QemuX86Machine {
+        Q35,
+        /// `pc`, QEMU's default machine.
+        I440fx,
+    }
+
+    /// The machine QEMU was started with (`-machine`/`-M`, its type first
+    /// or as `type=`), from its arguments.
+    fn qemu_x86_machine<'a>(args: impl IntoIterator<Item = &'a str>) -> QemuX86Machine {
+        let mut args = args.into_iter();
+        let mut machine = None;
+        while let Some(arg) = args.next() {
+            if matches!(arg, "-machine" | "--machine" | "-M")
+                && let Some(value) = args.next()
+            {
+                let mut parts = value.split(',');
+                let first = parts.next().filter(|part| !part.contains('='));
+                machine = first
+                    .or_else(|| value.split(',').find_map(|part| part.strip_prefix("type=")))
+                    .or(machine);
+            }
+        }
+        match machine {
+            Some(name) if name.contains("q35") => QemuX86Machine::Q35,
+            _ => QemuX86Machine::I440fx,
+        }
+    }
+
+    /// Where QEMU ends RAM below 4 GiB (`pc_q35_init`, `pc_init1`): q35
+    /// keeps 2 GiB there once the guest has 2.75 GiB, i440fx 3 GiB once it
+    /// has 3.5 GiB; a smaller guest's RAM all fits below.
+    fn qemu_x86_hole_start(machine: QemuX86Machine, ram_size: u64) -> u64 {
+        let (threshold, low) = match machine {
+            QemuX86Machine::Q35 => (0xB000_0000, 0x8000_0000),
+            QemuX86Machine::I440fx => (0xE000_0000, 0xC000_0000),
+        };
+        if ram_size >= threshold {
+            low
+        } else {
+            threshold
         }
     }
 
@@ -240,9 +296,9 @@ mod platform {
             let nix_pid = Pid::from_raw(pid);
             probe_ptrace_access(nix_pid, memory.start)?;
             Ok(Self {
+                layout: ram_layout(pid, hv, memory.length),
                 memory,
                 pid: nix_pid,
-                layout: ram_layout(pid, hv),
             })
         }
 
@@ -360,6 +416,39 @@ mod platform {
             assert_eq!(gpa_to_offset(layout, 0xFFFF_FFFF), None);
             // RAM resumes at 4 GiB, packed against the low RAM before it.
             assert_eq!(gpa_to_offset(layout, 0x1_0000_0000), Some(0x8000_0000));
+        }
+
+        /// An 8 GiB i440fx guest (libvirt's `pc`) keeps 3 GiB below the
+        /// hole, so its high RAM sits 1 GiB later in the mapping than a q35
+        /// guest's; a q35 guest under 2.75 GiB has no RAM moved above 4 GiB.
+        #[test]
+        fn the_hole_starts_where_the_qemu_machine_ends_low_ram() {
+            const GIB: u64 = 1 << 30;
+            let machine = |args: &str| qemu_x86_machine(args.split(' '));
+            assert_eq!(
+                machine("qemu-system-x86_64 -name guest=winvista -machine pc-i440fx-11.1,usb=off"),
+                QemuX86Machine::I440fx
+            );
+            assert_eq!(
+                machine("qemu-system-x86_64 -machine pc-q35-11.1,usb=off,dump-guest-core=off"),
+                QemuX86Machine::Q35
+            );
+            assert_eq!(
+                machine("qemu-system-x86_64 -M accel=kvm,type=q35"),
+                QemuX86Machine::Q35
+            );
+            // No -machine: QEMU's default, `pc`.
+            assert_eq!(machine("qemu-system-x86_64 -m 4G"), QemuX86Machine::I440fx);
+
+            let hole = qemu_x86_hole_start;
+            assert_eq!(hole(QemuX86Machine::I440fx, 8 * GIB), 3 * GIB);
+            assert_eq!(hole(QemuX86Machine::Q35, 8 * GIB), 2 * GIB);
+            assert_eq!(hole(QemuX86Machine::Q35, 2 * GIB + GIB / 2), 0xB000_0000);
+            assert_eq!(hole(QemuX86Machine::I440fx, 3 * GIB), 0xE000_0000);
+            let layout = RamLayout::X86 {
+                hole_start: hole(QemuX86Machine::I440fx, 8 * GIB),
+            };
+            assert_eq!(gpa_to_offset(layout, 0x1_3d3d_7cf8), Some(0xfd3d_7cf8));
         }
 
         #[test]

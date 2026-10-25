@@ -949,7 +949,9 @@ fn print_timer_list(detail: &TimerTable) {
     for entry in &detail.entries {
         let [due_time, period, dpc] = timer_cells(&entry.timer, now, &mut unread);
         builder.push_record([
-            entry.processor.to_string(),
+            entry
+                .processor
+                .map_or_else(|| "-".to_string(), |processor| processor.to_string()),
             entry.bucket.to_string(),
             ui::addr(entry.timer.address.0).to_string(),
             due_time,
@@ -965,9 +967,13 @@ fn print_timer_list(detail: &TimerTable) {
     unread.print();
     for bucket in &detail.terminations {
         if let Some(stop) = termination_message(&bucket.termination) {
+            let table = bucket.processor.map_or_else(
+                || "shared table".to_string(),
+                |processor| format!("CPU {processor}"),
+            );
             print_warning(format!(
-                "CPU {} bucket {}: list walk stopped: {stop}",
-                bucket.processor, bucket.bucket
+                "{table} bucket {}: list walk stopped: {stop}",
+                bucket.bucket
             ));
         }
     }

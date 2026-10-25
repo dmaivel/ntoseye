@@ -135,26 +135,33 @@ pub struct Zombies {
 struct ObjectQuery {
     header_size: u64,
     body_offset: u64,
-    type_index_offset: u64,
+    object_type: HeaderType,
     pointer_count_offset: u64,
     handle_count_offset: u64,
-    /// `nt!ObHeaderCookie`, which Windows 10 XORs into the stored
-    /// `TypeIndex` with the header address's second byte; `None` before,
-    /// where the index is stored as is.
-    cookie: Option<u8>,
-    process_index: Option<u8>,
-    thread_index: Option<u8>,
+    process_type: Option<u64>,
+    thread_type: Option<u64>,
+}
+
+/// How an object header names its type.
+enum HeaderType {
+    /// `TypeIndex`, the type's `Index` (Windows 7 on). `cookie` is
+    /// `nt!ObHeaderCookie`, which Windows 10 XORs into it with the header
+    /// address's second byte; `None` before, where it is stored as is.
+    Index { offset: u64, cookie: Option<u8> },
+    /// `Type`, the type object's address (Vista and earlier).
+    Pointer { offset: u64 },
 }
 
 impl ObjectQuery {
     /// The object header in the block whose body starts at `start`, when one
-    /// of the headers tried decodes to type `index` and its body starts
-    /// with dispatcher type `kind`.
+    /// of the headers tried names type `object_type` (an index or a type
+    /// object's address, by [`HeaderType`]) and its body starts with
+    /// dispatcher type `kind`.
     fn find(
         &self,
         memory: &impl MemoryOps<VirtAddr>,
         start: VirtAddr,
-        index: u8,
+        object_type: u64,
         kind: u8,
     ) -> Option<(VirtAddr, ObjectCounts)> {
         let mut bytes = vec![0u8; (MAX_OPTIONAL_HEADERS + self.header_size + 1) as usize];
@@ -162,19 +169,25 @@ impl ObjectQuery {
         (0..=MAX_OPTIONAL_HEADERS).step_by(16).find_map(|offset| {
             let header = start + offset;
             let at = |field: u64| bytes.get((offset + field) as usize).copied();
-            let raw = at(self.type_index_offset)?;
-            let decoded = self
-                .cookie
-                .map_or(raw, |cookie| raw ^ (header.0 >> 8) as u8 ^ cookie);
-            if decoded != index || at(self.body_offset)? != kind {
-                return None;
-            }
             let word = |field: u64| {
                 let from = (offset + field) as usize;
                 bytes
                     .get(from..from + 8)
                     .map(|word| i64::from_le_bytes(word.try_into().expect("8 bytes")))
             };
+            let named = match self.object_type {
+                HeaderType::Index {
+                    offset: index,
+                    cookie,
+                } => {
+                    let raw = at(index)?;
+                    u64::from(cookie.map_or(raw, |cookie| raw ^ (header.0 >> 8) as u8 ^ cookie))
+                }
+                HeaderType::Pointer { offset: pointer } => word(pointer)? as u64,
+            };
+            if named != object_type || at(self.body_offset)? != kind {
+                return None;
+            }
             Some((
                 header,
                 ObjectCounts {
@@ -193,30 +206,44 @@ impl Target {
         let nt = &guest.ntoskrnl;
         let memory = nt.memory();
         let header = nt.types().layout("_OBJECT_HEADER")?;
-        let index_offset = nt.types().layout("_OBJECT_TYPE")?.field_offset("Index")?;
-        let type_index = |type_symbol: &str| -> Result<u8> {
+        let object_type = match header.field_offset("TypeIndex") {
+            Ok(offset) => HeaderType::Index {
+                offset,
+                cookie: match nt.symbol("ObHeaderCookie") {
+                    Ok(symbol) => Some(symbol.read::<u8>()?),
+                    Err(Error::SymbolNotFound(_)) => None,
+                    Err(error) => return Err(error),
+                },
+            },
+            Err(_) => HeaderType::Pointer {
+                offset: header.field_offset("Type")?,
+            },
+        };
+        let index_offset = match object_type {
+            HeaderType::Index { .. } => {
+                Some(nt.types().layout("_OBJECT_TYPE")?.field_offset("Index")?)
+            }
+            HeaderType::Pointer { .. } => None,
+        };
+        // What a header of `type_symbol`'s objects holds.
+        let named = |type_symbol: &str| -> Result<u64> {
             let object = nt.symbol(type_symbol)?.read_pointer()?;
-            memory.read::<u8>(object + index_offset)
+            match index_offset {
+                Some(offset) => memory.read::<u8>(object + offset).map(u64::from),
+                None => Ok(object.0),
+            }
         };
         let query = ObjectQuery {
             header_size: header.size as u64,
             body_offset: header.field_offset("Body")?,
-            type_index_offset: header.field_offset("TypeIndex")?,
+            object_type,
             pointer_count_offset: header.field_offset("PointerCount")?,
             handle_count_offset: header.field_offset("HandleCount")?,
-            cookie: match nt.symbol("ObHeaderCookie") {
-                Ok(symbol) => Some(symbol.read::<u8>()?),
-                Err(Error::SymbolNotFound(_)) => None,
-                Err(error) => return Err(error),
-            },
-            process_index: kinds
+            process_type: kinds
                 .processes
-                .then(|| type_index("PsProcessType"))
+                .then(|| named("PsProcessType"))
                 .transpose()?,
-            thread_index: kinds
-                .threads
-                .then(|| type_index("PsThreadType"))
-                .transpose()?,
+            thread_type: kinds.threads.then(|| named("PsThreadType")).transpose()?,
         };
         let layout = pool_layout(self)?;
         let (region_start, region_end) = pool_range(self, &NONPAGED_POOL)?;
@@ -236,10 +263,10 @@ impl Target {
         let scan = scan_present_pool_pages(self, region_start, region_end, |page_va, page| {
             for (offset, tag) in pool_header_tags(&layout, page) {
                 let start = page_va + offset + layout.header_size;
-                match (tag & 0x7fff_ffff, query.process_index, query.thread_index) {
-                    (PROCESS_TAG, Some(index), _) => {
+                match (tag & 0x7fff_ffff, query.process_type, query.thread_type) {
+                    (PROCESS_TAG, Some(object_type), _) => {
                         let Some((header, counts)) =
-                            query.find(&memory, start, index, PROCESS_OBJECT)
+                            query.find(&memory, start, object_type, PROCESS_OBJECT)
                         else {
                             continue;
                         };
@@ -249,9 +276,9 @@ impl Target {
                             Err(_) => {}
                         }
                     }
-                    (THREAD_TAG, _, Some(index)) => {
+                    (THREAD_TAG, _, Some(object_type)) => {
                         let Some((header, counts)) =
-                            query.find(&memory, start, index, THREAD_OBJECT)
+                            query.find(&memory, start, object_type, THREAD_OBJECT)
                         else {
                             continue;
                         };

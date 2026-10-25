@@ -550,6 +550,12 @@ impl HeapReader<'_> {
                 address
             )));
         }
+        if heap.offset("SegmentList").is_err() && heap.offset("Segments").is_ok() {
+            return Err(Error::DebugInfo(
+                "the heap layout before Vista (a Segments array, unencoded entries) is not decoded"
+                    .into(),
+            ));
+        }
         let encode_mask = heap.read(&image, 0, "EncodeFlagMask")? as u32;
         let granule = self.layout("_HEAP_ENTRY")?.size() as u64;
         let encoding = decode_nt_heap_encoding(

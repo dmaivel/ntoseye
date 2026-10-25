@@ -159,9 +159,11 @@ fn print_hives(list: &HiveList) {
                     ui::addr(hive.address.0),
                     format!("{:#x}", hive.stable.length),
                     format!("{:#x}", hive.volatile.length),
-                    hive.mount
-                        .clone()
-                        .unwrap_or_else(|| ui::muted("(not mounted)")),
+                    match hive.mount.as_result() {
+                        Ok(Some(mount)) => mount.clone(),
+                        Ok(None) => ui::muted("(not mounted)"),
+                        Err(_) => ui::muted("-"),
+                    },
                     file,
                 ]);
             }

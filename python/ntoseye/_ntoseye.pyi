@@ -6966,9 +6966,6 @@ class Heaps:
 
 @final
 class Hive(BaseRecord):
-    """
-    A loaded hive (`_CMHIVE`).
-    """
     __match_args__: Final[tuple[Literal["address"], Literal["master"], Literal["mount"], Literal["file"], Literal["base_block"], Literal["base_block_name"], Literal["root_cell"], Literal["version"], Literal["flags"], Literal["flat"]]]
     @property
     def address(self, /) -> int: ...
@@ -7001,10 +6998,11 @@ class Hive(BaseRecord):
         The master hive (`nt!CmpMasterHive`), whose root is `\\REGISTRY`.
         """
     @property
-    def mount(self, /) -> str |None:
+    def mount(self, /) -> Diagnostic[str |None]:
         """
         Where it is mounted (`HiveRootPath`), `\\REGISTRY` for the master
-        hive.
+        hive; `None` for one not mounted. Unavailable before Vista, whose
+        hives do not record it.
         """
     @property
     def root_cell(self, /) -> Diagnostic[int]:
@@ -19322,7 +19320,7 @@ class TimerBucketEnd(BaseRecord):
     @property
     def bucket(self, /) -> int: ...
     @property
-    def processor(self, /) -> int: ...
+    def processor(self, /) -> int |None: ...
     @property
     def termination(self, /) -> ListTermination: ...
 
@@ -19370,7 +19368,10 @@ class TimerTableEntry(BaseRecord):
         The index of the timer-table bucket.
         """
     @property
-    def processor(self, /) -> int: ...
+    def processor(self, /) -> int |None:
+        """
+        `None` in the one table all processors share before Windows 7.
+        """
     @property
     def timer(self, /) -> KernelTimer: ...
 

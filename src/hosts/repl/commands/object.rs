@@ -86,6 +86,9 @@ impl Render<Option<String>> for Vec<DriverObjectInfo> {
             "Driver unload",
         ]);
 
+        // The loaded-module list, which names modules whose symbols did not
+        // load too.
+        let modules = target.kernel_modules().unwrap_or_default();
         let mut count = 0;
         for driver in self {
             if let Some(ref f) = filter
@@ -95,11 +98,10 @@ impl Render<Option<String>> for Vec<DriverObjectInfo> {
                 continue;
             }
             count += 1;
-            let module = target
-                .symbols
-                .find_module_for_address(target.kernel_dtb(), driver.driver_start)
-                .map(|module| module.name)
-                .unwrap_or_else(|| "-".to_string());
+            let module = modules
+                .iter()
+                .find(|module| module.contains_address(driver.driver_start))
+                .map_or("-", |module| module.name.as_str());
             builder.push_record(vec![
                 ui::addr(driver.object.0).to_string(),
                 driver.name.to_string(),
