@@ -36,6 +36,11 @@ pub struct StoreLayout {
     /// `ST_STORE`: the mask that takes a region key to its offset in the
     /// region, in 16-byte units.
     pub region_offset_mask: u32,
+    /// `ST_STORE`: the array of chunk pointers that page records live in.
+    pub chunk_array: u32,
+    /// `ST_STORE`: the chunk shift, records-per-chunk mask, record size and
+    /// chunk header size.
+    pub chunk_fields: [u32; 4],
 }
 
 /// The store layout `code` uses, when every anchor is found and agrees.
@@ -43,6 +48,7 @@ pub fn derive(code: &KernelCode<'_>) -> Result<StoreLayout> {
     let owner_process = owner_process(code)?;
     let (region_array, virtual_flag, back_pointer) = region_fields(code)?;
     let (region_shift, region_offset_mask) = region_key_fields(code)?;
+    let (chunk_array, chunk_fields) = chunk_fields(code)?;
     Ok(StoreLayout {
         owner_process,
         region_array,
@@ -50,6 +56,8 @@ pub fn derive(code: &KernelCode<'_>) -> Result<StoreLayout> {
         back_pointer,
         region_shift,
         region_offset_mask,
+        chunk_array,
+        chunk_fields,
     })
 }
 
@@ -386,6 +394,41 @@ fn region_key_fields(code: &KernelCode<'_>) -> Result<(u32, u32)> {
     ))
 }
 
+/// The page-record fields of `ST_PAGE_RECORD_GET`: the array of chunk
+/// pointers (`[st+i*8+A]`) and the four 32-bit fields it reads from the
+/// store, in offset order (shift, per-chunk mask, record size, header).
+fn chunk_fields(code: &KernelCode<'_>) -> Result<(u32, [u32; 4])> {
+    use iced_x86::{OpKind, Register};
+    let get = code.address("ST_STORE<SM_TRAITS>::ST_PAGE_RECORD_GET")?;
+    let mut arrays = std::collections::BTreeSet::new();
+    let mut dwords = std::collections::BTreeSet::new();
+    for instruction in code.instructions(get) {
+        if instruction.op_count() < 2
+            || instruction.op1_kind() != OpKind::Memory
+            || instruction.memory_base() == Register::RSP
+        {
+            continue;
+        }
+        let offset = instruction.memory_displacement64();
+        if instruction.memory_index() != Register::None && instruction.memory_index_scale() == 8 {
+            if offset != 0 {
+                arrays.insert(offset as u32);
+            }
+        } else if instruction.memory_size().size() == 4
+            && let Some(field) = based_offset(&instruction).filter(|f| *f >= 0x40)
+        {
+            dwords.insert(field);
+        }
+    }
+    let array = match arrays.into_iter().collect::<Vec<_>>().as_slice() {
+        [array] => *array,
+        other => return Err(layout_error(format_args!("chunk array: {other:x?}"))),
+    };
+    match dwords.into_iter().collect::<Vec<_>>().as_slice() {
+        [a, b, c, d] => Ok((array, [*a, *b, *c, *d])),
+        other => Err(layout_error(format_args!("chunk fields: {other:x?}"))),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,6 +461,16 @@ mod tests {
                 functions: HashMap::new(),
             };
             builder.function("KeStackAttachProcess", |a| a.ret().unwrap());
+            // A record's chunk: its pointer from the array at 0xc0, the
+            // record from the fields at 0x1c8..0x1d8.
+            builder.function("ST_STORE<SM_TRAITS>::ST_PAGE_RECORD_GET", |a| {
+                a.mov(r11d, dword_ptr(rcx + 0x1c8)).unwrap();
+                a.mov(ebx, dword_ptr(rcx + 0x1cc)).unwrap();
+                a.mov(edi, dword_ptr(rcx + 0x1d0)).unwrap();
+                a.mov(esi, dword_ptr(rcx + 0x1d8)).unwrap();
+                a.mov(rdx, qword_ptr(rcx + rax * 8 + 0xc0)).unwrap();
+                a.ret().unwrap();
+            });
             builder
         }
 
@@ -493,6 +546,8 @@ mod tests {
                 back_pointer: 0x320,
                 region_shift: 0x32c,
                 region_offset_mask: 0x328,
+                chunk_array: 0xc0,
+                chunk_fields: [0x1c8, 0x1cc, 0x1d0, 0x1d8],
             }
         );
     }
@@ -643,9 +698,9 @@ mod tests {
             };
             match derive(&kernel) {
                 Ok(layout) => println!("{}: {layout:x?}", exe.display()),
-                // 1507 and 1511 lay the store out differently; they are not
+                // 1507 to 1607 lay the store out differently; they are not
                 // supported.
-                Err(error) if build(&exe) < 14393 => println!("{}: {error}", exe.display()),
+                Err(error) if build(&exe) < 15063 => println!("{}: {error}", exe.display()),
                 Err(error) => failures.push(format!("{}: {error}", exe.display())),
             }
         }
