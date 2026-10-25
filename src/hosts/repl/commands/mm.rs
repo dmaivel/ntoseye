@@ -384,12 +384,11 @@ fn pte(
 
 impl Render for PteWalk {
     fn render(&self, repl: &mut ReplState<'_>, _: ()) {
-        let target = &repl.ctx.target;
-        let mask = target.phys.invalid_pte_mask();
+        let mask = repl.ctx.target.phys.invalid_pte_mask();
         print_pte_walk(self, mask);
         // What a non-present entry means for the page: where it is, and
         // whether a read still gets it.
-        if let Some(why) = target.non_resident(self.dtb, self.address) {
+        if let Some(why) = &self.non_resident {
             outln!("{}: {why}", ui::addr(self.address.0));
         }
     }

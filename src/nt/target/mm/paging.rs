@@ -255,6 +255,7 @@ impl Target {
             ppe,
             pde,
             pte,
+            non_resident: self.non_resident(dtb, address),
         })
     }
 }

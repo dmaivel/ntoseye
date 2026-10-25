@@ -12474,6 +12474,22 @@ class NdisUnreadable(BaseRecord):
     def error(self, /) -> str: ...
 
 @final
+class NonResident(BaseRecord):
+    """
+    Why a page is not in memory, as its page tables say
+    (`non_resident`).
+    """
+    __match_args__: Final[tuple[Literal["table"], Literal["place"]]]
+    @property
+    def place(self, /) -> Place: ...
+    @property
+    def table(self, /) -> Literal["pxe", "ppe", "pde", "pte"] |None:
+        """
+        The level whose entry names the page table that is not in memory;
+        `None` when the page itself is not.
+        """
+
+@final
 class Notice(BaseRecord):
     """
     Something the debugger reported beside a command's result.
@@ -13858,6 +13874,93 @@ class PfnSelector(BaseRecord):
         def value(self, /) -> int:
             """
             The page-frame number or physical address given.
+            """
+
+class Place(BaseRecord):
+    """
+    Where a page, or a page table, that is not in memory is.
+    """
+    @property
+    def kind(self, /) -> Literal["unmapped", "demand_zero", "prototype", "page_file", "store", "unreadable"]:
+        """
+        The variant: `unmapped`, `demand_zero`, `prototype`, `page_file`, `store`, `unreadable`.
+        """
+    @final
+    class DemandZero(Place):
+        """
+        Committed but never touched; it reads as zeros once touched.
+        """
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["demand_zero"]:
+            """
+            `demand_zero`.
+            """
+    @final
+    class PageFile(Place):
+        """
+        In paging file `file`, at page `offset`.
+        """
+        __match_args__: Final[tuple[Literal["file"], Literal["offset"]]]
+        @property
+        def file(self, /) -> int: ...
+        @property
+        def kind(self, /) -> Literal["page_file"]:
+            """
+            `page_file`.
+            """
+        @property
+        def offset(self, /) -> int: ...
+    @final
+    class Prototype(Place):
+        """
+        A view's page this process has not touched, and the section's own
+        PTE leaves it out of memory.
+        """
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["prototype"]:
+            """
+            `prototype`.
+            """
+    @final
+    class Store(Place):
+        """
+        In the memory-compression store, at page `offset` of its page file:
+        read from there, or, with `problem`, not.
+        """
+        __match_args__: Final[tuple[Literal["offset"], Literal["problem"]]]
+        @property
+        def kind(self, /) -> Literal["store"]:
+            """
+            `store`.
+            """
+        @property
+        def offset(self, /) -> int: ...
+        @property
+        def problem(self, /) -> str |None: ...
+    @final
+    class Unmapped(Place):
+        """
+        Nothing maps it: no page table, or a zero entry.
+        """
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["unmapped"]:
+            """
+            `unmapped`.
+            """
+    @final
+    class Unreadable(Place):
+        """
+        Its entry is present, but its frame does not read (a dump without
+        it).
+        """
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["unreadable"]:
+            """
+            `unreadable`.
             """
 
 @final
@@ -15383,7 +15486,7 @@ class PteWalk(BaseRecord):
     The page-table entries that map an address, read through NT's self-map
     (`!pte`).
     """
-    __match_args__: Final[tuple[Literal["address"], Literal["dtb"], Literal["pxe"], Literal["ppe"], Literal["pde"], Literal["pte"]]]
+    __match_args__: Final[tuple[Literal["address"], Literal["dtb"], Literal["pxe"], Literal["ppe"], Literal["pde"], Literal["pte"], Literal["non_resident"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -15391,6 +15494,13 @@ class PteWalk(BaseRecord):
         """
         The address space the walk was performed in (the attached process DTB
         when attached, else the kernel), so callers know what was walked.
+        """
+    @property
+    def non_resident(self, /) -> NonResident |None:
+        """
+        Where the page is when it is not in memory, and whether reads still
+        get it (from the memory-compression store); `None` when it is in
+        memory.
         """
     @property
     def pde(self, /) -> PteLevel |None: ...

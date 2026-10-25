@@ -6,6 +6,8 @@ use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use ntoseye_macros::record;
+
 mod ops;
 mod sections;
 pub mod store;
@@ -879,6 +881,7 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
 
 /// Why a page is not in memory, as its page tables say
 /// ([`AddressSpace::non_resident`]).
+#[record]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NonResident {
     /// The level whose entry names the page table that is not in memory;
@@ -888,6 +891,7 @@ pub struct NonResident {
 }
 
 /// Where a page, or a page table, that is not in memory is.
+#[record(tagged)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Place {
     /// Nothing maps it: no page table, or a zero entry.
@@ -898,10 +902,15 @@ pub enum Place {
     /// PTE leaves it out of memory.
     Prototype,
     /// In paging file `file`, at page `offset`.
-    PageFile { file: u8, offset: u32 },
+    PageFile {
+        file: u8,
+        #[record(hex)]
+        offset: u32,
+    },
     /// In the memory-compression store, at page `offset` of its page file:
     /// read from there, or, with `problem`, not.
     Store {
+        #[record(hex)]
         offset: u32,
         problem: Option<String>,
     },

@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use ntoseye_macros::record;
 
 use super::{DiagnosticMetric, DiagnosticValue, Target};
-use crate::base::memory::PAGE_SIZE;
+use crate::base::memory::{NonResident, PAGE_SIZE};
 use crate::base::types::{Dtb, PageTableLevel, PteAttributes, VirtAddr};
 use crate::nt::guest::ProcessInfo;
 use crate::nt::layout::{ParsedType, TypeInfo};
@@ -1107,6 +1107,10 @@ pub struct PteWalk {
     pub ppe: Option<PteLevel>,
     pub pde: Option<PteLevel>,
     pub pte: Option<PteLevel>,
+    /// Where the page is when it is not in memory, and whether reads still
+    /// get it (from the memory-compression store); `None` when it is in
+    /// memory.
+    pub non_resident: Option<NonResident>,
 }
 
 impl PteWalk {
