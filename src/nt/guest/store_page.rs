@@ -172,6 +172,46 @@ pub fn embedded_store(
     )))
 }
 
+/// `COMPRESSION_FORMAT_XPRESS`, plain LZ77.
+const FORMAT_XPRESS: u16 = 3;
+
+/// Decompress one page's `data` from the store at `store` (its `ST_STORE`
+/// at `st`) into `page`, by `compression`. Data of 4096 bytes is the page
+/// as it is.
+pub fn decompress_page(
+    read: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
+    compression: super::store_layout::Compression,
+    store: u64,
+    st: u64,
+    data: &[u8],
+    page: &mut [u8; 4096],
+) -> crate::base::error::Result<()> {
+    use super::store_layout::Compression;
+    use crate::base::error::Error;
+    if data.len() == page.len() {
+        page.copy_from_slice(data);
+        return Ok(());
+    }
+    match compression {
+        Compression::FormatField(field) => {
+            let mut format = [0u8; 2];
+            read(st + u64::from(field), &mut format)?;
+            match u16::from_le_bytes(format) {
+                FORMAT_XPRESS => crate::nt::decompress::xpress(data, page),
+                other => Err(Error::DebugInfo(format!(
+                    "store {store:#x}: compression format {other} is not supported"
+                ))),
+            }
+        }
+        Compression::Lz4UnlessCount(count) => match read_u32(read, store + u64::from(count))? {
+            0 => crate::nt::decompress::lz4(data, page),
+            other => Err(Error::DebugInfo(format!(
+                "store {store:#x}: a list of {other} compression algorithms is not supported"
+            ))),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +351,54 @@ mod tests {
             store + 0x50
         );
         assert!(embedded_store(&mut read, store + 0x1000, 0x320).is_err());
+    }
+
+    #[test]
+    fn a_page_decompresses_by_the_stores_algorithm() {
+        use super::super::store_layout::Compression;
+        let (store, st) = (0x10_000u64, 0x10_050u64);
+        let original: Vec<u8> = (0..4096u32).map(|i| (i / 64) as u8).collect();
+        let decompress = |values: &[(u64, Vec<u8>)], compression, data: &[u8]| {
+            let borrowed: Vec<(u64, &[u8])> =
+                values.iter().map(|(a, b)| (*a, b.as_slice())).collect();
+            let mut page = [0u8; 4096];
+            decompress_page(
+                &mut memory(&borrowed),
+                compression,
+                store,
+                st,
+                data,
+                &mut page,
+            )
+            .map(|()| page.to_vec())
+        };
+        // 24H2: LZ4 while the store's algorithm count is zero.
+        let lz4 = lz4_flex::block::compress(&original);
+        let zero = [(store + 0x12c0, 0u32.to_le_bytes().to_vec())];
+        assert_eq!(
+            decompress(&zero, Compression::Lz4UnlessCount(0x12c0), &lz4).unwrap(),
+            original
+        );
+        let listed = [(store + 0x12c0, 2u32.to_le_bytes().to_vec())];
+        assert!(decompress(&listed, Compression::Lz4UnlessCount(0x12c0), &lz4).is_err());
+        // Before 24H2: the format field; XPRESS as literals only.
+        let mut xpress = Vec::new();
+        for group in original.chunks(32) {
+            xpress.extend_from_slice(&[0; 4]);
+            xpress.extend_from_slice(group);
+        }
+        xpress.extend_from_slice(&[0; 4]);
+        let format = |value: u16| [(st + 0x3e0, value.to_le_bytes().to_vec())];
+        assert_eq!(
+            decompress(&format(3), Compression::FormatField(0x3e0), &xpress).unwrap(),
+            original
+        );
+        assert!(decompress(&format(4), Compression::FormatField(0x3e0), &xpress).is_err());
+        // Stored as it is.
+        assert_eq!(
+            decompress(&[], Compression::FormatField(0x3e0), &original).unwrap(),
+            original
+        );
     }
     #[test]
     fn a_page_record_is_found_through_its_chunk() {
