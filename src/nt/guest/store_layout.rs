@@ -43,6 +43,8 @@ pub struct StoreLayout {
     pub chunk_fields: [u32; 4],
     /// `SMKM_STORE_MGR`: the tree from page key to store index.
     pub key_tree: u32,
+    /// `ST_STORE`: the tree from page key to region key.
+    pub pages_tree: u32,
     pub compression: Compression,
 }
 
@@ -53,6 +55,7 @@ pub fn derive(code: &KernelCode<'_>) -> Result<StoreLayout> {
     let (region_shift, region_offset_mask) = region_key_fields(code)?;
     let (chunk_array, chunk_fields) = chunk_fields(code)?;
     let key_tree = key_tree(code)?;
+    let pages_tree = pages_tree(code)?;
     let compression = compression(code)?;
     Ok(StoreLayout {
         owner_process,
@@ -64,6 +67,7 @@ pub fn derive(code: &KernelCode<'_>) -> Result<StoreLayout> {
         chunk_array,
         chunk_fields,
         key_tree,
+        pages_tree,
         compression,
     })
 }
@@ -538,6 +542,42 @@ fn compression(code: &KernelCode<'_>) -> Result<Compression> {
     }
     most(&votes, "decompression format").map(Compression::FormatField)
 }
+
+/// The `ST_STORE`'s pages tree (page key to region key): the `rcx` that
+/// `ST_STORE` methods pass to that tree's search, `lea rcx,[st+P]`, or the
+/// store itself (`mov rcx,reg`) when the tree is at 0.
+fn pages_tree(code: &KernelCode<'_>) -> Result<u32> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    let searches: Vec<u64> = code
+        .functions
+        .iter()
+        .filter(|(name, _)| name.contains("_ST_PAGE_ENTRY") && name.ends_with("::BTreeSearchKey"))
+        .map(|(_, address)| *address)
+        .collect();
+    let mut votes: HashMap<u32, usize> = HashMap::new();
+    for function in code.functions_named("ST_STORE<SM_TRAITS>::") {
+        let mut rcx = None;
+        for instruction in code.instructions(function) {
+            if instruction.mnemonic() == Mnemonic::Call {
+                if near_target(&instruction).is_some_and(|t| searches.contains(&t))
+                    && let Some(offset) = rcx
+                {
+                    *votes.entry(offset).or_default() += 1;
+                }
+                rcx = None;
+            } else if instruction.op0_kind() == OpKind::Register
+                && instruction.op0_register().full_register() == Register::RCX
+            {
+                rcx = match (instruction.mnemonic(), instruction.op1_kind()) {
+                    (Mnemonic::Lea, _) => based_offset(&instruction),
+                    (Mnemonic::Mov, OpKind::Register) => Some(0),
+                    _ => None,
+                };
+            }
+        }
+    }
+    most(&votes, "pages tree")
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,6 +610,16 @@ mod tests {
                 functions: HashMap::new(),
             };
             builder.function("KeStackAttachProcess", |a| a.ret().unwrap());
+            // The page lookup searches the pages tree at the store's start.
+            let pages = builder.function(
+                "B_TREE<_SM_PAGE_KEY, ST_STORE<SM_TRAITS>::_ST_PAGE_ENTRY>::BTreeSearchKey",
+                |a| a.ret().unwrap(),
+            );
+            builder.function("ST_STORE<SM_TRAITS>::StDmpSinglePageLookup", |a| {
+                a.mov(rcx, rsi).unwrap();
+                a.call(pages).unwrap();
+                a.ret().unwrap();
+            });
             // 24H2's decompression: LZ4 unless the count at 0x12c0 is set.
             builder.function("SmStoreDecompressBuffer", |a| {
                 a.mov(rax, qword_ptr(rcx + 0x1d90)).unwrap();
@@ -683,6 +733,7 @@ mod tests {
                 chunk_array: 0xc0,
                 chunk_fields: [0x1c8, 0x1cc, 0x1d0, 0x1d8],
                 key_tree: 0x1c0,
+                pages_tree: 0,
                 compression: Compression::Lz4UnlessCount(0x12c0),
             }
         );
