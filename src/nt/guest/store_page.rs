@@ -74,6 +74,37 @@ pub fn page_record(
     Ok(record_address(records, key, mask, size, header))
 }
 
+/// Redirects a page's records are followed through at most.
+const MAX_REDIRECTS: usize = 32;
+
+/// The key and compressed size in the page record that region key `key`
+/// leads to, following records that redirect to another key (key
+/// `0xffffffff`, the next key at +4).
+pub fn resolve_record(
+    read: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
+    st: u64,
+    chunk_array: u32,
+    fields: [u32; 4],
+    key: u32,
+) -> crate::base::error::Result<(u32, u16)> {
+    let mut key = key;
+    for _ in 0..=MAX_REDIRECTS {
+        let record = page_record(read, st, chunk_array, fields, key)?;
+        let record_key = read_u32(read, record)?;
+        let next = read_u32(read, record + 4)?;
+        if record_key != u32::MAX {
+            return Ok((record_key, next as u16));
+        }
+        if next == key {
+            break;
+        }
+        key = next;
+    }
+    Err(crate::base::error::Error::DebugInfo(format!(
+        "store key {key:#x}: page records redirect in a loop"
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +133,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_redirect_record_leads_to_the_page_and_a_loop_is_refused() {
+        let st = 0x10_000;
+        let fields = [0x1c8, 0x1cc, 0x1d0, 0x1d8];
+        let first: u32 = 0b100 << 8;
+        let second: u32 = 0b100 << 8 | 1;
+        let mut values: Vec<(u64, Vec<u8>)> = vec![
+            (st + 0x1c8, 8u32.to_le_bytes().to_vec()),
+            (st + 0x1cc, 0xffu32.to_le_bytes().to_vec()),
+            (st + 0x1d0, 12u32.to_le_bytes().to_vec()),
+            (st + 0x1d8, 0u32.to_le_bytes().to_vec()),
+            (st + 0xc0 + 2 * 8, 0x20_000u64.to_le_bytes().to_vec()),
+            (0x20_000, 0x30_000u64.to_le_bytes().to_vec()),
+            // Record 0 redirects to record 1, which holds the page.
+            (0x30_000, u32::MAX.to_le_bytes().to_vec()),
+            (0x30_004, second.to_le_bytes().to_vec()),
+            (0x30_000 + 12, 0x0005_0042u32.to_le_bytes().to_vec()),
+            (0x30_000 + 16, 0x0123u32.to_le_bytes().to_vec()),
+        ];
+        let borrowed: Vec<(u64, &[u8])> = values.iter().map(|(a, b)| (*a, b.as_slice())).collect();
+        let mut read = memory(&borrowed);
+        assert_eq!(
+            resolve_record(&mut read, st, 0xc0, fields, first).unwrap(),
+            (0x0005_0042, 0x123)
+        );
+        // Record 0 redirecting to itself.
+        values[7].1 = first.to_le_bytes().to_vec();
+        let borrowed: Vec<(u64, &[u8])> = values.iter().map(|(a, b)| (*a, b.as_slice())).collect();
+        let mut read = memory(&borrowed);
+        assert!(resolve_record(&mut read, st, 0xc0, fields, first).is_err());
+    }
     #[test]
     fn a_page_record_is_found_through_its_chunk() {
         let st = 0x10_000;
