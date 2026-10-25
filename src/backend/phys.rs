@@ -711,6 +711,7 @@ mod tests {
                 chunk_fields: [0; 4],
                 key_tree: 0,
                 pages_tree: 0,
+                redirect_next: 4,
                 compression: Compression::FormatField(0),
             },
             manager: 1,

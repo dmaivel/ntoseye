@@ -77,24 +77,25 @@ pub fn page_record(
 /// Redirects a page's records are followed through at most.
 const MAX_REDIRECTS: usize = 32;
 
-/// The key and compressed size in the page record that region key `key`
-/// leads to, following records that redirect to another key (key
-/// `0xffffffff`, the next key at +4).
+/// The key and size word (the dword at +4) in the page record that region
+/// key `key` leads to, following records that redirect to another key (key
+/// `0xffffffff`, the next key at `redirect_next`).
 pub fn resolve_record(
     read: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
     st: u64,
     chunk_array: u32,
     fields: [u32; 4],
+    redirect_next: u32,
     key: u32,
-) -> crate::base::error::Result<(u32, u16)> {
+) -> crate::base::error::Result<(u32, u32)> {
     let mut key = key;
     for _ in 0..=MAX_REDIRECTS {
         let record = page_record(read, st, chunk_array, fields, key)?;
         let record_key = read_u32(read, record)?;
-        let next = read_u32(read, record + 4)?;
         if record_key != u32::MAX {
-            return Ok((record_key, next as u16));
+            return Ok((record_key, read_u32(read, record + 4)?));
         }
+        let next = read_u32(read, record + u64::from(redirect_next))?;
         if next == key {
             break;
         }
@@ -240,6 +241,7 @@ pub fn read_page(
         st,
         layout.chunk_array,
         layout.chunk_fields,
+        layout.redirect_next,
         region_key,
     )?;
     let shift = read_u32(kernel, st + u64::from(layout.region_shift))?;
@@ -253,15 +255,12 @@ pub fn read_page(
         layout.virtual_flag,
         index,
     )?;
-    let length = if size == 0x1000 {
-        0x1000
-    } else {
-        usize::from(size & 0xfff)
+    // The size word's low 12 bits are the compressed length, 0 for a page
+    // kept as it is; the kernel keeps other state above them.
+    let length = match size & 0xfff {
+        0 => 0x1000,
+        length => length as usize,
     };
-    if length == 0 {
-        page.fill(0);
-        return Ok(());
-    }
     let mut data = vec![0u8; length];
     // The store's own pages can be paged out to disk, or left out of a dump.
     regions(region + offset, &mut data).map_err(|_| {
@@ -300,6 +299,9 @@ pub struct StoreLayout {
     pub key_tree: u32,
     /// `ST_STORE`: the tree from page key to region key.
     pub pages_tree: u32,
+    /// Page record: where a redirecting record (key `0xffffffff`) keeps the
+    /// key it redirects to; +4 to 26100, +8 from 28000.
+    pub redirect_next: u32,
     pub compression: Compression,
 }
 
@@ -427,14 +429,24 @@ mod tests {
         let borrowed: Vec<(u64, &[u8])> = values.iter().map(|(a, b)| (*a, b.as_slice())).collect();
         let mut read = memory(&borrowed);
         assert_eq!(
-            resolve_record(&mut read, st, 0xc0, fields, first).unwrap(),
+            resolve_record(&mut read, st, 0xc0, fields, 4, first).unwrap(),
+            (0x0005_0042, 0x123)
+        );
+        // 28000 keeps the next key at +8, past the size word at +4.
+        let mut moved = values.clone();
+        moved[7].1 = 0x0000_0123u32.to_le_bytes().to_vec();
+        moved.push((0x30_008, second.to_le_bytes().to_vec()));
+        let borrowed: Vec<(u64, &[u8])> = moved.iter().map(|(a, b)| (*a, b.as_slice())).collect();
+        let mut read = memory(&borrowed);
+        assert_eq!(
+            resolve_record(&mut read, st, 0xc0, fields, 8, first).unwrap(),
             (0x0005_0042, 0x123)
         );
         // Record 0 redirecting to itself.
         values[7].1 = first.to_le_bytes().to_vec();
         let borrowed: Vec<(u64, &[u8])> = values.iter().map(|(a, b)| (*a, b.as_slice())).collect();
         let mut read = memory(&borrowed);
-        assert!(resolve_record(&mut read, st, 0xc0, fields, first).is_err());
+        assert!(resolve_record(&mut read, st, 0xc0, fields, 4, first).is_err());
     }
 
     #[test]
@@ -578,6 +590,7 @@ mod tests {
             chunk_fields: [0x1c8, 0x1cc, 0x1d0, 0x1d8],
             key_tree: 0x1c0,
             pages_tree: 0,
+            redirect_next: 4,
             compression: Compression::Lz4UnlessCount(0x12c0),
         };
         let leaf = |key: u32, value: u32| {
@@ -626,6 +639,29 @@ mod tests {
         read_page(
             &mut memory(&kernel),
             &mut memory(&region),
+            &layout,
+            manager,
+            owner,
+            key,
+            &mut page,
+        )
+        .unwrap();
+        assert_eq!(&page[..], &original[..]);
+        // A size word whose low 12 bits are 0 holds the page as it is,
+        // whatever the kernel keeps above them.
+        let raw: Vec<(u64, Vec<u8>)> = kernel_values
+            .iter()
+            .map(|(at, value)| match at {
+                0x150_014 => (*at, d(0x5000)),
+                _ => (*at, value.clone()),
+            })
+            .collect();
+        let raw: Vec<(u64, &[u8])> = raw.iter().map(|(a, b)| (*a, b.as_slice())).collect();
+        let stored: Vec<(u64, &[u8])> = vec![(0x0123_0000_0200, original.as_slice())];
+        page.fill(0xcc);
+        read_page(
+            &mut memory(&raw),
+            &mut memory(&stored),
             &layout,
             manager,
             owner,

@@ -1213,6 +1213,7 @@ mod tests {
             chunk_fields: [0x1c8, 0x1cc, 0x1d0, 0x1d8],
             key_tree: 0x1c0,
             pages_tree: 0,
+            redirect_next: 4,
             compression: Compression::Lz4UnlessCount(0x12c0),
         };
         StoredPhysMem {

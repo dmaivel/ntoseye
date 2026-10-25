@@ -27,6 +27,7 @@ pub fn derive(code: &KernelCode<'_>) -> Result<StoreLayout> {
     let (chunk_array, chunk_fields) = chunk_fields(code)?;
     let key_tree = key_tree(code)?;
     let pages_tree = pages_tree(code)?;
+    let redirect_next = redirect_next(code)?;
     let compression = compression(code)?;
     Ok(StoreLayout {
         owner_process,
@@ -39,6 +40,7 @@ pub fn derive(code: &KernelCode<'_>) -> Result<StoreLayout> {
         chunk_fields,
         key_tree,
         pages_tree,
+        redirect_next,
         compression,
     })
 }
@@ -540,6 +542,77 @@ fn pages_tree(code: &KernelCode<'_>) -> Result<u32> {
     most(&votes, "pages tree")
 }
 
+/// Where a redirecting page record (key `0xffffffff`) keeps the key it
+/// redirects to: the dword the `ST_STORE` methods load from the record on
+/// the path where its key compared equal to -1, an immediate or a register
+/// the method set to -1. +4 to 26100, +8 from 28000.
+fn redirect_next(code: &KernelCode<'_>) -> Result<u32> {
+    use iced_x86::{ConditionCode, Mnemonic, OpKind};
+    let dword = |instruction: &Instruction| instruction.memory_size().size() == 4;
+    let mut votes: HashMap<u32, usize> = HashMap::new();
+    for function in code.functions_named("ST_STORE<SM_TRAITS>::") {
+        let instructions = code.instructions(function);
+        let index: HashMap<u64, usize> = instructions
+            .iter()
+            .enumerate()
+            .map(|(i, instruction)| (instruction.ip(), i))
+            .collect();
+        let minus_one: Vec<iced_x86::Register> = instructions
+            .iter()
+            .filter(|i| {
+                matches!(i.mnemonic(), Mnemonic::Or | Mnemonic::Mov)
+                    && i.op0_kind() == OpKind::Register
+                    && matches!(i.op1_kind(), OpKind::Immediate8to32 | OpKind::Immediate32)
+                    && i.immediate(1) as u32 == u32::MAX
+            })
+            .map(Instruction::op0_register)
+            .collect();
+        for (i, compare) in instructions.iter().enumerate() {
+            let against_minus_one = match compare.op1_kind() {
+                OpKind::Immediate8to32 | OpKind::Immediate32 => {
+                    compare.immediate(1) as u32 == u32::MAX
+                }
+                OpKind::Register => minus_one.contains(&compare.op1_register()),
+                _ => false,
+            };
+            if compare.mnemonic() != Mnemonic::Cmp
+                || compare.op0_kind() != OpKind::Memory
+                || !dword(compare)
+                || based_offset(compare) != Some(0)
+                || !against_minus_one
+            {
+                continue;
+            }
+            // The redirect path: a `je`'s target, or what follows a `jne`.
+            let Some(branch) = instructions.get(i + 1) else {
+                continue;
+            };
+            let start = match branch.condition_code() {
+                ConditionCode::e => near_target(branch).and_then(|t| index.get(&t).copied()),
+                ConditionCode::ne => Some(i + 2),
+                _ => None,
+            };
+            let record = compare.memory_base();
+            let next = start
+                .and_then(|start| instructions.get(start..))
+                .into_iter()
+                .flatten()
+                .take(3)
+                .find(|load| {
+                    load.mnemonic() == Mnemonic::Mov
+                        && load.op1_kind() == OpKind::Memory
+                        && load.memory_base() == record
+                        && dword(load)
+                })
+                .and_then(based_offset);
+            if let Some(offset) = next {
+                *votes.entry(offset).or_default() += 1;
+            }
+        }
+    }
+    most(&votes, "redirect next key")
+}
+
 /// An image's executable sections laid out by RVA, and their `(start,
 /// end)` RVAs.
 pub struct MappedCode {
@@ -687,6 +760,37 @@ mod tests {
             address
         }
 
+        /// A page-record lookup that follows redirecting records (key -1)
+        /// to the key at +`next`: against an immediate -1 and on to the
+        /// key past a `jne`, or, with `register`, against a register set to
+        /// -1 and on to the key at a `je`'s target, as 28000 does.
+        fn redirect(&mut self, name: &str, next: u32, register: bool) {
+            let name = format!("ST_STORE<SM_TRAITS>::{name}");
+            self.function(&name, |a| {
+                let mut follow = a.create_label();
+                let mut done = a.create_label();
+                if register {
+                    a.or(r12d, -1).unwrap();
+                    a.set_label(&mut done).unwrap();
+                    a.cmp(dword_ptr(r9), r12d).unwrap();
+                    a.je(follow).unwrap();
+                    a.mov(eax, dword_ptr(r9)).unwrap();
+                    a.ret().unwrap();
+                    a.set_label(&mut follow).unwrap();
+                    a.mov(r9d, dword_ptr(r9 + next)).unwrap();
+                    a.jmp(done).unwrap();
+                } else {
+                    a.set_label(&mut follow).unwrap();
+                    a.cmp(dword_ptr(r8), -1).unwrap();
+                    a.jne(done).unwrap();
+                    a.mov(r9d, dword_ptr(r8 + next)).unwrap();
+                    a.jmp(follow).unwrap();
+                    a.set_label(&mut done).unwrap();
+                    a.ret().unwrap();
+                }
+            });
+        }
+
         /// A store method that switches to the process at `owner`.
         fn attaching_method(&mut self, name: &str, owner: u32) {
             let attach = self.functions["KeStackAttachProcess"];
@@ -738,6 +842,8 @@ mod tests {
         builder.attaching_method("SmStSwapStore", 0x1d00);
         builder.attaching_method("SmStTrimWsStore", 0x1d00);
         builder.retrieval(0x320, 0x1a95, 0x1b68);
+        builder.redirect("StDmPageRecordRemove", 4, false);
+        builder.redirect("StDmCombinePageRecords", 4, false);
         assert_eq!(
             builder.derive().unwrap(),
             StoreLayout {
@@ -751,9 +857,23 @@ mod tests {
                 chunk_fields: [0x1c8, 0x1cc, 0x1d0, 0x1d8],
                 key_tree: 0x1c0,
                 pages_tree: 0,
+                redirect_next: 4,
                 compression: Compression::Lz4UnlessCount(0x12c0),
             }
         );
+    }
+
+    /// 28000 moved a redirecting record's next key from +4 to +8, and
+    /// compares the key with a register holding -1.
+    #[test]
+    fn a_redirect_is_followed_where_the_build_keeps_the_next_key() {
+        let mut builder = Builder::new();
+        builder.attaching_method("SmStSwapStore", 0x1d00);
+        builder.attaching_method("SmStTrimWsStore", 0x1d00);
+        builder.retrieval(0x320, 0x1a95, 0x1b68);
+        builder.redirect("StDmPageRecordRemove", 8, true);
+        builder.redirect("StDmCombinePageRecords", 8, true);
+        assert_eq!(builder.derive().unwrap().redirect_next, 8);
     }
 
     #[test]
@@ -770,6 +890,8 @@ mod tests {
         let mut builder = Builder::new();
         builder.attaching_method("SmStSwapStore", 0x1d00);
         builder.attaching_method("SmStTrimWsStore", 0x1d00);
+        builder.redirect("StDmPageRecordRemove", 4, false);
+        builder.redirect("StDmCombinePageRecords", 4, false);
         builder.function("SMKM_STORE<SM_TRAITS>::SmStMapVirtualRegion", |a| {
             a.mov(rax, qword_ptr(rcx + 0x1b68)).unwrap();
             a.lea(r14, qword_ptr(rax + rdi * 8)).unwrap();
@@ -799,6 +921,8 @@ mod tests {
         let mut builder = Builder::new();
         builder.attaching_method("SmStSwapStore", 0x1d00);
         builder.attaching_method("SmStTrimWsStore", 0x1d00);
+        builder.redirect("StDmPageRecordRemove", 4, false);
+        builder.redirect("StDmCombinePageRecords", 4, false);
         builder.function("SMKM_STORE<SM_TRAITS>::SmStMapVirtualRegion", |a| {
             a.mov(rax, qword_ptr(rcx + 0x1b68)).unwrap();
             a.lea(r14, qword_ptr(rax + rdi * 8)).unwrap();
