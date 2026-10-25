@@ -41,6 +41,8 @@ pub struct StoreLayout {
     /// `ST_STORE`: the chunk shift, records-per-chunk mask, record size and
     /// chunk header size.
     pub chunk_fields: [u32; 4],
+    /// `SMKM_STORE_MGR`: the tree from page key to store index.
+    pub key_tree: u32,
 }
 
 /// The store layout `code` uses, when every anchor is found and agrees.
@@ -49,6 +51,7 @@ pub fn derive(code: &KernelCode<'_>) -> Result<StoreLayout> {
     let (region_array, virtual_flag, back_pointer) = region_fields(code)?;
     let (region_shift, region_offset_mask) = region_key_fields(code)?;
     let (chunk_array, chunk_fields) = chunk_fields(code)?;
+    let key_tree = key_tree(code)?;
     Ok(StoreLayout {
         owner_process,
         region_array,
@@ -58,6 +61,7 @@ pub fn derive(code: &KernelCode<'_>) -> Result<StoreLayout> {
         region_offset_mask,
         chunk_array,
         chunk_fields,
+        key_tree,
     })
 }
 
@@ -429,6 +433,46 @@ fn chunk_fields(code: &KernelCode<'_>) -> Result<(u32, [u32; 4])> {
         other => Err(layout_error(format_args!("chunk fields: {other:x?}"))),
     }
 }
+
+/// The store manager's key-to-store tree: the `rcx` that `SMKM_STORE_MGR`
+/// methods pass to the frontend tree's search, `lea rcx,[mgr+K]` or
+/// `add rcx,K`.
+fn key_tree(code: &KernelCode<'_>) -> Result<u32> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    let searches: Vec<u64> = code
+        .functions
+        .iter()
+        .filter(|(name, _)| {
+            name.contains("SMKM_FRONTEND_ENTRY") && name.ends_with("::BTreeSearchKey")
+        })
+        .map(|(_, address)| *address)
+        .collect();
+    let mut votes: HashMap<u32, usize> = HashMap::new();
+    for function in code.functions_named("SMKM_STORE_MGR<SM_TRAITS>::") {
+        let mut rcx = None;
+        for instruction in code.instructions(function) {
+            if instruction.mnemonic() == Mnemonic::Call {
+                if near_target(&instruction).is_some_and(|t| searches.contains(&t))
+                    && let Some(offset) = rcx
+                {
+                    *votes.entry(offset).or_default() += 1;
+                }
+                rcx = None;
+            } else if instruction.op0_kind() == OpKind::Register
+                && instruction.op0_register().full_register() == Register::RCX
+            {
+                rcx = match (instruction.mnemonic(), instruction.op1_kind()) {
+                    (Mnemonic::Lea, _) => based_offset(&instruction),
+                    (Mnemonic::Add, OpKind::Immediate32to64 | OpKind::Immediate8to64) => {
+                        u32::try_from(instruction.immediate(1)).ok()
+                    }
+                    _ => None,
+                };
+            }
+        }
+    }
+    agreed(&votes, "key-to-store tree")
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +513,23 @@ mod tests {
                 a.mov(edi, dword_ptr(rcx + 0x1d0)).unwrap();
                 a.mov(esi, dword_ptr(rcx + 0x1d8)).unwrap();
                 a.mov(rdx, qword_ptr(rcx + rax * 8 + 0xc0)).unwrap();
+                a.ret().unwrap();
+            });
+            // Two manager methods searching the key-to-store tree at 0x1c0,
+            // one with lea and one with add.
+            let search = builder.function(
+                "B_TREE<_SM_PAGE_KEY, SMKM_STORE_MGR<SM_TRAITS>::SMKM_FRONTEND_ENTRY>::BTreeSearchKey",
+                |a| a.ret().unwrap(),
+            );
+            builder.function("SMKM_STORE_MGR<SM_TRAITS>::SmFeReadInitiate", |a| {
+                a.lea(rcx, qword_ptr(rdi + 0x1c0)).unwrap();
+                a.call(search).unwrap();
+                a.ret().unwrap();
+            });
+            builder.function("SMKM_STORE_MGR<SM_TRAITS>::SmFeCheckPresent", |a| {
+                a.mov(rcx, qword_ptr(rsp + 0x28)).unwrap();
+                a.add(rcx, 0x1c0).unwrap();
+                a.call(search).unwrap();
                 a.ret().unwrap();
             });
             builder
@@ -548,6 +609,7 @@ mod tests {
                 region_offset_mask: 0x328,
                 chunk_array: 0xc0,
                 chunk_fields: [0x1c8, 0x1cc, 0x1d0, 0x1d8],
+                key_tree: 0x1c0,
             }
         );
     }
