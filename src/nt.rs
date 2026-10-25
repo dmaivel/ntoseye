@@ -1,7 +1,6 @@
 pub mod breakpoints;
 pub mod bugchecks;
 pub mod cpu_state;
-pub mod decompress;
 pub mod dmp;
 pub mod dump_writer;
 pub mod expr;

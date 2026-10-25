@@ -2,6 +2,7 @@
 pub mod output;
 
 pub mod bytes;
+pub mod decompress;
 pub mod diagnostics;
 pub mod disasm;
 pub mod error;

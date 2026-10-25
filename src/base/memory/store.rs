@@ -180,13 +180,12 @@ const FORMAT_XPRESS: u16 = 3;
 /// as it is.
 pub fn decompress_page(
     read: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
-    compression: super::store_layout::Compression,
+    compression: Compression,
     store: u64,
     st: u64,
     data: &[u8],
     page: &mut [u8; 4096],
 ) -> crate::base::error::Result<()> {
-    use super::store_layout::Compression;
     use crate::base::error::Error;
     if data.len() == page.len() {
         page.copy_from_slice(data);
@@ -197,14 +196,14 @@ pub fn decompress_page(
             let mut format = [0u8; 2];
             read(st + u64::from(field), &mut format)?;
             match u16::from_le_bytes(format) {
-                FORMAT_XPRESS => crate::nt::decompress::xpress(data, page),
+                FORMAT_XPRESS => crate::base::decompress::xpress(data, page),
                 other => Err(Error::DebugInfo(format!(
                     "store {store:#x}: compression format {other} is not supported"
                 ))),
             }
         }
         Compression::Lz4UnlessCount(count) => match read_u32(read, store + u64::from(count))? {
-            0 => crate::nt::decompress::lz4(data, page),
+            0 => crate::base::decompress::lz4(data, page),
             other => Err(Error::DebugInfo(format!(
                 "store {store:#x}: a list of {other} compression algorithms is not supported"
             ))),
@@ -219,7 +218,7 @@ pub fn decompress_page(
 pub fn read_page(
     kernel: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
     regions: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
-    layout: &super::store_layout::StoreLayout,
+    layout: &StoreLayout,
     manager: u64,
     owner: u64,
     key: u32,
@@ -266,6 +265,46 @@ pub fn read_page(
     let mut data = vec![0u8; length];
     regions(region + offset, &mut data)?;
     decompress_page(kernel, layout.compression, store, st, &data, page)
+}
+
+/// Where the store keeps what a page lookup needs. `SMKM_STORE` offsets are
+/// from the store; `ST_STORE` offsets are from the store's embedded
+/// `ST_STORE` (see [`embedded_store`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreLayout {
+    /// `SMKM_STORE`: the process whose address space holds the regions.
+    pub owner_process: u32,
+    /// `SMKM_STORE`: the pointer to the array of region entries.
+    pub region_array: u32,
+    /// `SMKM_STORE`: the byte and bit set when regions are virtual.
+    pub virtual_flag: (u32, u8),
+    /// `ST_STORE`: the pointer back to the store that embeds it.
+    pub back_pointer: u32,
+    /// `ST_STORE`: the shift that takes a region key to its region index.
+    pub region_shift: u32,
+    /// `ST_STORE`: the mask that takes a region key to its offset in the
+    /// region, in 16-byte units.
+    pub region_offset_mask: u32,
+    /// `ST_STORE`: the array of chunk pointers that page records live in.
+    pub chunk_array: u32,
+    /// `ST_STORE`: the chunk shift, records-per-chunk mask, record size and
+    /// chunk header size.
+    pub chunk_fields: [u32; 4],
+    /// `SMKM_STORE_MGR`: the tree from page key to store index.
+    pub key_tree: u32,
+    /// `ST_STORE`: the tree from page key to region key.
+    pub pages_tree: u32,
+    pub compression: Compression,
+}
+
+/// How a store's pages are compressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compression {
+    /// Before 24H2: the `ST_STORE` word at this offset is the
+    /// `RtlDecompressBuffer` format.
+    FormatField(u32),
+    /// From 24H2: LZ4 when the `SMKM_STORE` count at this offset is zero.
+    Lz4UnlessCount(u32),
 }
 
 #[cfg(test)]
@@ -411,7 +450,6 @@ mod tests {
 
     #[test]
     fn a_page_decompresses_by_the_stores_algorithm() {
-        use super::super::store_layout::Compression;
         let (store, st) = (0x10_000u64, 0x10_050u64);
         let original: Vec<u8> = (0..4096u32).map(|i| (i / 64) as u8).collect();
         let decompress = |values: &[(u64, Vec<u8>)], compression, data: &[u8]| {
@@ -459,7 +497,6 @@ mod tests {
 
     #[test]
     fn a_page_key_reads_back_its_page_through_the_whole_store() {
-        use super::super::store_layout::{Compression, StoreLayout};
         let layout = StoreLayout {
             owner_process: 0x1d00,
             region_array: 0x1b68,

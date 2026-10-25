@@ -11,41 +11,12 @@ use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction};
 use crate::base::error::{Error, Result};
 
 use super::hv_layout::ImageView;
+use crate::base::memory::{Compression, StoreLayout};
 
 /// The kernel image and the addresses of its functions, by undecorated name.
 pub struct KernelCode<'a> {
     pub image: ImageView<'a>,
     pub functions: &'a HashMap<String, u64>,
-}
-
-/// Where the store keeps what a page lookup needs. `SMKM_STORE` offsets are
-/// from the store; `ST_STORE` offsets are from the store's embedded
-/// `ST_STORE`, at `st_store` in it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoreLayout {
-    /// `SMKM_STORE`: the process whose address space holds the regions.
-    pub owner_process: u32,
-    /// `SMKM_STORE`: the pointer to the array of region entries.
-    pub region_array: u32,
-    /// `SMKM_STORE`: the byte and bit set when regions are virtual.
-    pub virtual_flag: (u32, u8),
-    /// `ST_STORE`: the pointer back to the store that embeds it.
-    pub back_pointer: u32,
-    /// `ST_STORE`: the shift that takes a region key to its region index.
-    pub region_shift: u32,
-    /// `ST_STORE`: the mask that takes a region key to its offset in the
-    /// region, in 16-byte units.
-    pub region_offset_mask: u32,
-    /// `ST_STORE`: the array of chunk pointers that page records live in.
-    pub chunk_array: u32,
-    /// `ST_STORE`: the chunk shift, records-per-chunk mask, record size and
-    /// chunk header size.
-    pub chunk_fields: [u32; 4],
-    /// `SMKM_STORE_MGR`: the tree from page key to store index.
-    pub key_tree: u32,
-    /// `ST_STORE`: the tree from page key to region key.
-    pub pages_tree: u32,
-    pub compression: Compression,
 }
 
 /// The store layout `code` uses, when every anchor is found and agrees.
@@ -479,16 +450,6 @@ fn key_tree(code: &KernelCode<'_>) -> Result<u32> {
         }
     }
     agreed(&votes, "key-to-store tree")
-}
-
-/// How a store's pages are compressed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Compression {
-    /// Before 24H2: the `ST_STORE` word at this offset is the
-    /// `RtlDecompressBuffer` format.
-    FormatField(u32),
-    /// From 24H2: LZ4 when the `SMKM_STORE` count at this offset is zero.
-    Lz4UnlessCount(u32),
 }
 
 /// From `SmStoreDecompressBuffer` (24H2 and later), the count it tests

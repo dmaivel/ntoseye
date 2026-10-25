@@ -8,9 +8,12 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 mod ops;
 mod sections;
+mod store;
+mod store_tree;
 
 pub use ops::MemoryOps;
 pub use sections::{SectionLayout, SectionViews};
+pub use store::{Compression, StoreLayout};
 
 pub const PAGE_SIZE: usize = 0x1000; // 4KiB
 
