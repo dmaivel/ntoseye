@@ -44,6 +44,12 @@ A write to a trimmed page fails. The kernel can use the frame for a different pu
 
 If a process has never touched a page of a DLL or a mapped file, the process has no PTE for that page, but a different process that maps the same file often has that page in memory. The host page walk finds the page through the VAD of the process and reads the frame that the shared prototype PTE of the section records. This lets `ntoseye` read the code and unwind tables of a DLL in every process that maps the DLL. {command}`!vtop` shows such a page as `mapping : section`. These pages are also read-only.
 
+### Compressed memory
+
+With memory compression on, which is Windows' default on client editions, the guest compresses most trimmed pages of processes into its compression store in RAM instead of writing them to the page file. Their PTEs then point into a virtual page file, the store's. The host page walk reads such a page from the store and decompresses it, so the read works like a read of a page in memory wherever reads go through the host page walk: the `memory` backend, and `kd` or `kdnet` with the host memory source. The page is read-only, as the trimmed pages above are, and `.dump /u` captures it.
+
+`ntoseye` reads the store's layout from the kernel's own code the first time it needs it, because the PDB does not describe the store's structures and they change between Windows releases. This works for 64-bit Windows 10 1703 and later, for builds whose PDB types the partition's store fields (`_MI_PARTITION_STORES.VirtualPageFileNumber` and `StoreProcess`). Where the layout is not recognized, or memory compression is off, a page in the store reads as unavailable, as a page on disk does.
+
 A read of a page that is on disk shows the page as unavailable. To get it, use {command}`.pagein`, which tells the guest to read the page into memory:
 
 ```

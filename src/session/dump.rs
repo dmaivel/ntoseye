@@ -510,8 +510,8 @@ fn used_stack(memory: &AddressSpace<'_, PhysMem>, teb: u64, sp: u64) -> Option<R
 /// part of it that is demand-zero: each committed region of at most
 /// [`PAGE_BY_PAGE_REGION`] wherever its pages translate, which takes pages
 /// in transition and shared pages not yet touched too, or are demand-zero
-/// (committed, never touched: zeros); each larger one where its pages are
-/// present.
+/// (committed, never touched: zeros), or are in the memory-compression
+/// store; each larger one where its pages are present.
 fn captured_memory(
     memory: &AddressSpace<'_, PhysMem>,
     regions: &[MinidumpRegion],
@@ -533,6 +533,8 @@ fn captured_memory(
                 } else if memory.page_is_demand_zero(VirtAddr(address), private) {
                     add(&mut ranges, address, address + page);
                     add(&mut zero, address, address + page);
+                } else if memory.page_is_compressed(VirtAddr(address)) {
+                    add(&mut ranges, address, address + page);
                 }
             }
         } else {

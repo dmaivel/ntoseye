@@ -633,6 +633,13 @@ thread_local! {
 }
 
 impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
+    /// Whether the page at `va` is in the guest's memory-compression store
+    /// and decompresses: the page tables leave it unmapped, and a read
+    /// takes it from the store.
+    pub fn page_is_compressed(&self, va: VirtAddr) -> bool {
+        matches!(self.compressed_page(va), Some(Ok(_)))
+    }
+
     /// The page at `va` from the guest's memory-compression store, when the
     /// page tables leave it unmapped with a PTE in the store's page file.
     fn compressed_page(&self, va: VirtAddr) -> Option<Result<Box<[u8; PAGE_SIZE]>>> {
