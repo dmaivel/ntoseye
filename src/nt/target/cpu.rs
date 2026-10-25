@@ -180,7 +180,8 @@ pub struct IdtGate {
     pub present: DiagnosticValue<bool>,
     /// Whether the handler is in a module other than NT.
     pub non_nt_hook: DiagnosticValue<bool>,
-    /// For a handler in `KiIsrThunk`, which dispatches through the
+    /// For a handler in `KiIsrThunk` (or `KiIsrThunkShadow`), which
+    /// dispatches through the
     /// processor's `_KPRCB.InterruptObject` table, the `_KINTERRUPT`
     /// connected to the vector and its service routine. None for other
     /// handlers and for a vector nothing is connected to.
@@ -1057,13 +1058,17 @@ fn connected_interrupt(
     handler: u64,
     vector: u16,
 ) -> Option<String> {
-    let thunk = target
-        .symbols
-        .find_symbol_with_module(target.kernel_dtb(), "nt!KiIsrThunk")
-        .ok()
-        .flatten()
-        .map(|(address, _)| address.0)?;
-    if handler < thunk || handler - thunk >= 0x1000 {
+    // `KiIsrThunkShadow` where the kernel shadows its address space
+    // (KVA shadow), from the 2018 updates on.
+    let in_thunks = ["nt!KiIsrThunk", "nt!KiIsrThunkShadow"].iter().any(|name| {
+        target
+            .symbols
+            .find_symbol_with_module(target.kernel_dtb(), name)
+            .ok()
+            .flatten()
+            .is_some_and(|(thunk, _)| handler >= thunk.0 && handler - thunk.0 < 0x1000)
+    });
+    if !in_thunks {
         return None;
     }
     let memory = kernel(target).ok()?.memory();

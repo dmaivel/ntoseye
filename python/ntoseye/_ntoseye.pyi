@@ -7689,7 +7689,8 @@ class IdtGate(BaseRecord):
     @property
     def ki_isr_thunk(self, /) -> Diagnostic[str |None]:
         """
-        For a handler in `KiIsrThunk`, which dispatches through the
+        For a handler in `KiIsrThunk` (or `KiIsrThunkShadow`), which
+        dispatches through the
         processor's `_KPRCB.InterruptObject` table, the `_KINTERRUPT`
         connected to the vector and its service routine. None for other
         handlers and for a vector nothing is connected to.
