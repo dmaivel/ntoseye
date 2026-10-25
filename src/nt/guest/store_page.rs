@@ -127,6 +127,32 @@ pub fn region_address(
     read_u64(read, (entry & !7) + 0x18)
 }
 
+/// The `SMKM_STORE` that holds page `key`: the manager's key tree (its root
+/// pointer at `key_tree`) gives a store index, whose high five bits pick a
+/// row of the manager's 32 x 32 table and low five bits a 40-byte entry in
+/// it, which starts with the store. `None` when no store holds the key.
+pub fn store_for_key(
+    read: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
+    manager: u64,
+    key_tree: u32,
+    key: u32,
+) -> crate::base::error::Result<Option<u64>> {
+    let root = read_u64(read, manager + u64::from(key_tree))?;
+    let Some(value) = super::store_tree::search(&mut *read, root, key)? else {
+        return Ok(None);
+    };
+    if value & 0x0100_0000 != 0 {
+        return Ok(None);
+    }
+    let index = u64::from(value & 0x3ff);
+    let row = read_u64(read, manager + (index >> 5) * 8)?;
+    if row == 0 {
+        return Ok(None);
+    }
+    let store = read_u64(read, row + (index & 0x1f) * 0x28)?;
+    Ok((store != 0).then_some(store))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +244,36 @@ mod tests {
         assert_eq!(
             region_address(&mut read, store, 0x1b68, (0x1a95, 2), 3).unwrap(),
             0x0222_0000_0000
+        );
+    }
+
+    #[test]
+    fn a_page_key_leads_to_its_store_through_the_table() {
+        let manager = 0x10_000;
+        let leaf = |key: u32, value: u32| {
+            let mut node = vec![0u8; 16];
+            node[0] = 1;
+            node[3] = 1;
+            node.extend_from_slice(&key.to_le_bytes());
+            node.extend_from_slice(&value.to_le_bytes());
+            node
+        };
+        let values: Vec<(u64, Vec<u8>)> = vec![
+            (manager + 0x1c0, 0x40_000u64.to_le_bytes().to_vec()),
+            // Store index 33: row 1, entry 1.
+            (0x40_000, leaf(0x2000_1234, 33)),
+            (manager + 8, 0x50_000u64.to_le_bytes().to_vec()),
+            (0x50_000 + 0x28, 0x60_000u64.to_le_bytes().to_vec()),
+        ];
+        let borrowed: Vec<(u64, &[u8])> = values.iter().map(|(a, b)| (*a, b.as_slice())).collect();
+        let mut read = memory(&borrowed);
+        assert_eq!(
+            store_for_key(&mut read, manager, 0x1c0, 0x2000_1234).unwrap(),
+            Some(0x60_000)
+        );
+        assert_eq!(
+            store_for_key(&mut read, manager, 0x1c0, 0x2000_1235).unwrap(),
+            None
         );
     }
     #[test]
