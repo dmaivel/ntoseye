@@ -105,6 +105,28 @@ pub fn resolve_record(
     )))
 }
 
+/// The address of region `index` of the `SMKM_STORE` at `store`, from its
+/// region array (the pointer at `region_array`). When the store's virtual
+/// flag (`flag`, byte and bit) is set, the entry is the region's address
+/// with state bits; otherwise it points to a descriptor with the address at
+/// +0x18.
+pub fn region_address(
+    read: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
+    store: u64,
+    region_array: u32,
+    flag: (u32, u8),
+    index: u64,
+) -> crate::base::error::Result<u64> {
+    let array = read_u64(read, store + u64::from(region_array))?;
+    let entry = read_u64(read, array + index * 8)?;
+    let mut flags = [0u8; 1];
+    read(store + u64::from(flag.0), &mut flags)?;
+    if flags[0] & (1 << flag.1) != 0 {
+        return Ok(entry & 0x7fff_ffff_ffff_0000);
+    }
+    read_u64(read, (entry & !7) + 0x18)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +185,40 @@ mod tests {
         let borrowed: Vec<(u64, &[u8])> = values.iter().map(|(a, b)| (*a, b.as_slice())).collect();
         let mut read = memory(&borrowed);
         assert!(resolve_record(&mut read, st, 0xc0, fields, first).is_err());
+    }
+
+    #[test]
+    fn a_region_entry_is_an_address_or_a_descriptor() {
+        let store = 0x10_000;
+        let values: Vec<(u64, Vec<u8>)> = vec![
+            (store + 0x1b68, 0x20_000u64.to_le_bytes().to_vec()),
+            (
+                0x20_000 + 3 * 8,
+                0x0000_0123_4567_0005u64.to_le_bytes().to_vec(),
+            ),
+            (store + 0x1a95, vec![0b100]),
+        ];
+        let borrowed: Vec<(u64, &[u8])> = values.iter().map(|(a, b)| (*a, b.as_slice())).collect();
+        let mut read = memory(&borrowed);
+        assert_eq!(
+            region_address(&mut read, store, 0x1b68, (0x1a95, 2), 3).unwrap(),
+            0x0123_4567_0000
+        );
+        let values: Vec<(u64, Vec<u8>)> = vec![
+            (store + 0x1b68, 0x20_000u64.to_le_bytes().to_vec()),
+            (0x20_000 + 3 * 8, 0x30_003u64.to_le_bytes().to_vec()),
+            (store + 0x1a95, vec![0]),
+            (
+                0x30_000 + 0x18,
+                0x0000_0222_0000_0000u64.to_le_bytes().to_vec(),
+            ),
+        ];
+        let borrowed: Vec<(u64, &[u8])> = values.iter().map(|(a, b)| (*a, b.as_slice())).collect();
+        let mut read = memory(&borrowed);
+        assert_eq!(
+            region_address(&mut read, store, 0x1b68, (0x1a95, 2), 3).unwrap(),
+            0x0222_0000_0000
+        );
     }
     #[test]
     fn a_page_record_is_found_through_its_chunk() {
