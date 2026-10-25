@@ -15,7 +15,7 @@ use crate::base::memory::PAGE_SIZE;
 use crate::base::types::VirtAddr;
 use crate::nt::guest::ProcessInfo;
 use crate::nt::layout::{ParsedType, TypeInfo};
-use crate::nt::target::pool::read_kernel_global_u64;
+use crate::nt::target::pool::{read_kernel_global_u32, read_kernel_global_u64};
 use crate::nt::target::{DiagnosticMetric, DiagnosticValue, Target};
 
 const DEFAULT_MEMORY_PROCESS_LIMIT: usize = 64;
@@ -214,22 +214,33 @@ impl Target {
             }
         };
         let pte = VmPteDetail { counters };
-        let legacy_page_files: Vec<VmCounter> = [
-            ("MmNumberOfPagingFiles", "number of paging files", None),
-            (
-                "MmTotalPagesForPagingFile",
-                "pages for paging file",
-                Some(VmUnit::Pages),
-            ),
-            ("MmFreePages", "free paging pages", Some(VmUnit::Pages)),
-        ]
-        .into_iter()
-        .map(|(symbol, name, unit)| {
-            let mut counter = named_counter(self, symbol, unit);
-            counter.name = name.to_string();
-            counter
-        })
-        .collect();
+        // A ULONG, where the others are page counts.
+        let paging_file_count = VmCounter {
+            name: "number of paging files".into(),
+            value: match read_kernel_global_u32(self, "MmNumberOfPagingFiles") {
+                Ok(value) => available_metric(value.into()),
+                Err(error) => unavailable_metric(error),
+            },
+            unit: None,
+        };
+        let legacy_page_files: Vec<VmCounter> = std::iter::once(paging_file_count)
+            .chain(
+                [
+                    (
+                        "MmTotalPagesForPagingFile",
+                        "pages for paging file",
+                        Some(VmUnit::Pages),
+                    ),
+                    ("MmFreePages", "free paging pages", Some(VmUnit::Pages)),
+                ]
+                .into_iter()
+                .map(|(symbol, name, unit)| {
+                    let mut counter = named_counter(self, symbol, unit);
+                    counter.name = name.to_string();
+                    counter
+                }),
+            )
+            .collect();
         let page_files = if legacy_page_files.iter().any(is_available) {
             legacy_page_files
         } else {
@@ -321,8 +332,8 @@ impl Target {
 
     fn process_memory_usage(
         &self,
-        eprocess_layout: &TypeInfo,
-        vm_layout: &TypeInfo,
+        eprocess_layout: &Arc<TypeInfo>,
+        vm_layout: &Arc<TypeInfo>,
         process: ProcessInfo,
     ) -> ProcessMemoryUsage {
         let eprocess = process.eprocess;
@@ -333,8 +344,8 @@ impl Target {
 
     fn process_memory_counter(
         &self,
-        eprocess_layout: &TypeInfo,
-        vm_layout: &TypeInfo,
+        eprocess_layout: &Arc<TypeInfo>,
+        vm_layout: &Arc<TypeInfo>,
         eprocess: VirtAddr,
         field: &str,
     ) -> DiagnosticValue<u64> {
@@ -350,15 +361,22 @@ impl Target {
         };
         DiagnosticValue::from_result((|| -> Result<u64> {
             let vm = eprocess + eprocess_layout.field_offset("Vm")?;
+            let types = self.guest()?.ntoskrnl.types();
+            // At each field's own width: Windows 7's working-set counts are
+            // ULONGs, 8.1's ULONGLONGs.
+            let read = |layout: &Arc<TypeInfo>, base: VirtAddr, name: &str| {
+                types
+                    .struct_with_layout(Arc::clone(layout), base)
+                    .read_uint(name)
+            };
 
-            if let Ok(value) = self.read_kernel_layout_field(vm_layout, vm, field) {
+            if let Ok(value) = read(vm_layout, vm, field) {
                 return bytes(value);
             }
-            if let Ok(value) = self.read_kernel_layout_field(eprocess_layout, eprocess, field) {
+            if let Ok(value) = read(eprocess_layout, eprocess, field) {
                 return Ok(value);
             }
 
-            let types = self.guest()?.ntoskrnl.types();
             for container in ["Instance", "Shared"] {
                 let Some(container_field) = vm_layout.fields.get(container) else {
                     continue;
@@ -371,11 +389,7 @@ impl Target {
                 let Ok(layout) = types.layout(layout_name) else {
                     continue;
                 };
-                if let Ok(value) = self.read_kernel_layout_field(
-                    &layout,
-                    vm + u64::from(container_field.offset),
-                    field,
-                ) {
+                if let Ok(value) = read(&layout, vm + u64::from(container_field.offset), field) {
                     return bytes(value);
                 }
             }
@@ -387,8 +401,7 @@ impl Target {
                 _ => None,
             };
             if let Some(page_field) = page_field {
-                let pages: u64 =
-                    self.read_kernel_layout_field(eprocess_layout, eprocess, page_field)?;
+                let pages = read(eprocess_layout, eprocess, page_field)?;
                 return pages.checked_mul(PAGE_SIZE as u64).ok_or_else(|| {
                     Error::DebugInfo(format!("_EPROCESS.{page_field} overflows a byte count"))
                 });
@@ -398,32 +411,45 @@ impl Target {
         })())
     }
 
-    /// Paged pool in use, in pages: `MmSizeOfPagedPoolInPages`, or on builds
-    /// without it `MiState.Vs.PagedPoolInfo.AllocatedPagedPool`.
+    /// Paged pool in use, in pages: `MmPagedPoolInfo.AllocatedPagedPool`
+    /// (Windows 7 and 8.1, whose `MmSizeOfPagedPoolInPages` is the pool's
+    /// maximum), or `MiState.Vs.PagedPoolInfo.AllocatedPagedPool`.
     fn paged_pool_pages(&self) -> DiagnosticMetric<u64> {
-        self.pool_in_use(
-            "MmSizeOfPagedPoolInPages",
-            &["Vs", "PagedPoolInfo", "AllocatedPagedPool"],
-            1,
-        )
+        let global = (|| -> Result<u64> {
+            let kernel = &self.guest()?.ntoskrnl;
+            kernel
+                .types()
+                .struct_at(
+                    "_MM_PAGED_POOL_INFO",
+                    kernel.symbol("MmPagedPoolInfo")?.address(),
+                )?
+                .read_uint("AllocatedPagedPool")
+        })();
+        self.pool_in_use(global, &["Vs", "PagedPoolInfo", "AllocatedPagedPool"], 1)
     }
 
-    /// Nonpaged pool in use, in bytes: `MmSizeOfNonPagedPoolInBytes`, or on
-    /// builds without it `MiState.Pools.AllocatedNonPagedPool`, which counts
-    /// pages.
+    /// Nonpaged pool in use, in bytes: `MmAllocatedNonPagedPool` pages
+    /// (Windows 7 and 8.1, whose `MmSizeOfNonPagedPoolInBytes` is the
+    /// initial size), or `MiState.Pools.AllocatedNonPagedPool` pages.
     fn nonpaged_pool_bytes(&self) -> DiagnosticMetric<u64> {
+        let global = read_kernel_global_u64(self, "MmAllocatedNonPagedPool").and_then(|pages| {
+            pages
+                .checked_mul(PAGE_SIZE as u64)
+                .ok_or_else(|| Error::DebugInfo("MmAllocatedNonPagedPool overflows".into()))
+        });
         self.pool_in_use(
-            "MmSizeOfNonPagedPoolInBytes",
+            global,
             &["Pools", "AllocatedNonPagedPool"],
             PAGE_SIZE as u64,
         )
     }
 
-    /// The kernel global `symbol`, else the `MiState` field at `path` times
-    /// `scale`. Newer kernels keep pool usage only in `MiState`. KDBG's pool
-    /// sizes are the configured ranges, not usage, so they are not used.
-    fn pool_in_use(&self, symbol: &str, path: &[&str], scale: u64) -> DiagnosticMetric<u64> {
-        let global = match read_kernel_global_u64(self, symbol) {
+    /// `global`, the older kernels' count, else the `MiState` field at
+    /// `path` times `scale`. Newer kernels keep pool usage only in `MiState`.
+    /// KDBG's pool sizes are the configured ranges, not usage, so they are
+    /// not used.
+    fn pool_in_use(&self, global: Result<u64>, path: &[&str], scale: u64) -> DiagnosticMetric<u64> {
+        let global = match global {
             Ok(value) => return available_metric(value),
             Err(error) => error,
         };

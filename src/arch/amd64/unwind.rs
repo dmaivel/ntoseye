@@ -29,6 +29,11 @@ const UWOP_SPARE_CODE: u8 = 7;
 
 pub const RUNTIME_FUNCTION_SIZE: usize = 12;
 
+/// The low bit of a `.pdata` entry's `UnwindData`: the rest is the RVA of
+/// another entry, its function's, whose unwind data covers this code too
+/// (a block split off from the function, as in Windows 8.1's binaries).
+pub const RUNTIME_FUNCTION_INDIRECT: u32 = 1;
+
 /// Entry `index` of the AMD64 exception directory at `pdata`, `None` when it
 /// is paged out.
 pub fn runtime_function_at(
@@ -180,7 +185,9 @@ pub fn unwind_by_codes(
     // codes are gated on the prolog progress at `rip`; chained parents already
     // ran their prologs in full, so all of their codes apply.
     let rva = (context.pc - base_address) as u32;
-    let rip_offset = rva.saturating_sub(begin);
+    // Wrapping, as Windows computes it: a fragment placed below its
+    // function (see `RUNTIME_FUNCTION_INDIRECT`) is never in the prolog.
+    let rip_offset = rva.wrapping_sub(begin);
     let mut primary = true;
 
     for _ in 0..MAX_CHAIN_DEPTH {

@@ -14,8 +14,8 @@ use crate::arch::Arch;
 use crate::arch::amd64::VOLATILE_REGISTERS;
 use crate::arch::amd64::prolog::{PROLOG_BYTES, analyze_prolog};
 use crate::arch::amd64::unwind::{
-    MAX_CHAIN_DEPTH, RUNTIME_FUNCTION_SIZE, UnwindInfo, describe_unwind_info, runtime_function_at,
-    unwind_by_codes, unwind_if_epilog,
+    MAX_CHAIN_DEPTH, RUNTIME_FUNCTION_INDIRECT, RUNTIME_FUNCTION_SIZE, UnwindInfo,
+    describe_unwind_info, runtime_function_at, unwind_by_codes, unwind_if_epilog,
 };
 use crate::arch::unwind::{Unwind, UnwindBytes};
 use crate::backend::phys::PhysMem;
@@ -421,6 +421,26 @@ fn resolve_function(
         |index| runtime_function_at(image, pdata.start, index),
         rva,
     ) {
+        Lookup::Found(function) if function.UnwindData & RUNTIME_FUNCTION_INDIRECT != 0 => {
+            // Followed once, as `RtlLookupFunctionEntry` does.
+            let primary = (function.UnwindData & !RUNTIME_FUNCTION_INDIRECT) as usize;
+            match runtime_function_at(image, primary, 0) {
+                Some(primary)
+                    if primary.UnwindData & RUNTIME_FUNCTION_INDIRECT == 0
+                        && image.is_present(primary.UnwindData as usize, 4) =>
+                {
+                    Resolve::Function {
+                        unwind_data: primary.UnwindData,
+                        begin: primary.BeginAddress,
+                        end: primary.EndAddress,
+                    }
+                }
+                Some(primary) if primary.UnwindData & RUNTIME_FUNCTION_INDIRECT != 0 => {
+                    Resolve::Leaf
+                }
+                _ => Resolve::Holed,
+            }
+        }
         // an entry is only usable if its unwind info (`.xdata`) is resident too
         Lookup::Found(function) if image.is_present(function.UnwindData as usize, 4) => {
             Resolve::Function {
@@ -654,9 +674,12 @@ pub fn describe_function_entry(
 #[cfg(test)]
 mod tests {
     use super::{
-        Lookup, PrimaryLookup, RUNTIME_FUNCTION, RUNTIME_FUNCTION_SIZE, lookup_runtime_function,
-        primary_function_begin,
+        Lookup, PrimaryLookup, RUNTIME_FUNCTION, RUNTIME_FUNCTION_SIZE, Resolve,
+        lookup_runtime_function, primary_function_begin, resolve_function,
     };
+    use crate::arch::Arch;
+    use crate::arch::amd64::unwind::unwind_by_codes;
+    use crate::arch::unwind::{FrameMemory, FrameRegisters, Unwound};
     use crate::nt::pe::PeImage;
 
     #[test]
@@ -776,5 +799,56 @@ mod tests {
         assert_eq!(begin(0x1410), Some(0x1000));
         assert_eq!(begin(0x1050), Some(0x1000));
         assert_eq!(begin(0x1200), None);
+    }
+
+    /// A block split off below its function, whose entry points at the
+    /// function's (`UnwindData` with the low bit set), unwinds by the
+    /// function's codes as body code: `sub rsp, 0x28` undone, the return
+    /// taken from above it.
+    #[test]
+    fn an_indirect_entry_unwinds_by_its_functions_codes() {
+        struct Stack;
+        impl FrameMemory for Stack {
+            fn stack_u64(&self, address: u64) -> Option<u64> {
+                (address == 0x5028).then_some(0x1_4000_1234)
+            }
+            fn trap_frame(&self, _: u64) -> Option<FrameRegisters> {
+                None
+            }
+        }
+        let fragment = RUNTIME_FUNCTION {
+            BeginAddress: 0x1000,
+            EndAddress: 0x1040,
+            // The second entry's RVA, with the indirect bit.
+            UnwindData: (0x2000 + RUNTIME_FUNCTION_SIZE as u32) | 1,
+        };
+        let function = RUNTIME_FUNCTION {
+            BeginAddress: 0x1100,
+            EndAddress: 0x1200,
+            UnwindData: 0x2100,
+        };
+        // Version 1, a 4-byte prolog with one code: at 4, UWOP_ALLOC_SMALL 0x28.
+        let unwind: &[u8] = &[0x01, 0x04, 0x01, 0x00, 0x04, 0x42, 0x00, 0x00];
+        let image = image_with_functions(&[fragment, function], &[(0x2100, unwind)]);
+        let base = 0x1_4000_0000;
+        let Resolve::Function {
+            unwind_data,
+            begin,
+            end,
+        } = resolve_function(&image, None, base, base + 0x1010)
+        else {
+            panic!("the fragment resolves to its function");
+        };
+        assert_eq!((unwind_data, begin, end), (0x2100, 0x1100, 0x1200));
+
+        let mut context = FrameRegisters::new(Arch::Amd64, base + 0x1010, 0x5000);
+        let unwound = unwind_by_codes(&Stack, &mut context, &image, base, unwind_data, begin, end);
+        assert!(matches!(
+            unwound,
+            Unwound::Frame {
+                stack_switch: false
+            }
+        ));
+        assert_eq!((context.pc, context.sp), (0x1_4000_1234, 0x5030));
     }
 }

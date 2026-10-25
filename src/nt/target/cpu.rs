@@ -180,11 +180,11 @@ pub struct IdtGate {
     pub present: DiagnosticValue<bool>,
     /// Whether the handler is in a module other than NT.
     pub non_nt_hook: DiagnosticValue<bool>,
-    /// For a handler in `KiIsrThunk` (or `KiIsrThunkShadow`), which
-    /// dispatches through the
-    /// processor's `_KPRCB.InterruptObject` table, the `_KINTERRUPT`
-    /// connected to the vector and its service routine. None for other
-    /// handlers and for a vector nothing is connected to.
+    /// The `_KINTERRUPT` connected to the vector and its service routine:
+    /// through the processor's `_KPRCB.InterruptObject` table for a
+    /// handler in `KiIsrThunk` (or `KiIsrThunkShadow`), or, before those
+    /// (Windows 8.1), the object whose `DispatchCode` the gate points into.
+    /// None for other handlers and for a vector nothing is connected to.
     pub ki_isr_thunk: DiagnosticValue<Option<String>>,
 }
 
@@ -1048,10 +1048,10 @@ fn is_nt_module(name: &str) -> bool {
     name.contains("ntoskrnl") || name.contains("ntkrnl") || name == "nt"
 }
 
-/// The `_KINTERRUPT` connected to `vector`, for a `handler` in `KiIsrThunk`,
-/// which dispatches through `objects` (the processor's
-/// `_KPRCB.InterruptObject` table): its address and service routine. None
-/// for another handler, and for a vector nothing is connected to.
+/// The `_KINTERRUPT` connected to `vector` and its service routine: for a
+/// `handler` in `KiIsrThunk(Shadow)`, through `objects` (the processor's
+/// `_KPRCB.InterruptObject` table); otherwise the object `handler` points
+/// into. None for another handler, and for a vector nothing is connected to.
 fn connected_interrupt(
     target: &Target,
     objects: Option<VirtAddr>,
@@ -1068,17 +1068,20 @@ fn connected_interrupt(
             .flatten()
             .is_some_and(|(thunk, _)| handler >= thunk.0 && handler - thunk.0 < 0x1000)
     });
-    if !in_thunks {
-        return None;
-    }
     let memory = kernel(target).ok()?.memory();
-    let Some(objects) = objects else {
-        return Some("KiIsrThunk: the processor's interrupt object table is not known".into());
+    let interrupt = if in_thunks {
+        let Some(objects) = objects else {
+            return Some("KiIsrThunk: the processor's interrupt object table is not known".into());
+        };
+        memory
+            .read_pointer(objects + u64::from(vector) * 8)
+            .ok()
+            .filter(|interrupt| !interrupt.is_zero())?
+    } else {
+        // Before the thunks (Windows 8.1), the gate points into the
+        // interrupt object's own `DispatchCode`.
+        embedding_interrupt(target, handler)?
     };
-    let interrupt = memory
-        .read_pointer(objects + u64::from(vector) * 8)
-        .ok()
-        .filter(|interrupt| !interrupt.is_zero())?;
     // A message-signalled interrupt's ServiceRoutine is the kernel's
     // KiInterruptMessageDispatch; the driver's is MessageServiceRoutine.
     let interrupt_layout = layout(target, "_KINTERRUPT").ok();
@@ -1099,6 +1102,18 @@ fn connected_interrupt(
         })
         .unwrap_or_else(|| "-".into());
     Some(format!("KINTERRUPT {:#x}  {routine}", interrupt.0))
+}
+
+/// The `_KINTERRUPT` whose `DispatchCode` holds `handler`: one whose
+/// header says it is an interrupt object of the type's size.
+fn embedding_interrupt(target: &Target, handler: u64) -> Option<VirtAddr> {
+    /// `KOBJECTS.InterruptObject`.
+    const INTERRUPT_OBJECT: i16 = 0x16;
+    let layout = layout(target, "_KINTERRUPT").ok()?;
+    let interrupt = VirtAddr(handler.checked_sub(layout.field_offset("DispatchCode").ok()?)?);
+    let memory = kernel(target).ok()?.memory();
+    let header: [i16; 2] = memory.read(interrupt).ok()?;
+    (header == [INTERRUPT_OBJECT, layout.size as i16]).then_some(interrupt)
 }
 
 /// Where `processor`'s `_KPRCB.InterruptObject` table is.
@@ -1164,6 +1179,7 @@ fn decode_idt_entry(target: &Target, base: u64, vector: u16, objects: Option<Vir
             .as_ref()
             .is_some_and(|module| !is_nt_module(&module.name))
             || symbol_module_is_hook;
+        let connected = connected_interrupt(target, objects, offset, vector);
         return IdtGate {
             vector,
             address,
@@ -1175,10 +1191,10 @@ fn decode_idt_entry(target: &Target, base: u64, vector: u16, objects: Option<Vir
             gate_name: DiagnosticValue::Available(gate_name.to_string()),
             dpl: DiagnosticValue::Available(dpl),
             present: DiagnosticValue::Available(present),
-            non_nt_hook: DiagnosticValue::Available(hook),
-            ki_isr_thunk: DiagnosticValue::Available(connected_interrupt(
-                target, objects, offset, vector,
-            )),
+            // A gate into an interrupt object is the kernel's dispatch, not
+            // a hook, wherever the object lies.
+            non_nt_hook: DiagnosticValue::Available(hook && connected.is_none()),
+            ki_isr_thunk: DiagnosticValue::Available(connected),
         };
     };
     unavailable_idt_entry(vector, address, error.to_string())

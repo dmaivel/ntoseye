@@ -247,7 +247,7 @@ pub(crate) fn read_kernel_global_u64(debugger: &Target, name: &str) -> Result<u6
     debugger.kernel_address_space().read(address)
 }
 
-fn read_kernel_global_u32(debugger: &Target, name: &str) -> Result<u32> {
+pub fn read_kernel_global_u32(debugger: &Target, name: &str) -> Result<u32> {
     let address = kernel_symbol_address(debugger, name)?;
     debugger.kernel_address_space().read(address)
 }
@@ -1148,9 +1148,12 @@ pub struct PoolRange {
     /// Another global for the end, where a build names it so instead
     /// (Windows 7's `MiNonPagedPoolEnd`).
     other_end_symbol: Option<&'static str>,
-    /// The start on AMD64 kernels with no start global: Windows 7's paged
-    /// pool, the 128 GiB at `0xfffff8a000000000`.
-    amd64_fixed_start: Option<u64>,
+    /// Where AMD64 kernels with no start global put the pool, by release;
+    /// the start is the highest of these below the end.
+    amd64_fixed_starts: &'static [u64],
+    /// The pool's size, for an end where no global gives one (8.1's
+    /// nonpaged pool: its start plus `MmMaximumNonPagedPoolInBytes`).
+    size_symbol: Option<&'static str>,
 }
 
 pub const NONPAGED_POOL: PoolRange = PoolRange {
@@ -1159,7 +1162,9 @@ pub const NONPAGED_POOL: PoolRange = PoolRange {
     start_symbol: "MmNonPagedPoolStart",
     end_symbol: "MmNonPagedPoolEnd",
     other_end_symbol: Some("MiNonPagedPoolEnd"),
-    amd64_fixed_start: None,
+    // Windows 8.1.
+    amd64_fixed_starts: &[0xffff_e000_0000_0000],
+    size_symbol: Some("MmMaximumNonPagedPoolInBytes"),
 };
 
 pub const PAGED_POOL: PoolRange = PoolRange {
@@ -1168,7 +1173,9 @@ pub const PAGED_POOL: PoolRange = PoolRange {
     start_symbol: "MmPagedPoolStart",
     end_symbol: "MmPagedPoolEnd",
     other_end_symbol: None,
-    amd64_fixed_start: Some(0xffff_f8a0_0000_0000),
+    // Windows 7 (128 GiB below 0xfffff8c000000000) and 8.1.
+    amd64_fixed_starts: &[0xffff_f8a0_0000_0000, 0xffff_c000_0000_0000],
+    size_symbol: None,
 };
 
 pub const SPECIAL_POOL: PoolRange = PoolRange {
@@ -1177,7 +1184,8 @@ pub const SPECIAL_POOL: PoolRange = PoolRange {
     start_symbol: "MmSpecialPoolStart",
     end_symbol: "MmSpecialPoolEnd",
     other_end_symbol: None,
-    amd64_fixed_start: None,
+    amd64_fixed_starts: &[],
+    size_symbol: None,
 };
 
 /// The virtual range `[start, end)` of `pool`. Windows 10 1803 and later
@@ -1253,21 +1261,30 @@ fn assigned_system_va_region(debugger: &Target, region: &str) -> Result<(VirtAdd
 /// `pool`'s range from its `nt!Mm*Start`/`nt!Mm*End` globals, else from the
 /// `MiState` fields named like them.
 fn legacy_pool_range(debugger: &Target, pool: &PoolRange) -> Option<(VirtAddr, VirtAddr)> {
-    let end = read_kernel_global_u64(debugger, pool.end_symbol).or_else(|error| {
-        pool.other_end_symbol.map_or(Err(error), |symbol| {
-            read_kernel_global_u64(debugger, symbol)
+    let end = read_kernel_global_u64(debugger, pool.end_symbol)
+        .or_else(|error| {
+            pool.other_end_symbol.map_or(Err(error), |symbol| {
+                read_kernel_global_u64(debugger, symbol)
+            })
         })
-    });
-    let start = read_kernel_global_u64(debugger, pool.start_symbol).or_else(|error| {
-        match pool.amd64_fixed_start {
-            Some(start) if debugger.arch() == crate::arch::Arch::Amd64 => Ok(start),
-            _ => Err(error),
-        }
-    });
-    let globals = start
-        .and_then(|start| Ok((start, end?)))
+        .ok();
+    let start = read_kernel_global_u64(debugger, pool.start_symbol)
         .ok()
-        .filter(|(start, end)| start < end);
+        .or_else(|| {
+            if debugger.arch() != crate::arch::Arch::Amd64 {
+                return None;
+            }
+            let fixed = pool.amd64_fixed_starts.iter().copied();
+            match end {
+                Some(end) => fixed.filter(|start| *start < end).max(),
+                None => fixed.max(),
+            }
+        });
+    let end = end.or_else(|| {
+        let size = read_kernel_global_u64(debugger, pool.size_symbol?).ok()?;
+        start?.checked_add(size)
+    });
+    let globals = start.zip(end).filter(|(start, end)| start < end);
     let (start, end) = globals.or_else(|| {
         let fields = find_mi_state_fields(debugger, &["pool", "start", "end"]);
         // `MmPagedPoolStart` names `pagedpoolstart`, which a

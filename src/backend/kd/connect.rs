@@ -285,7 +285,13 @@ impl KdBackend {
             (hints.ps_loaded_module_list, 16usize, "loaded-module list"),
         ] {
             let mut local_bytes = vec![0u8; len];
-            local.read_bytes(address, &mut local_bytes)?;
+            local
+                .read_bytes(address, &mut local_bytes)
+                .map_err(|error| {
+                    Error::Kd(format!(
+                        "host VM memory does not match KD target ({label} unreadable: {error})"
+                    ))
+                })?;
             let processor = self.current_processor;
             let remote_bytes =
                 with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {

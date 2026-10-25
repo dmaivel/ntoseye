@@ -210,6 +210,9 @@ pub struct ModuleSymbolDiagnostic {
 pub enum SessionSpace {
     Load,
     Skip,
+    /// Read their images through this root, a session process's; the
+    /// symbols stay under the load's own root.
+    Through(Dtb),
 }
 
 /// When a symbol load rebuilds a missing PDB from guest memory (see
