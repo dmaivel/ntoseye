@@ -212,6 +212,62 @@ pub fn decompress_page(
     }
 }
 
+/// Page `key` of the memory-compression store, decompressed into `page`.
+/// `kernel` reads the store manager (at `manager`) and its stores; `regions`
+/// reads the address space of the process that owns them (`owner`, its
+/// EPROCESS), which a store must name.
+pub fn read_page(
+    kernel: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
+    regions: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
+    layout: &super::store_layout::StoreLayout,
+    manager: u64,
+    owner: u64,
+    key: u32,
+    page: &mut [u8; 4096],
+) -> crate::base::error::Result<()> {
+    use crate::base::error::Error;
+    let fail = |what: &str| Error::DebugInfo(format!("store page key {key:#x}: {what}"));
+    let store =
+        store_for_key(kernel, manager, layout.key_tree, key)?.ok_or_else(|| fail("in no store"))?;
+    if read_u64(kernel, store + u64::from(layout.owner_process))? != owner {
+        return Err(fail("its store belongs to another process"));
+    }
+    let st = embedded_store(kernel, store, layout.back_pointer)?;
+    let pages = read_u64(kernel, st + u64::from(layout.pages_tree))?;
+    let region_key = super::store_tree::search(&mut *kernel, pages, key)?
+        .ok_or_else(|| fail("not in its store's pages"))?;
+    let (record_key, size) = resolve_record(
+        kernel,
+        st,
+        layout.chunk_array,
+        layout.chunk_fields,
+        region_key,
+    )?;
+    let shift = read_u32(kernel, st + u64::from(layout.region_shift))?;
+    let mask = read_u32(kernel, st + u64::from(layout.region_offset_mask))?;
+    let (index, offset) =
+        region_location(record_key, shift, mask).ok_or_else(|| fail("bad region shift"))?;
+    let region = region_address(
+        kernel,
+        store,
+        layout.region_array,
+        layout.virtual_flag,
+        index,
+    )?;
+    let length = if size == 0x1000 {
+        0x1000
+    } else {
+        usize::from(size & 0xfff)
+    };
+    if length == 0 {
+        page.fill(0);
+        return Ok(());
+    }
+    let mut data = vec![0u8; length];
+    regions(region + offset, &mut data)?;
+    decompress_page(kernel, layout.compression, store, st, &data, page)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,6 +455,89 @@ mod tests {
             decompress(&[], Compression::FormatField(0x3e0), &original).unwrap(),
             original
         );
+    }
+
+    #[test]
+    fn a_page_key_reads_back_its_page_through_the_whole_store() {
+        use super::super::store_layout::{Compression, StoreLayout};
+        let layout = StoreLayout {
+            owner_process: 0x1d00,
+            region_array: 0x1b68,
+            virtual_flag: (0x1a95, 2),
+            back_pointer: 0x320,
+            region_shift: 0x32c,
+            region_offset_mask: 0x328,
+            chunk_array: 0xc0,
+            chunk_fields: [0x1c8, 0x1cc, 0x1d0, 0x1d8],
+            key_tree: 0x1c0,
+            pages_tree: 0,
+            compression: Compression::Lz4UnlessCount(0x12c0),
+        };
+        let leaf = |key: u32, value: u32| {
+            let mut node = vec![1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            node.extend_from_slice(&key.to_le_bytes());
+            node.extend_from_slice(&value.to_le_bytes());
+            node
+        };
+        let q = |value: u64| value.to_le_bytes().to_vec();
+        let d = |value: u32| value.to_le_bytes().to_vec();
+        let (manager, store, owner) = (0x100_000u64, 0x200_000u64, 0xffff_8000_0000_1000u64);
+        let st = store + 0x50;
+        let (key, region_key, record_key) = (0x2000_0042u32, 1 << 8 | 2, 1 << 16 | 0x20);
+        let original: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let data = lz4_flex::block::compress(&original);
+        let kernel_values: Vec<(u64, Vec<u8>)> = vec![
+            (manager + 0x1c0, q(0x110_000)),
+            (0x110_000, leaf(key, 0)),
+            (manager, q(0x120_000)),
+            (0x120_000, q(store)),
+            (store + 0x1d00, q(owner)),
+            (st + 0x320, q(store)),
+            (store + 0x1b68, q(0x300_000)),
+            (store + 0x1a95, vec![0b100]),
+            (store + 0x12c0, d(0)),
+            (st, q(0x130_000)),
+            (0x130_000, leaf(key, region_key)),
+            (st + 0x1c8, d(8)),
+            (st + 0x1cc, d(0xff)),
+            (st + 0x1d0, d(8)),
+            (st + 0x1d8, d(0)),
+            (st + 0xc0, q(0x140_000)),
+            (0x140_000, q(0x150_000)),
+            (0x150_010, d(record_key)),
+            (0x150_014, d(data.len() as u32)),
+            (st + 0x32c, d(16)),
+            (st + 0x328, d(0xffff)),
+            (0x300_008, q(0x0123_0000_0000 | 5)),
+        ];
+        let kernel: Vec<(u64, &[u8])> = kernel_values
+            .iter()
+            .map(|(a, b)| (*a, b.as_slice()))
+            .collect();
+        let region: Vec<(u64, &[u8])> = vec![(0x0123_0000_0200, data.as_slice())];
+        let mut page = [0u8; 4096];
+        read_page(
+            &mut memory(&kernel),
+            &mut memory(&region),
+            &layout,
+            manager,
+            owner,
+            key,
+            &mut page,
+        )
+        .unwrap();
+        assert_eq!(&page[..], &original[..]);
+        // A store that names another owner is not read.
+        let other = read_page(
+            &mut memory(&kernel),
+            &mut memory(&region),
+            &layout,
+            manager,
+            owner + 8,
+            key,
+            &mut page,
+        );
+        assert!(other.is_err());
     }
     #[test]
     fn a_page_record_is_found_through_its_chunk() {
