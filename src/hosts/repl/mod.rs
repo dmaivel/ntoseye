@@ -74,6 +74,20 @@ pub fn error(msg: &str) {
     diagnostics::print_error(msg);
 }
 
+/// Print a command's error. A read that failed at an address also says why
+/// the page there is not in memory, as the current address space's page
+/// tables tell it (not in a VTL1 one, which they do not describe).
+pub fn report_error(state: &ReplState<'_>, error: &crate::base::error::Error) {
+    self::error(&error.to_string());
+    let target = &state.ctx.target;
+    if let crate::base::error::Error::BadVirtualAddress(address) = error
+        && !target.in_secure_address_space()
+        && let Some(why) = target.context_memory().non_resident(*address)
+    {
+        diagnostics::print_note(format!("{:#x}: {why}", address.0));
+    }
+}
+
 macro_rules! error {
     ($($arg:tt)*) => {
         error(&format!($($arg)*))

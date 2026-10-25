@@ -1341,7 +1341,7 @@ impl Command {
             _ if self.is_run() && self.returns_motion() => quote! {
                 match self::#function(#receiver, #(#call_args),*) {
                     Ok(#value) => #state.run_motion(#value),
-                    Err(#error) => crate::hosts::repl::error(&#error.to_string()),
+                    Err(#error) => crate::hosts::repl::report_error(#state, &#error),
                 }
                 Ok(())
             },
@@ -1350,7 +1350,7 @@ impl Command {
                 let #cancel = crate::hosts::repl::run_cancel(#state.stop_wait.as_ref());
                 match self::#function(#receiver, #(#call_args),*) {
                     Ok(#value) => crate::hosts::repl::Render::render(&#value, #state, #options),
-                    Err(#error) => crate::hosts::repl::error(&#error.to_string()),
+                    Err(#error) => crate::hosts::repl::report_error(#state, &#error),
                 }
                 Ok(())
             },
@@ -1362,7 +1362,7 @@ impl Command {
                         match self::#function(#receiver, #(#call_args),*) {
                             Ok(#value) => #values.push(#value),
                             Err(#error) => {
-                                crate::hosts::repl::error(&#error.to_string());
+                                crate::hosts::repl::report_error(#state, &#error);
                                 return Ok(());
                             }
                         }
@@ -1374,7 +1374,7 @@ impl Command {
             None => quote! {
                 match self::#function(#receiver, #(#call_args),*) {
                     Ok(#value) => crate::hosts::repl::Render::render(&#value, #state, #options),
-                    Err(#error) => crate::hosts::repl::error(&#error.to_string()),
+                    Err(#error) => crate::hosts::repl::report_error(#state, &#error),
                 }
                 Ok(())
             },

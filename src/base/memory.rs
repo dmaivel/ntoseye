@@ -734,6 +734,69 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         matches!(self.compressed_page(va), Some(Ok(_)))
     }
 
+    /// Why the page at `va` is not in memory, as its page tables say; `None`
+    /// when it is (mapped, in transition, or a view's page in memory).
+    pub fn non_resident(&self, va: VirtAddr) -> Option<NonResident> {
+        if self.dtb == DTB_IDENTITY {
+            return None;
+        }
+        let mut last = None;
+        let leaf = match self.walk_tables(va, |step| last = Some(step)).ok()? {
+            Walked::Mapped(_) => return None,
+            Walked::Unmapped(leaf) if self.section_page(va, leaf).is_some() => return None,
+            Walked::Unmapped(leaf) => leaf,
+        };
+        if let Some(pte) = leaf {
+            return Some(NonResident {
+                table: None,
+                place: self.place_of(pte, true),
+            });
+        }
+        // The walk stopped above the PTE: at an entry that is not present,
+        // or at one whose table does not read.
+        let step = last?;
+        let place = match self.arch.paging().decode_entry(step.level, step.entry) {
+            TableEntry::Absent => match self.place_of(step.entry, false) {
+                // The table read from the store; what stopped the walk is
+                // below it, in entries no step reported.
+                Place::Store { problem: None, .. } => Place::Unmapped,
+                place => place,
+            },
+            TableEntry::Table(_) | TableEntry::Leaf(_) => Place::Unreadable,
+        };
+        Some(NonResident {
+            table: Some(step.level),
+            place,
+        })
+    }
+
+    /// Where the non-present `entry` puts its page (`leaf`) or its table.
+    fn place_of(&self, entry: PageTableEntry, leaf: bool) -> Place {
+        let unswizzled = entry.unswizzled(self.backend.invalid_pte_mask());
+        let low = self.backend.page_file_low();
+        let (file, offset) = unswizzled.page_file_location(low);
+        if unswizzled.0 == 0 || (!leaf && (unswizzled.is_prototype() || offset == 0)) {
+            return Place::Unmapped;
+        }
+        if unswizzled.is_prototype() {
+            return Place::Prototype;
+        }
+        if unswizzled.is_demand_zero(low) {
+            return Place::DemandZero;
+        }
+        match self.backend.compressed_pages() {
+            Some(store) if store.page_file == file => Place::Store {
+                offset,
+                problem: match self.stored_page(entry) {
+                    Some(Ok(_)) => None,
+                    Some(Err(error)) => Some(error.to_string()),
+                    None => Some("the store's own reads do not use it".into()),
+                },
+            },
+            _ => Place::PageFile { file, offset },
+        }
+    }
+
     /// The page at `va` from the guest's memory-compression store, when the
     /// page tables leave it unmapped with a PTE in the store's page file.
     fn compressed_page(&self, va: VirtAddr) -> Option<Result<Box<[u8; PAGE_SIZE]>>> {
@@ -774,6 +837,76 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         let result = store.read(self, entry, &mut page);
         IN_STORE.set(false);
         Some(result?.map(|()| page))
+    }
+}
+
+/// Why a page is not in memory, as its page tables say
+/// ([`AddressSpace::non_resident`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonResident {
+    /// The level whose entry names the page table that is not in memory;
+    /// `None` when the page itself is not.
+    pub table: Option<PageTableLevel>,
+    pub place: Place,
+}
+
+/// Where a page, or a page table, that is not in memory is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Place {
+    /// Nothing maps it: no page table, or a zero entry.
+    Unmapped,
+    /// Committed but never touched; it reads as zeros once touched.
+    DemandZero,
+    /// A view's page this process has not touched, and the section's own
+    /// PTE leaves it out of memory.
+    Prototype,
+    /// In paging file `file`, at page `offset`.
+    PageFile { file: u8, offset: u32 },
+    /// In the memory-compression store, at page `offset` of its page file:
+    /// read from there, or, with `problem`, not.
+    Store {
+        offset: u32,
+        problem: Option<String>,
+    },
+    /// Its entry is present, but its frame does not read (a dump without
+    /// it).
+    Unreadable,
+}
+
+impl std::fmt::Display for Place {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unmapped => write!(f, "not mapped"),
+            Self::DemandZero => write!(f, "committed but never touched (demand zero)"),
+            Self::Prototype => write!(f, "a view's page that is not in memory"),
+            Self::PageFile { file, offset } => write!(f, "in page file {file} at page {offset:#x}"),
+            Self::Store {
+                offset,
+                problem: None,
+            } => write!(
+                f,
+                "compressed in the memory-compression store (page {offset:#x}); reads decompress it"
+            ),
+            Self::Store {
+                offset,
+                problem: Some(problem),
+            } => write!(
+                f,
+                "in the memory-compression store (page {offset:#x}), but it does not decode: {problem}"
+            ),
+            Self::Unreadable => write!(f, "not in memory"),
+        }
+    }
+}
+
+impl std::fmt::Display for NonResident {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.table, &self.place) {
+            (None, place) | (Some(_), place @ Place::Unmapped) => write!(f, "{place}"),
+            (Some(level), place) => {
+                write!(f, "its page table, which its {level} names, is {place}")
+            }
+        }
     }
 }
 
@@ -1177,6 +1310,80 @@ mod tests {
             [0x1000, 0x2000, 0x3000, 0x4010]
         );
         assert_eq!(translation.map(|t| t.address), Some(0x5000));
+    }
+
+    /// A page that is not in memory says where it is: from its PTE, or from
+    /// the entry above it that names a table not in memory.
+    #[test]
+    fn a_page_not_in_memory_says_where_it_is() {
+        let page = |pte: u64| {
+            let (mem, va) = amd64_space(pte);
+            AddressSpace::new_amd64(&mem, 0x1000).non_resident(va)
+        };
+        let leaf = |place| Some(NonResident { table: None, place });
+        assert_eq!(page(0x5000 | 0x3), None);
+        assert_eq!(page(0x5000 | 1 << 11 | 0x80), None, "in transition");
+        assert_eq!(page(0), leaf(Place::Unmapped));
+        assert_eq!(page(0x80), leaf(Place::DemandZero));
+        assert_eq!(page(0xffff_ffff_0000_0480), leaf(Place::Prototype));
+        assert_eq!(
+            page(0x1234 << 32 | 0x80),
+            leaf(Place::PageFile {
+                file: 0,
+                offset: 0x1234
+            })
+        );
+
+        // PD[0] is in page file 3: the table under it is.
+        let mut data = vec![0u8; 0x4000];
+        let mut put = |at: usize, value: u64| {
+            data[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        };
+        put(0x1000, 0x2000 | 0x7);
+        put(0x2000, 0x3000 | 0x7);
+        put(0x3000, 0x77 << 32 | 3 << 12 | 0x80);
+        let mem = FakePhysMem {
+            data,
+            invalid_pte_mask: 0,
+        };
+        assert_eq!(
+            AddressSpace::new_amd64(&mem, 0x1000).non_resident(VirtAddr(0x5000)),
+            Some(NonResident {
+                table: Some(PageTableLevel::Pde),
+                place: Place::PageFile {
+                    file: 3,
+                    offset: 0x77
+                },
+            })
+        );
+
+        // In the store: the page reads from there; a key the store does not
+        // hold says why not.
+        let stored = 0x0000_0042_0000_2080u64;
+        let page = VirtAddr(0x4000_0000 + 5 * PAGE_SIZE as u64);
+        let mem = stored_table(stored, PAGE_FILE_LOW);
+        assert_eq!(
+            AddressSpace::new_amd64(&mem, 0x400_000).non_resident(page),
+            leaf(Place::Store {
+                offset: 0x42,
+                problem: None
+            })
+        );
+        let mem = stored_table(0x0000_0043_0000_2080, PAGE_FILE_LOW);
+        let missing = AddressSpace::new_amd64(&mem, 0x400_000).non_resident(page);
+        assert!(
+            matches!(
+                missing,
+                Some(NonResident {
+                    table: Some(PageTableLevel::Pde),
+                    place: Place::Store {
+                        offset: 0x43,
+                        problem: Some(_)
+                    },
+                })
+            ),
+            "{missing:?}"
+        );
     }
     #[test]
     fn present_page_walk_skips_absent_tables_and_clips_large_pages() {

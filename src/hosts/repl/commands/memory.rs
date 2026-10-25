@@ -1098,6 +1098,7 @@ fn pagein(
     #[arg(parse = pagein_request)] request: PageInRequest,
 ) -> Result<()> {
     let PageInRequest { process, address } = request;
+    let dtb = process.as_ref().map(|process| process.dtb);
     outln!("resuming the target so its debugger worker can run");
     state.clear_selected_frame();
     let report = state
@@ -1113,8 +1114,14 @@ fn pagein(
     if !report.resident {
         // MmPrefetchVirtualMemory declines addresses that are not backed
         // at all, and the worker reports completion either way.
+        let target = &state.ctx.target;
+        let memory = dtb.map_or_else(|| target.context_memory(), |dtb| target.address_space(dtb));
+        let why = memory.non_resident(address).map_or_else(
+            || "it may be unmapped rather than paged out".to_string(),
+            |why| why.to_string(),
+        );
         return Err(Error::DebugInfo(format!(
-            "{} is still unreadable; it may be unmapped rather than paged out",
+            "{} is still unreadable: {why}",
             ui::addr(address.0)
         )));
     }

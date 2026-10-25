@@ -263,7 +263,13 @@ pub fn read_page(
         return Ok(());
     }
     let mut data = vec![0u8; length];
-    regions(region + offset, &mut data)?;
+    // The store's own pages can be paged out to disk, or left out of a dump.
+    regions(region + offset, &mut data).map_err(|_| {
+        fail(&format!(
+            "its compressed data at {:#x} is not in memory",
+            region + offset
+        ))
+    })?;
     decompress_page(kernel, layout.compression, store, st, &data, page)
 }
 
