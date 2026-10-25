@@ -1,6 +1,12 @@
-//! Arithmetic the store does to find a page: a page record from a region
-//! key, and a region and offset from a record's key, as the kernel's
-//! `ST_PAGE_RECORD_GET` and page retrieval compute them.
+//! Reading a page from the memory-compression store, as the kernel's store
+//! manager finds it: the page's key leads through the manager's key tree
+//! to a store, through the store's pages tree to a region key, and through
+//! the store's page records to a region and the offset in it of the page's
+//! compressed bytes.
+
+use super::{AddressSpace, MemoryOps, PAGE_SIZE, store_tree};
+use crate::base::error::{Error, Result};
+use crate::base::types::{Dtb, PhysAddr, VirtAddr};
 
 /// Which chunk-pointer slot, and which 16-byte entry in that chunk, hold the
 /// page records of `key`: the key shifted right by `shift` has its highest
@@ -9,11 +15,6 @@ pub fn chunk_entry(key: u32, shift: u32) -> Option<(usize, u64)> {
     let encoded = key.checked_shr(shift & 0xff)?;
     let slot = encoded.checked_ilog2()?;
     Some((slot as usize, u64::from(encoded ^ (1 << slot)) * 16))
-}
-
-/// The address of `key`'s page record, in the record array at `records`.
-pub fn record_address(records: u64, key: u32, mask: u32, size: u32, header: u32) -> u64 {
-    records + u64::from(header) + u64::from(size) * u64::from(key & mask)
 }
 
 /// A record key's region index and byte offset in that region: the key
@@ -26,52 +27,33 @@ pub fn region_location(key: u32, shift: u32, mask: u32) -> Option<(u64, u64)> {
     ))
 }
 
-/// A little-endian u64 read with `read` at `address`.
-pub fn read_u64(
-    read: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
-    address: u64,
-) -> crate::base::error::Result<u64> {
-    let mut bytes = [0u8; 8];
-    read(address, &mut bytes)?;
-    Ok(u64::from_le_bytes(bytes))
-}
-
-/// A little-endian u32 read with `read` at `address`.
-pub fn read_u32(
-    read: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
-    address: u64,
-) -> crate::base::error::Result<u32> {
-    let mut bytes = [0u8; 4];
-    read(address, &mut bytes)?;
-    Ok(u32::from_le_bytes(bytes))
+/// The field at `offset` in the structure at `base`.
+fn field(base: VirtAddr, offset: u32) -> VirtAddr {
+    base + u64::from(offset)
 }
 
 /// The address of the page record of region key `key` in the `ST_STORE` at
-/// `st`, whose chunk-pointer array is at `chunk_array` and whose chunk
-/// shift, records-per-chunk mask, record size and header size are at
-/// `fields`.
+/// `st`: in the chunk its key picks from the chunk-pointer array, past the
+/// chunk's header by the key's index.
 pub fn page_record(
-    read: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
-    st: u64,
-    chunk_array: u32,
-    fields: [u32; 4],
+    memory: &impl MemoryOps<VirtAddr>,
+    st: VirtAddr,
+    layout: &StoreLayout,
     key: u32,
-) -> crate::base::error::Result<u64> {
-    let [shift, mask, size, header] = fields;
-    let shift = read_u32(read, st + u64::from(shift))?;
-    let mask = read_u32(read, st + u64::from(mask))?;
-    let size = read_u32(read, st + u64::from(size))?;
-    let header = read_u32(read, st + u64::from(header))?;
-    let bad = || crate::base::error::Error::DebugInfo(format!("store key {key:#x}: no chunk"));
-    let (slot, entry) = chunk_entry(key, shift)
-        .filter(|(slot, _)| *slot < 32)
-        .ok_or_else(bad)?;
-    let chunk = read_u64(read, st + u64::from(chunk_array) + slot as u64 * 8)?;
+) -> Result<VirtAddr> {
+    let fields = layout.chunk_fields;
+    let shift: u32 = memory.read(field(st, fields.shift))?;
+    let mask: u32 = memory.read(field(st, fields.mask))?;
+    let size: u32 = memory.read(field(st, fields.record_size))?;
+    let header: u32 = memory.read(field(st, fields.header))?;
+    let no_chunk = || Error::DebugInfo(format!("store key {key:#x}: no chunk"));
+    let (slot, entry) = chunk_entry(key, shift).ok_or_else(no_chunk)?;
+    let chunk: u64 = memory.read(field(st, layout.chunk_array) + slot as u64 * 8)?;
     if chunk == 0 {
-        return Err(bad());
+        return Err(no_chunk());
     }
-    let records = read_u64(read, chunk + entry)?;
-    Ok(record_address(records, key, mask, size, header))
+    let records: u64 = memory.read(VirtAddr(chunk + entry))?;
+    Ok(VirtAddr(records + u64::from(header)) + u64::from(size) * u64::from(key & mask))
 }
 
 /// Redirects a page's records are followed through at most.
@@ -79,197 +61,137 @@ const MAX_REDIRECTS: usize = 32;
 
 /// The key and size word (the dword at +4) in the page record that region
 /// key `key` leads to, following records that redirect to another key (key
-/// `0xffffffff`, the next key at `redirect_next`).
+/// `0xffffffff`, the next key at the layout's `redirect_next`).
 pub fn resolve_record(
-    read: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
-    st: u64,
-    chunk_array: u32,
-    fields: [u32; 4],
-    redirect_next: u32,
+    memory: &impl MemoryOps<VirtAddr>,
+    st: VirtAddr,
+    layout: &StoreLayout,
     key: u32,
-) -> crate::base::error::Result<(u32, u32)> {
+) -> Result<(u32, u32)> {
     let mut key = key;
     for _ in 0..=MAX_REDIRECTS {
-        let record = page_record(read, st, chunk_array, fields, key)?;
-        let record_key = read_u32(read, record)?;
+        let record = page_record(memory, st, layout, key)?;
+        let record_key: u32 = memory.read(record)?;
         if record_key != u32::MAX {
-            return Ok((record_key, read_u32(read, record + 4)?));
+            return Ok((record_key, memory.read(record + 4u64)?));
         }
-        let next = read_u32(read, record + u64::from(redirect_next))?;
+        let next: u32 = memory.read(field(record, layout.redirect_next))?;
         if next == key {
             break;
         }
         key = next;
     }
-    Err(crate::base::error::Error::DebugInfo(format!(
+    Err(Error::DebugInfo(format!(
         "store key {key:#x}: page records redirect in a loop"
     )))
 }
 
 /// The address of region `index` of the `SMKM_STORE` at `store`, from its
-/// region array (the pointer at `region_array`). When the store's virtual
-/// flag (`flag`, byte and bit) is set, the entry is the region's address
-/// with state bits; otherwise it points to a descriptor with the address at
-/// +0x18.
+/// region array. When the store's virtual flag is set, the entry is the
+/// region's address with state bits; otherwise it points to a descriptor
+/// with the address at +0x18.
 pub fn region_address(
-    read: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
-    store: u64,
-    region_array: u32,
-    flag: (u32, u8),
+    memory: &impl MemoryOps<VirtAddr>,
+    store: VirtAddr,
+    layout: &StoreLayout,
     index: u64,
-) -> crate::base::error::Result<u64> {
-    let array = read_u64(read, store + u64::from(region_array))?;
-    let entry = read_u64(read, array + index * 8)?;
-    let mut flags = [0u8; 1];
-    read(store + u64::from(flag.0), &mut flags)?;
-    if flags[0] & (1 << flag.1) != 0 {
-        return Ok(entry & 0x7fff_ffff_ffff_0000);
+) -> Result<VirtAddr> {
+    let array: u64 = memory.read(field(store, layout.region_array))?;
+    let entry: u64 = memory.read(VirtAddr(array + index * 8))?;
+    let (flag, bit) = layout.virtual_flag;
+    let flags: u8 = memory.read(field(store, flag))?;
+    if flags & (1 << bit) != 0 {
+        return Ok(VirtAddr(entry & 0x7fff_ffff_ffff_0000));
     }
-    read_u64(read, (entry & !7) + 0x18)
+    memory.read(VirtAddr((entry & !7) + 0x18))
 }
 
-/// The `SMKM_STORE` that holds page `key`: the manager's key tree (its root
-/// pointer at `key_tree`) gives a store index, whose high five bits pick a
-/// row of the manager's 32 x 32 table and low five bits a 40-byte entry in
-/// it, which starts with the store. `None` when no store holds the key.
+/// Set in a key-tree value whose key has no store behind it; the kernel's
+/// lookup skips it too.
+const NO_STORE: u32 = 0x0100_0000;
+/// A key-tree value's store index: its high five bits pick a row of the
+/// manager's 32 x 32 table, its low five bits an entry in that row.
+const STORE_INDEX: u32 = 0x3ff;
+/// Bytes of an entry of the manager's store table, which starts with the
+/// store.
+const STORE_ENTRY: u64 = 0x28;
+
+/// The `SMKM_STORE` that holds page `key`, from the key tree of the store
+/// manager at `manager` (its root pointer at `key_tree`); `None` when no
+/// store holds the key.
 pub fn store_for_key(
-    read: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
-    manager: u64,
+    memory: &impl MemoryOps<VirtAddr>,
+    manager: VirtAddr,
     key_tree: u32,
     key: u32,
-) -> crate::base::error::Result<Option<u64>> {
-    let root = read_u64(read, manager + u64::from(key_tree))?;
-    let Some(value) = super::store_tree::search(&mut *read, root, key)? else {
+) -> Result<Option<VirtAddr>> {
+    let root: u64 = memory.read(field(manager, key_tree))?;
+    let Some(value) = store_tree::search(memory, root, key)? else {
         return Ok(None);
     };
-    if value & 0x0100_0000 != 0 {
+    if value & NO_STORE != 0 {
         return Ok(None);
     }
-    let index = u64::from(value & 0x3ff);
-    let row = read_u64(read, manager + (index >> 5) * 8)?;
+    let index = u64::from(value & STORE_INDEX);
+    let row: u64 = memory.read(manager + (index >> 5) * 8)?;
     if row == 0 {
         return Ok(None);
     }
-    let store = read_u64(read, row + (index & 0x1f) * 0x28)?;
-    Ok((store != 0).then_some(store))
+    let store: u64 = memory.read(VirtAddr(row + (index & 0x1f) * STORE_ENTRY))?;
+    Ok((store != 0).then_some(VirtAddr(store)))
 }
 
 /// The `ST_STORE` embedded in the `SMKM_STORE` at `store`: the offset (0x40
 /// on 26H1, 0x50 before it; others nearby are tried) whose back pointer at
 /// `back_pointer` points to `store`.
 pub fn embedded_store(
-    read: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
-    store: u64,
+    memory: &impl MemoryOps<VirtAddr>,
+    store: VirtAddr,
     back_pointer: u32,
-) -> crate::base::error::Result<u64> {
-    for offset in (0x40..=0x60).step_by(8) {
-        let st = store + offset;
-        if read_u64(read, st + u64::from(back_pointer)).ok() == Some(store) {
-            return Ok(st);
-        }
-    }
-    Err(crate::base::error::Error::DebugInfo(format!(
-        "store {store:#x}: no embedded ST_STORE points back to it"
-    )))
+) -> Result<VirtAddr> {
+    (0x40..=0x60u64)
+        .step_by(8)
+        .map(|offset| store + offset)
+        .find(|&st| memory.read::<u64>(field(st, back_pointer)).ok() == Some(store.0))
+        .ok_or_else(|| {
+            Error::DebugInfo(format!(
+                "store {store:#x}: no embedded ST_STORE points back to it"
+            ))
+        })
 }
 
 /// `COMPRESSION_FORMAT_XPRESS`, plain LZ77.
 const FORMAT_XPRESS: u16 = 3;
 
 /// Decompress one page's `data` from the store at `store` (its `ST_STORE`
-/// at `st`) into `page`, by `compression`. Data of 4096 bytes is the page
+/// at `st`) into `page`, by `compression`. Data of a page's size is the page
 /// as it is.
 pub fn decompress_page(
-    read: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
+    memory: &impl MemoryOps<VirtAddr>,
     compression: Compression,
-    store: u64,
-    st: u64,
+    store: VirtAddr,
+    st: VirtAddr,
     data: &[u8],
-    page: &mut [u8; 4096],
-) -> crate::base::error::Result<()> {
-    use crate::base::error::Error;
+    page: &mut [u8; PAGE_SIZE],
+) -> Result<()> {
     if data.len() == page.len() {
         page.copy_from_slice(data);
         return Ok(());
     }
     match compression {
-        Compression::FormatField(field) => {
-            let mut format = [0u8; 2];
-            read(st + u64::from(field), &mut format)?;
-            match u16::from_le_bytes(format) {
-                FORMAT_XPRESS => crate::base::decompress::xpress(data, page),
-                other => Err(Error::DebugInfo(format!(
-                    "store {store:#x}: compression format {other} is not supported"
-                ))),
-            }
-        }
-        Compression::Lz4UnlessCount(count) => match read_u32(read, store + u64::from(count))? {
+        Compression::FormatField(format) => match memory.read::<u16>(field(st, format))? {
+            FORMAT_XPRESS => crate::base::decompress::xpress(data, page),
+            other => Err(Error::DebugInfo(format!(
+                "store {store:#x}: compression format {other} is not supported"
+            ))),
+        },
+        Compression::Lz4UnlessCount(count) => match memory.read::<u32>(field(store, count))? {
             0 => crate::base::decompress::lz4(data, page),
             other => Err(Error::DebugInfo(format!(
                 "store {store:#x}: a list of {other} compression algorithms is not supported"
             ))),
         },
     }
-}
-
-/// Page `key` of the memory-compression store, decompressed into `page`.
-/// `kernel` reads the store manager (at `manager`) and its stores; `regions`
-/// reads the address space of the process that owns them (`owner`, its
-/// EPROCESS), which a store must name.
-pub fn read_page(
-    kernel: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
-    regions: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
-    layout: &StoreLayout,
-    manager: u64,
-    owner: u64,
-    key: u32,
-    page: &mut [u8; 4096],
-) -> crate::base::error::Result<()> {
-    use crate::base::error::Error;
-    let fail = |what: &str| Error::DebugInfo(format!("store page key {key:#x}: {what}"));
-    let store =
-        store_for_key(kernel, manager, layout.key_tree, key)?.ok_or_else(|| fail("in no store"))?;
-    if read_u64(kernel, store + u64::from(layout.owner_process))? != owner {
-        return Err(fail("its store belongs to another process"));
-    }
-    let st = embedded_store(kernel, store, layout.back_pointer)?;
-    let pages = read_u64(kernel, st + u64::from(layout.pages_tree))?;
-    let region_key = super::store_tree::search(&mut *kernel, pages, key)?
-        .ok_or_else(|| fail("not in its store's pages"))?;
-    let (record_key, size) = resolve_record(
-        kernel,
-        st,
-        layout.chunk_array,
-        layout.chunk_fields,
-        layout.redirect_next,
-        region_key,
-    )?;
-    let shift = read_u32(kernel, st + u64::from(layout.region_shift))?;
-    let mask = read_u32(kernel, st + u64::from(layout.region_offset_mask))?;
-    let (index, offset) =
-        region_location(record_key, shift, mask).ok_or_else(|| fail("bad region shift"))?;
-    let region = region_address(
-        kernel,
-        store,
-        layout.region_array,
-        layout.virtual_flag,
-        index,
-    )?;
-    // The size word's low 12 bits are the compressed length, 0 for a page
-    // kept as it is; the kernel keeps other state above them.
-    let length = match size & 0xfff {
-        0 => 0x1000,
-        length => length as usize,
-    };
-    let mut data = vec![0u8; length];
-    // The store's own pages can be paged out to disk, or left out of a dump.
-    regions(region + offset, &mut data).map_err(|_| {
-        fail(&format!(
-            "its compressed data at {:#x} is not in memory",
-            region + offset
-        ))
-    })?;
-    decompress_page(kernel, layout.compression, store, st, &data, page)
 }
 
 /// Where the store keeps what a page lookup needs. `SMKM_STORE` offsets are
@@ -292,9 +214,7 @@ pub struct StoreLayout {
     pub region_offset_mask: u32,
     /// `ST_STORE`: the array of chunk pointers that page records live in.
     pub chunk_array: u32,
-    /// `ST_STORE`: the chunk shift, records-per-chunk mask, record size and
-    /// chunk header size.
-    pub chunk_fields: [u32; 4],
+    pub chunk_fields: ChunkFields,
     /// `SMKM_STORE_MGR`: the tree from page key to store index.
     pub key_tree: u32,
     /// `ST_STORE`: the tree from page key to region key.
@@ -303,6 +223,19 @@ pub struct StoreLayout {
     /// key it redirects to; +4 to 26100, +8 from 28000.
     pub redirect_next: u32,
     pub compression: Compression,
+}
+
+/// The `ST_STORE` fields that place a page record in its chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkFields {
+    /// The shift that takes a region key to its chunk slot and entry.
+    pub shift: u32,
+    /// The mask that takes a region key to its record in the chunk.
+    pub mask: u32,
+    /// The bytes of a record.
+    pub record_size: u32,
+    /// The bytes before a chunk's first record.
+    pub header: u32,
 }
 
 /// How a store's pages are compressed.
@@ -323,102 +256,223 @@ pub enum Compression {
 pub struct CompressedPages {
     pub layout: StoreLayout,
     /// The `SMKM_STORE_MGR`.
-    pub manager: u64,
+    pub manager: VirtAddr,
     /// The owning process's `EPROCESS`, which each store names.
-    pub owner: u64,
+    pub owner: VirtAddr,
     /// The root of the owning process's address space.
-    pub owner_root: crate::base::types::Dtb,
+    pub owner_root: Dtb,
     /// The page-file number that PTEs of store pages carry.
     pub page_file: u8,
 }
 
 impl CompressedPages {
-    /// The page whose non-present PTE in `space` is `pte`, when that PTE
-    /// is in the store's page file; `None` for any other PTE.
-    pub fn read<B: super::MemoryOps<crate::base::types::PhysAddr>>(
+    /// Page `offset` of the store's page file, decompressed into `page`.
+    /// `space` reads the store manager and its stores; the regions are in
+    /// the owning process's address space.
+    pub fn read<B: MemoryOps<PhysAddr>>(
         &self,
-        space: &super::AddressSpace<'_, B>,
-        pte: crate::base::types::PageTableEntry,
-        page: &mut [u8; 4096],
-    ) -> Option<crate::base::error::Result<()>> {
-        use super::MemoryOps;
-        use crate::base::types::VirtAddr;
-        if pte.is_present() || pte.is_prototype() || pte.is_transition() {
-            return None;
+        space: &AddressSpace<'_, B>,
+        offset: u32,
+        page: &mut [u8; PAGE_SIZE],
+    ) -> Result<()> {
+        let owner =
+            AddressSpace::for_arch(space.backend, self.owner_root, space.kernel_dtb, space.arch);
+        // Before 24H2 a page's key carries the page-file number in its top
+        // four bits; from 24H2 it is the bare offset. A kernel's tree holds
+        // one form, so both are tried.
+        for key in [u32::from(self.page_file) << 28 | offset, offset] {
+            if let Some(store) = store_for_key(space, self.manager, self.layout.key_tree, key)? {
+                return self.read_key(space, &owner, store, key, page);
+            }
         }
-        let pte = pte.unswizzled(space.backend.invalid_pte_mask());
-        let (page_file, offset) = pte.page_file_location(space.backend.page_file_low());
-        if page_file != self.page_file || offset == 0 {
-            return None;
-        }
-        let mut kernel = |address: u64, buf: &mut [u8]| space.read_bytes(VirtAddr(address), buf);
-        let owner = super::AddressSpace::for_arch(
-            space.backend,
-            self.owner_root,
-            space.kernel_dtb,
-            space.arch,
-        );
-        let mut regions = |address: u64, buf: &mut [u8]| owner.read_bytes(VirtAddr(address), buf);
-        // The key carries the page-file number in its top four bits before
-        // 24H2 and not from it; a kernel's tree holds one form only.
-        let with_file = u32::from(self.page_file) << 28 | offset;
-        let key = match store_for_key(&mut kernel, self.manager, self.layout.key_tree, with_file) {
-            Ok(Some(_)) => with_file,
-            Ok(None) => offset,
-            Err(error) => return Some(Err(error)),
+        Err(Error::DebugInfo(format!(
+            "store page {offset:#x}: in no store"
+        )))
+    }
+
+    /// Page `key` of the `SMKM_STORE` at `store`, decompressed into `page`:
+    /// `kernel` reads the store, `regions` the address space of the process
+    /// that owns it, which the store must name.
+    pub fn read_key(
+        &self,
+        kernel: &impl MemoryOps<VirtAddr>,
+        regions: &impl MemoryOps<VirtAddr>,
+        store: VirtAddr,
+        key: u32,
+        page: &mut [u8; PAGE_SIZE],
+    ) -> Result<()> {
+        let layout = &self.layout;
+        let fail = |what: &dyn std::fmt::Display| {
+            Error::DebugInfo(format!("store page key {key:#x}: {what}"))
         };
-        Some(read_page(
-            &mut kernel,
-            &mut regions,
-            &self.layout,
-            self.manager,
-            self.owner,
-            key,
-            page,
-        ))
+        if kernel.read::<u64>(field(store, layout.owner_process))? != self.owner.0 {
+            return Err(fail(&"its store belongs to another process"));
+        }
+        let st = embedded_store(kernel, store, layout.back_pointer)?;
+        let pages: u64 = kernel.read(field(st, layout.pages_tree))?;
+        let region_key = store_tree::search(kernel, pages, key)?
+            .ok_or_else(|| fail(&"not in its store's pages"))?;
+        let (record_key, size) = resolve_record(kernel, st, layout, region_key)?;
+        let shift: u32 = kernel.read(field(st, layout.region_shift))?;
+        let mask: u32 = kernel.read(field(st, layout.region_offset_mask))?;
+        let (index, offset) =
+            region_location(record_key, shift, mask).ok_or_else(|| fail(&"bad region shift"))?;
+        let at = region_address(kernel, store, layout, index)? + offset;
+        // The size word's low 12 bits are the compressed length, 0 for a
+        // page kept as it is; the kernel keeps other state above them.
+        let length = match size & 0xfff {
+            0 => PAGE_SIZE,
+            length => length as usize,
+        };
+        let mut data = [0u8; PAGE_SIZE];
+        // The store's own pages can be paged out to disk, or left out of a
+        // dump.
+        regions.read_bytes(at, &mut data[..length]).map_err(|_| {
+            fail(&format_args!(
+                "its compressed data at {at:#x} is not in memory"
+            ))
+        })?;
+        decompress_page(kernel, layout.compression, store, st, &data[..length], page)
+    }
+}
+
+/// Test memory, and a whole store in it, for the tests of the store walk
+/// and of the page walk through it.
+#[cfg(test)]
+pub mod fixture {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// Guest memory of bytes at fixed addresses; no other address reads.
+    pub struct Bytes(BTreeMap<u64, u8>);
+
+    impl Bytes {
+        pub fn new<V: AsRef<[u8]>>(values: &[(u64, V)]) -> Self {
+            Self(
+                values
+                    .iter()
+                    .flat_map(|(at, data)| {
+                        (data.as_ref().iter().enumerate())
+                            .map(move |(i, &byte)| (at + i as u64, byte))
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    impl MemoryOps<VirtAddr> for Bytes {
+        fn read_bytes(&self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
+            for (i, byte) in buf.iter_mut().enumerate() {
+                *byte = *self
+                    .0
+                    .get(&(addr.0 + i as u64))
+                    .ok_or(Error::BadVirtualAddress(addr))?;
+            }
+            Ok(())
+        }
+
+        fn write_bytes(&self, addr: VirtAddr, _: &[u8]) -> Result<()> {
+            Err(Error::BadVirtualAddress(addr))
+        }
+    }
+
+    /// The layout of 24H2 from 26100.9278 on.
+    pub fn layout() -> StoreLayout {
+        StoreLayout {
+            owner_process: 0x1d00,
+            region_array: 0x1b68,
+            virtual_flag: (0x1a95, 2),
+            back_pointer: 0x320,
+            region_shift: 0x32c,
+            region_offset_mask: 0x328,
+            chunk_array: 0xc0,
+            chunk_fields: ChunkFields {
+                shift: 0x1c8,
+                mask: 0x1cc,
+                record_size: 0x1d0,
+                header: 0x1d8,
+            },
+            key_tree: 0x1c0,
+            pages_tree: 0,
+            redirect_next: 4,
+            compression: Compression::Lz4UnlessCount(0x12c0),
+        }
+    }
+
+    pub const MANAGER: u64 = 0x100_000;
+    pub const STORE: u64 = 0x200_000;
+    pub const OWNER: u64 = 0xffff_8000_0000_1000;
+    /// The page key the store holds: page 0x42 of page file 2.
+    pub const KEY: u32 = 0x2000_0042;
+    /// Where that page's compressed bytes are, in the owner's address
+    /// space.
+    pub const DATA_AT: u64 = 0x0123_0000_0200;
+
+    /// Kernel memory where the key tree of the store manager at [`MANAGER`]
+    /// leads [`KEY`] to the store at [`STORE`], owned by [`OWNER`], whose
+    /// page record for it has `size` as its size word and its bytes at
+    /// [`DATA_AT`].
+    pub fn kernel_values(size: u32) -> Vec<(u64, Vec<u8>)> {
+        let leaf = |key: u32, value: u32| store_tree::node(true, 0, &[(key, u64::from(value))]);
+        let q = |value: u64| value.to_le_bytes().to_vec();
+        let d = |value: u32| value.to_le_bytes().to_vec();
+        let st = STORE + 0x50;
+        let (region_key, record_key) = (1 << 8 | 2, 1 << 16 | 0x20);
+        vec![
+            (MANAGER + 0x1c0, q(0x110_000)),
+            (0x110_000, leaf(KEY, 0)),
+            (MANAGER, q(0x120_000)),
+            (0x120_000, q(STORE)),
+            (STORE + 0x1d00, q(OWNER)),
+            (st + 0x320, q(STORE)),
+            (STORE + 0x1b68, q(0x300_000)),
+            (STORE + 0x1a95, vec![0b100]),
+            (STORE + 0x12c0, d(0)),
+            (st, q(0x130_000)),
+            (0x130_000, leaf(KEY, region_key)),
+            (st + 0x1c8, d(8)),
+            (st + 0x1cc, d(0xff)),
+            (st + 0x1d0, d(8)),
+            (st + 0x1d8, d(0)),
+            (st + 0xc0, q(0x140_000)),
+            (0x140_000, q(0x150_000)),
+            (0x150_010, d(record_key)),
+            (0x150_014, d(size)),
+            (st + 0x32c, d(16)),
+            (st + 0x328, d(0xffff)),
+            // Region 1, its address with state bits.
+            (0x300_008, q((DATA_AT - 0x200) | 5)),
+        ]
+    }
+
+    /// The pages of that store, the owner's address space at `owner_root`.
+    pub fn pages(owner_root: Dtb) -> CompressedPages {
+        CompressedPages {
+            layout: layout(),
+            manager: VirtAddr(MANAGER),
+            owner: VirtAddr(OWNER),
+            owner_root,
+            page_file: 2,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::fixture::{self, Bytes, DATA_AT, KEY, MANAGER, STORE};
     use super::*;
-
-    /// Memory of little-endian values at fixed addresses.
-    fn memory(
-        values: &[(u64, &[u8])],
-    ) -> impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()> + use<> {
-        let bytes: std::collections::BTreeMap<u64, u8> = values
-            .iter()
-            .flat_map(|(at, data)| {
-                data.iter()
-                    .enumerate()
-                    .map(move |(i, b)| (at + i as u64, *b))
-            })
-            .collect();
-        move |address, out| {
-            for (i, byte) in out.iter_mut().enumerate() {
-                *byte = *bytes.get(&(address + i as u64)).ok_or(
-                    crate::base::error::Error::BadVirtualAddress(crate::base::types::VirtAddr(
-                        address,
-                    )),
-                )?;
-            }
-            Ok(())
-        }
-    }
 
     #[test]
     fn a_redirect_record_leads_to_the_page_and_a_loop_is_refused() {
-        let st = 0x10_000;
-        let fields = [0x1c8, 0x1cc, 0x1d0, 0x1d8];
+        let st = VirtAddr(0x10_000);
         let first: u32 = 0b100 << 8;
         let second: u32 = 0b100 << 8 | 1;
         let mut values: Vec<(u64, Vec<u8>)> = vec![
-            (st + 0x1c8, 8u32.to_le_bytes().to_vec()),
-            (st + 0x1cc, 0xffu32.to_le_bytes().to_vec()),
-            (st + 0x1d0, 12u32.to_le_bytes().to_vec()),
-            (st + 0x1d8, 0u32.to_le_bytes().to_vec()),
-            (st + 0xc0 + 2 * 8, 0x20_000u64.to_le_bytes().to_vec()),
+            (st.0 + 0x1c8, 8u32.to_le_bytes().to_vec()),
+            (st.0 + 0x1cc, 0xffu32.to_le_bytes().to_vec()),
+            (st.0 + 0x1d0, 12u32.to_le_bytes().to_vec()),
+            (st.0 + 0x1d8, 0u32.to_le_bytes().to_vec()),
+            (st.0 + 0xc0 + 2 * 8, 0x20_000u64.to_le_bytes().to_vec()),
             (0x20_000, 0x30_000u64.to_le_bytes().to_vec()),
             // Record 0 redirects to record 1, which holds the page.
             (0x30_000, u32::MAX.to_le_bytes().to_vec()),
@@ -426,136 +480,103 @@ mod tests {
             (0x30_000 + 12, 0x0005_0042u32.to_le_bytes().to_vec()),
             (0x30_000 + 16, 0x0123u32.to_le_bytes().to_vec()),
         ];
-        let borrowed: Vec<(u64, &[u8])> = values.iter().map(|(a, b)| (*a, b.as_slice())).collect();
-        let mut read = memory(&borrowed);
+        let layout = fixture::layout();
         assert_eq!(
-            resolve_record(&mut read, st, 0xc0, fields, 4, first).unwrap(),
+            resolve_record(&Bytes::new(&values), st, &layout, first).unwrap(),
             (0x0005_0042, 0x123)
         );
         // 28000 keeps the next key at +8, past the size word at +4.
         let mut moved = values.clone();
         moved[7].1 = 0x0000_0123u32.to_le_bytes().to_vec();
         moved.push((0x30_008, second.to_le_bytes().to_vec()));
-        let borrowed: Vec<(u64, &[u8])> = moved.iter().map(|(a, b)| (*a, b.as_slice())).collect();
-        let mut read = memory(&borrowed);
+        let layout_28000 = StoreLayout {
+            redirect_next: 8,
+            ..fixture::layout()
+        };
         assert_eq!(
-            resolve_record(&mut read, st, 0xc0, fields, 8, first).unwrap(),
+            resolve_record(&Bytes::new(&moved), st, &layout_28000, first).unwrap(),
             (0x0005_0042, 0x123)
         );
         // Record 0 redirecting to itself.
         values[7].1 = first.to_le_bytes().to_vec();
-        let borrowed: Vec<(u64, &[u8])> = values.iter().map(|(a, b)| (*a, b.as_slice())).collect();
-        let mut read = memory(&borrowed);
-        assert!(resolve_record(&mut read, st, 0xc0, fields, 4, first).is_err());
+        assert!(resolve_record(&Bytes::new(&values), st, &layout, first).is_err());
     }
 
     #[test]
     fn a_region_entry_is_an_address_or_a_descriptor() {
-        let store = 0x10_000;
-        let values: Vec<(u64, Vec<u8>)> = vec![
-            (store + 0x1b68, 0x20_000u64.to_le_bytes().to_vec()),
-            (
-                0x20_000 + 3 * 8,
-                0x0000_0123_4567_0005u64.to_le_bytes().to_vec(),
-            ),
-            (store + 0x1a95, vec![0b100]),
-        ];
-        let borrowed: Vec<(u64, &[u8])> = values.iter().map(|(a, b)| (*a, b.as_slice())).collect();
-        let mut read = memory(&borrowed);
+        let store = VirtAddr(0x10_000);
+        let layout = fixture::layout();
+        let entry = |value: u64, flags: u8, descriptor: Option<u64>| {
+            let mut values = vec![
+                (store.0 + 0x1b68, 0x20_000u64.to_le_bytes().to_vec()),
+                (0x20_000 + 3 * 8, value.to_le_bytes().to_vec()),
+                (store.0 + 0x1a95, vec![flags]),
+            ];
+            values.extend(descriptor.map(|at| (0x30_000 + 0x18, at.to_le_bytes().to_vec())));
+            region_address(&Bytes::new(&values), store, &layout, 3).unwrap()
+        };
         assert_eq!(
-            region_address(&mut read, store, 0x1b68, (0x1a95, 2), 3).unwrap(),
-            0x0123_4567_0000
+            entry(0x0000_0123_4567_0005, 0b100, None),
+            VirtAddr(0x0123_4567_0000)
         );
-        let values: Vec<(u64, Vec<u8>)> = vec![
-            (store + 0x1b68, 0x20_000u64.to_le_bytes().to_vec()),
-            (0x20_000 + 3 * 8, 0x30_003u64.to_le_bytes().to_vec()),
-            (store + 0x1a95, vec![0]),
-            (
-                0x30_000 + 0x18,
-                0x0000_0222_0000_0000u64.to_le_bytes().to_vec(),
-            ),
-        ];
-        let borrowed: Vec<(u64, &[u8])> = values.iter().map(|(a, b)| (*a, b.as_slice())).collect();
-        let mut read = memory(&borrowed);
         assert_eq!(
-            region_address(&mut read, store, 0x1b68, (0x1a95, 2), 3).unwrap(),
-            0x0222_0000_0000
+            entry(0x30_003, 0, Some(0x0222_0000_0000)),
+            VirtAddr(0x0222_0000_0000)
         );
     }
 
     #[test]
     fn a_page_key_leads_to_its_store_through_the_table() {
-        let manager = 0x10_000;
-        let leaf = |key: u32, value: u32| {
-            let mut node = vec![0u8; 16];
-            node[0] = 1;
-            node[3] = 1;
-            node.extend_from_slice(&key.to_le_bytes());
-            node.extend_from_slice(&value.to_le_bytes());
-            node
-        };
-        let values: Vec<(u64, Vec<u8>)> = vec![
-            (manager + 0x1c0, 0x40_000u64.to_le_bytes().to_vec()),
+        let manager = VirtAddr(0x10_000);
+        let memory = Bytes::new(&[
+            (manager.0 + 0x1c0, 0x40_000u64.to_le_bytes().to_vec()),
             // Store index 33: row 1, entry 1.
-            (0x40_000, leaf(0x2000_1234, 33)),
-            (manager + 8, 0x50_000u64.to_le_bytes().to_vec()),
+            (0x40_000, store_tree::node(true, 0, &[(0x2000_1234, 33)])),
+            (manager.0 + 8, 0x50_000u64.to_le_bytes().to_vec()),
             (0x50_000 + 0x28, 0x60_000u64.to_le_bytes().to_vec()),
-        ];
-        let borrowed: Vec<(u64, &[u8])> = values.iter().map(|(a, b)| (*a, b.as_slice())).collect();
-        let mut read = memory(&borrowed);
+        ]);
         assert_eq!(
-            store_for_key(&mut read, manager, 0x1c0, 0x2000_1234).unwrap(),
-            Some(0x60_000)
+            store_for_key(&memory, manager, 0x1c0, 0x2000_1234).unwrap(),
+            Some(VirtAddr(0x60_000))
         );
         assert_eq!(
-            store_for_key(&mut read, manager, 0x1c0, 0x2000_1235).unwrap(),
+            store_for_key(&memory, manager, 0x1c0, 0x2000_1235).unwrap(),
             None
         );
     }
 
     #[test]
     fn the_embedded_store_is_the_one_that_points_back() {
-        let store = 0x10_000;
-        let values: Vec<(u64, Vec<u8>)> = vec![
+        let store = VirtAddr(0x10_000);
+        let memory = Bytes::new(&[
             // A pointer elsewhere at 0x40's back-pointer slot, the store at 0x50's.
-            (store + 0x40 + 0x320, 0x99_000u64.to_le_bytes().to_vec()),
-            (store + 0x50 + 0x320, store.to_le_bytes().to_vec()),
-        ];
-        let borrowed: Vec<(u64, &[u8])> = values.iter().map(|(a, b)| (*a, b.as_slice())).collect();
-        let mut read = memory(&borrowed);
+            (store.0 + 0x40 + 0x320, 0x99_000u64.to_le_bytes()),
+            (store.0 + 0x50 + 0x320, store.0.to_le_bytes()),
+        ]);
         assert_eq!(
-            embedded_store(&mut read, store, 0x320).unwrap(),
-            store + 0x50
+            embedded_store(&memory, store, 0x320).unwrap(),
+            store + 0x50u64
         );
-        assert!(embedded_store(&mut read, store + 0x1000, 0x320).is_err());
+        assert!(embedded_store(&memory, store + 0x1000u64, 0x320).is_err());
     }
 
     #[test]
     fn a_page_decompresses_by_the_stores_algorithm() {
-        let (store, st) = (0x10_000u64, 0x10_050u64);
+        let (store, st) = (VirtAddr(0x10_000), VirtAddr(0x10_050));
         let original: Vec<u8> = (0..4096u32).map(|i| (i / 64) as u8).collect();
         let decompress = |values: &[(u64, Vec<u8>)], compression, data: &[u8]| {
-            let borrowed: Vec<(u64, &[u8])> =
-                values.iter().map(|(a, b)| (*a, b.as_slice())).collect();
-            let mut page = [0u8; 4096];
-            decompress_page(
-                &mut memory(&borrowed),
-                compression,
-                store,
-                st,
-                data,
-                &mut page,
-            )
-            .map(|()| page.to_vec())
+            let mut page = [0u8; PAGE_SIZE];
+            decompress_page(&Bytes::new(values), compression, store, st, data, &mut page)
+                .map(|()| page.to_vec())
         };
         // 24H2: LZ4 while the store's algorithm count is zero.
         let lz4 = lz4_flex::block::compress(&original);
-        let zero = [(store + 0x12c0, 0u32.to_le_bytes().to_vec())];
+        let zero = [(store.0 + 0x12c0, 0u32.to_le_bytes().to_vec())];
         assert_eq!(
             decompress(&zero, Compression::Lz4UnlessCount(0x12c0), &lz4).unwrap(),
             original
         );
-        let listed = [(store + 0x12c0, 2u32.to_le_bytes().to_vec())];
+        let listed = [(store.0 + 0x12c0, 2u32.to_le_bytes().to_vec())];
         assert!(decompress(&listed, Compression::Lz4UnlessCount(0x12c0), &lz4).is_err());
         // Before 24H2: the format field; XPRESS as literals only.
         let mut xpress = Vec::new();
@@ -564,7 +585,7 @@ mod tests {
             xpress.extend_from_slice(group);
         }
         xpress.extend_from_slice(&[0; 4]);
-        let format = |value: u16| [(st + 0x3e0, value.to_le_bytes().to_vec())];
+        let format = |value: u16| [(st.0 + 0x3e0, value.to_le_bytes().to_vec())];
         assert_eq!(
             decompress(&format(3), Compression::FormatField(0x3e0), &xpress).unwrap(),
             original
@@ -579,124 +600,46 @@ mod tests {
 
     #[test]
     fn a_page_key_reads_back_its_page_through_the_whole_store() {
-        let layout = StoreLayout {
-            owner_process: 0x1d00,
-            region_array: 0x1b68,
-            virtual_flag: (0x1a95, 2),
-            back_pointer: 0x320,
-            region_shift: 0x32c,
-            region_offset_mask: 0x328,
-            chunk_array: 0xc0,
-            chunk_fields: [0x1c8, 0x1cc, 0x1d0, 0x1d8],
-            key_tree: 0x1c0,
-            pages_tree: 0,
-            redirect_next: 4,
-            compression: Compression::Lz4UnlessCount(0x12c0),
-        };
-        let leaf = |key: u32, value: u32| {
-            let mut node = vec![1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-            node.extend_from_slice(&key.to_le_bytes());
-            node.extend_from_slice(&value.to_le_bytes());
-            node
-        };
-        let q = |value: u64| value.to_le_bytes().to_vec();
-        let d = |value: u32| value.to_le_bytes().to_vec();
-        let (manager, store, owner) = (0x100_000u64, 0x200_000u64, 0xffff_8000_0000_1000u64);
-        let st = store + 0x50;
-        let (key, region_key, record_key) = (0x2000_0042u32, 1 << 8 | 2, 1 << 16 | 0x20);
         let original: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
         let data = lz4_flex::block::compress(&original);
-        let kernel_values: Vec<(u64, Vec<u8>)> = vec![
-            (manager + 0x1c0, q(0x110_000)),
-            (0x110_000, leaf(key, 0)),
-            (manager, q(0x120_000)),
-            (0x120_000, q(store)),
-            (store + 0x1d00, q(owner)),
-            (st + 0x320, q(store)),
-            (store + 0x1b68, q(0x300_000)),
-            (store + 0x1a95, vec![0b100]),
-            (store + 0x12c0, d(0)),
-            (st, q(0x130_000)),
-            (0x130_000, leaf(key, region_key)),
-            (st + 0x1c8, d(8)),
-            (st + 0x1cc, d(0xff)),
-            (st + 0x1d0, d(8)),
-            (st + 0x1d8, d(0)),
-            (st + 0xc0, q(0x140_000)),
-            (0x140_000, q(0x150_000)),
-            (0x150_010, d(record_key)),
-            (0x150_014, d(data.len() as u32)),
-            (st + 0x32c, d(16)),
-            (st + 0x328, d(0xffff)),
-            (0x300_008, q(0x0123_0000_0000 | 5)),
-        ];
-        let kernel: Vec<(u64, &[u8])> = kernel_values
-            .iter()
-            .map(|(a, b)| (*a, b.as_slice()))
-            .collect();
-        let region: Vec<(u64, &[u8])> = vec![(0x0123_0000_0200, data.as_slice())];
-        let mut page = [0u8; 4096];
-        read_page(
-            &mut memory(&kernel),
-            &mut memory(&region),
-            &layout,
-            manager,
-            owner,
-            key,
-            &mut page,
-        )
-        .unwrap();
-        assert_eq!(&page[..], &original[..]);
+        let read = |pages: &CompressedPages, size: u32, stored: &[u8]| {
+            let kernel = Bytes::new(&fixture::kernel_values(size));
+            let regions = Bytes::new(&[(DATA_AT, stored)]);
+            let store = store_for_key(&kernel, VirtAddr(MANAGER), 0x1c0, KEY)?.unwrap();
+            assert_eq!(store, VirtAddr(STORE));
+            let mut page = [0xccu8; PAGE_SIZE];
+            pages
+                .read_key(&kernel, &regions, store, KEY, &mut page)
+                .map(|()| page.to_vec())
+        };
+        let pages = fixture::pages(0);
+        assert_eq!(read(&pages, data.len() as u32, &data).unwrap(), original);
         // A size word whose low 12 bits are 0 holds the page as it is,
         // whatever the kernel keeps above them.
-        let raw: Vec<(u64, Vec<u8>)> = kernel_values
-            .iter()
-            .map(|(at, value)| match at {
-                0x150_014 => (*at, d(0x5000)),
-                _ => (*at, value.clone()),
-            })
-            .collect();
-        let raw: Vec<(u64, &[u8])> = raw.iter().map(|(a, b)| (*a, b.as_slice())).collect();
-        let stored: Vec<(u64, &[u8])> = vec![(0x0123_0000_0200, original.as_slice())];
-        page.fill(0xcc);
-        read_page(
-            &mut memory(&raw),
-            &mut memory(&stored),
-            &layout,
-            manager,
-            owner,
-            key,
-            &mut page,
-        )
-        .unwrap();
-        assert_eq!(&page[..], &original[..]);
+        assert_eq!(read(&pages, 0x5000, &original).unwrap(), original);
         // A store that names another owner is not read.
-        let other = read_page(
-            &mut memory(&kernel),
-            &mut memory(&region),
-            &layout,
-            manager,
-            owner + 8,
-            key,
-            &mut page,
-        );
-        assert!(other.is_err());
+        let other = CompressedPages {
+            owner: VirtAddr(fixture::OWNER + 8),
+            ..fixture::pages(0)
+        };
+        assert!(read(&other, data.len() as u32, &data).is_err());
     }
+
     #[test]
     fn a_page_record_is_found_through_its_chunk() {
-        let st = 0x10_000;
+        let st = VirtAddr(0x10_000);
         let key = 0b101 << 8 | 0x03;
-        let mut read = memory(&[
-            (st + 0x1c8, &8u32.to_le_bytes()),
-            (st + 0x1cc, &0xffu32.to_le_bytes()),
-            (st + 0x1d0, &12u32.to_le_bytes()),
-            (st + 0x1d8, &0x20u32.to_le_bytes()),
+        let memory = Bytes::new(&[
+            (st.0 + 0x1c8, 8u32.to_le_bytes().to_vec()),
+            (st.0 + 0x1cc, 0xffu32.to_le_bytes().to_vec()),
+            (st.0 + 0x1d0, 12u32.to_le_bytes().to_vec()),
+            (st.0 + 0x1d8, 0x20u32.to_le_bytes().to_vec()),
             // Slot 2 (0b101's top bit), entry 1 (0b01).
-            (st + 0xc0 + 2 * 8, &0x20_000u64.to_le_bytes()),
-            (0x20_000 + 16, &0x30_000u64.to_le_bytes()),
+            (st.0 + 0xc0 + 2 * 8, 0x20_000u64.to_le_bytes().to_vec()),
+            (0x20_000 + 16, 0x30_000u64.to_le_bytes().to_vec()),
         ]);
-        let record = page_record(&mut read, st, 0xc0, [0x1c8, 0x1cc, 0x1d0, 0x1d8], key).unwrap();
-        assert_eq!(record, 0x30_000 + 0x20 + 12 * 3);
+        let record = page_record(&memory, st, &fixture::layout(), key).unwrap();
+        assert_eq!(record, VirtAddr(0x30_000 + 0x20 + 12 * 3));
     }
 
     #[test]
@@ -705,14 +648,6 @@ mod tests {
         assert_eq!(chunk_entry(0b1_0110 << 8 | 0x7f, 8), Some((4, 6 * 16)));
         assert_eq!(chunk_entry(1 << 8, 8), Some((0, 0)));
         assert_eq!(chunk_entry(0xff, 8), None, "no bit above the shift");
-    }
-
-    #[test]
-    fn a_record_is_past_the_header_by_its_index() {
-        assert_eq!(
-            record_address(0x1000, 0x1234, 0xff, 12, 0x20),
-            0x1000 + 0x20 + 12 * 0x34
-        );
     }
 
     #[test]

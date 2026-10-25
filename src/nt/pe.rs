@@ -823,6 +823,23 @@ pub fn version_strings(info: &[u32; 13]) -> (String, String) {
     (version(info[2], info[3]), version(info[4], info[5]))
 }
 
+/// The `[start, end)` RVAs of the executable sections `view`'s headers
+/// list, clipped to the image's `SizeOfImage`; a section with nothing in the
+/// image is left out.
+pub fn executable_ranges<'a>(view: &impl pelite::pe64::Pe<'a>) -> Vec<(u32, u32)> {
+    let size = view.optional_header().SizeOfImage;
+    view.section_headers()
+        .iter()
+        .filter(|section| section.Characteristics & pelite::image::IMAGE_SCN_MEM_EXECUTE != 0)
+        .map(|section| {
+            let start = section.VirtualAddress;
+            let end = start.saturating_add(section.VirtualSize.max(section.SizeOfRawData));
+            (start, end.min(size))
+        })
+        .filter(|(start, end)| start < end)
+        .collect()
+}
+
 /// Whether `disk` is the file `mapped` was loaded from: the headers agree
 /// except in `OptionalHeader.ImageBase`, which the loader rewrites to the
 /// address it relocated the image to.

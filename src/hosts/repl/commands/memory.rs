@@ -1115,8 +1115,8 @@ fn pagein(
         // MmPrefetchVirtualMemory declines addresses that are not backed
         // at all, and the worker reports completion either way.
         let target = &state.ctx.target;
-        let memory = dtb.map_or_else(|| target.context_memory(), |dtb| target.address_space(dtb));
-        let why = memory.non_resident(address).map_or_else(
+        let dtb = dtb.unwrap_or_else(|| target.current_dtb());
+        let why = target.non_resident(dtb, address).map_or_else(
             || "it may be unmapped rather than paged out".to_string(),
             |why| why.to_string(),
         );

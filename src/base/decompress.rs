@@ -8,14 +8,14 @@ use crate::base::error::{Error, Result};
 /// Decompress an LZ4 block into `out`, which must come out exactly full.
 pub fn lz4(input: &[u8], out: &mut [u8]) -> Result<()> {
     let written = lz4_flex::block::decompress_into(input, out)
-        .map_err(|error| Error::Kd(format!("LZ4: {error}")))?;
+        .map_err(|error| Error::DebugInfo(format!("LZ4: {error}")))?;
     exact(written, out.len())
 }
 
 /// Decompress plain LZ77 (XPRESS) data into `out`, which must come out
 /// exactly full.
 pub fn xpress(input: &[u8], out: &mut [u8]) -> Result<()> {
-    let bad = |what: &str| Error::Kd(format!("XPRESS: {what}"));
+    let bad = |what: &str| Error::DebugInfo(format!("XPRESS: {what}"));
     let mut written = 0usize;
     let mut position = 0usize;
     let mut flags = 0u32;
@@ -34,13 +34,16 @@ pub fn xpress(input: &[u8], out: &mut [u8]) -> Result<()> {
         *position += 2;
         Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
     };
+    let dword = |position: &mut usize| -> Result<u32> {
+        let bytes = input
+            .get(*position..*position + 4)
+            .ok_or_else(|| bad("truncated"))?;
+        *position += 4;
+        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    };
     loop {
         if flag_count == 0 {
-            let bytes = input
-                .get(position..position + 4)
-                .ok_or_else(|| bad("truncated"))?;
-            flags = u32::from_le_bytes(bytes.try_into().unwrap());
-            position += 4;
+            flags = dword(&mut position)?;
             flag_count = 32;
         }
         flag_count -= 1;
@@ -71,11 +74,7 @@ pub fn xpress(input: &[u8], out: &mut [u8]) -> Result<()> {
                 if length == 255 {
                     length = usize::from(word(&mut position)?);
                     if length == 0 {
-                        let bytes = input
-                            .get(position..position + 4)
-                            .ok_or_else(|| bad("truncated"))?;
-                        length = u32::from_le_bytes(bytes.try_into().unwrap()) as usize;
-                        position += 4;
+                        length = dword(&mut position)? as usize;
                     }
                     length = length
                         .checked_sub(15 + 7)
@@ -104,7 +103,7 @@ fn exact(written: usize, wanted: usize) -> Result<()> {
     if written == wanted {
         Ok(())
     } else {
-        Err(Error::Kd(format!(
+        Err(Error::DebugInfo(format!(
             "decompressed {written:#x} bytes, expected {wanted:#x}"
         )))
     }
@@ -114,17 +113,16 @@ fn exact(written: usize, wanted: usize) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// A page must decompress to exactly a page; less is refused, not
+    /// padded.
     #[test]
-    fn lz4_round_trips_a_page() {
+    fn lz4_data_must_fill_the_page() {
         let page: Vec<u8> = (0..4096u32).map(|i| (i % 7) as u8).collect();
-        let packed = lz4_flex::block::compress(&page);
         let mut out = [0u8; 4096];
-        lz4(&packed, &mut out).unwrap();
+        lz4(&lz4_flex::block::compress(&page), &mut out).unwrap();
         assert_eq!(&out[..], &page[..]);
-        assert!(
-            lz4(&packed, &mut [0u8; 4095]).is_err(),
-            "a short page is refused"
-        );
+        let short = lz4_flex::block::compress(&page[..4000]);
+        assert!(lz4(&short, &mut out).is_err());
     }
 
     #[test]

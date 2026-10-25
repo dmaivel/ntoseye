@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::{ExpressionScope, ReloadReport, StartupMessage, Target, UserProcess};
 use crate::arch::Arch;
@@ -273,8 +273,15 @@ impl Target {
     /// in the REPL), and work this target does, a run from the view among
     /// it, must see it.
     pub fn share_interrupt(&mut self, other: &Target) {
-        self.interrupt = Arc::clone(&other.interrupt);
+        self.set_interrupt(Arc::clone(&other.interrupt));
         self.interrupt_requests = Arc::clone(&other.interrupt_requests);
+    }
+
+    /// Make `flag` the interrupt flag, this target's and its memory's, so
+    /// Ctrl+C on it stops the work either does.
+    pub fn set_interrupt(&mut self, flag: Arc<AtomicBool>) {
+        self.phys.set_interrupt_flag(Arc::clone(&flag));
+        self.interrupt = flag;
     }
 
     /// Count a rebuild without one, so a host takes the handles it minted

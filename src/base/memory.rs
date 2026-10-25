@@ -4,16 +4,16 @@ use crate::base::types::*;
 use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 mod ops;
 mod sections;
-mod store;
+pub mod store;
 mod store_tree;
 
 pub use ops::{MemoryOps, PAGE_FILE_LOW};
 pub use sections::{SectionLayout, SectionViews};
-pub use store::{CompressedPages, Compression, StoreLayout};
+pub use store::{ChunkFields, CompressedPages, Compression, StoreLayout};
 
 pub const PAGE_SIZE: usize = 0x1000; // 4KiB
 
@@ -238,7 +238,7 @@ pub struct WalkStep {
 /// page the guest compressed into its memory-compression store, a copy.
 enum TablePage {
     Frame(PhysAddr),
-    Stored(Box<[u8; PAGE_SIZE]>),
+    Stored(Arc<[u8; PAGE_SIZE]>),
 }
 
 /// Entry `index` of the table page `page`.
@@ -433,6 +433,37 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         end: VirtAddr,
         mut visit: impl FnMut(VirtAddr, PhysAddr, u64) -> ControlFlow<()>,
     ) -> Result<()> {
+        self.visit_range(
+            start,
+            end,
+            &mut visit,
+            &mut None::<fn(VirtAddr, PageTableEntry)>,
+        )
+    }
+
+    /// [`Self::for_each_present_page`], also handing `absent` each
+    /// non-present, non-zero PTE-level entry in `[start, end)` with the
+    /// address of its page: pages that are paged out or otherwise not in
+    /// memory. Tables the guest trimmed (in transition, or in the
+    /// memory-compression store) are walked too.
+    pub fn for_each_page(
+        &self,
+        start: VirtAddr,
+        end: VirtAddr,
+        mut present: impl FnMut(VirtAddr, PhysAddr, u64) -> ControlFlow<()>,
+        absent: impl FnMut(VirtAddr, PageTableEntry),
+    ) -> Result<()> {
+        self.visit_range(start, end, &mut present, &mut Some(absent))
+    }
+
+    /// The walk of [`Self::for_each_page`], `absent` optional.
+    fn visit_range(
+        &self,
+        start: VirtAddr,
+        end: VirtAddr,
+        visit: &mut impl FnMut(VirtAddr, PhysAddr, u64) -> ControlFlow<()>,
+        absent: &mut Option<impl FnMut(VirtAddr, PageTableEntry)>,
+    ) -> Result<()> {
         if start.0 >= end.0 {
             return Ok(());
         }
@@ -448,51 +479,12 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         } else {
             0
         };
-        let _ = self.visit_table(
-            TablePage::Frame(self.root_for(start)),
-            0,
-            half,
-            start.0,
-            end.0,
-            &mut visit,
-            &mut None::<fn(VirtAddr, PageTableEntry)>,
-        )?;
+        let root = TablePage::Frame(self.root_for(start));
+        let _ = self.visit_table(root, 0, half, start.0, end.0, visit, absent)?;
         Ok(())
     }
 
-    /// Each non-present, non-zero PTE-level entry that maps a page in
-    /// `[start, end)`, with the address of its page: pages that are paged
-    /// out or otherwise not in memory. Absent tables are skipped whole,
-    /// except ones the guest trimmed: in transition, or in the
-    /// memory-compression store.
-    pub fn for_each_absent_pte(
-        &self,
-        start: VirtAddr,
-        end: VirtAddr,
-        visit: impl FnMut(VirtAddr, PageTableEntry),
-    ) -> Result<()> {
-        if start.0 >= end.0 || self.dtb == DTB_IDENTITY {
-            return Ok(());
-        }
-        let bits = self.arch.paging().levels()[0].shift() + 9;
-        let half = if start.0 & (1 << (bits - 1)) != 0 {
-            !0 << bits
-        } else {
-            0
-        };
-        let _ = self.visit_table(
-            TablePage::Frame(self.root_for(start)),
-            0,
-            half,
-            start.0,
-            end.0,
-            &mut |_, _, _| ControlFlow::Continue(()),
-            &mut Some(visit),
-        )?;
-        Ok(())
-    }
-
-    /// One table of [`Self::for_each_present_page`], `depth` levels below
+    /// One table of [`Self::for_each_page`], `depth` levels below
     /// the root, covering from `base`; entries outside `[start, end)` are
     /// skipped. With `absent`, it is handed each non-present PTE-level
     /// entry, and tables the guest trimmed are visited too
@@ -571,7 +563,7 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         }
         match self.walk_tables(va, |_| {})? {
             Walked::Mapped(translation) => Ok(Some(translation)),
-            Walked::Unmapped(leaf) => Ok(self.section_page(va, leaf)),
+            walked => Ok(self.section_page(va, walked.leaf())),
         }
     }
 
@@ -584,7 +576,7 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         let mut steps = Vec::with_capacity(PageTableLevel::ALL.len());
         let translation = match self.walk_tables(va, |step| steps.push(step))? {
             Walked::Mapped(translation) => Some(translation),
-            Walked::Unmapped(leaf) => self.section_page(va, leaf),
+            walked => self.section_page(va, walked.leaf()),
         };
         Ok((steps, translation))
     }
@@ -604,7 +596,11 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
                 TablePage::Frame(frame) => {
                     let address = frame + 8 * index;
                     let Some(entry) = self.read_pt_entry(address)? else {
-                        return Ok(Walked::Unmapped(None));
+                        let stop = match depth.checked_sub(1) {
+                            Some(up) => Stop::Unreadable(paging.levels()[up]),
+                            None => Stop::Root,
+                        };
+                        return Ok(Walked::Stopped(stop));
                     };
                     on_step(WalkStep {
                         level,
@@ -630,7 +626,7 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
                 TableEntry::Absent if level != PageTableLevel::Pte => {
                     match self.absent_table(entry) {
                         Some(page) => table = page,
-                        None => return Ok(Walked::Unmapped(None)),
+                        None => return Ok(Walked::Stopped(Stop::Absent(level, entry))),
                     }
                 }
                 TableEntry::Absent => {
@@ -644,12 +640,11 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
                         let pte = entry.unswizzled(self.backend.invalid_pte_mask());
                         return Ok(Walked::Mapped(Translation::new_transition(pte, va)));
                     }
-                    return Ok(Walked::Unmapped(Some(entry)));
+                    return Ok(Walked::Unmapped(entry));
                 }
             }
         }
-        // The last level decodes no table.
-        Ok(Walked::Unmapped(None))
+        unreachable!("the last level maps a page or nothing")
     }
 
     /// A user page of a mapped view that the tables do not map, read from
@@ -689,25 +684,33 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
     /// holds zeros because it was never touched: for `private` memory, its
     /// PTE is a demand-zero one or there is none (no table, or zero); for a
     /// view, the section PTE the page maps is a demand-zero one. A page in
-    /// the page file, or a view's page in its file, is not.
+    /// the page file, or a view's page in its file, is not, and neither is
+    /// one whose page table is paged out or does not read.
     pub fn page_is_demand_zero(&self, va: VirtAddr, private: bool) -> bool {
         if self.dtb == DTB_IDENTITY || self.arch.paging().is_kernel_address(va) {
             return false;
         }
-        let leaf = match self.walk_tables(va, |_| {}) {
-            Ok(Walked::Unmapped(leaf)) => leaf,
+        let walked = match self.walk_tables(va, |_| {}) {
             Ok(Walked::Mapped(_)) | Err(_) => return false,
+            Ok(walked) => walked,
         };
         let mask = self.backend.invalid_pte_mask();
         let low = self.backend.page_file_low();
+        let never_touched =
+            |entry: PageTableEntry| entry.0 == 0 || entry.unswizzled(mask).is_demand_zero(low);
         if private {
-            return leaf.is_none_or(|pte| pte.0 == 0 || pte.unswizzled(mask).is_demand_zero(low));
+            return match walked {
+                Walked::Unmapped(entry) | Walked::Stopped(Stop::Absent(_, entry)) => {
+                    never_touched(entry)
+                }
+                Walked::Mapped(_) | Walked::Stopped(Stop::Root | Stop::Unreadable(_)) => false,
+            };
         }
         let Some(views) = self.backend.section_views() else {
             return false;
         };
         let from_vad = || views.prototype_pte(self, self.dtb, va);
-        let prototype = match leaf {
+        let prototype = match walked.leaf() {
             None => from_vad(),
             Some(pte) if pte.0 == 0 => from_vad(),
             Some(pte) if pte.is_prototype() => pte.prototype_address().or_else(from_vad),
@@ -725,6 +728,26 @@ thread_local! {
     static IN_STORE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Holds [`IN_STORE`] set while it lives, and restores it when dropped, even
+/// if the read unwinds.
+struct InStore {
+    was: bool,
+}
+
+impl InStore {
+    fn enter() -> Self {
+        Self {
+            was: IN_STORE.replace(true),
+        }
+    }
+}
+
+impl Drop for InStore {
+    fn drop(&mut self) {
+        IN_STORE.set(self.was);
+    }
+}
+
 impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
     /// Whether the page at `va` is in the guest's memory-compression store
     /// and decompresses: the page tables leave it unmapped, and a read
@@ -733,73 +756,62 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         matches!(self.compressed_page(va), Some(Ok(_)))
     }
 
+    /// [`Self::page_is_compressed`] for a page whose non-present PTE a walk
+    /// already has.
+    pub fn pte_is_compressed(&self, pte: PageTableEntry) -> bool {
+        matches!(self.stored_page(pte), Some(Ok(_)))
+    }
+
     /// Why the page at `va` is not in memory, as its page tables say; `None`
-    /// when it is (mapped, in transition, or a view's page in memory).
+    /// when it is (mapped, in transition, or a view's page in memory), or
+    /// when not even the root table reads.
     pub fn non_resident(&self, va: VirtAddr) -> Option<NonResident> {
         if self.dtb == DTB_IDENTITY {
             return None;
         }
-        let mut last = None;
-        let leaf = match self.walk_tables(va, |step| last = Some(step)).ok()? {
-            Walked::Mapped(_) => return None,
-            Walked::Unmapped(leaf) if self.section_page(va, leaf).is_some() => return None,
-            Walked::Unmapped(leaf) => leaf,
-        };
-        if let Some(pte) = leaf {
-            return Some(NonResident {
-                table: None,
-                place: self.place_of(pte, true),
-            });
+        let walked = self.walk_tables(va, |_| {}).ok()?;
+        if self.section_page(va, walked.leaf()).is_some() {
+            return None;
         }
-        // The walk stopped above the PTE: at an entry that is not present,
-        // or at one whose table does not read.
-        let step = last?;
-        let place = match self.arch.paging().decode_entry(step.level, step.entry) {
-            TableEntry::Absent => match self.place_of(step.entry, false) {
-                // The table read from the store; what stopped the walk is
-                // below it, in entries no step reported.
-                Place::Store { problem: None, .. } => Place::Unmapped,
-                place => place,
-            },
-            TableEntry::Table(_) | TableEntry::Leaf(_) => Place::Unreadable,
+        let (table, place) = match walked {
+            Walked::Mapped(_) | Walked::Stopped(Stop::Root) => return None,
+            Walked::Unmapped(pte) => (None, self.place_of(pte, true)),
+            Walked::Stopped(Stop::Absent(level, entry)) => {
+                (Some(level), self.place_of(entry, false))
+            }
+            Walked::Stopped(Stop::Unreadable(level)) => (Some(level), Place::Unreadable),
         };
-        Some(NonResident {
-            table: Some(step.level),
-            place,
-        })
+        Some(NonResident { table, place })
     }
 
     /// Where the non-present `entry` puts its page (`leaf`) or its table.
     fn place_of(&self, entry: PageTableEntry, leaf: bool) -> Place {
-        let unswizzled = entry.unswizzled(self.backend.invalid_pte_mask());
-        let low = self.backend.page_file_low();
-        let (file, offset) = unswizzled.page_file_location(low);
-        if unswizzled.0 == 0 || (!leaf && (unswizzled.is_prototype() || offset == 0)) {
-            return Place::Unmapped;
-        }
-        if unswizzled.is_prototype() {
-            return Place::Prototype;
-        }
-        if unswizzled.is_demand_zero(low) {
-            return Place::DemandZero;
-        }
-        match self.backend.compressed_pages() {
-            Some(store) if store.page_file == file => Place::Store {
+        let Some((file, offset)) = self.page_file_location(entry) else {
+            let unswizzled = entry.unswizzled(self.backend.invalid_pte_mask());
+            return if !leaf || unswizzled.0 == 0 {
+                Place::Unmapped
+            } else if unswizzled.is_prototype() {
+                Place::Prototype
+            } else if unswizzled.is_demand_zero(self.backend.page_file_low()) {
+                Place::DemandZero
+            } else {
+                Place::Unmapped
+            };
+        };
+        match (self.backend.compressed_pages()).filter(|store| store.page_file == file) {
+            Some(store) => Place::Store {
                 offset,
-                problem: match self.stored_page(entry) {
-                    Some(Ok(_)) => None,
-                    Some(Err(error)) => Some(error.to_string()),
-                    None => Some("the store's own reads do not use it".into()),
-                },
+                problem: (self.read_stored(&store, file, offset).err())
+                    .map(|error| error.to_string()),
             },
-            _ => Place::PageFile { file, offset },
+            None => Place::PageFile { file, offset },
         }
     }
 
     /// The page at `va` from the guest's memory-compression store, when the
     /// page tables leave it unmapped with a PTE in the store's page file.
-    fn compressed_page(&self, va: VirtAddr) -> Option<Result<Box<[u8; PAGE_SIZE]>>> {
-        let Ok(Walked::Unmapped(Some(pte))) = self.walk_tables(va, |_| {}) else {
+    fn compressed_page(&self, va: VirtAddr) -> Option<Result<Arc<[u8; PAGE_SIZE]>>> {
+        let Ok(Walked::Unmapped(pte)) = self.walk_tables(va, |_| {}) else {
             return None;
         };
         self.stored_page(pte)
@@ -816,36 +828,52 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         self.stored_page(entry)?.ok().map(TablePage::Stored)
     }
 
-    /// The page whose non-present PTE or table entry is `entry`, from the
-    /// guest's memory-compression store when `entry` is in its page file.
-    /// The store's own reads do not come back here.
-    fn stored_page(&self, entry: PageTableEntry) -> Option<Result<Box<[u8; PAGE_SIZE]>>> {
-        // Only a page-file entry (software, with a page-file offset) can be
-        // in the store; anything else does not need the store resolved.
-        if IN_STORE.get()
-            || entry.is_present()
-            || entry.is_prototype()
-            || entry.is_transition()
-            || entry.0 >> 32 == 0
-        {
+    /// The page-file number and page that the non-present `entry` gives, its
+    /// L1TF swizzle undone; `None` for a prototype or transition entry, and
+    /// for one with no page in a page file (demand-zero, or none at all).
+    fn page_file_location(&self, entry: PageTableEntry) -> Option<(u8, u32)> {
+        if entry.is_present() || entry.is_prototype() || entry.is_transition() {
             return None;
         }
-        let store = self.backend.compressed_pages()?;
         let (file, offset) = entry
             .unswizzled(self.backend.invalid_pte_mask())
             .page_file_location(self.backend.page_file_low());
+        (offset != 0).then_some((file, offset))
+    }
+
+    /// The page whose non-present PTE or table entry is `entry`, from the
+    /// guest's memory-compression store when `entry` is in its page file;
+    /// `None` for any other entry. The store's own reads do not come back
+    /// here.
+    fn stored_page(&self, entry: PageTableEntry) -> Option<Result<Arc<[u8; PAGE_SIZE]>>> {
+        if IN_STORE.get() {
+            return None;
+        }
+        let (file, offset) = self.page_file_location(entry)?;
+        let store = (self.backend.compressed_pages()).filter(|store| store.page_file == file)?;
+        Some(self.read_stored(&store, file, offset))
+    }
+
+    /// Page `offset` of `store`'s page file, number `file`: from this halt's
+    /// cache, or decompressed from the store.
+    fn read_stored(
+        &self,
+        store: &CompressedPages,
+        file: u8,
+        offset: u32,
+    ) -> Result<Arc<[u8; PAGE_SIZE]>> {
         let key = u64::from(file) << 32 | u64::from(offset);
         if let Some(page) = self.backend.cached_store_page(key) {
-            return Some(Ok(page));
+            return Ok(page);
         }
-        let mut page = Box::new([0u8; PAGE_SIZE]);
-        IN_STORE.set(true);
-        let result = store.read(self, entry, &mut page);
-        IN_STORE.set(false);
-        if let Some(Ok(())) = result {
-            self.backend.cache_store_page(key, &page);
+        let mut page = [0u8; PAGE_SIZE];
+        {
+            let _in_store = InStore::enter();
+            store.read(self, offset, &mut page)?;
         }
-        Some(result?.map(|()| page))
+        let page = Arc::new(page);
+        self.backend.cache_store_page(key, Arc::clone(&page));
+        Ok(page)
     }
 }
 
@@ -922,8 +950,31 @@ impl std::fmt::Display for NonResident {
 /// Where a table walk ended.
 enum Walked {
     Mapped(Translation),
-    /// Nothing maps the page. The leaf PTE, when its table exists, says why.
-    Unmapped(Option<PageTableEntry>),
+    /// Nothing maps the page; its PTE says why.
+    Unmapped(PageTableEntry),
+    /// The walk stopped above the page's PTE.
+    Stopped(Stop),
+}
+
+impl Walked {
+    /// The page's PTE, when the walk reached it and nothing maps the page.
+    fn leaf(&self) -> Option<PageTableEntry> {
+        match self {
+            Self::Unmapped(pte) => Some(*pte),
+            Self::Mapped(_) | Self::Stopped(_) => None,
+        }
+    }
+}
+
+/// Where a walk stopped above a page's PTE.
+enum Stop {
+    /// The root table does not read.
+    Root,
+    /// The entry at this level is not present, and its table is nowhere a
+    /// read gets it.
+    Absent(PageTableLevel, PageTableEntry),
+    /// The entry at this level names a table whose frame does not read.
+    Unreadable(PageTableLevel),
 }
 
 impl<'a, B: MemoryOps<PhysAddr>> MemoryOps<VirtAddr> for AddressSpace<'a, B> {
@@ -1074,47 +1125,77 @@ mod tests {
         )
     }
 
-    #[test]
-    fn absent_pte_walk_reports_non_present_ptes_in_range_only() {
-        // Kernel half: PML4[0x1f0] -> PDPT at 0x2000 -> PD at 0x3000. PD[0]
-        // -> PT at 0x4000: PTE 2 present, PTE 3 in transition, PTE 5 in a
-        // page file, PTE 6 zero. PD[1] is a non-present table entry, which
-        // maps no page itself.
-        let mut data = vec![0u8; 0x5000];
-        let mut put = |table: usize, index: usize, value: u64| {
-            data[table + index * 8..table + index * 8 + 8].copy_from_slice(&value.to_le_bytes());
-        };
-        put(0x1000, 0x1f0, 0x2000 | 0b11);
-        put(0x2000, 0, 0x3000 | 0b11);
-        put(0x3000, 0, 0x4000 | 0b11);
-        put(0x3000, 1, 0x0000_0012_0000_2080);
-        put(0x4000, 2, 0x9000 | 0b11);
-        put(0x4000, 3, 0xa000 | (1 << 11));
-        put(0x4000, 5, 0x0000_00ab_0000_2080);
-        let mem = FakePhysMem {
+    /// Physical memory of `size` bytes holding `entries`, each a u64 at an
+    /// address: page tables, and data where a test needs it.
+    fn tables(size: usize, entries: &[(u64, u64)]) -> FakePhysMem {
+        let mut data = vec![0u8; size];
+        for &(at, value) in entries {
+            data[at as usize..at as usize + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        FakePhysMem {
             data,
             invalid_pte_mask: 0,
-        };
+        }
+    }
+
+    /// The walk of a range hands each present page, once per large page and
+    /// clipped to the range, and each non-present PTE in the range; it skips
+    /// an absent table whole, and a break ends it.
+    #[test]
+    fn a_range_walk_visits_present_pages_and_absent_ptes() {
+        // Kernel half: PML4[0x1f0] -> PDPT at 0x2000. PDPT[0] -> PD at
+        // 0x3000; PDPT[1] is absent. PD[0] -> PT at 0x4000: PTE 2 present,
+        // PTE 3 in transition, PTE 5 in a page file, PTE 6 zero. PD[1] is a
+        // 2 MiB page at 0x20_0000; PD[2] a non-present table entry, which
+        // maps no page itself.
+        let pagefile = 0x0000_00ab_0000_2080;
+        let mem = tables(
+            0x5000,
+            &[
+                (0x1000 + 0x1f0 * 8, 0x2000 | 0b11),
+                (0x2000, 0x3000 | 0b11),
+                (0x3000, 0x4000 | 0b11),
+                (0x3000 + 8, 0x20_0000 | 0x80 | 0b11),
+                (0x3000 + 16, 0x0000_0012_0000_2080),
+                (0x4000 + 2 * 8, 0x9000 | 0b11),
+                (0x4000 + 3 * 8, 0xa000 | 1 << 11),
+                (0x4000 + 5 * 8, pagefile),
+            ],
+        );
         let space = AddressSpace::new_amd64(&mem, 0x1000);
         let base = 0xffff_f800_0000_0000u64;
-        let absent = |start: u64, end: u64| {
-            let mut visits = Vec::new();
+        let walk = |start: u64, end: u64, stop: bool| {
+            let (mut present, mut absent) = (Vec::new(), Vec::new());
             space
-                .for_each_absent_pte(VirtAddr(base + start), VirtAddr(base + end), |va, pte| {
-                    visits.push((va.0 - base, pte.0));
-                })
+                .for_each_page(
+                    VirtAddr(base + start),
+                    VirtAddr(base + end),
+                    |va, physical, length| {
+                        present.push((va.0 - base, physical, length));
+                        if stop {
+                            ControlFlow::Break(())
+                        } else {
+                            ControlFlow::Continue(())
+                        }
+                    },
+                    |va, pte| absent.push((va.0 - base, pte.0)),
+                )
                 .unwrap();
-            visits
+            (present, absent)
         };
+        let (present, absent) = walk(0x1000, 0x4000_0000 + 0x1000, false);
         assert_eq!(
-            absent(0, 0x4000_0000),
-            [
-                (0x3000, 0xa000 | (1 << 11)),
-                (0x5000, 0x0000_00ab_0000_2080)
-            ]
+            present,
+            [(0x2000, 0x9000, 0x1000), (0x20_0000, 0x20_0000, 0x20_0000)]
         );
-        assert_eq!(absent(0x4000, 0x5000), []);
-        assert_eq!(absent(0x5000, 0x6000), [(0x5000, 0x0000_00ab_0000_2080)]);
+        assert_eq!(absent, [(0x3000, 0xa000 | 1 << 11), (0x5000, pagefile)]);
+        assert_eq!(walk(0x4000, 0x5000, false).1, []);
+        assert_eq!(walk(0x5000, 0x6000, false).1, [(0x5000, pagefile)]);
+        // A range starting inside the large page is clipped to it.
+        assert_eq!(
+            walk(0x30_0000, 0x31_0000, true).0,
+            [(0x30_0000, 0x30_0000, 0x1_0000)]
+        );
     }
 
     /// Physical memory of a guest that compressed pages, a page table among
@@ -1143,90 +1224,43 @@ mod tests {
         }
     }
 
-    /// The table at 1 GiB, in the store under key 0x2000_0042 (page file 2,
-    /// offset 0x42), whose entry 5 is `stored`, the PTE naming that same
-    /// key: the PDE names it as the table, entry 5 as the page. A kernel
-    /// with `page_file_low` reads the page-file number at that bit.
-    fn stored_table(stored: u64, page_file_low: u32) -> StoredPhysMem {
+    /// A PTE naming page 0x42 of page file 2, the store's page that
+    /// [`stored_table`]'s table is in.
+    const STORED: u64 = 0x0000_0042_0000_2080;
+
+    /// The store of [`store::fixture`] (kernel memory identity-mapped by a
+    /// 1 GiB page; its region by another, at frame 0), holding one page:
+    /// zeros but for its entry 5, `entry_5`. In the page tables at 0x400_000,
+    /// PDPT[1] is `pdpte` and the PD at 0x403_000 has `pde` as its entry 0:
+    /// with `pdpte` naming that PD and `pde` [`STORED`], the stored page is
+    /// the table of the 2 MiB at 1 GiB. A kernel with `page_file_low` reads
+    /// the page-file number at that bit.
+    fn stored_table(pdpte: u64, pde: u64, entry_5: u64, page_file_low: u32) -> StoredPhysMem {
         let mut original = vec![0u8; PAGE_SIZE];
-        original[40..48].copy_from_slice(&stored.to_le_bytes());
+        original[40..48].copy_from_slice(&entry_5.to_le_bytes());
         let data = lz4_flex::block::compress(&original);
-        let leaf = |key: u32, value: u32| {
-            let mut node = vec![1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-            node.extend_from_slice(&key.to_le_bytes());
-            node.extend_from_slice(&value.to_le_bytes());
-            node
-        };
-        let q = |value: u64| value.to_le_bytes().to_vec();
-        let d = |value: u32| value.to_le_bytes().to_vec();
-        let (manager, store, owner) = (0x100_000u64, 0x200_000u64, 0xffff_8000_0000_1000u64);
-        let st = store + 0x50;
-        let (key, region_key, record_key) = (0x2000_0042u32, 1 << 8 | 2, 1 << 16 | 0x20);
-        let values: Vec<(u64, Vec<u8>)> = vec![
-            (manager + 0x1c0, q(0x110_000)),
-            (0x110_000, leaf(key, 0)),
-            (manager, q(0x120_000)),
-            (0x120_000, q(store)),
-            (store + 0x1d00, q(owner)),
-            (st + 0x320, q(store)),
-            (store + 0x1b68, q(0x300_000)),
-            (store + 0x1a95, vec![0b100]),
-            (store + 0x12c0, d(0)),
-            (st, q(0x130_000)),
-            (0x130_000, leaf(key, region_key)),
-            (st + 0x1c8, d(8)),
-            (st + 0x1cc, d(0xff)),
-            (st + 0x1d0, d(8)),
-            (st + 0x1d8, d(0)),
-            (st + 0xc0, q(0x140_000)),
-            (0x140_000, q(0x150_000)),
-            (0x150_010, d(record_key)),
-            (0x150_014, d(data.len() as u32)),
-            (st + 0x32c, d(16)),
-            (st + 0x328, d(0xffff)),
-            (0x300_008, q(0x0123_0000_0000 | 5)),
-            // The region: 1 GiB page 0x8c of PML4 entry 2, at frame 0.
-            (0x200, data),
-            // PML4 at 0x400_000. Its entry 0 maps the store's structures
-            // by a 1 GiB page at frame 0; 1 GiB up, PD entry 0 is in the
-            // store.
-            (0x400_000, q(0x401_000 | 0x7)),
-            (0x400_010, q(0x402_000 | 0x7)),
-            (0x401_000, q(0x87)),
-            (0x401_008, q(0x403_000 | 0x7)),
-            (0x402_000 + 0x8c * 8, q(0x87)),
-            (0x403_000, q(stored)),
-        ];
-        let mut data = vec![0u8; 0x404_000];
-        for (at, bytes) in &values {
-            data[*at as usize..*at as usize + bytes.len()].copy_from_slice(bytes);
+        let mut memory = tables(
+            0x404_000,
+            &[
+                (0x400_000, 0x401_000 | 0x7),
+                (0x400_010, 0x402_000 | 0x7),
+                (0x401_000, 0x87),
+                (0x401_008, pdpte),
+                // The region's 1 GiB, 0x8c of PML4 entry 2.
+                (0x402_000 + 0x8c * 8, 0x87),
+                (0x403_000, pde),
+            ],
+        );
+        let region = (store::fixture::DATA_AT & 0x3fff_ffff, data);
+        for (at, bytes) in store::fixture::kernel_values(region.1.len() as u32)
+            .iter()
+            .chain([&region])
+        {
+            memory.data[*at as usize..*at as usize + bytes.len()].copy_from_slice(bytes);
         }
-        let layout = StoreLayout {
-            owner_process: 0x1d00,
-            region_array: 0x1b68,
-            virtual_flag: (0x1a95, 2),
-            back_pointer: 0x320,
-            region_shift: 0x32c,
-            region_offset_mask: 0x328,
-            chunk_array: 0xc0,
-            chunk_fields: [0x1c8, 0x1cc, 0x1d0, 0x1d8],
-            key_tree: 0x1c0,
-            pages_tree: 0,
-            redirect_next: 4,
-            compression: Compression::Lz4UnlessCount(0x12c0),
-        };
         StoredPhysMem {
-            memory: FakePhysMem {
-                data,
-                invalid_pte_mask: 0,
-            },
-            store: Arc::new(CompressedPages {
-                layout,
-                manager,
-                owner,
-                owner_root: 0x400_000,
-                page_file: 2,
-            }),
+            memory,
+            store: Arc::new(store::fixture::pages(0x400_000)),
             page_file_low,
         }
     }
@@ -1237,23 +1271,25 @@ mod tests {
     /// non-present PTEs.
     #[test]
     fn a_page_under_a_table_in_the_store_reads_through_the_store() {
-        let stored = 0x0000_0042_0000_2080u64;
-        let mem = stored_table(stored, PAGE_FILE_LOW);
+        let mem = stored_table(0x403_000 | 0x7, STORED, STORED, PAGE_FILE_LOW);
         let space = AddressSpace::new_amd64(&mem, 0x400_000);
         let table = 0x4000_0000u64;
         let page = VirtAddr(table + 5 * PAGE_SIZE as u64);
         let mut buf = [0u8; 8];
         space.read_bytes(page + 40u64, &mut buf).unwrap();
-        assert_eq!(u64::from_le_bytes(buf), stored);
+        assert_eq!(u64::from_le_bytes(buf), STORED);
         space.read_bytes(page, &mut buf).unwrap();
         assert_eq!(buf, [0; 8]);
         let mut absent = Vec::new();
         space
-            .for_each_absent_pte(VirtAddr(table), VirtAddr(table + 0x20_0000), |va, pte| {
-                absent.push((va.0, pte.0));
-            })
+            .for_each_page(
+                VirtAddr(table),
+                VirtAddr(table + 0x20_0000),
+                |_, _, _| ControlFlow::Continue(()),
+                |va, pte| absent.push((va.0, pte.0)),
+            )
             .unwrap();
-        assert_eq!(absent, [(page.0, stored)]);
+        assert_eq!(absent, [(page.0, STORED)]);
 
         // Without the store, the table is out of reach.
         let plain = AddressSpace::new_amd64(&mem.memory, 0x400_000);
@@ -1267,18 +1303,12 @@ mod tests {
     fn the_page_file_number_is_read_where_the_kernel_keeps_it() {
         let stored = 0x0000_0042_0000_0084u64;
         let page = VirtAddr(0x4000_0000 + 5 * PAGE_SIZE as u64);
-        let mut buf = [0u8; 8];
-        let mem = stored_table(stored, 1);
-        AddressSpace::new_amd64(&mem, 0x400_000)
-            .read_bytes(page + 40u64, &mut buf)
-            .unwrap();
-        assert_eq!(u64::from_le_bytes(buf), stored);
-        let mem = stored_table(stored, PAGE_FILE_LOW);
-        assert!(
-            AddressSpace::new_amd64(&mem, 0x400_000)
-                .read_bytes(page, &mut buf)
-                .is_err()
-        );
+        let read = |page_file_low| {
+            let mem = stored_table(0x403_000 | 0x7, stored, stored, page_file_low);
+            AddressSpace::new_amd64(&mem, 0x400_000).read::<u64>(page + 40u64)
+        };
+        assert_eq!(read(1).unwrap(), stored);
+        assert!(read(PAGE_FILE_LOW).is_err());
     }
 
     /// A page table the guest trimmed stays in its frame while it is in
@@ -1288,19 +1318,17 @@ mod tests {
     fn a_page_under_a_table_in_transition_reads_from_its_frame() {
         // PD[0] at 0x3000 names the table at 0x4000, in transition; its
         // entry 2 is a page in transition at 0x5000.
-        let mut data = vec![0u8; 0x6000];
-        let mut put = |at: usize, value: u64| {
-            data[at..at + 8].copy_from_slice(&value.to_le_bytes());
-        };
-        put(0x1000, 0x2000 | 0x7);
-        put(0x2000, 0x3000 | 0x7);
-        put(0x3000, 0x4000 | 1 << 11 | 0x80);
-        put(0x4000 + 2 * 8, 0x5000 | 1 << 11 | 0x80);
-        put(0x5000 + 0x18, 0x1122_3344_5566_7788);
-        let mem = FakePhysMem {
-            data,
-            invalid_pte_mask: 0,
-        };
+        let in_transition = |frame: u64| frame | 1 << 11 | 0x80;
+        let mem = tables(
+            0x6000,
+            &[
+                (0x1000, 0x2000 | 0x7),
+                (0x2000, 0x3000 | 0x7),
+                (0x3000, in_transition(0x4000)),
+                (0x4000 + 2 * 8, in_transition(0x5000)),
+                (0x5000 + 0x18, 0x1122_3344_5566_7788),
+            ],
+        );
         let space = AddressSpace::new_amd64(&mem, 0x1000);
         let page = VirtAddr(2 * PAGE_SIZE as u64);
         assert_eq!(
@@ -1309,11 +1337,14 @@ mod tests {
         );
         let mut absent = Vec::new();
         space
-            .for_each_absent_pte(VirtAddr(0), VirtAddr(0x20_0000), |va, pte| {
-                absent.push((va.0, pte.0));
-            })
+            .for_each_page(
+                VirtAddr(0),
+                VirtAddr(0x20_0000),
+                |_, _, _| ControlFlow::Continue(()),
+                |va, pte| absent.push((va.0, pte.0)),
+            )
             .unwrap();
-        assert_eq!(absent, [(page.0, 0x5000 | 1 << 11 | 0x80)]);
+        assert_eq!(absent, [(page.0, in_transition(0x5000))]);
         let (steps, translation) = space.walk_steps(page).unwrap();
         assert_eq!(
             steps.iter().map(|step| step.address).collect::<Vec<_>>(),
@@ -1322,8 +1353,35 @@ mod tests {
         assert_eq!(translation.map(|t| t.address), Some(0x5000));
     }
 
+    /// A private page with no page table was never touched, and reads as
+    /// zeros; one whose page table is paged out, or does not read, holds
+    /// data the dump does not have, and is not zeros.
+    #[test]
+    fn a_page_is_demand_zero_only_without_a_page_table() {
+        let demand_zero = |pde: u64| {
+            let mem = tables(
+                0x4000,
+                &[
+                    (0x1000, 0x2000 | 0x7),
+                    (0x2000, 0x3000 | 0x7),
+                    (0x3000, pde),
+                ],
+            );
+            AddressSpace::new_amd64(&mem, 0x1000).page_is_demand_zero(VirtAddr(0x5000), true)
+        };
+        assert!(demand_zero(0), "no page table");
+        assert!(!demand_zero(0x77 << 32 | 0x80), "page table in a page file");
+        assert!(
+            !demand_zero(0x9000_0000 | 1 << 11 | 0x80),
+            "page table that does not read"
+        );
+        assert!(
+            !demand_zero(0x9000_0000 | 0x7),
+            "present, but does not read"
+        );
+    }
     /// A page that is not in memory says where it is: from its PTE, or from
-    /// the entry above it that names a table not in memory.
+    /// the entry, in whatever table, that names a table not in memory.
     #[test]
     fn a_page_not_in_memory_says_where_it_is() {
         let page = |pte: u64| {
@@ -1331,6 +1389,12 @@ mod tests {
             AddressSpace::new_amd64(&mem, 0x1000).non_resident(va)
         };
         let leaf = |place| Some(NonResident { table: None, place });
+        let table = |place| {
+            Some(NonResident {
+                table: Some(PageTableLevel::Pde),
+                place,
+            })
+        };
         assert_eq!(page(0x5000 | 0x3), None);
         assert_eq!(page(0x5000 | 1 << 11 | 0x80), None, "in transition");
         assert_eq!(page(0), leaf(Place::Unmapped));
@@ -1344,43 +1408,43 @@ mod tests {
             })
         );
 
-        // PD[0] is in page file 3: the table under it is.
-        let mut data = vec![0u8; 0x4000];
-        let mut put = |at: usize, value: u64| {
-            data[at..at + 8].copy_from_slice(&value.to_le_bytes());
-        };
-        put(0x1000, 0x2000 | 0x7);
-        put(0x2000, 0x3000 | 0x7);
-        put(0x3000, 0x77 << 32 | 3 << 12 | 0x80);
-        let mem = FakePhysMem {
-            data,
-            invalid_pte_mask: 0,
+        // PD[0] names its table in page file 3; in transition at a frame
+        // that does not read.
+        let pd = |pde: u64| {
+            let mem = tables(
+                0x4000,
+                &[
+                    (0x1000, 0x2000 | 0x7),
+                    (0x2000, 0x3000 | 0x7),
+                    (0x3000, pde),
+                ],
+            );
+            AddressSpace::new_amd64(&mem, 0x1000).non_resident(VirtAddr(0x5000))
         };
         assert_eq!(
-            AddressSpace::new_amd64(&mem, 0x1000).non_resident(VirtAddr(0x5000)),
-            Some(NonResident {
-                table: Some(PageTableLevel::Pde),
-                place: Place::PageFile {
-                    file: 3,
-                    offset: 0x77
-                },
+            pd(0x77 << 32 | 3 << 12 | 0x80),
+            table(Place::PageFile {
+                file: 3,
+                offset: 0x77
             })
         );
+        assert_eq!(pd(0x9000_0000 | 1 << 11 | 0x80), table(Place::Unreadable));
 
         // In the store: the page reads from there; a key the store does not
         // hold says why not.
-        let stored = 0x0000_0042_0000_2080u64;
-        let page = VirtAddr(0x4000_0000 + 5 * PAGE_SIZE as u64);
-        let mem = stored_table(stored, PAGE_FILE_LOW);
+        let in_store = |pdpte, pde, entry_5, va: u64| {
+            let mem = stored_table(pdpte, pde, entry_5, PAGE_FILE_LOW);
+            AddressSpace::new_amd64(&mem, 0x400_000).non_resident(VirtAddr(va))
+        };
+        let page_5 = 0x4000_0000 + 5 * PAGE_SIZE as u64;
         assert_eq!(
-            AddressSpace::new_amd64(&mem, 0x400_000).non_resident(page),
+            in_store(0x403_000 | 0x7, STORED, STORED, page_5),
             leaf(Place::Store {
                 offset: 0x42,
                 problem: None
             })
         );
-        let mem = stored_table(0x0000_0043_0000_2080, PAGE_FILE_LOW);
-        let missing = AddressSpace::new_amd64(&mem, 0x400_000).non_resident(page);
+        let missing = in_store(0x403_000 | 0x7, STORED + (1 << 32), STORED, page_5);
         assert!(
             matches!(
                 missing,
@@ -1394,59 +1458,14 @@ mod tests {
             ),
             "{missing:?}"
         );
-    }
-    #[test]
-    fn present_page_walk_skips_absent_tables_and_clips_large_pages() {
-        // Kernel half: PML4[0x1f0] -> PDPT at 0x2000. PDPT[0] -> PD at
-        // 0x3000; PDPT[1] is absent. PD[0] -> PT at 0x4000 with PTE 2
-        // present and PTE 3 in transition; PD[1] is a 2 MiB page at
-        // 0x20_0000.
-        let mut data = vec![0u8; 0x5000];
-        let mut put = |table: usize, index: usize, value: u64| {
-            data[table + index * 8..table + index * 8 + 8].copy_from_slice(&value.to_le_bytes());
-        };
-        put(0x1000, 0x1f0, 0x2000 | 0b11);
-        put(0x2000, 0, 0x3000 | 0b11);
-        put(0x3000, 0, 0x4000 | 0b11);
-        put(0x3000, 1, 0x20_0000 | 0x80 | 0b11);
-        put(0x4000, 2, 0x9000 | 0b11);
-        put(0x4000, 3, 0xa000 | (1 << 11));
-        let mem = FakePhysMem {
-            data,
-            invalid_pte_mask: 0,
-        };
-        let space = AddressSpace::new_amd64(&mem, 0x1000);
-        let base = 0xffff_f800_0000_0000u64;
-        let mut visits = Vec::new();
-        space
-            .for_each_present_page(
-                VirtAddr(base + 0x1000),
-                VirtAddr(base + 0x4000_0000 + 0x1000),
-                |va, physical, length| {
-                    visits.push((va.0 - base, physical, length));
-                    ControlFlow::Continue(())
-                },
-            )
-            .unwrap();
+        // A PD in the store, whose entry 5 names its table in page file 0.
         assert_eq!(
-            visits,
-            [(0x2000, 0x9000, 0x1000), (0x20_0000, 0x20_0000, 0x20_0000)]
+            in_store(STORED, 0, 0x55 << 32 | 0x80, 0x4000_0000 + 5 * 0x20_0000),
+            table(Place::PageFile {
+                file: 0,
+                offset: 0x55
+            })
         );
-
-        // A range starting inside the large page is clipped to it, and a
-        // break stops the walk.
-        let mut visits = Vec::new();
-        space
-            .for_each_present_page(
-                VirtAddr(base + 0x30_0000),
-                VirtAddr(base + 0x31_0000),
-                |va, physical, length| {
-                    visits.push((va.0 - base, physical, length));
-                    ControlFlow::Break(())
-                },
-            )
-            .unwrap();
-        assert_eq!(visits, [(0x30_0000, 0x30_0000, 0x1_0000)]);
     }
 
     /// A trimmed page keeps its frame on the standby list with the valid bit

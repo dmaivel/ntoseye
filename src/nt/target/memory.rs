@@ -247,6 +247,15 @@ impl Target {
         AddressSpace::for_arch(&self.phys, dtb, self.kernel_dtb(), self.arch())
     }
 
+    /// Why the page at `address`, in the address space rooted at `dtb`, is
+    /// not in memory ([`AddressSpace::non_resident`]); `None` when it is, and
+    /// for a VTL1 address space, which the page walk does not describe.
+    pub fn non_resident(&self, dtb: Dtb, address: VirtAddr) -> Option<memory::NonResident> {
+        let secure = self.symbols.is_secure_root(dtb)
+            || (dtb == self.current_dtb() && self.in_secure_scope());
+        (!secure).then(|| self.address_space(dtb).non_resident(address))?
+    }
+
     /// Kernel-root address space (reads kernel VAs on both arches).
     pub fn kernel_address_space(&self) -> AddressSpace<'_, PhysMem> {
         self.address_space(self.kernel_dtb())

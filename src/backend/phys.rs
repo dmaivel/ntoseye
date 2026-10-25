@@ -41,23 +41,14 @@ pub struct PhysMem {
     compressed_pages: StoreSlot,
     /// Pages decompressed from that store during the current halt.
     store_pages: Mutex<StorePageCache>,
-    /// Raised by Ctrl+C (the target's interrupt, which shares it); work
-    /// done here on the target's behalf, such as finding the store, stops.
-    interrupt: Arc<AtomicBool>,
+    /// The target's interrupt flag, which Ctrl+C raises (see
+    /// [`Self::set_interrupt_flag`]); finding the store stops on it.
+    interrupt: Mutex<Arc<AtomicBool>>,
 }
 
-/// What a resolver found of the guest's memory-compression store.
-pub enum StoreLookup {
-    Found(CompressedPages),
-    /// Not there (yet), or its layout is unknown.
-    Absent,
-    /// Stopped by Ctrl+C; looked for again on the next read.
-    Interrupted,
-}
-
-/// How a resolver finds the guest's memory-compression store; it stops
-/// when the flag it is handed (Ctrl+C) is raised.
-pub type StoreResolver = Box<dyn FnMut(&AtomicBool) -> StoreLookup + Send>;
+/// How a resolver finds the guest's memory-compression store: `None` when it
+/// is not there (yet), or when the flag it is handed (Ctrl+C) stopped it.
+pub type StoreResolver = Box<dyn FnMut(&AtomicBool) -> Option<CompressedPages> + Send>;
 
 /// How long a store not found while the guest may be running goes before
 /// it is looked for again.
@@ -65,16 +56,15 @@ const STORE_RETRY_WHILE_RUNNING: Duration = Duration::from_secs(1);
 
 /// Where the guest's memory-compression store stands.
 enum StoreState {
-    /// No kernel found yet.
-    Unknown,
+    /// No resolver here: no kernel found yet, or the resolver is running
+    /// (its own reads ask for the store, and get none).
+    Idle,
     /// A kernel found, and its store not yet: looked for when first needed,
     /// and again once the guest may have created it since `tried`.
     Pending {
         resolve: StoreResolver,
         tried: Option<StoreTry>,
     },
-    /// Being resolved; reads made meanwhile do not use the store.
-    Resolving,
     Found(Arc<CompressedPages>),
 }
 
@@ -103,7 +93,7 @@ pub struct StoreSlot(Mutex<StoreState>);
 
 impl StoreSlot {
     fn new() -> Self {
-        Self(Mutex::new(StoreState::Unknown))
+        Self(Mutex::new(StoreState::Idle))
     }
 
     fn lock(&self) -> MutexGuard<'_, StoreState> {
@@ -125,37 +115,40 @@ impl StoreSlot {
     /// again: it runs unlocked, and those nested calls get `None`.
     pub fn get(&self, epoch: Option<u64>, interrupt: &AtomicBool) -> Option<Arc<CompressedPages>> {
         let mut state = self.lock();
-        match std::mem::replace(&mut *state, StoreState::Resolving) {
-            StoreState::Pending { mut resolve, tried }
+        let (mut resolve, tried) = match std::mem::replace(&mut *state, StoreState::Idle) {
+            StoreState::Pending { resolve, tried }
                 if tried.as_ref().is_none_or(|tried| tried.stale(epoch)) =>
             {
-                drop(state);
-                let (state, pages) = match resolve(interrupt) {
-                    StoreLookup::Found(pages) => {
-                        let pages = Arc::new(pages);
-                        (StoreState::Found(Arc::clone(&pages)), Some(pages))
-                    }
-                    StoreLookup::Absent => {
-                        let tried = Some(StoreTry {
-                            epoch,
-                            at: Instant::now(),
-                        });
-                        (StoreState::Pending { resolve, tried }, None)
-                    }
-                    StoreLookup::Interrupted => (StoreState::Pending { resolve, tried }, None),
-                };
-                *self.lock() = state;
-                pages
+                (resolve, tried)
             }
             other => {
-                let pages = match &other {
+                let found = match &other {
                     StoreState::Found(pages) => Some(Arc::clone(pages)),
-                    _ => None,
+                    StoreState::Idle | StoreState::Pending { .. } => None,
                 };
                 *state = other;
-                pages
+                return found;
             }
+        };
+        drop(state);
+        let found = resolve(interrupt).map(Arc::new);
+        let next = match &found {
+            Some(pages) => StoreState::Found(Arc::clone(pages)),
+            None if interrupt.load(Ordering::Relaxed) => StoreState::Pending { resolve, tried },
+            None => StoreState::Pending {
+                resolve,
+                tried: Some(StoreTry {
+                    epoch,
+                    at: Instant::now(),
+                }),
+            },
+        };
+        let mut state = self.lock();
+        // A kernel found meanwhile (the guest rebooted) set its own.
+        if matches!(*state, StoreState::Idle) {
+            *state = next;
         }
+        found
     }
 }
 
@@ -170,13 +163,13 @@ const STORE_PAGE_CACHE_PAGES: usize = 0x4000;
 #[derive(Default)]
 pub struct StorePageCache {
     epoch: Option<u64>,
-    pages: HashMap<u64, Box<[u8; PAGE_SIZE]>>,
+    pages: HashMap<u64, Arc<[u8; PAGE_SIZE]>>,
 }
 
 impl StorePageCache {
     /// The page cached under `key` in halt `epoch`; none while the guest
     /// may be running.
-    pub fn get(&self, epoch: Option<u64>, key: u64) -> Option<Box<[u8; PAGE_SIZE]>> {
+    pub fn get(&self, epoch: Option<u64>, key: u64) -> Option<Arc<[u8; PAGE_SIZE]>> {
         if epoch.is_none() || epoch != self.epoch {
             return None;
         }
@@ -185,7 +178,7 @@ impl StorePageCache {
 
     /// Cache `page` under `key` for halt `epoch`, dropping the pages of an
     /// earlier halt, or all of them once full.
-    pub fn put(&mut self, epoch: Option<u64>, key: u64, page: &[u8; PAGE_SIZE]) {
+    pub fn put(&mut self, epoch: Option<u64>, key: u64, page: Arc<[u8; PAGE_SIZE]>) {
         if epoch.is_none() {
             return;
         }
@@ -193,7 +186,7 @@ impl StorePageCache {
             self.pages.clear();
             self.epoch = epoch;
         }
-        self.pages.insert(key, Box::new(*page));
+        self.pages.insert(key, page);
     }
 }
 
@@ -291,7 +284,7 @@ impl PhysMem {
             section_views: Mutex::new(None),
             compressed_pages: StoreSlot::new(),
             store_pages: Mutex::default(),
-            interrupt: Arc::new(AtomicBool::new(false)),
+            interrupt: Mutex::default(),
         }
     }
 
@@ -440,9 +433,23 @@ impl PhysMem {
             .unwrap_or_else(PoisonError::into_inner) = views.map(Arc::new);
     }
 
-    /// The flag Ctrl+C raises, which the target shares; see the field.
+    /// The flag Ctrl+C raises for work done on this memory's behalf.
     pub fn interrupt_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.interrupt)
+        Arc::clone(
+            &self
+                .interrupt
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+    }
+
+    /// Make `flag` the one Ctrl+C raises; the target sets its own (see
+    /// [`crate::nt::target::Target::set_interrupt`]).
+    pub fn set_interrupt_flag(&self, flag: Arc<AtomicBool>) {
+        *self
+            .interrupt
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = flag;
     }
 
     /// Record how to find the guest's memory-compression store for this boot:
@@ -651,17 +658,17 @@ impl MemoryOps<PhysAddr> for PhysMem {
 
     fn compressed_pages(&self) -> Option<Arc<CompressedPages>> {
         self.compressed_pages
-            .get(self.halt_epoch(), &self.interrupt)
+            .get(self.halt_epoch(), &self.interrupt_flag())
     }
 
-    fn cached_store_page(&self, key: u64) -> Option<Box<[u8; PAGE_SIZE]>> {
+    fn cached_store_page(&self, key: u64) -> Option<Arc<[u8; PAGE_SIZE]>> {
         self.store_pages
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(self.halt_epoch(), key)
     }
 
-    fn cache_store_page(&self, key: u64, page: &[u8; PAGE_SIZE]) {
+    fn cache_store_page(&self, key: u64, page: Arc<[u8; PAGE_SIZE]>) {
         let epoch = self.halt_epoch();
         self.store_pages
             .lock()
@@ -674,51 +681,30 @@ impl MemoryOps<PhysAddr> for PhysMem {
 mod tests {
     use super::HaltClock;
 
+    use crate::base::memory::store::fixture;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
     /// A page decompressed from the store is reused within a halt, and not
     /// after the guest ran, nor while it may be running.
     #[test]
     fn a_store_page_is_cached_for_one_halt_only() {
         let mut cache = super::StorePageCache::default();
-        let page = [7u8; crate::base::memory::PAGE_SIZE];
-        cache.put(Some(1), 0x2_0000_0042, &page);
-        assert_eq!(cache.get(Some(1), 0x2_0000_0042).as_deref(), Some(&page));
+        let page = Arc::new([7u8; crate::base::memory::PAGE_SIZE]);
+        cache.put(Some(1), 0x2_0000_0042, Arc::clone(&page));
+        assert_eq!(cache.get(Some(1), 0x2_0000_0042), Some(Arc::clone(&page)));
         assert!(cache.get(Some(1), 0x2_0000_0043).is_none());
         assert!(cache.get(Some(2), 0x2_0000_0042).is_none(), "the guest ran");
         assert!(
             cache.get(None, 0x2_0000_0042).is_none(),
             "it may be running"
         );
-        cache.put(None, 0x2_0000_0044, &page);
+        cache.put(None, 0x2_0000_0044, Arc::clone(&page));
         assert!(cache.get(Some(1), 0x2_0000_0044).is_none());
         // A put in a later halt drops the earlier halt's pages.
-        cache.put(Some(2), 0x2_0000_0045, &page);
+        cache.put(Some(2), 0x2_0000_0045, page);
         assert!(cache.get(Some(2), 0x2_0000_0042).is_none());
         assert!(cache.get(Some(2), 0x2_0000_0045).is_some());
-    }
-
-    /// A store with a placeholder layout.
-    fn some_store() -> super::CompressedPages {
-        use crate::base::memory::{Compression, StoreLayout};
-        super::CompressedPages {
-            layout: StoreLayout {
-                owner_process: 0,
-                region_array: 0,
-                virtual_flag: (0, 0),
-                back_pointer: 0,
-                region_shift: 0,
-                region_offset_mask: 0,
-                chunk_array: 0,
-                chunk_fields: [0; 4],
-                key_tree: 0,
-                pages_tree: 0,
-                redirect_next: 4,
-                compression: Compression::FormatField(0),
-            },
-            manager: 1,
-            owner: 2,
-            owner_root: 3,
-            page_file: 2,
-        }
     }
 
     /// The resolver runs on first use and, while it finds no store (the
@@ -728,24 +714,18 @@ mod tests {
     /// gets none instead of deadlocking.
     #[test]
     fn a_missing_store_is_looked_for_again_once_the_guest_has_run() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        use std::sync::{Arc, Mutex};
         let slot = Arc::new(super::StoreSlot::new());
-        let interrupt = Arc::new(AtomicBool::new(false));
+        let interrupt = AtomicBool::new(false);
         assert!(slot.get(Some(0), &interrupt).is_none(), "no kernel yet");
         let runs = Arc::new(AtomicUsize::new(0));
         let nested = Arc::new(Mutex::new(None));
         let resolver = {
             let (slot, runs, nested) = (Arc::clone(&slot), Arc::clone(&runs), Arc::clone(&nested));
             Box::new(move |interrupt: &AtomicBool| {
+                // No store until the third try that Ctrl+C did not stop.
                 let run = runs.fetch_add(1, Ordering::SeqCst) + 1;
                 *nested.lock().unwrap() = Some(slot.get(Some(9), interrupt).is_some());
-                match run {
-                    _ if interrupt.load(Ordering::SeqCst) => super::StoreLookup::Interrupted,
-                    // No store until the third try.
-                    ..3 => super::StoreLookup::Absent,
-                    _ => super::StoreLookup::Found(some_store()),
-                }
+                (run >= 4 && !interrupt.load(Ordering::SeqCst)).then(|| fixture::pages(3))
             })
         };
         slot.set(resolver);
@@ -760,18 +740,38 @@ mod tests {
         interrupt.store(true, Ordering::SeqCst);
         assert!(slot.get(Some(3), &interrupt).is_none());
         interrupt.store(false, Ordering::SeqCst);
-        assert_eq!(
-            slot.get(Some(3), &interrupt).map(|store| store.manager),
-            Some(1),
-            "the interrupted try did not count"
-        );
+        // The interrupted try did not count: it is tried again in the same
+        // halt.
+        let found = slot.get(Some(3), &interrupt).map(|store| store.manager);
+        assert_eq!(found, Some(crate::base::types::VirtAddr(fixture::MANAGER)));
         assert_eq!(*nested.lock().unwrap(), Some(false));
+        assert!(slot.get(Some(4), &interrupt).is_some());
+        assert!(slot.get(None, &interrupt).is_some());
+        assert_eq!(runs.load(Ordering::SeqCst), 4, "a found store is kept");
+    }
+
+    /// A resolver set while another runs, a rebooted guest's kernel's, is
+    /// the one the slot keeps.
+    #[test]
+    fn a_resolver_set_while_one_runs_is_kept() {
+        let slot = Arc::new(super::StoreSlot::new());
+        let interrupt = AtomicBool::new(false);
+        let old = {
+            let slot = Arc::clone(&slot);
+            Box::new(move |_: &AtomicBool| {
+                slot.set(Box::new(|_: &AtomicBool| Some(fixture::pages(0x5000))));
+                Some(fixture::pages(3))
+            })
+        };
+        slot.set(old);
         assert_eq!(
-            slot.get(Some(4), &interrupt).map(|store| store.owner),
-            Some(2)
+            slot.get(Some(1), &interrupt).map(|store| store.owner_root),
+            Some(3)
         );
-        assert_eq!(slot.get(None, &interrupt).map(|store| store.owner), Some(2));
-        assert_eq!(runs.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            slot.get(Some(1), &interrupt).map(|store| store.owner_root),
+            Some(0x5000)
+        );
     }
 
     /// While the guest may be running there is no halt to go by: a missing

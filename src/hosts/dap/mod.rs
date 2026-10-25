@@ -821,7 +821,7 @@ fn merge(base: &mut Value, overrides: Value) {
 /// `disconnect`, or a termination signal would not end a step whose stop
 /// never arrives.
 fn share_cancel(session: &mut Session, cancel: &Arc<AtomicBool>) {
-    session.target.interrupt = Arc::clone(cancel);
+    session.target.set_interrupt(Arc::clone(cancel));
 }
 
 /// Build a target spec from `launch`/`attach` arguments. Kernel debugging has

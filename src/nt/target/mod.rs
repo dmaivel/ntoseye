@@ -156,7 +156,8 @@ pub struct Target {
     pub breakpoint_stop: Option<BreakpointStop>,
     /// Host interrupt flag. Long scans (pool, heap, list walks) stop early
     /// once it is raised; the host sets it (Ctrl-C in the REPL) and clears it
-    /// before the next command.
+    /// before the next command. Replace it with [`Self::set_interrupt`],
+    /// which hands it to the target's memory too.
     pub interrupt: Arc<AtomicBool>,
     /// How many times a host raised `interrupt` through an
     /// [`InterruptRequester`]. Work that takes the flag (a stack walk, a

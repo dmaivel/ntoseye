@@ -12,7 +12,10 @@ use crate::{
     },
     nt::{
         guest::ModuleInfo,
-        pe::{PeImage, image_file_identity, read_pe_image_from_file},
+        pe::{
+            PeImage, headers_match_relocated, image_file_identity, pe_headers_end,
+            read_pe_image_from_file,
+        },
     },
 };
 use indicatif::ProgressBar;
@@ -404,6 +407,30 @@ impl SymbolStore {
         let image = Arc::new(read_pe_image_from_file(&path)?);
         self.on_disk_images.insert(job.path, Arc::clone(&image));
         Ok(image)
+    }
+
+    /// The module's on-disk image when it is the file the image whose
+    /// header page is `mapped` was loaded from: found by the header's
+    /// `TimeDateStamp` and `SizeOfImage` where `fetch` allows, and opening
+    /// with the same headers but for `ImageBase`, which the loader rewrites.
+    pub fn module_image_matching(
+        &self,
+        image_file_name: &str,
+        mapped: &[u8],
+        fetch: ImageFetch,
+    ) -> Option<Arc<PeImage>> {
+        use pelite::pe64::{Pe, PeView};
+        let view = PeView::from_bytes(mapped).ok()?;
+        let disk = self
+            .module_image_on_disk(
+                image_file_name,
+                view.file_header().TimeDateStamp,
+                view.optional_header().SizeOfImage,
+                fetch,
+            )
+            .ok()?;
+        let end = pe_headers_end(mapped)?;
+        headers_match_relocated(disk.headers().get(..end)?, mapped.get(..end)?).then_some(disk)
     }
 
     pub fn build_image_download_job(

@@ -1,6 +1,6 @@
 use crate::arch::Arch;
 use crate::{
-    backend::phys::{PhysMem, StoreLookup},
+    backend::phys::PhysMem,
     base::{
         error::{Error, Result},
         memory::{
@@ -12,7 +12,7 @@ use crate::{
     nt::{
         dmp::DmpInfo,
         layout::ParsedType,
-        pe::{PeImage, headers::CodeView, headers_match_relocated, pe_headers_end},
+        pe::{self, PeImage, headers::CodeView},
         symbols::{ImageFetch, SymbolStore},
         target::ListTermination,
         target::object::DriverObjectInfo,
@@ -352,11 +352,12 @@ impl Guest {
         ntoskrnl
             .phys
             .set_section_views(section_layout(&ntoskrnl).map(SectionViews::new));
-        // Reading the kernel's code for the store layout waits until a page
-        // may be in the store, and is done once; the store itself is
-        // looked for until it exists. The resolver holds the physical
-        // memory weakly, since that memory holds the resolver.
-        let resolve = {
+        // The store layout is known for AMD64 kernels. Reading the kernel's
+        // code for it waits until a page may be in the store, and is done
+        // once; the store itself is looked for until it exists. The
+        // resolver holds the physical memory weakly, since that memory
+        // holds the resolver.
+        if ntoskrnl.arch() == Arch::Amd64 {
             let phys = Arc::downgrade(&ntoskrnl.phys);
             let symbols = Arc::clone(ntoskrnl.symbols());
             let (dtb, base, arch, guid) = (
@@ -366,20 +367,15 @@ impl Guest {
                 ntoskrnl.guid,
             );
             let mut layout = None;
-            Box::new(move |interrupt: &AtomicBool| {
-                let Some(phys) = phys.upgrade() else {
-                    return StoreLookup::Absent;
-                };
-                let mut kernel = Image::new(phys, Arc::clone(&symbols), dtb, base, arch);
-                kernel.guid = guid;
-                match compressed_pages(&mut kernel, &mut layout, interrupt) {
-                    Some(pages) => StoreLookup::Found(pages),
-                    None if interrupt.load(Ordering::Relaxed) => StoreLookup::Interrupted,
-                    None => StoreLookup::Absent,
-                }
-            })
-        };
-        ntoskrnl.phys.set_compressed_pages(resolve);
+            ntoskrnl
+                .phys
+                .set_compressed_pages(Box::new(move |interrupt: &AtomicBool| {
+                    let mut kernel =
+                        Image::new(phys.upgrade()?, Arc::clone(&symbols), dtb, base, arch);
+                    kernel.guid = guid;
+                    compressed_pages(&mut kernel, &mut layout, interrupt)
+                }));
+        }
         if let Ok(pte_base) = ntoskrnl
             .symbol("MmPteBase")
             .and_then(|symbol| symbol.read_pointer())
@@ -758,8 +754,6 @@ fn system_dtb(kernel: &Image) -> Option<Dtb> {
     Some(dtb & kernel.arch().dtb_page_mask()).filter(|dtb| *dtb != 0)
 }
 
-/// The kernel's `MiState.Hardware.InvalidPteMask`: the bits it sets in a
-/// non-present PTE's frame so a speculative load through it reaches no real
 /// The first bit of a software PTE's page-file number
 /// (`_MMPTE_SOFTWARE.PageFileLow`): bit 12 on kernels with the L1TF
 /// mitigation, bit 1 before it. `None` when the PDB does not type it.
@@ -771,6 +765,8 @@ fn page_file_low(kernel: &Image) -> Option<u32> {
     }
 }
 
+/// The kernel's `MiState.Hardware.InvalidPteMask`: the bits it sets in a
+/// non-present PTE's frame so a speculative load through it reaches no real
 /// memory (the L1TF mitigation). `None` on a build without one.
 fn invalid_pte_mask(kernel: &Image) -> Option<u64> {
     let state = kernel.symbol("MiState").ok()?.address();
@@ -826,16 +822,11 @@ fn store_functions(kernel: &Image) -> Option<HashMap<String, u64>> {
 /// one, and the kernel for 5-level paging.
 const KERNEL_FILE_NAMES: [&str; 2] = ["ntoskrnl.exe", "ntkrla57.exe"];
 
-/// The kernel's file from the image cache, matched by the mapped headers
-/// `mapped`; from the symbol servers too when reads go through the target,
-/// where reading the kernel's 12 MiB of code takes over half a minute.
+/// The kernel's file, matched by its mapped header page `mapped`: from the
+/// image cache, and from the symbol servers too when reads go through the
+/// target, where reading the kernel's 12 MiB of code takes over half a
+/// minute.
 fn kernel_file(kernel: &Image, mapped: &[u8]) -> Option<Arc<PeImage>> {
-    let view = PeView::from_bytes(mapped).ok()?;
-    let (stamp, size) = (
-        view.file_header().TimeDateStamp,
-        view.optional_header().SizeOfImage,
-    );
-    let end = pe_headers_end(mapped)?;
     let fetches: &[ImageFetch] = if kernel.phys.reads_through_target() {
         &[ImageFetch::CacheOnly, ImageFetch::Download]
     } else {
@@ -844,13 +835,7 @@ fn kernel_file(kernel: &Image, mapped: &[u8]) -> Option<Arc<PeImage>> {
     fetches
         .iter()
         .flat_map(|&fetch| KERNEL_FILE_NAMES.map(|name| (name, fetch)))
-        .find_map(|(name, fetch)| {
-            let file = kernel
-                .symbols()
-                .module_image_on_disk(name, stamp, size, fetch)
-                .ok()?;
-            headers_match_relocated(file.headers().get(..end)?, mapped.get(..end)?).then_some(file)
-        })
+        .find_map(|(name, fetch)| kernel.symbols().module_image_matching(name, mapped, fetch))
 }
 
 /// The layout of the kernel's memory-compression store, from its code
@@ -858,7 +843,7 @@ fn kernel_file(kernel: &Image, mapped: &[u8]) -> Option<Arc<PeImage>> {
 /// it, at the file's own base as the corpus test reads it, else the mapped
 /// image's.
 fn store_layout_of(kernel: &mut Image, interrupt: &AtomicBool) -> Option<StoreLayout> {
-    let mapped = kernel.view()?.image().to_vec();
+    let headers = kernel.view()?.image().to_vec();
     let functions = store_functions(kernel)?;
     let derive = |base: u64, bytes: &[u8], code: Vec<(u32, u32)>| {
         let functions = functions
@@ -876,31 +861,32 @@ fn store_layout_of(kernel: &mut Image, interrupt: &AtomicBool) -> Option<StoreLa
         })
         .ok()
     };
-    if let Some(file) = kernel_file(kernel, &mapped) {
+    if let Some(file) = kernel_file(kernel, &headers) {
         let bytes = file.headers();
         let view = PeView::from_bytes(bytes).ok()?;
-        let code = store_layout::code_ranges(&view, bytes.len());
-        return derive(view.optional_header().ImageBase, bytes, code);
+        return derive(
+            view.optional_header().ImageBase,
+            bytes,
+            pe::executable_ranges(&view),
+        );
     }
     let base = kernel.base_address.0;
-    let code =
-        store_layout::mapped_code(&kernel.memory(), base, kernel.binary_size(), interrupt).ok()?;
+    let code = store_layout::mapped_code(&kernel.memory(), base, &headers, interrupt).ok()?;
     derive(base, &code.bytes, code.code)
 }
 
 /// The guest's memory-compression store, when its PDB types the
 /// partition's store fields, the store has an owner process (it has none
 /// when compression is off, or before the store manager creates it after
-/// boot), and the kernel's code gives the layout, which is derived into
-/// `layout` once.
+/// boot), and the kernel's code gives the layout. `layout` keeps the
+/// derivation's outcome, so the code is read once: a layout the code does
+/// not give is not looked for again, unless Ctrl+C (`interrupt`) stopped
+/// the derivation.
 fn compressed_pages(
     kernel: &mut Image,
-    layout: &mut Option<StoreLayout>,
+    layout: &mut Option<Option<StoreLayout>>,
     interrupt: &AtomicBool,
 ) -> Option<CompressedPages> {
-    if kernel.arch() != Arch::Amd64 {
-        return None;
-    }
     let memory = kernel.memory();
     let types = kernel.types();
     let partition = kernel.symbol("MiSystemPartition").ok()?.address();
@@ -946,15 +932,21 @@ fn compressed_pages(
         .ok()?;
     let owner_root = root & kernel.arch().dtb_page_mask();
     let layout = match layout {
-        Some(layout) => layout.clone(),
-        None => layout.insert(store_layout_of(kernel, interrupt)?).clone(),
+        Some(known) => known.clone()?,
+        None => {
+            let derived = store_layout_of(kernel, interrupt);
+            if derived.is_some() || !interrupt.load(Ordering::Relaxed) {
+                *layout = Some(derived.clone());
+            }
+            derived?
+        }
     };
     Some(CompressedPages {
         layout,
-        manager,
-        owner: owner.0,
+        manager: VirtAddr(manager),
+        owner,
         owner_root,
-        page_file: page_file as u8,
+        page_file: u8::try_from(page_file).ok()?,
     })
 }
 

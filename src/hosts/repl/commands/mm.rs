@@ -387,9 +387,7 @@ impl Render for PteWalk {
         print_pte_walk(self, mask);
         // What a non-present entry means for the page: where it is, and
         // whether a read still gets it.
-        if !target.in_secure_address_space()
-            && let Some(why) = target.address_space(self.dtb).non_resident(self.address)
-        {
+        if let Some(why) = target.non_resident(self.dtb, self.address) {
             outln!("{}: {why}", ui::addr(self.address.0));
         }
     }

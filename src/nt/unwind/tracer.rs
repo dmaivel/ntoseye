@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use pelite::pe64::{Pe, PeView, image::IMAGE_SCN_MEM_EXECUTE};
+use pelite::pe64::{Pe, PeView};
 
 use super::{
     CachedModule, FrameMemory, FrameRegisters, OwnedModule, StackPage, StackTracer,
@@ -20,7 +20,7 @@ use crate::{
     },
     nt::{
         guest::{Image, ModuleInfo},
-        pe::{CodeLayout, PeImage, headers_match_relocated, pe_headers_end},
+        pe::{self, CodeLayout, PeImage},
         symbols::ImageFetch,
         target::Target,
     },
@@ -317,13 +317,8 @@ impl<'a> StackTracer<'a> {
     /// from the target. The file must open with the headers the guest
     /// mapped; a mismatch keeps the guest image. Nothing is downloaded here.
     fn cached_on_disk_image(&self, image: &PeImage, info: &ModuleInfo) -> Option<Arc<PeImage>> {
-        let disk = self.on_disk_image(image, info, ImageFetch::CacheOnly)?;
-        let headers_end = pe_headers_end(image.headers())?;
-        headers_match_relocated(
-            disk.headers().get(..headers_end)?,
-            image.headers().get(..headers_end)?,
-        )
-        .then_some(disk)
+        self.symbols
+            .module_image_matching(&info.name, image.headers(), ImageFetch::CacheOnly)
     }
 
     /// Whether `info` is the trace's foreign image (the Windows
@@ -371,25 +366,8 @@ impl CachedModule {
 /// The `[start, end)` RVA ranges of a module's executable sections (used to
 /// validate scan candidates).
 fn executable_ranges(image: &PeImage) -> Vec<(u32, u32)> {
-    let Ok(view) = PeView::from_bytes(image.headers()) else {
-        return Vec::new();
-    };
-    view.section_headers()
-        .iter()
-        .filter_map(|section| {
-            if section.Characteristics & IMAGE_SCN_MEM_EXECUTE == 0 {
-                return None;
-            }
-            let size = section.VirtualSize.max(section.SizeOfRawData);
-            if size == 0 {
-                return None;
-            }
-            Some((
-                section.VirtualAddress,
-                section.VirtualAddress.saturating_add(size),
-            ))
-        })
-        .collect()
+    PeView::from_bytes(image.headers())
+        .map_or_else(|_| Vec::new(), |view| pe::executable_ranges(&view))
 }
 
 impl FrameMemory for StackTracer<'_> {
