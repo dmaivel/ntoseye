@@ -31,7 +31,22 @@ A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode
 
 ### Supported Windows
 
-`ntoseye` supports 64-bit AMD64 and ARM64 Windows 10 and 11 targets.
+| Windows | x64 | x86 | ARM64 |
+| --- | --- | --- | --- |
+| 11 | Yes |  | Yes |
+| 10 | Yes | No | Yes |
+| 8.1 | Yes | No |  |
+| 8 | Untested | No |  |
+| 7 SP1 | Yes | No |  |
+| 7 RTM | Untested | No |  |
+| Vista SP2 | Yes | No |  |
+| Vista SP1 | Untested | No |  |
+| Vista RTM | Untested | No |  |
+| XP SP3 |  | No |  |
+| XP SP2 | Yes | No |  |
+| XP SP1 |  | No |  |
+| XP RTM | Untested | No |  |
+| 2000 |  | No |  |
 
 ### Supported hypervisors
 

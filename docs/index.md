@@ -41,7 +41,24 @@ For your own drivers, [private PDBs and local source](using/symbols.md) add sour
 
 ## Platform support
 
-`ntoseye` debugs 64-bit Windows 10 and 11 on AMD64 and ARM64, live or from a crash dump. It runs on Linux (x86-64 and ARM64) and on macOS on Apple Silicon.
+| Windows | x64 | x86 | ARM64 |
+| --- | --- | --- | --- |
+| 11 | Yes |  | Yes |
+| 10 | Yes | No | Yes |
+| 8.1 | Yes | No |  |
+| 8 | Untested | No |  |
+| 7 SP1 | Yes | No |  |
+| 7 RTM | Untested | No |  |
+| Vista SP2 | Yes | No |  |
+| Vista SP1 | Untested | No |  |
+| Vista RTM | Untested | No |  |
+| XP SP3 |  | No |  |
+| XP SP2 | Yes | No |  |
+| XP SP1 |  | No |  |
+| XP RTM | Untested | No |  |
+| 2000 |  | No |  |
+
+`ntoseye` runs on Linux (x86-64 and ARM64) and on macOS on Apple Silicon.
 
 It sets up and works directly with [KVM/QEMU](setup/kvm-qemu.md) and [VMware Workstation](setup/vmware.md) on Linux and [UTM](setup/utm.md) on macOS. Any other machine, physical or virtual, connects over [KDNET](setup/kdnet.md).
 
