@@ -554,12 +554,19 @@ impl ReplState<'_> {
                 ("committed", format!("{:#x}", heap.committed_pages * 0x1000)),
                 (
                     "free committed",
-                    format!(
-                        "{:#x} (LFH {:#x}, VS {:#x})",
-                        heap.free_committed_pages * 0x1000,
-                        heap.lfh_free_committed_pages * 0x1000,
-                        heap.vs_free_committed_pages * 0x1000
-                    ),
+                    match heap.vs_free_committed_pages {
+                        Some(vs) => format!(
+                            "{:#x} (LFH {:#x}, VS {:#x})",
+                            heap.free_committed_pages * 0x1000,
+                            heap.lfh_free_committed_pages * 0x1000,
+                            vs * 0x1000
+                        ),
+                        None => format!(
+                            "{:#x} (LFH {:#x})",
+                            heap.free_committed_pages * 0x1000,
+                            heap.lfh_free_committed_pages * 0x1000
+                        ),
+                    },
                 ),
                 (
                     "large allocations",

@@ -672,6 +672,8 @@ pub struct TargetKernel {
     pub size: Option<u64>,
     pub file_version: Option<String>,
     pub product_version: Option<String>,
+    /// The file name of the loaded PDB (`ntkrnlmp.pdb`).
+    pub pdb_name: Option<String>,
     /// The GUID of the PDB, which identifies the symbols.
     pub pdb_guid: Option<String>,
     /// The age of the PDB.
@@ -1167,6 +1169,10 @@ impl Target {
             product_version: kernel_module
                 .as_ref()
                 .and_then(|module| module.product_version.clone()),
+            pdb_name: self
+                .symbols
+                .module_pdb_path(self.kernel_dtb(), base)
+                .and_then(|path| Some(path.file_name()?.to_string_lossy().into_owned())),
             pdb_guid: identity.map(|identity| format!("{:032X}", identity.guid)),
             pdb_age: identity.map(|identity| identity.age),
         });

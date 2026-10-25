@@ -297,6 +297,19 @@ impl Render for DevNodeDetail {
     }
 }
 
+/// The device object or device node `!devstack` starts from; a device may
+/// be named as `!devobj` takes it.
+#[grammar(usage = "<device-object|devnode|device-name>", complete = [Expression])]
+fn device_stack_argument(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<VirtAddr, ArgError> {
+    let Some(text) = cursor.word() else {
+        return Err(ArgError::Missing);
+    };
+    super::object::device_object_named(cx, &text)
+}
+
 /// Show the device stack for a DEVICE_OBJECT or device node.
 ///
 /// The argument can be any DEVICE_OBJECT in the stack, or the DEVICE_NODE of
@@ -314,7 +327,7 @@ impl Render for DevNodeDetail {
 )]
 fn devstack(
     session: &Session,
-    #[arg(name = "device-object|devnode")] device_or_node: VirtAddr,
+    #[arg(parse = device_stack_argument)] device_or_node: VirtAddr,
 ) -> Result<DeviceStackDetail> {
     session.target.inspect_device_stack(device_or_node)
 }

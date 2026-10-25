@@ -66,7 +66,7 @@ mod kdnet;
 mod machine;
 mod memory;
 mod pump;
-mod registers;
+pub mod registers;
 mod run;
 mod transport;
 use breakpoints::PendingWriteBreakpoint;

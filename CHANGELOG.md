@@ -19,6 +19,8 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 
 ### Added
 
+- `!devobj` and `!devstack` take a device by name, `\Device\Null` or `Null`, as WinDbg's `!devobj` does, and `!drvobj` takes WinDbg's flags: 1 shows the device objects, 2 the dispatch routines.
+- On an ARM64 target, `rdmsr` and `wrmsr` take a system register by name (`MIDR_EL1`, `TTBR1_EL1`, `CNTVCT_EL0`), as `S3_0_C0_C0_0`, or by the number KD reads it by, and name the registers they know. `rdmsr TSC` there sent x86's MSR number.
 - `-c '<commands>'` runs commands at startup, each line as typed at the prompt, as `cdb -c` does; give it more than once for several lines. `--batch` quits after them instead of prompting, prints only the commands' output, leaves a live target as `q` does, and exits with status 1 if a command reported an error. See [Commands from the command line](https://ntoseye.com/using/repl/#commands-from-the-command-line).
 - `--kd-handshake-timeout <seconds>` sets how long the `kd` and `kdnet` backends wait for the target's first answer, as `NTOSEYE_KD_TIMEOUT` does, and wins over it; the default is still 8 seconds. MCP's `open` takes it as `kd_handshake_timeout`, DAP's attach arguments as `kdHandshakeTimeout`, and the SDK as `ntoseye.attach(kd_handshake_timeout=...)`.
 - The `gdb` backend sets as many hardware breakpoints (`ba`) as the GDB stub accepts, no longer four, so QEMU running with TCG, which emulates them, takes any number. Under KVM the processor still has four debug registers, and a fifth `ba` says the stub refused it.
@@ -62,6 +64,14 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 
 ### Fixed
 
+- `!poolused` counted big allocations twice: the tag tables count them, and their bytes were added again from the big-page table, so a tag with 758 big blocks showed 1516. It reads the big-page table only when the tag tables cannot be read, lists tags in the order their characters read (it went by the last one), and leaves out tags with nothing outstanding.
+- `!vm` shows the system PTEs, each paging file (its size, limits, use, free space and peak use) and the nonpaged pool maximum on Windows 10 and later, which keep none of the globals it read. It said they were unavailable.
+- `!sysptes` and `!vm` no longer stop with an overflow on Windows 11 22631 ARM64, whose free-PTE counter goes below zero. Free PTEs are counted from each allocator's bitmap, and `!sysptes` shows a counter that disagrees as it reads (`-3459`) without blaming a race.
+- `!heap` decodes segment heaps on Windows before 11 24H2, which keep no separate VS free count. It showed no statistics for them.
+- `!drvobj ACPI` showed the driver named ACPI, not an error that acpi.sys's image base is no driver object: a name is looked up before it is taken as an expression.
+- On an ARM64 target, `!cpuinfo` says the processor block keeps no vendor, family, model or stepping and points to `rdmsr MIDR_EL1`, instead of reporting four x86 fields missing, and `!analyze` names the program counter `pc`, not `rip`.
+- `vertarget` names the kernel's PDB by its file, such as `ntkrnlmp.pdb`, not always `ntoskrnl.pdb`.
+- On `kd` and `kdnet`, a reply that the target sent an earlier debugger and repeats to the next one is passed over, instead of failing the attach with "reply api mismatch".
 - On an ARM64 target, `!pte` shows a page Windows lets the process write as writable (`W`) before its first write, when the hardware still maps it read-only, and marks it dirty (`D`) once written and copy-on-write (`C`). It showed such a page as read-only (`R`).
 - On an ARM64 target, `~` heads the program counter's column `PC`, not `RIP`.
 - `!vad` shows each region's commit charge on Windows before 11 24H2, which keeps it in another field. The Commit column was empty.

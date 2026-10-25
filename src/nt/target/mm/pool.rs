@@ -14,7 +14,7 @@ use crate::base::types::VirtAddr;
 use crate::nt::symbols::glob_matches;
 use crate::nt::target::Target;
 use crate::nt::target::pool::{
-    BigPoolEntry, NONPAGED_POOL, PAGED_POOL, POOL_ALIGN, POOL_PAGE_SIZE, PoolHeader,
+    BigPoolEntry, PoolUsageRow, NONPAGED_POOL, PAGED_POOL, POOL_ALIGN, POOL_PAGE_SIZE, PoolHeader,
     annotate_near_symbol, big_pool_layout, classify_pool_region, collect_pool_usage, find_big_pool,
     locate_pool_block_in_page, pool_block_state, pool_header_candidates, pool_layout,
     pool_page_blocks, pool_range, scan_big_pool_entries, scan_present_pool_pages,
@@ -163,24 +163,13 @@ impl Target {
             .rows
             .into_iter()
             .filter(|row| {
-                tag_filter
-                    .map(|filter| glob_matches(filter, &tag_string(row.tag), false))
-                    .unwrap_or(true)
+                row.in_use()
+                    && tag_filter
+                        .map(|filter| glob_matches(filter, &tag_string(row.tag), false))
+                        .unwrap_or(true)
             })
             .collect::<Vec<_>>();
-        match sort {
-            PoolUsageSort::NonPagedBytes => rows.sort_by(|a, b| {
-                b.nonpaged_bytes
-                    .cmp(&a.nonpaged_bytes)
-                    .then_with(|| a.tag.cmp(&b.tag))
-            }),
-            PoolUsageSort::PagedBytes => rows.sort_by(|a, b| {
-                b.paged_bytes
-                    .cmp(&a.paged_bytes)
-                    .then_with(|| a.tag.cmp(&b.tag))
-            }),
-            PoolUsageSort::Tag => rows.sort_by_key(|row| row.tag),
-        }
+        sort_usage_rows(&mut rows, sort);
         let rows_truncated = summary.rows_truncated || rows.len() > MAX_POOLUSED_ROWS;
         rows.truncate(MAX_POOLUSED_ROWS);
         Ok(PoolUsageDetail {
@@ -352,6 +341,25 @@ impl Target {
             truncated,
             interrupted,
         })
+    }
+}
+
+/// `rows` in `!poolused`'s order: by tag, as its characters read, or by
+/// nonpaged or paged bytes, largest first.
+fn sort_usage_rows(rows: &mut [PoolUsageRow], sort: PoolUsageSort) {
+    match sort {
+        PoolUsageSort::NonPagedBytes => rows.sort_by(|a, b| {
+            b.nonpaged_bytes
+                .cmp(&a.nonpaged_bytes)
+                .then_with(|| a.tag.to_le_bytes().cmp(&b.tag.to_le_bytes()))
+        }),
+        PoolUsageSort::PagedBytes => rows.sort_by(|a, b| {
+            b.paged_bytes
+                .cmp(&a.paged_bytes)
+                .then_with(|| a.tag.to_le_bytes().cmp(&b.tag.to_le_bytes()))
+        }),
+        // A tag's characters are its bytes in memory order.
+        PoolUsageSort::Tag => rows.sort_by_key(|row| row.tag.to_le_bytes()),
     }
 }
 
@@ -532,6 +540,42 @@ mod tests {
 
     const PAGE: VirtAddr = VirtAddr(0xffff_8000_0000_0000);
     const TAG: u32 = u32::from_le_bytes(*b"Test");
+
+    fn usage(tag: &[u8; 4], nonpaged: (i64, i64, i64)) -> PoolUsageRow {
+        PoolUsageRow {
+            tag: u32::from_le_bytes(*tag),
+            nonpaged_allocs: Some(nonpaged.0),
+            nonpaged_frees: Some(nonpaged.1),
+            nonpaged_bytes: Some(nonpaged.2),
+            paged_allocs: Some(0),
+            paged_frees: Some(0),
+            paged_bytes: Some(0),
+        }
+    }
+
+    /// Tags sort as their characters read, as WinDbg lists them, not by
+    /// the little-endian number they are stored as (which orders them by
+    /// their last character).
+    #[test]
+    fn usage_rows_sort_by_tag_text() {
+        let mut rows = [b"lcA\0", b"Proc", b"ConT", b"EP\0\0"].map(|tag| usage(tag, (1, 0, 16)));
+        sort_usage_rows(&mut rows, PoolUsageSort::Tag);
+        let order: Vec<[u8; 4]> = rows.iter().map(|row| row.tag.to_le_bytes()).collect();
+        assert_eq!(order, [*b"ConT", *b"EP\0\0", *b"Proc", *b"lcA\0"]);
+    }
+
+    /// A tag is in use while it has more allocations than frees, summed
+    /// over the processors' tables; one whose every allocation was freed
+    /// is not, whatever any one processor's table says.
+    #[test]
+    fn a_tag_is_in_use_while_allocations_are_outstanding() {
+        assert!(usage(b"Proc", (5, 4, 0x100)).in_use());
+        assert!(!usage(b"Proc", (7, 7, 0)).in_use());
+        let mut without_counts = usage(b"Proc", (0, 0, 0x40));
+        without_counts.nonpaged_allocs = None;
+        without_counts.nonpaged_frees = None;
+        assert!(without_counts.in_use(), "bytes stand in for missing counts");
+    }
 
     fn header(offset: u64, size: u64, previous_size: u64, pool_type: u8) -> PoolHeader {
         PoolHeader {

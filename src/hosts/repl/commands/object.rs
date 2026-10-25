@@ -125,8 +125,10 @@ impl Render<Option<String>> for Vec<DriverObjectInfo> {
     }
 }
 
-/// The driver object that `!drvobj` names: an expression, or else a driver
-/// name (`ACPI` or `\Driver\ACPI`).
+/// The driver object that `!drvobj` names: a driver name (`ACPI` or
+/// `\Driver\ACPI`), or else an address expression. The name comes first:
+/// nearly every driver's is also its module's, which evaluates to the
+/// image base.
 #[grammar(usage = "<driver-object|driver-name>", complete = [Driver])]
 fn driver_argument(
     cx: &mut ArgCx<'_, '_>,
@@ -135,9 +137,6 @@ fn driver_argument(
     let Some(text) = cursor.word() else {
         return Err(ArgError::Missing);
     };
-    if let Ok(address) = cx.eval(&text) {
-        return Ok(address);
-    }
     let full;
     let needle = if text.starts_with("\\Driver\\") {
         &*text
@@ -156,14 +155,85 @@ fn driver_argument(
                 .find(|driver| driver.name.eq_ignore_ascii_case(needle))
         })
         .map(|driver| driver.object)
-        .ok_or_else(|| {
+        .map_or_else(
+            || {
+                cx.eval(&text).map_err(|_| {
+                    ArgError::Message(format!(
+                        "driver '{text}' not found, and it is not an address expression"
+                    ))
+                })
+            },
+            Ok,
+        )
+}
+
+/// The parts of a driver object `!drvobj` shows, by WinDbg's flags: 1 its
+/// device objects, 2 its dispatch routines; 4, detail on the devices,
+/// implies 1. Both without flags.
+#[derive(Clone, Copy)]
+pub struct DriverSections {
+    devices: bool,
+    dispatch: bool,
+}
+
+#[grammar(usage = "[flags]", complete = [Expression])]
+fn drvobj_flags(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<DriverSections, ArgError> {
+    let Some(word) = cursor.word() else {
+        return Ok(DriverSections {
+            devices: true,
+            dispatch: true,
+        });
+    };
+    let flags = cx.eval(&word)?.0;
+    cursor.finish(cx.name)?;
+    Ok(DriverSections {
+        devices: flags & 0x5 != 0,
+        dispatch: flags & 0x2 != 0,
+    })
+}
+
+/// The device object a word names: an object path, where a bare name is
+/// one in `\Device` (`Null` for `\Device\Null`), or else an address
+/// expression. The name comes first, as for `!drvobj`: `Null` is also
+/// null.sys's module.
+pub fn device_object_named(
+    cx: &mut ArgCx<'_, '_>,
+    text: &str,
+) -> std::result::Result<VirtAddr, ArgError> {
+    let path = if text.starts_with('\\') {
+        text.to_string()
+    } else {
+        format!("\\Device\\{text}")
+    };
+    match cx.state.ctx.target.object_at_path(&path) {
+        Ok(object) => Ok(object),
+        Err(error) => cx.eval(text).map_err(|_| {
             ArgError::Message(format!(
-                "driver '{text}' not found, and it is not an address expression"
+                "device '{text}' not found ({error}), and it is not an address expression"
             ))
-        })
+        }),
+    }
+}
+
+/// The device object that `!devobj` names.
+#[grammar(usage = "<device-object|device-name>", complete = [Expression])]
+fn device_argument(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<VirtAddr, ArgError> {
+    let Some(text) = cursor.word() else {
+        return Err(ArgError::Missing);
+    };
+    device_object_named(cx, &text)
 }
 
 /// Show a DRIVER_OBJECT with its device chain and dispatch table.
+///
+/// The flags follow WinDbg: 1 shows the device objects, 2 the dispatch
+/// routines; without flags, both.
 #[command(
     names = ["!drvobj", "drvobj"],
     category = "objects and I/O",
@@ -175,12 +245,13 @@ fn driver_argument(
 fn drvobj(
     session: &Session,
     #[arg(receiver, parse = driver_argument)] driver: VirtAddr,
+    #[arg(render, parse = drvobj_flags)] sections: DriverSections,
 ) -> Result<DriverObjectDetail> {
     session.target.inspect_driver_object(driver)
 }
 
-impl Render for DriverObjectDetail {
-    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+impl Render<DriverSections> for DriverObjectDetail {
+    fn render(&self, repl: &mut ReplState<'_>, sections: DriverSections) {
         let target = &repl.ctx.target;
         let mode = if self.via_pointer {
             "pointer"
@@ -197,10 +268,14 @@ impl Render for DriverObjectDetail {
             kernel_symbol_or_dash(target, self.driver_unload)
         );
 
-        print_section("devices");
-        if self.devices.is_empty() {
+        // A table ends with the blank line that separates sections.
+        let mut after_table = false;
+        if sections.devices {
+            print_section("devices");
+        }
+        if !sections.devices {
+        } else if self.devices.is_empty() {
             outln!("  {}", ui::muted("no device objects"));
-            print_section("dispatch table");
         } else {
             let mut builder = Builder::default();
             builder.push_record([
@@ -222,8 +297,15 @@ impl Render for DriverObjectDetail {
                 ]);
             }
             print_padded_table(builder);
-            // The table already ends with the blank line that separates sections.
+            after_table = true;
+        }
+        if !sections.dispatch {
+            return;
+        }
+        if after_table {
             outln!("{}", ui::label("dispatch table"));
+        } else {
+            print_section("dispatch table");
         }
         for routine in &self.dispatch {
             outln!(
@@ -250,7 +332,7 @@ impl Render for DriverObjectDetail {
 )]
 fn devobj(
     session: &Session,
-    #[arg(receiver, name = "device-object")] device: VirtAddr,
+    #[arg(receiver, parse = device_argument)] device: VirtAddr,
 ) -> Result<DeviceObjectDetail> {
     session.target.inspect_device_object(device)
 }

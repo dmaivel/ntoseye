@@ -146,12 +146,24 @@ impl ManipulateHeader {
 fn recv_manipulate_reply(
     framing: &mut KdFraming<impl Read + Write>,
     requested_processor: u16,
+    requested_api: u32,
 ) -> Result<(ManipulateHeader, [u8; MANIPULATE_HEADER_SIZE], Vec<u8>)> {
     loop {
         let pkt = framing.recv_data()?;
         match pkt.packet_type {
             PACKET_TYPE_KD_STATE_MANIPULATE => {
                 let parsed = ManipulateHeader::decode(&pkt.payload)?;
+                // A reply to another request is stale: one the target sent a
+                // debugger that went away before taking it, and sends again
+                // to the next. The reply to this request still follows.
+                if parsed.api_number != requested_api {
+                    kd_trace!(
+                        "kd: dropping a stale reply to api {:#x} while awaiting {:#x}",
+                        parsed.api_number,
+                        requested_api
+                    );
+                    continue;
+                }
                 if parsed.processor != requested_processor {
                     return Err(Error::Kd(format!(
                         "reply processor mismatch: expected {}, got {}",
@@ -204,11 +216,12 @@ fn send_manipulate(
     data: &[u8],
 ) -> Result<(ManipulateHeader, [u8; MANIPULATE_HEADER_SIZE], Vec<u8>)> {
     let requested_processor = read_u16(header, 6);
+    let requested_api = read_u32(header, 0);
     let mut payload = Vec::with_capacity(MANIPULATE_HEADER_SIZE + data.len());
     payload.extend_from_slice(header);
     payload.extend_from_slice(data);
     framing.send_data(PACKET_TYPE_KD_STATE_MANIPULATE, &payload)?;
-    recv_manipulate_reply(framing, requested_processor)
+    recv_manipulate_reply(framing, requested_processor, requested_api)
 }
 
 fn check_status(header: &ManipulateHeader, api: u32) -> Result<()> {
@@ -675,7 +688,8 @@ pub fn recv_write_breakpoint_reply<T: Read + Write>(
     framing: &mut KdFraming<T>,
     processor: u16,
 ) -> Result<u32> {
-    let (parsed, reply_header, _) = recv_manipulate_reply(framing, processor)?;
+    let (parsed, reply_header, _) =
+        recv_manipulate_reply(framing, processor, DBGKD_WRITE_BREAKPOINT)?;
     check_status(&parsed, DBGKD_WRITE_BREAKPOINT)?;
     Ok(read_u32(&reply_header, UNION_OFFSET + 8))
 }

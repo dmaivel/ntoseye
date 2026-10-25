@@ -796,7 +796,8 @@ pub struct SegmentHeap {
     pub committed_pages: u64,
     pub free_committed_pages: u64,
     pub lfh_free_committed_pages: u64,
-    pub vs_free_committed_pages: u64,
+    /// `None` before Windows 11 24H2, which counts no VS share apart.
+    pub vs_free_committed_pages: Option<u64>,
     pub large_reserved_pages: u64,
     pub large_committed_pages: u64,
     /// The segment contexts, as decoded; `SegmentHeapDetail.contexts` has
@@ -1072,7 +1073,7 @@ impl HeapReader<'_> {
             committed_pages: stats.read(&image, stats_at, "TotalCommittedPages")?,
             free_committed_pages: stats.read(&image, stats_at, "FreeCommittedPages")?,
             lfh_free_committed_pages: stats.read(&image, stats_at, "LfhFreeCommittedPages")?,
-            vs_free_committed_pages: stats.read(&image, stats_at, "VsFreeCommittedPages")?,
+            vs_free_committed_pages: stats.read(&image, stats_at, "VsFreeCommittedPages").ok(),
             large_reserved_pages: heap.read(&image, 0, "LargeReservedPages")?,
             large_committed_pages: heap.read(&image, 0, "LargeCommittedPages")?,
             contexts,

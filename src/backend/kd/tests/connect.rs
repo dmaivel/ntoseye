@@ -130,3 +130,49 @@ fn arm64_target_hints_read_ttbr1_through_kd() {
     assert_eq!(hints.kernel_base, VirtAddr(kernel_base));
     assert_eq!(hints.ps_loaded_module_list, VirtAddr(module_list));
 }
+
+/// A reply the target sent a debugger that went away (here to a
+/// RestoreBreakPoint) and sends again to the next is passed over: the
+/// request's own reply follows it.
+#[test]
+fn a_stale_reply_before_the_requested_one_is_passed_over() {
+    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let mut backend = kd_backend_with_framing(host);
+    backend.link.halt();
+    backend.exit_prepared = true;
+    let kernel_base = 0xffff_f802_4e80_0000u64;
+
+    let worker = spawn(move || {
+        let request = read_wire_packet(&mut kernel);
+        kernel
+            .write_all(&control_packet(
+                PACKET_TYPE_KD_ACKNOWLEDGE,
+                wire_header(&request).packet_id,
+            ))
+            .unwrap();
+        let stale = manipulate_reply_payload(api::DBGKD_RESTORE_BREAKPOINT, 0, &[0u8; 40]);
+        kernel
+            .write_all(&data_packet(
+                PACKET_TYPE_KD_STATE_MANIPULATE,
+                INITIAL_PACKET_ID,
+                &stale,
+            ))
+            .unwrap();
+        let _stale_ack = read_wire_packet(&mut kernel);
+        let mut version_union = [0u8; 40];
+        version_union[16..24].copy_from_slice(&kernel_base.to_le_bytes());
+        let reply = manipulate_reply_payload(api::DBGKD_GET_VERSION, 0, &version_union);
+        kernel
+            .write_all(&data_packet(
+                PACKET_TYPE_KD_STATE_MANIPULATE,
+                INITIAL_PACKET_ID ^ 1,
+                &reply,
+            ))
+            .unwrap();
+        let _ack = read_wire_packet(&mut kernel);
+    });
+
+    let version = api::get_version(backend.framing().unwrap(), 0).unwrap();
+    worker.join().unwrap();
+    assert_eq!(version.kern_base, kernel_base);
+}

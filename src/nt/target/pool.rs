@@ -172,6 +172,23 @@ impl PoolUsageRow {
 }
 
 impl PoolUsageRow {
+    /// Whether an allocation with the tag is outstanding in either pool:
+    /// more allocations than frees, or bytes in use where no counts are
+    /// kept.
+    pub fn in_use(&self) -> bool {
+        let outstanding = |allocs: Option<i64>, frees: Option<i64>, bytes: Option<i64>| match (
+            allocs, frees,
+        ) {
+            (Some(allocs), Some(frees)) => allocs != frees,
+            _ => bytes.unwrap_or(0) != 0,
+        };
+        outstanding(
+            self.nonpaged_allocs,
+            self.nonpaged_frees,
+            self.nonpaged_bytes,
+        ) || outstanding(self.paged_allocs, self.paged_frees, self.paged_bytes)
+    }
+
     fn new(tag: u32) -> Self {
         Self {
             tag,
@@ -644,15 +661,35 @@ fn aggregate_big_pool_entry(
     }
 }
 
-/// Aggregate all per-processor tracker tables and the big-page table without
-/// retaining every entry.
+/// Aggregate the per-processor tracker tables without retaining every
+/// entry. The tracker counts every allocation, big ones too, as WinDbg's
+/// `!poolused` reads it alone: the big-page table stands in only when the
+/// tracker cannot be read, and then gives the big allocations alone.
 pub fn collect_pool_usage(debugger: &Target) -> PoolUsageSummary {
     let mut rows = BTreeMap::<u32, PoolUsageRow>::new();
     let mut rows_truncated = false;
-    let tracker_status = collect_tracker_usage(debugger, &mut rows, &mut rows_truncated)
-        .unwrap_or_else(|error| error);
+    let tracker = collect_tracker_usage(debugger, &mut rows, &mut rows_truncated);
+    let big = match &tracker {
+        Ok(_) => BigPoolScanSummary {
+            status: "counted by the tracker".to_string(),
+        },
+        Err(_) => collect_big_pool_usage(debugger, &mut rows, &mut rows_truncated),
+    };
+    PoolUsageSummary {
+        rows: rows.into_values().collect(),
+        rows_truncated,
+        tracker_status: tracker.unwrap_or_else(|error| error),
+        big,
+    }
+}
 
-    let big = match pool_layout(debugger) {
+/// The big-page table's allocations, by tag, into `rows`.
+fn collect_big_pool_usage(
+    debugger: &Target,
+    rows: &mut BTreeMap<u32, PoolUsageRow>,
+    rows_truncated: &mut bool,
+) -> BigPoolScanSummary {
+    match pool_layout(debugger) {
         Ok(layout) => scan_big_pool_entries(
             debugger,
             layout.big_pool_type.as_deref(),
@@ -660,7 +697,7 @@ pub fn collect_pool_usage(debugger: &Target) -> PoolUsageSummary {
             layout.big_pool_has_pool_type,
             layout.big_pool_has_slush,
             |entry| {
-                aggregate_big_pool_entry(&mut rows, &mut rows_truncated, entry);
+                aggregate_big_pool_entry(rows, rows_truncated, entry);
                 false
             },
         ),
@@ -672,7 +709,7 @@ pub fn collect_pool_usage(debugger: &Target) -> PoolUsageSummary {
                 has_pool_type,
                 has_slush,
                 |entry| {
-                    aggregate_big_pool_entry(&mut rows, &mut rows_truncated, entry);
+                    aggregate_big_pool_entry(rows, rows_truncated, entry);
                     false
                 },
             ),
@@ -682,13 +719,6 @@ pub fn collect_pool_usage(debugger: &Target) -> PoolUsageSummary {
                 ),
             },
         },
-    };
-
-    PoolUsageSummary {
-        rows: rows.into_values().collect(),
-        rows_truncated,
-        tracker_status,
-        big,
     }
 }
 

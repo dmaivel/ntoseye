@@ -16,7 +16,7 @@ use crate::hosts::ui;
 use crate::nt::expr::Expr;
 use crate::nt::target::cpu::{
     CpuInfo, CpuTriageFallback, DescriptorRegister, Gdt, GdtDescriptor, Idt, IdtGate, Irql, Pcr,
-    Prcb, Processor, SpecialRegistersArea, msr_name, parse_msr_name,
+    Prcb, Processor, SpecialRegistersArea, msr_kind, msr_name, parse_msr_name,
 };
 use crate::nt::target::{DiagnosticValue, ServedVp, Target};
 use crate::session::Session;
@@ -66,7 +66,7 @@ impl FromArg for Msr {
     const COMPLETION: CompletionStrategy = CompletionStrategy::Expression;
 
     fn from_arg(cx: &mut ArgCx<'_, '_>, text: &str) -> std::result::Result<Self, ArgError> {
-        if let Some(msr) = parse_msr_name(text) {
+        if let Some(msr) = parse_msr_name(cx.state.ctx.target.arch(), text) {
             return Ok(Msr(msr));
         }
         let value = cx.eval(text)?.0;
@@ -660,7 +660,10 @@ pub struct MsrValue {
 ///
 /// Reads one model-specific register on the selected processor, or on
 /// another processor that you select with /p. The dump and memory backends
-/// show that MSR access is unavailable.
+/// show that MSR access is unavailable. On an ARM64 target the register is
+/// a system register: by name (MIDR_EL1, TTBR1_EL1, CNTVCT_EL0, ...), as
+/// S<op0>_<op1>_C<n>_C<m>_<op2>, or by the number KD reads it by,
+/// op0<<16 | op1<<12 | CRn<<8 | CRm<<4 | op2 (MIDR_EL1 is 0x30000).
 #[command(
     names = ["rdmsr"],
     category = "cpu",
@@ -691,10 +694,11 @@ fn rdmsr(
 
 impl Render for MsrValue {
     fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+        let arch = repl.ctx.target.arch();
         outln!(
             "processor {}  {} ({:#x}) = {}",
             self.processor,
-            msr_name(self.msr).unwrap_or("MSR"),
+            msr_name(arch, self.msr).unwrap_or(msr_kind(arch)),
             self.msr,
             render_msr_value(&repl.ctx.target, self.value)
         );
@@ -707,7 +711,8 @@ pub struct MsrWrite(MsrValue);
 /// Write a model-specific register on the current processor.
 ///
 /// Writes one model-specific register on the current processor. You can use
-/// a common IA32_* name instead of the numeric MSR.
+/// a common IA32_* name instead of the numeric MSR. On an ARM64 target the
+/// register is a system register, named as rdmsr takes it.
 #[command(
     names = ["wrmsr"],
     category = "cpu",
@@ -734,7 +739,8 @@ fn wrmsr(session: &mut Session, msr: Msr, value: u64) -> Result<MsrWrite> {
 }
 
 impl Render for MsrWrite {
-    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+        let arch = repl.ctx.target.arch();
         let MsrValue {
             processor,
             msr,
@@ -743,7 +749,7 @@ impl Render for MsrWrite {
         outln!(
             "processor {}  {} ({:#x}) <- {}",
             processor,
-            msr_name(msr).unwrap_or("MSR"),
+            msr_name(arch, msr).unwrap_or(msr_kind(arch)),
             msr,
             ui::addr(value)
         );

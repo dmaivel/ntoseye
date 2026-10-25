@@ -193,7 +193,9 @@ impl Render for PtovDetail {
 
 /// Show pool tracker usage by tag.
 ///
-/// The command adds up the usage from the tag table of each processor. The
+/// The command adds up the usage from the tag table of each processor, which
+/// counts big allocations too; the big-page table is read only when those
+/// tables cannot be. Tags with no allocation outstanding are left out. The
 /// flags follow WinDbg: bit 1 (2) sorts by nonpaged bytes, bit 2 (4) sorts by
 /// paged bytes, and bit 0 (1) shows the alloc/free columns. The tag match is
 /// case-sensitive and supports * and ?.
@@ -673,11 +675,9 @@ fn print_system_ptes(detail: &SystemPtesDetail, flags: u64) {
         }
         field("first PTE", ui::addr(pte_type.base_pte.0));
         field("total", pte_type.total.to_string());
-        field("free", pte_type.free.to_string());
-        field(
-            "in use",
-            pte_type.total.saturating_sub(pte_type.free).to_string(),
-        );
+        let free = pte_type.counted_free();
+        field("free", free.to_string());
+        field("in use", pte_type.total.saturating_sub(free).to_string());
         field("failures", pte_type.failures.to_string());
         field(
             "bitmap",
@@ -730,11 +730,19 @@ fn print_system_ptes(detail: &SystemPtesDetail, flags: u64) {
                 pte_type.free_run_count - pte_type.free_runs.len() as u64
             );
         }
-        if pte_type.bitmap_free != pte_type.free {
+        if pte_type.total > span {
             outln!(
-                "    (the bitmap counts {} free where TotalFreeSystemPtes says {}: the target allocated between the reads)",
-                pte_type.bitmap_free,
-                pte_type.free
+                "    (TotalSystemPtes reads {} where the bitmap covers {} PTEs; in use counts from it)",
+                pte_type.total,
+                span
+            );
+        }
+        if pte_type.bitmap_free != pte_type.free {
+            // A counter that went below zero reads as its two's complement.
+            outln!(
+                "    (TotalFreeSystemPtes reads {} where the bitmap counts {} free; the totals use the bitmap)",
+                pte_type.free as i64,
+                pte_type.bitmap_free
             );
         }
     }

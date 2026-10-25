@@ -4318,6 +4318,9 @@ class Driver:
     def inspect(self, /) -> DriverObjectDetail:
         """
         Show a DRIVER_OBJECT with its device chain and dispatch table.
+        
+        The flags follow WinDbg: 1 shows the device objects, 2 the dispatch
+        routines; without flags, both.
         """
     @property
     def name(self, /) -> str:
@@ -8728,7 +8731,9 @@ class Inspect:
         """
         Show pool tracker usage by tag.
         
-        The command adds up the usage from the tag table of each processor. The
+        The command adds up the usage from the tag table of each processor, which
+        counts big allocations too; the big-page table is read only when those
+        tables cannot be. Tags with no allocation outstanding are left out. The
         flags follow WinDbg: bit 1 (2) sorts by nonpaged bytes, bit 2 (4) sorts by
         paged bytes, and bit 0 (1) shows the alloc/free columns. The tag match is
         case-sensitive and supports * and ?.
@@ -11642,7 +11647,8 @@ class MsrRange(BaseRecord):
 @final
 class Msrs:
     """
-    Model-specific registers on one processor (`rdmsr`/`wrmsr`, KD only).
+    Model-specific registers on one processor, or an ARM64 target's system
+    registers (`rdmsr`/`wrmsr`, KD only).
     """
     def __getitem__(self, key: int |str, /) -> int: ...
     def __repr__(self, /) -> str: ...
@@ -16716,7 +16722,10 @@ class SegmentHeap(BaseRecord):
     @property
     def reserved_pages(self, /) -> int: ...
     @property
-    def vs_free_committed_pages(self, /) -> int: ...
+    def vs_free_committed_pages(self, /) -> int |None:
+        """
+        `None` before Windows 11 24H2, which counts no VS share apart.
+        """
 
 @final
 class SegmentHeapDetail(BaseRecord):
@@ -18405,8 +18414,10 @@ class SystemPteTypeDetail(BaseRecord):
     @property
     def bitmap_free(self, /) -> int:
         """
-        The free PTEs, counted from the clear bits of the bitmap. It differs
-        from `free` only when the target allocated between the two reads.
+        The free PTEs, counted from the clear bits of the bitmap, which the
+        allocator hands out from. It differs from `free` when the target
+        allocated between the two reads, or where the counter does not hold:
+        Windows 11 22631 ARM64 keeps one below zero.
         """
     @property
     def failures(self, /) -> int: ...
@@ -18479,7 +18490,11 @@ class SystemPtesDetail(BaseRecord):
     """
     __match_args__: Final[tuple[Literal["types"], Literal["total"], Literal["free"]]]
     @property
-    def free(self, /) -> int: ...
+    def free(self, /) -> int:
+        """
+        The free PTEs of every allocator: counted from its bitmap where the
+        bitmap was read whole, else its `TotalFreeSystemPtes`.
+        """
     @property
     def total(self, /) -> int: ...
     @property
@@ -18587,7 +18602,7 @@ class TargetKernel(BaseRecord):
     """
     The identity of the kernel image.
     """
-    __match_args__: Final[tuple[Literal["name"], Literal["short_name"], Literal["base"], Literal["size"], Literal["file_version"], Literal["product_version"], Literal["pdb_guid"], Literal["pdb_age"]]]
+    __match_args__: Final[tuple[Literal["name"], Literal["short_name"], Literal["base"], Literal["size"], Literal["file_version"], Literal["product_version"], Literal["pdb_name"], Literal["pdb_guid"], Literal["pdb_age"]]]
     @property
     def base(self, /) -> int: ...
     @property
@@ -18606,6 +18621,11 @@ class TargetKernel(BaseRecord):
     def pdb_guid(self, /) -> str |None:
         """
         The GUID of the PDB, which identifies the symbols.
+        """
+    @property
+    def pdb_name(self, /) -> str |None:
+        """
+        The file name of the loaded PDB (`ntkrnlmp.pdb`).
         """
     @property
     def product_version(self, /) -> str |None: ...

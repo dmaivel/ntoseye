@@ -246,9 +246,7 @@ impl Target {
 
             let total = pte_type.read_uint("TotalSystemPtes")?;
             let free = pte_type.read_uint("TotalFreeSystemPtes")?;
-            detail.total += total;
-            detail.free += free;
-            detail.types.push(SystemPteTypeDetail {
+            let allocator = SystemPteTypeDetail {
                 name,
                 address,
                 va_type,
@@ -271,7 +269,10 @@ impl Target {
                 free_runs,
                 free_runs_truncated: list_free_runs && runs.truncated,
                 tracking,
-            });
+            };
+            detail.total = detail.total.saturating_add(total);
+            detail.free = detail.free.saturating_add(allocator.counted_free());
+            detail.types.push(allocator);
         }
         Ok(detail)
     }

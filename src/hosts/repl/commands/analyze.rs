@@ -318,6 +318,8 @@ fn print_triage_report(arch: Arch, report: &TriageReport, verbose: bool) {
         }
 
         print_section("faulting context");
+        // The program counter by its own register's name: rip, or pc.
+        let pc = arch.pc_register();
         let mut fields = vec![
             (
                 "state".to_string(),
@@ -348,7 +350,7 @@ fn print_triage_report(arch: Arch, report: &TriageReport, verbose: bool) {
                 .map(|symbol| format!("  {}", ui::symbol(symbol)))
                 .unwrap_or_default();
             fields.push((
-                "rip".to_string(),
+                pc.to_string(),
                 format!("{}{symbol}", ui::addr(frame.instruction_pointer())),
             ));
             fields.push((
@@ -366,7 +368,7 @@ fn print_triage_report(arch: Arch, report: &TriageReport, verbose: bool) {
                 .as_deref()
                 .map(|symbol| format!("  {}", ui::symbol(symbol)))
                 .unwrap_or_default();
-            fields.push(("rip".to_string(), format!("{}{symbol}", ui::addr(rip))));
+            fields.push((pc.to_string(), format!("{}{symbol}", ui::addr(rip))));
         }
         if let Some(process) = &report.status.attached_process {
             fields.push((

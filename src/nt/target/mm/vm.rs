@@ -42,6 +42,18 @@ fn global_metric(target: &Target, symbol: &str) -> DiagnosticMetric<u64> {
     }
 }
 
+fn counter(name: &str, value: u64, unit: Option<VmUnit>) -> VmCounter {
+    VmCounter {
+        name: name.to_string(),
+        value: available_metric(value),
+        unit,
+    }
+}
+
+fn is_available(counter: &VmCounter) -> bool {
+    matches!(counter.value.value, DiagnosticValue::Available(_))
+}
+
 fn named_counter(target: &Target, name: &str, unit: Option<VmUnit>) -> VmCounter {
     VmCounter {
         name: name.to_string(),
@@ -144,7 +156,7 @@ impl Target {
             process_count,
             truncated,
         };
-        let pool_fields = find_mi_state_fields(self, &["pool"])
+        let pool_fields: Vec<VmCounter> = find_mi_state_fields(self, &["pool"])
             .into_iter()
             .filter(|(name, _)| curated_mi_state_pool_field(name))
             .take(MAX_MI_STATE_FIELDS)
@@ -154,28 +166,52 @@ impl Target {
                 value: available_metric(value),
             })
             .collect();
+        // Windows 10 keeps the maximum in MiState instead, in pages.
+        let nonpaged_pool_maximum = match global_metric(self, "MmMaximumNonPagedPoolInBytes") {
+            metric @ DiagnosticMetric {
+                value: DiagnosticValue::Available(_),
+                ..
+            } => metric,
+            missing => pool_fields
+                .iter()
+                .filter(|field| field.name.ends_with("MaximumNonPagedPoolThreshold"))
+                .find_map(|field| match field.value.value {
+                    DiagnosticValue::Available(pages) => pages.checked_mul(PAGE_SIZE as u64),
+                    DiagnosticValue::Unavailable(_) => None,
+                })
+                .map_or(missing, available_metric),
+        };
         let pool = VmPoolDetail {
             nonpaged_pool_bytes: self.nonpaged_pool_bytes(),
-            nonpaged_pool_maximum: global_metric(self, "MmMaximumNonPagedPoolInBytes"),
+            nonpaged_pool_maximum,
             paged_pool_pages: self.paged_pool_pages(),
             fields: pool_fields,
         };
+        let legacy_ptes: Vec<VmCounter> = [
+            ("MmTotalSystemPtes", "total system PTEs"),
+            ("MmTotalFreeSystemPtes", "free system PTEs"),
+            ("MmTotalNonPagedPoolPtes", "nonpaged pool PTEs"),
+            ("MmAvailableSystemPtes", "available system PTEs"),
+        ]
+        .into_iter()
+        .map(|(symbol, name)| {
+            let mut counter = named_counter(self, symbol, None);
+            counter.name = name.to_string();
+            counter
+        })
+        .collect();
+        // Windows 10 allocates system PTEs from bitmaps, as `!sysptes` reads
+        // them, and keeps none of these globals.
         let pte = VmPteDetail {
-            counters: [
-                ("MmTotalSystemPtes", "total system PTEs"),
-                ("MmTotalFreeSystemPtes", "free system PTEs"),
-                ("MmTotalNonPagedPoolPtes", "nonpaged pool PTEs"),
-                ("MmAvailableSystemPtes", "available system PTEs"),
-            ]
-            .into_iter()
-            .map(|(symbol, name)| {
-                let mut counter = named_counter(self, symbol, None);
-                counter.name = name.to_string();
-                counter
-            })
-            .collect(),
+            counters: match self.system_ptes(false) {
+                Ok(ptes) if !legacy_ptes.iter().any(is_available) => vec![
+                    counter("total system PTEs", ptes.total, None),
+                    counter("free system PTEs", ptes.free, None),
+                ],
+                _ => legacy_ptes,
+            },
         };
-        let page_files = [
+        let legacy_page_files: Vec<VmCounter> = [
             ("MmNumberOfPagingFiles", "number of paging files", None),
             (
                 "MmTotalPagesForPagingFile",
@@ -191,6 +227,11 @@ impl Target {
             counter
         })
         .collect();
+        let page_files = if legacy_page_files.iter().any(is_available) {
+            legacy_page_files
+        } else {
+            self.partition_paging_files().unwrap_or(legacy_page_files)
+        };
         Ok(VmDetail {
             system,
             pool,
@@ -198,6 +239,49 @@ impl Target {
             page_files,
             include_processes,
         })
+    }
+
+    /// The paging files of the system partition (`MiSystemPartition.Vp`,
+    /// Windows 10 on): how many, and each one's size, limits, use, free
+    /// space and peak use, in pages. Its use is what Windows reports as the
+    /// file's current usage.
+    fn partition_paging_files(&self) -> Result<Vec<VmCounter>> {
+        let kernel = &self.guest()?.ntoskrnl;
+        let types = kernel.types();
+        let partition =
+            types.struct_at("_MI_PARTITION", kernel.symbol("MiSystemPartition")?.address())?;
+        let visible = partition.embedded("Vp")?;
+        let count = visible.read_uint("NumberOfPagingFiles")?;
+        let mut counters = vec![counter("number of paging files", count, None)];
+        let slots = visible.addr() + visible.layout().field_offset("PagingFile")?;
+        let memory = self.kernel_address_space();
+        for index in 0..count.min(16) {
+            let pointer = memory.read_pointer(slots + 8 * index)?;
+            if pointer.is_zero() {
+                continue;
+            }
+            let file = types.struct_at("_MMPAGING_FILE", pointer)?;
+            let name = match file.unicode_string("PageFileName") {
+                Ok(name) if !name.is_empty() => name,
+                _ if file.read_bits("VirtualStorePagefile").is_ok_and(|bit| bit != 0) => {
+                    "virtual store".to_string()
+                }
+                _ => format!("paging file {index}"),
+            };
+            let size = file.read_uint("Size")?;
+            let free = file.read_uint("FreeSpace")?;
+            for (label, pages) in [
+                ("size", size),
+                ("minimum", file.read_uint("MinimumSize")?),
+                ("maximum", file.read_uint("MaximumSize")?),
+                ("in use", size.saturating_sub(free)),
+                ("free", free),
+                ("peak use", file.read_uint("PeakUsage")?),
+            ] {
+                counters.push(counter(&format!("{name} {label}"), pages, Some(VmUnit::Pages)));
+            }
+        }
+        Ok(counters)
     }
 
     /// `_EPROCESS` and the struct or union layout of its embedded `Vm`.

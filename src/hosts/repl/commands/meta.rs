@@ -626,8 +626,13 @@ fn print_target_version(detail: &TargetVersion) {
         .and_then(|kernel| kernel.pdb_guid.as_deref());
     let pdb_age = detail.kernel.as_ref().and_then(|kernel| kernel.pdb_age);
     if let (Some(guid), Some(age)) = (pdb_guid, pdb_age) {
+        let name = detail
+            .kernel
+            .as_ref()
+            .and_then(|kernel| kernel.pdb_name.as_deref())
+            .unwrap_or("-");
         outln!(
-            "  {}  ntoskrnl.pdb GUID {} age {}",
+            "  {}  {name} GUID {} age {}",
             field(width, "pdb"),
             guid,
             age
