@@ -1814,6 +1814,7 @@ mod tests {
         put(page(0x308), 0x6000 | 1 << 11);
         put(0x6000, 0x9999_aaaa_bbbb_cccc);
         let views = SectionViews::new(SectionLayout {
+            arch: Arch::Amd64,
             process_list_head: kernel,
             active_process_links: 0x10,
             directory_table_base: 0x28,

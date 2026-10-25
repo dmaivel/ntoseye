@@ -45,8 +45,8 @@ const PAGE_BY_PAGE_REGION: u64 = 64 << 20;
 /// FILETIME (100 ns units since 1601) at the Unix epoch.
 const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
 const FILETIME_SECOND: u64 = 10_000_000;
-/// `NT_TIB64.StackBase`.
-const NT_TIB_STACK_BASE: u64 = 8;
+/// `NT_TIB.StackBase`, in pointers from the TEB's start.
+const NT_TIB_STACK_BASE_SLOT: u64 = 1;
 /// The most handles a minidump lists: far more than any process holds.
 const MAX_HANDLES: usize = 1 << 20;
 /// `RTL_UNLOAD_EVENT_TRACE` on a 64-bit process: `BaseAddress`,
@@ -403,9 +403,12 @@ fn stop_exception(
 fn kernel_unicode_string(target: &Target, address: VirtAddr) -> Option<String> {
     let kernel = target.kernel_address_space();
     let length: u16 = kernel.read(address).ok()?;
-    let buffer: u64 = kernel.read(address + 8u64).ok()?;
+    // `Buffer` follows the lengths, a pointer in.
+    let buffer = kernel
+        .read_pointer(address + kernel.arch().pointer_size())
+        .ok()?;
     let mut bytes = vec![0u8; usize::from(length)];
-    kernel.read_bytes(VirtAddr(buffer), &mut bytes).ok()?;
+    kernel.read_bytes(buffer, &mut bytes).ok()?;
     Some(utf16le_lossy(&bytes))
 }
 
@@ -493,7 +496,9 @@ fn unloaded_modules(target: &Target, process: &ProcessInfo) -> Vec<MinidumpUnloa
             .flatten()
     };
     let (Some(array), Some(size), Some(number)) = (
-        symbol("ntdll!RtlpUnloadEventTraceEx").and_then(|at| memory.read::<u64>(at).ok()),
+        symbol("ntdll!RtlpUnloadEventTraceEx")
+            .and_then(|at| memory.read_pointer(at).ok())
+            .map(|array| array.0),
         symbol("ntdll!RtlpUnloadEventTraceExSize").and_then(|at| memory.read::<u32>(at).ok()),
         symbol("ntdll!RtlpUnloadEventTraceExNumber").and_then(|at| memory.read::<u32>(at).ok()),
     ) else {
@@ -537,7 +542,12 @@ fn unloaded_modules(target: &Target, process: &ProcessInfo) -> Vec<MinidumpUnloa
 /// Where a thread's user stack is in use: from `sp` to its TEB's
 /// `StackBase`, when that is above `sp`.
 fn used_stack(memory: &AddressSpace<'_, PhysMem>, teb: u64, sp: u64) -> Option<Range<u64>> {
-    let base = memory.read::<u64>(VirtAddr(teb + NT_TIB_STACK_BASE)).ok()?;
+    let base = memory
+        .read_pointer(VirtAddr(
+            teb + NT_TIB_STACK_BASE_SLOT * memory.arch().pointer_size(),
+        ))
+        .ok()?
+        .0;
     (sp < base && base - sp <= 1 << 30).then_some(sp..base)
 }
 
@@ -741,9 +751,9 @@ pub fn collect_process_minidump(
                 .or(thread.start_address)
                 .map_or(0, |address| address.0),
             name: thread_name_offset
-                .and_then(|offset| kernel.read::<u64>(thread.ethread + offset).ok())
-                .filter(|&pointer| pointer != 0)
-                .and_then(|pointer| kernel_unicode_string(&session.target, VirtAddr(pointer)))
+                .and_then(|offset| kernel.read_pointer(thread.ethread + offset).ok())
+                .filter(|pointer| !pointer.is_zero())
+                .and_then(|pointer| kernel_unicode_string(&session.target, pointer))
                 .filter(|name| !name.is_empty()),
         });
     }

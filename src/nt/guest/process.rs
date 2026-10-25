@@ -212,8 +212,8 @@ impl Guest {
             .into_iter()
             .find(|process| {
                 memory
-                    .read::<u64>(process.eprocess + user_root_offset)
-                    .is_ok_and(|root| root & mask == user_root)
+                    .read_pointer(process.eprocess + user_root_offset)
+                    .is_ok_and(|root| root.0 & mask == user_root)
             })
     }
 
@@ -224,8 +224,9 @@ impl Guest {
         let root = self
             .ntoskrnl
             .memory()
-            .read::<u64>(process.eprocess + self.user_root_offset()?)
+            .read_pointer(process.eprocess + self.user_root_offset()?)
             .ok()?
+            .0
             & mask;
         (root != 0).then_some(root)
     }

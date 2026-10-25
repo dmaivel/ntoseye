@@ -23,10 +23,10 @@ use crate::nt::userdump::{MemoryRange, MemoryRegion};
 const TEB_SPAN: u64 = 0x2000;
 /// The bytes a 64-bit PEB spans: one page.
 const PEB_SPAN: u64 = 0x1000;
-/// `NT_TIB64.StackBase` and `NT_TIB64.StackLimit`, at the start of a 64-bit
-/// TEB (the `NT_TIB` layout is part of the Windows ABI).
-const TIB64_STACK_BASE: u64 = 0x8;
-const TIB64_STACK_LIMIT: u64 = 0x10;
+/// `NT_TIB.StackBase` and `NT_TIB.StackLimit`, in pointers from the start of
+/// a TEB (the `NT_TIB` layout is part of the Windows ABI).
+const TIB_STACK_BASE_SLOT: u64 = 1;
+const TIB_STACK_LIMIT_SLOT: u64 = 2;
 /// The most `ProcessHeaps` entries read; the loader's own limit is far
 /// lower.
 const MAX_PROCESS_HEAPS: u32 = 1024;
@@ -468,12 +468,15 @@ impl Target {
             }
             let tib = (thread.teb != 0)
                 .then(|| {
-                    let base = memory
-                        .read::<u64>(VirtAddr(thread.teb + TIB64_STACK_BASE))
-                        .ok()?;
-                    let limit = memory
-                        .read::<u64>(VirtAddr(thread.teb + TIB64_STACK_LIMIT))
-                        .ok()?;
+                    let pointer = memory.arch().pointer_size();
+                    let slot = |slot: u64| {
+                        memory
+                            .read_pointer(VirtAddr(thread.teb + slot * pointer))
+                            .ok()
+                            .map(|value| value.0)
+                    };
+                    let base = slot(TIB_STACK_BASE_SLOT)?;
+                    let limit = slot(TIB_STACK_LIMIT_SLOT)?;
                     (limit < base).then_some((limit, base))
                 })
                 .flatten();

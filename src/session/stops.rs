@@ -738,15 +738,23 @@ impl Session {
             |index| self.argument_on_entry(index, |name| self.target.register_value(name));
         let (name, process, info) = (argument(0)?, argument(1)?, argument(2)?);
         let kernel = self.target.kernel_address_space();
+        let pointer = kernel.arch().pointer_size();
         let user = self
             .target
             .address_space(dtb & self.target.arch().dtb_page_mask());
-        let image = [info, info + IMAGE_INFO_EX_IMAGE_INFO]
+        let image = [info, info + IMAGE_INFO_EX_IMAGE_INFO_SLOT * pointer]
             .into_iter()
             .find_map(|at| {
                 let properties: u32 = kernel.read(VirtAddr(at)).ok()?;
-                let base: u64 = kernel.read(VirtAddr(at + IMAGE_INFO_IMAGE_BASE)).ok()?;
-                let size: u64 = kernel.read(VirtAddr(at + IMAGE_INFO_IMAGE_SIZE)).ok()?;
+                let base = kernel
+                    .read_pointer(VirtAddr(at + IMAGE_INFO_IMAGE_BASE_SLOT * pointer))
+                    .ok()?
+                    .0;
+                // `SIZE_T`, pointer-wide.
+                let size = kernel
+                    .read_pointer(VirtAddr(at + IMAGE_INFO_IMAGE_SIZE_SLOT * pointer))
+                    .ok()?
+                    .0;
                 let headers = read_pe_header_page(VirtAddr(base), &user).ok()?;
                 let headers = decode_headers(&headers[..]).ok()?;
                 (u64::from(headers.optional.size_of_image) == size)
@@ -756,10 +764,11 @@ impl Session {
         if properties & IMAGE_INFO_SYSTEM_MODE_IMAGE != 0 {
             return None;
         }
+        // `UNICODE_STRING`: its `Buffer` follows the lengths, a pointer in.
         let length: u16 = kernel.read(VirtAddr(name)).ok()?;
-        let buffer: u64 = kernel.read(VirtAddr(name + 8)).ok()?;
+        let buffer = kernel.read_pointer(VirtAddr(name + pointer)).ok()?;
         let mut bytes = vec![0u8; usize::from(length)];
-        kernel.read_bytes(VirtAddr(buffer), &mut bytes).ok()?;
+        kernel.read_bytes(buffer, &mut bytes).ok()?;
         Some((
             VirtAddr(base),
             u32::try_from(size).unwrap_or(u32::MAX),
@@ -999,12 +1008,14 @@ fn held_pause(event: StopEvent) -> StopEvent {
 
 /// `IMAGE_INFO.SystemModeImage`: the image is a kernel image.
 const IMAGE_INFO_SYSTEM_MODE_IMAGE: u32 = 1 << 8;
-/// `IMAGE_INFO.ImageBase` and `ImageSize`, on a 64-bit kernel.
-const IMAGE_INFO_IMAGE_BASE: u64 = 8;
-const IMAGE_INFO_IMAGE_SIZE: u64 = 24;
+/// `IMAGE_INFO.ImageBase` and `ImageSize`, in pointers from its start: the
+/// `Properties` before each is padded to one.
+const IMAGE_INFO_IMAGE_BASE_SLOT: u64 = 1;
+const IMAGE_INFO_IMAGE_SIZE_SLOT: u64 = 3;
 /// Where the wrapper current builds pass the notify call holds its
-/// `IMAGE_INFO` (`IMAGE_INFO_EX.ImageInfo`, after its `Size`).
-const IMAGE_INFO_EX_IMAGE_INFO: u64 = 8;
+/// `IMAGE_INFO` (`IMAGE_INFO_EX.ImageInfo`, after its pointer-wide `Size`),
+/// in pointers.
+const IMAGE_INFO_EX_IMAGE_INFO_SLOT: u64 = 1;
 
 /// The process a user-mode image report names.
 #[derive(Debug, Clone, Copy)]

@@ -746,7 +746,8 @@ fn system_dtb(kernel: &Image) -> Option<Dtb> {
         .ok()?
         .field_offset("DirectoryTableBase")
         .ok()?;
-    let dtb = kernel.memory().read::<u64>(system + pcb + offset).ok()?;
+    // Pointer-wide: a `ULONG` on x86, the first of two on XP x64.
+    let dtb = kernel.memory().read_pointer(system + pcb + offset).ok()?.0;
     Some(dtb & kernel.arch().dtb_page_mask()).filter(|dtb| *dtb != 0)
 }
 
@@ -926,12 +927,13 @@ fn compressed_pages(
     let eprocess = types.layout("_EPROCESS").ok()?;
     let kprocess = types.layout("_KPROCESS").ok()?;
     let root = memory
-        .read::<u64>(
+        .read_pointer(
             owner
                 + eprocess.field_offset("Pcb").ok()?
                 + kprocess.field_offset("DirectoryTableBase").ok()?,
         )
-        .ok()?;
+        .ok()?
+        .0;
     let owner_root = root & kernel.arch().dtb_page_mask();
     let layout = match layout {
         Some(known) => known.clone()?,
@@ -966,6 +968,7 @@ fn section_layout(kernel: &Image) -> Option<SectionLayout> {
         return None;
     };
     Some(SectionLayout {
+        arch: kernel.arch(),
         process_list_head: kernel.symbol("PsActiveProcessHead").ok()?.address(),
         active_process_links: eprocess.field_offset("ActiveProcessLinks").ok()?,
         directory_table_base: eprocess.field_offset("Pcb").ok()?
