@@ -631,6 +631,10 @@ impl MemoryOps<PhysAddr> for PhysMem {
         }
     }
 
+    fn in_page_table_map(&self, addr: VirtAddr) -> bool {
+        self.in_pte_self_map(addr)
+    }
+
     fn read_page_table_bytes(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
         match &self.source {
             Source::Remote(kd) => kd.read_page_table_bytes(addr, buf),

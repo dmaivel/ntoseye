@@ -58,6 +58,13 @@ pub trait MemoryOps<A> {
         self.read_bytes(addr, buf)
     }
 
+    /// Whether `addr` is in the guest's page-table self-map, whose pages
+    /// are page tables: [`crate::base::memory::AddressSpace`] reads their
+    /// frames with [`Self::read_page_table_bytes`].
+    fn in_page_table_map(&self, _addr: VirtAddr) -> bool {
+        false
+    }
+
     /// The bits the guest sets in a non-present page-table entry to point it
     /// at no real memory (Windows' L1TF mitigation, `InvalidPteMask`), which
     /// a transition entry's frame must have cleared; 0 when there are none.
@@ -141,6 +148,10 @@ impl<A, B: MemoryOps<A>> MemoryOps<A> for Arc<B> {
 
     fn read_page_table_bytes(&self, addr: A, buf: &mut [u8]) -> Result<()> {
         (**self).read_page_table_bytes(addr, buf)
+    }
+
+    fn in_page_table_map(&self, addr: VirtAddr) -> bool {
+        (**self).in_page_table_map(addr)
     }
 
     fn invalid_pte_mask(&self) -> u64 {

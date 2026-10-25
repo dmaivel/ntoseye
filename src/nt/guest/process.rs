@@ -18,6 +18,14 @@ use std::collections::HashSet;
 /// image name, unterminated when the name is at least this long.
 const IMAGE_FILE_NAME_LEN: usize = 15;
 
+/// Whether `name`, an `ImageFileName` up to its NUL, may be the start of a
+/// longer one. The kernel keeps 14 bytes of the image name and a NUL in the
+/// field's 15, so `fontdrvhost.exe` reads `fontdrvhost.ex`; a shorter name
+/// is complete as is.
+fn may_be_truncated(name: &[u8]) -> bool {
+    name.len() >= IMAGE_FILE_NAME_LEN - 1
+}
+
 /// The `_EPROCESS` fields process enumeration needs, fetched with one read
 /// covering their span instead of one request per field over the transport.
 struct EprocessSpan {
@@ -250,10 +258,9 @@ impl Guest {
     }
 
     /// Display name for the process at `eprocess_va` given its raw
-    /// `EPROCESS.ImageFileName` bytes. The kernel keeps only the first 15
-    /// bytes of the image name, so the PEB loader list (a page-walked read of
-    /// user memory) is consulted only when the field is full and may be
-    /// truncated; every shorter name is complete as is.
+    /// `EPROCESS.ImageFileName` bytes. The PEB loader list (a page-walked
+    /// read of user memory) is consulted only for a name that may be
+    /// truncated (see [`may_be_truncated`]).
     fn process_name_from_image_file_name(
         &self,
         eprocess_va: VirtAddr,
@@ -261,7 +268,7 @@ impl Guest {
         image_file_name: &[u8],
     ) -> String {
         let name = before_nul(image_file_name);
-        if name.len() == IMAGE_FILE_NAME_LEN
+        if may_be_truncated(name)
             && dtb != 0
             && let Ok(full) = self.full_process_name(eprocess_va, dtb)
         {
@@ -317,5 +324,16 @@ impl Guest {
         }
 
         Err(Error::MissingImage)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::may_be_truncated;
+
+    #[test]
+    fn a_name_that_fills_the_field_may_be_truncated() {
+        assert!(may_be_truncated(b"fontdrvhost.ex"));
+        assert!(!may_be_truncated(b"svchost.exe"));
     }
 }

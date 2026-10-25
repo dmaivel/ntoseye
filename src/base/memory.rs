@@ -1006,9 +1006,16 @@ impl<'a, B: MemoryOps<PhysAddr>> MemoryOps<VirtAddr> for AddressSpace<'a, B> {
 
             let bytes_available = PAGE_SIZE - curr_vaddr.page_offset() as usize;
             let chunk_size = (buf.len() - offset).min(bytes_available);
-
-            self.backend
-                .read_bytes(translation.address, &mut buf[offset..offset + chunk_size])?;
+            let chunk = &mut buf[offset..offset + chunk_size];
+            // A page of the self-map is a page table: a KD backend reads a
+            // run of its entries per request and keeps them for the halt,
+            // where an arbitrary physical read costs a request each time.
+            if self.backend.in_page_table_map(curr_vaddr) {
+                self.backend
+                    .read_page_table_bytes(translation.address, chunk)?;
+            } else {
+                self.backend.read_bytes(translation.address, chunk)?;
+            }
             offset += chunk_size;
         }
 

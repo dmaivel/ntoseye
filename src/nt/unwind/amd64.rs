@@ -251,7 +251,7 @@ impl StackTracer<'_> {
             return Unwound::Stop;
         };
 
-        if !self.is_executable_address(return_address) {
+        if !self.is_return_address(return_address) {
             return Unwound::Stop;
         }
 

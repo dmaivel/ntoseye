@@ -172,6 +172,7 @@ impl Target {
             .or_else(|_| types.layout("_MMVAD"))?;
         let offsets = VadTreeOffsets::resolve(types, &vad_layout, MissingOffset::Default)?;
         let flags_layout = types.layout("_MMVAD_FLAGS").ok();
+        let flags1_layout = types.layout("_MMVAD_FLAGS1").ok();
         let modules = guest.process_modules(process).unwrap_or_default();
 
         let mut regions = Vec::new();
@@ -197,6 +198,7 @@ impl Target {
                 &memory,
                 &vad_layout,
                 flags_layout.as_deref(),
+                flags1_layout.as_deref(),
                 node,
                 level,
                 vad,
@@ -261,6 +263,7 @@ impl Target {
         memory: &impl MemoryOps<VirtAddr>,
         vad_layout: &TypeInfo,
         flags_layout: Option<&TypeInfo>,
+        flags1_layout: Option<&TypeInfo>,
         node_address: VirtAddr,
         level: usize,
         vad: VirtAddr,
@@ -292,7 +295,8 @@ impl Target {
             Self::bitfield_value(layout, "PrivateMemory", raw).map(|v| v != 0)
         });
         // A field of its own from Windows 11 24H2 (with its high bits in
-        // CommitChargeHigh), a bitfield of the flags before.
+        // CommitChargeHigh). Before, a bitfield of `u1`'s `_MMVAD_FLAGS1`,
+        // and on Windows 7 of the flags themselves.
         let commit_charge = match Self::read_integer_field(memory, vad_layout, vad, "CommitCharge")
         {
             Some(low) => {
@@ -300,9 +304,19 @@ impl Target {
                     .unwrap_or(0);
                 Some(low | (high << 32))
             }
-            None => flags
-                .zip(flags_layout)
-                .and_then(|(raw, layout)| Self::bitfield_value(layout, "CommitCharge", raw)),
+            None => vad_layout
+                .field_offset("u1")
+                .ok()
+                .zip(flags1_layout)
+                .and_then(|(offset, layout)| {
+                    let raw = memory.read::<u32>(vad + offset).ok()?;
+                    Self::bitfield_value(layout, "CommitCharge", raw.into())
+                })
+                .or_else(|| {
+                    flags
+                        .zip(flags_layout)
+                        .and_then(|(raw, layout)| Self::bitfield_value(layout, "CommitCharge", raw))
+                }),
         };
         let details = modules
             .iter()

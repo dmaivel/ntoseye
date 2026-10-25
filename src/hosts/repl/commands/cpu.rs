@@ -1339,7 +1339,8 @@ impl Render for Contexts {
             Self::Vcpus(vcpus) => {
                 repl.caches.refresh_vcpus(repl.ctx.backend.as_mut());
                 let current = repl.ctx.current_thread.as_str();
-                print_vcpus(vcpus, current);
+                let pc = repl.ctx.target.arch().pc_register().to_uppercase();
+                print_vcpus(vcpus, current, &pc);
             }
         }
     }
@@ -1387,8 +1388,9 @@ fn print_user_threads(threads: &[UserThreadSummary]) {
 
 /// The vCPU list: what each vCPU runs, with the lines below a vCPU in the
 /// hypervisor. `.` marks `current`, the selected vCPU, as WinDbg's `~` marks
-/// the current thread.
-fn print_vcpus(vcpus: &[VcpuInfo], current: &str) {
+/// the current thread. `pc` heads the program counter's column: `RIP`, or
+/// `PC` on ARM64.
+fn print_vcpus(vcpus: &[VcpuInfo], current: &str, pc: &str) {
     // The marker column, and the two spaces after it.
     let marker_column = 3;
     // Where the Symbol column starts: each column is as wide as its
@@ -1405,7 +1407,7 @@ fn print_vcpus(vcpus: &[VcpuInfo], current: &str) {
                 .map(|vcpu| thread_label(&vcpu.id).chars().count()),
         )
         + widest(
-            "RIP",
+            pc,
             &mut vcpus.iter().map(|vcpu| match vcpu.rip {
                 Some(0) => 1,
                 Some(_) => 16,
@@ -1418,7 +1420,7 @@ fn print_vcpus(vcpus: &[VcpuInfo], current: &str) {
         );
 
     let mut builder = Builder::default();
-    builder.push_record(["", "Processor", "RIP", "Context", "Symbol"]);
+    builder.push_record(["", "Processor", pc, "Context", "Symbol"]);
     // Processors whose registers could not be read, said under the table.
     let mut notes = Vec::new();
     for vcpu in vcpus {

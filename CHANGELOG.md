@@ -19,7 +19,7 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 
 ### Added
 
-- `-c '<commands>'` runs commands at startup, each line as typed at the prompt, as `cdb -c` does; give it more than once for several lines. `--batch` quits after them instead of prompting, prints only the commands' output, leaves a live target as `q` does, and exits with status 1 if a command reported an error. See [Commands from the command line](docs/using/repl.md#commands-from-the-command-line).
+- `-c '<commands>'` runs commands at startup, each line as typed at the prompt, as `cdb -c` does; give it more than once for several lines. `--batch` quits after them instead of prompting, prints only the commands' output, leaves a live target as `q` does, and exits with status 1 if a command reported an error. See [Commands from the command line](https://ntoseye.com/using/repl/#commands-from-the-command-line).
 - `--kd-handshake-timeout <seconds>` sets how long the `kd` and `kdnet` backends wait for the target's first answer, as `NTOSEYE_KD_TIMEOUT` does, and wins over it; the default is still 8 seconds. MCP's `open` takes it as `kd_handshake_timeout`, DAP's attach arguments as `kdHandshakeTimeout`, and the SDK as `ntoseye.attach(kd_handshake_timeout=...)`.
 - The `gdb` backend sets as many hardware breakpoints (`ba`) as the GDB stub accepts, no longer four, so QEMU running with TCG, which emulates them, takes any number. Under KVM the processor still has four debug registers, and a fifth `ba` says the stub refused it.
 - A module whose PDB no symbol source has — a vendor driver never published — falls back to the export table of its image in the dump, as the Windows debugger does, so `k`, `ln` and `!analyze` name its functions (`myfault!nmf_fault_irql+0x35`) where they showed `module+offset`, and a deferred breakpoint on an export binds. So does a module whose image names no PDB at all (no CodeView record), once fetching the image does not name one either. A PDB acquired later (a source added, the process attached again) replaces the export symbols.
@@ -62,6 +62,12 @@ Stops and `u` now show where the code goes: the instructions around the stop in 
 
 ### Fixed
 
+- On an ARM64 target, `!pte` shows a page Windows lets the process write as writable (`W`) before its first write, when the hardware still maps it read-only, and marks it dirty (`D`) once written and copy-on-write (`C`). It showed such a page as read-only (`R`).
+- On an ARM64 target, `~` heads the program counter's column `PC`, not `RIP`.
+- `!vad` shows each region's commit charge on Windows before 11 24H2, which keeps it in another field. The Commit column was empty.
+- A stack from a breakpoint in a function that JIT-compiled code called, such as a .NET P/Invoke, shows that caller's frame. The walk dropped it and went on scanning the stack for return addresses.
+- Over `kd` or `kdnet` with no host mapping of guest memory (`--memory-source kd`, a physical machine, or UTM on macOS), page tables read through the kernel's self-map are fetched a run of entries at a time and kept until the target runs. `.dump /u` and `!vprot` cost a request for each entry before: a minidump of a 15 MiB process over KDNET now takes 135 s, not 297.
+- A process whose image name is 15 characters or longer, such as `fontdrvhost.exe`, is named in full in `.dump /u`, `ps`, `attach` and stops, not cut to the 14 characters the kernel keeps (`fontdrvhost.ex`).
 - On the `kd` and `kdnet` backends, `r` shows a hardware breakpoint set or cleared with `ba`/`bc`, or an MSR written with `wrmsr`, as soon as you make the change. It showed the debug registers and `efer` as they were before, until the target ran again.
 - On an ARM64 target, `p` steps over a pointer-authenticated call (`blraa`, `blrab`, `blraaz`, `blrabz`), as it steps over `blr`, instead of into it.
 - Modules are named after their image file, as WinDbg's `lm` names them, not the loader's alias for it: `kd.dll` rather than `kdcom.dll`, `mcupdate_GenuineIntel.dll` rather than `mcupdate.dll`, in a WOW64 process's 32-bit module list too. Their `module!` prefixes follow (`kd!`, `mcupdate_genuineintel!`).

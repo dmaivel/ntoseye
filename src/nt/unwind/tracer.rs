@@ -15,14 +15,14 @@ use crate::nt::trapframe::decode_ktrap_frame_for_thread;
 use crate::{
     base::{
         error::{Error, Result},
-        memory::{MemoryOps, PAGE_SIZE, read_page_chunks},
+        memory::{MemoryOps, PAGE_SIZE, Residency, read_page_chunks},
         types::{CodeMachine, VirtAddr},
     },
     nt::{
         guest::{Image, ModuleInfo},
         pe::{self, CodeLayout, PeImage},
         symbols::ImageFetch,
-        target::Target,
+        target::{Target, TargetKind},
     },
 };
 
@@ -168,6 +168,24 @@ impl<'a> StackTracer<'a> {
             .executable_ranges
             .iter()
             .any(|(start, end)| rva >= *start && rva < *end)
+    }
+
+    /// Whether a return address the unwind found is code: by
+    /// [`Self::is_executable_address`], or, outside every module of a
+    /// kernel target, in a page the tables map executable. JIT-compiled code
+    /// is there, and .NET Framework's has no tables to read: an in-process
+    /// callback gives its unwind data. The stack scan keeps to the strict
+    /// test, which needs no page walk for each slot it reads.
+    pub(super) fn is_return_address(&mut self, address: u64) -> bool {
+        if self.is_executable_address(address) {
+            return true;
+        }
+        self.target.kind() == TargetKind::Kernel
+            && self.module_containing(address).is_none()
+            && matches!(
+                self.memory.virt_to_phys(VirtAddr(address)),
+                Ok(Some(page)) if page.residency == Residency::Mapped && !page.nx
+            )
     }
 
     pub(super) fn module_containing(&mut self, address: u64) -> Option<&CachedModule> {

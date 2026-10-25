@@ -334,7 +334,7 @@ impl StackTracer<'_> {
                     unwind_trace!("unwind: returns to its own pc without moving -> stop");
                     return Unwound::Stop;
                 }
-                if !self.is_executable_address(return_address) {
+                if !self.is_return_address(return_address) {
                     unwind_trace!("unwind: lr {return_address:#x} is no code -> stop");
                     return Unwound::Stop;
                 }
