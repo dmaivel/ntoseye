@@ -339,7 +339,8 @@ impl CompressedPages {
             return None;
         }
         let pte = pte.unswizzled(space.backend.invalid_pte_mask());
-        if ((pte.0 >> 12) & 0xf) as u8 != self.page_file || pte.0 >> 32 == 0 {
+        let (page_file, offset) = pte.page_file_location(space.backend.page_file_low());
+        if page_file != self.page_file || offset == 0 {
             return None;
         }
         let mut kernel = |address: u64, buf: &mut [u8]| space.read_bytes(VirtAddr(address), buf);
@@ -352,7 +353,6 @@ impl CompressedPages {
         let mut regions = |address: u64, buf: &mut [u8]| owner.read_bytes(VirtAddr(address), buf);
         // The key carries the page-file number in its top four bits before
         // 24H2 and not from it; a kernel's tree holds one form only.
-        let offset = (pte.0 >> 32) as u32;
         let with_file = u32::from(self.page_file) << 28 | offset;
         let key = match store_for_key(&mut kernel, self.manager, self.layout.key_tree, with_file) {
             Ok(Some(_)) => with_file,

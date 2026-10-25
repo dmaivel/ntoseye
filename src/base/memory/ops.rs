@@ -6,6 +6,10 @@ use crate::base::error::Result;
 use crate::base::memory::{CompressedPages, SectionViews, TranslationCache};
 use crate::base::types::{Dtb, VirtAddr};
 
+/// Where a software PTE's page-file number starts on kernels with the L1TF
+/// mitigation; see [`MemoryOps::page_file_low`].
+pub const PAGE_FILE_LOW: u32 = 12;
+
 /// Reads and writes of guest memory at addresses of type `A`: physical
 /// memory ([`crate::backend::phys::PhysMem`]), or a virtual address space walked
 /// through its page tables ([`crate::base::memory::AddressSpace`]).
@@ -59,6 +63,13 @@ pub trait MemoryOps<A> {
     /// a transition entry's frame must have cleared; 0 when there are none.
     fn invalid_pte_mask(&self) -> u64 {
         0
+    }
+
+    /// The first bit of a software PTE's page-file number (`PageFileLow`):
+    /// 12 on kernels with the L1TF mitigation (Windows 10 1809, and 1703 to
+    /// 1803 from their 2018 updates), 1 before.
+    fn page_file_low(&self) -> u32 {
+        PAGE_FILE_LOW
     }
 
     /// The guest's mapped views, for pages a process's page tables do not
@@ -123,6 +134,10 @@ impl<A, B: MemoryOps<A>> MemoryOps<A> for Arc<B> {
 
     fn invalid_pte_mask(&self) -> u64 {
         (**self).invalid_pte_mask()
+    }
+
+    fn page_file_low(&self) -> u32 {
+        (**self).page_file_low()
     }
 
     fn section_views(&self) -> Option<Arc<SectionViews>> {

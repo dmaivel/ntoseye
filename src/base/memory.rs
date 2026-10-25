@@ -11,7 +11,7 @@ mod sections;
 mod store;
 mod store_tree;
 
-pub use ops::MemoryOps;
+pub use ops::{MemoryOps, PAGE_FILE_LOW};
 pub use sections::{SectionLayout, SectionViews};
 pub use store::{CompressedPages, Compression, StoreLayout};
 
@@ -708,8 +708,9 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             Ok(Walked::Mapped(_)) | Err(_) => return false,
         };
         let mask = self.backend.invalid_pte_mask();
+        let low = self.backend.page_file_low();
         if private {
-            return leaf.is_none_or(|pte| pte.0 == 0 || pte.unswizzled(mask).is_demand_zero());
+            return leaf.is_none_or(|pte| pte.0 == 0 || pte.unswizzled(mask).is_demand_zero(low));
         }
         let Some(views) = self.backend.section_views() else {
             return false;
@@ -723,7 +724,7 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         };
         prototype
             .and_then(|address| self.read::<u64>(address).ok())
-            .is_some_and(|pte| PageTableEntry(pte).unswizzled(mask).is_demand_zero())
+            .is_some_and(|pte| PageTableEntry(pte).unswizzled(mask).is_demand_zero(low))
     }
 }
 
@@ -976,6 +977,7 @@ mod tests {
     struct StoredPhysMem {
         memory: FakePhysMem,
         store: Arc<CompressedPages>,
+        page_file_low: u32,
     }
 
     impl MemoryOps<PhysAddr> for StoredPhysMem {
@@ -990,17 +992,17 @@ mod tests {
         fn compressed_pages(&self) -> Option<Arc<CompressedPages>> {
             Some(Arc::clone(&self.store))
         }
+
+        fn page_file_low(&self) -> u32 {
+            self.page_file_low
+        }
     }
 
-    /// Windows compresses a trimmed process's page tables into the store
-    /// too. A walk goes on through a table read from there, to the pages
-    /// its entries leave in the store: for a read, and for the walk of
-    /// non-present PTEs.
-    #[test]
-    fn a_page_under_a_table_in_the_store_reads_through_the_store() {
-        // Store key 0x2000_0042 holds a table whose entry 5 names that same
-        // key: the PDE names it as the table, entry 5 as the page.
-        let stored = 0x0000_0042_0000_2080u64;
+    /// The table at 1 GiB, in the store under key 0x2000_0042 (page file 2,
+    /// offset 0x42), whose entry 5 is `stored`, the PTE naming that same
+    /// key: the PDE names it as the table, entry 5 as the page. A kernel
+    /// with `page_file_low` reads the page-file number at that bit.
+    fn stored_table(stored: u64, page_file_low: u32) -> StoredPhysMem {
         let mut original = vec![0u8; PAGE_SIZE];
         original[40..48].copy_from_slice(&stored.to_le_bytes());
         let data = lz4_flex::block::compress(&original);
@@ -1067,7 +1069,7 @@ mod tests {
             pages_tree: 0,
             compression: Compression::Lz4UnlessCount(0x12c0),
         };
-        let mem = StoredPhysMem {
+        StoredPhysMem {
             memory: FakePhysMem {
                 data,
                 invalid_pte_mask: 0,
@@ -1079,7 +1081,18 @@ mod tests {
                 owner_root: 0x400_000,
                 page_file: 2,
             }),
-        };
+            page_file_low,
+        }
+    }
+
+    /// Windows compresses a trimmed process's page tables into the store
+    /// too. A walk goes on through a table read from there, to the pages
+    /// its entries leave in the store: for a read, and for the walk of
+    /// non-present PTEs.
+    #[test]
+    fn a_page_under_a_table_in_the_store_reads_through_the_store() {
+        let stored = 0x0000_0042_0000_2080u64;
+        let mem = stored_table(stored, PAGE_FILE_LOW);
         let space = AddressSpace::new_amd64(&mem, 0x400_000);
         let table = 0x4000_0000u64;
         let page = VirtAddr(table + 5 * PAGE_SIZE as u64);
@@ -1100,6 +1113,28 @@ mod tests {
         let plain = AddressSpace::new_amd64(&mem.memory, 0x400_000);
         assert!(plain.read_bytes(page, &mut buf).is_err());
     }
+
+    /// Kernels before the L1TF mitigation keep the page-file number in bits
+    /// 1-4, where a later kernel has its swizzle bit and others: read at
+    /// bit 12, the same PTE names page file 0, which is not the store.
+    #[test]
+    fn the_page_file_number_is_read_where_the_kernel_keeps_it() {
+        let stored = 0x0000_0042_0000_0084u64;
+        let page = VirtAddr(0x4000_0000 + 5 * PAGE_SIZE as u64);
+        let mut buf = [0u8; 8];
+        let mem = stored_table(stored, 1);
+        AddressSpace::new_amd64(&mem, 0x400_000)
+            .read_bytes(page + 40u64, &mut buf)
+            .unwrap();
+        assert_eq!(u64::from_le_bytes(buf), stored);
+        let mem = stored_table(stored, PAGE_FILE_LOW);
+        assert!(
+            AddressSpace::new_amd64(&mem, 0x400_000)
+                .read_bytes(page, &mut buf)
+                .is_err()
+        );
+    }
+
     #[test]
     fn present_page_walk_skips_absent_tables_and_clips_large_pages() {
         // Kernel half: PML4[0x1f0] -> PDPT at 0x2000. PDPT[0] -> PD at

@@ -4,7 +4,8 @@ use crate::{
     base::{
         error::{Error, Result},
         memory::{
-            CompressedPages, DTB_IDENTITY, MemoryOps, SectionLayout, SectionViews, StoreLayout,
+            CompressedPages, DTB_IDENTITY, MemoryOps, PAGE_FILE_LOW, SectionLayout, SectionViews,
+            StoreLayout,
         },
         types::*,
     },
@@ -342,6 +343,9 @@ impl Guest {
         ntoskrnl
             .phys
             .set_invalid_pte_mask(invalid_pte_mask(&ntoskrnl).unwrap_or(0));
+        ntoskrnl
+            .phys
+            .set_page_file_low(page_file_low(&ntoskrnl).unwrap_or(PAGE_FILE_LOW));
         ntoskrnl
             .phys
             .set_section_views(section_layout(&ntoskrnl).map(SectionViews::new));
@@ -746,6 +750,17 @@ fn system_dtb(kernel: &Image) -> Option<Dtb> {
 
 /// The kernel's `MiState.Hardware.InvalidPteMask`: the bits it sets in a
 /// non-present PTE's frame so a speculative load through it reaches no real
+/// The first bit of a software PTE's page-file number
+/// (`_MMPTE_SOFTWARE.PageFileLow`): bit 12 on kernels with the L1TF
+/// mitigation, bit 1 before it. `None` when the PDB does not type it.
+fn page_file_low(kernel: &Image) -> Option<u32> {
+    let software = kernel.types().layout("_MMPTE_SOFTWARE").ok()?;
+    match software.fields.get("PageFileLow")?.type_data {
+        ParsedType::Bitfield { pos, .. } => Some(u32::from(pos)),
+        _ => None,
+    }
+}
+
 /// memory (the L1TF mitigation). `None` on a build without one.
 fn invalid_pte_mask(kernel: &Image) -> Option<u64> {
     let state = kernel.symbol("MiState").ok()?.address();

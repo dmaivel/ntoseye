@@ -1,12 +1,14 @@
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::backend::host::VmHandle;
 use crate::backend::kd::KdMemory;
 use crate::base::error::{Error, Result};
-use crate::base::memory::{CompressedPages, MemoryOps, SectionViews, TranslationCache};
+use crate::base::memory::{
+    CompressedPages, MemoryOps, PAGE_FILE_LOW, SectionViews, TranslationCache,
+};
 use crate::base::types::{Dtb, PhysAddr, VirtAddr};
 use crate::nt::dmp::{DmpInfo, DmpMem};
 use crate::nt::guest::ept::EptMemory;
@@ -24,6 +26,9 @@ pub struct PhysMem {
     /// The guest kernel's `InvalidPteMask`, set when a kernel is found (see
     /// [`Self::set_invalid_pte_mask`]).
     invalid_pte_mask: AtomicU64,
+    /// The first bit of a software PTE's page-file number, set when a kernel
+    /// is found (see [`Self::set_page_file_low`]).
+    page_file_low: AtomicU32,
     /// The guest kernel's `MmPteBase`, 0 until a kernel is found (see
     /// [`Self::set_pte_self_map`]).
     pte_self_map: AtomicU64,
@@ -224,6 +229,7 @@ impl PhysMem {
         Self {
             source,
             invalid_pte_mask: AtomicU64::new(0),
+            page_file_low: AtomicU32::new(PAGE_FILE_LOW),
             pte_self_map: AtomicU64::new(0),
             section_views: Mutex::new(None),
             compressed_pages: StoreSlot::new(),
@@ -345,6 +351,12 @@ impl PhysMem {
     /// [`MemoryOps::invalid_pte_mask`].
     pub fn set_invalid_pte_mask(&self, mask: u64) {
         self.invalid_pte_mask.store(mask, Ordering::Release);
+    }
+
+    /// Record where the guest kernel's software PTEs keep their page-file
+    /// number; see [`MemoryOps::page_file_low`].
+    pub fn set_page_file_low(&self, bit: u32) {
+        self.page_file_low.store(bit, Ordering::Release);
     }
 
     /// Record the guest kernel's `MmPteBase`. The 512 GiB self-map it heads
@@ -560,6 +572,10 @@ impl MemoryOps<PhysAddr> for PhysMem {
 
     fn invalid_pte_mask(&self) -> u64 {
         self.invalid_pte_mask.load(Ordering::Acquire)
+    }
+
+    fn page_file_low(&self) -> u32 {
+        self.page_file_low.load(Ordering::Acquire)
     }
 
     fn section_views(&self) -> Option<Arc<SectionViews>> {

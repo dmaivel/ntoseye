@@ -414,14 +414,25 @@ impl PageTableEntry {
 
     /// A Windows demand-zero PTE, its L1TF swizzle undone: a software PTE
     /// that is neither a prototype nor in transition and has no page-file
-    /// location (`PageFileLow` bits 12-15, `PageFileHigh` bits 32-63). The
-    /// page is committed and was never touched, so it reads as zeros.
-    pub const fn is_demand_zero(self) -> bool {
-        const PAGE_FILE_BITS: u64 = 0xffff_ffff_0000_f000;
+    /// location (`PageFileLow` at bit `page_file_low`, `PageFileHigh` bits
+    /// 32-63). The page is committed and was never touched, so it reads as
+    /// zeros.
+    pub const fn is_demand_zero(self, page_file_low: u32) -> bool {
+        let page_file_bits = 0xffff_ffff_0000_0000 | 0xf << page_file_low;
         !self.is_present()
             && !self.is_prototype()
             && !self.is_transition()
-            && self.0 & PAGE_FILE_BITS == 0
+            && self.0 & page_file_bits == 0
+    }
+
+    /// Where a Windows page-file PTE, its L1TF swizzle undone, says its page
+    /// is: the paging file's number (`PageFileLow`, four bits at
+    /// `page_file_low`) and the page's index in that file (`PageFileHigh`).
+    pub const fn page_file_location(self, page_file_low: u32) -> (u8, u32) {
+        (
+            ((self.0 >> page_file_low) & 0xf) as u8,
+            (self.0 >> 32) as u32,
+        )
     }
 
     pub const fn page_frame(self) -> u64 {
