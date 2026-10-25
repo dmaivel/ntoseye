@@ -41,11 +41,23 @@ pub struct PhysMem {
     compressed_pages: StoreSlot,
     /// Pages decompressed from that store during the current halt.
     store_pages: Mutex<StorePageCache>,
+    /// Raised by Ctrl+C (the target's interrupt, which shares it); work
+    /// done here on the target's behalf, such as finding the store, stops.
+    interrupt: Arc<AtomicBool>,
 }
 
-/// How a resolver finds the guest's memory-compression store; `None` when
-/// it is not there (yet).
-pub type StoreResolver = Box<dyn FnMut() -> Option<CompressedPages> + Send>;
+/// What a resolver found of the guest's memory-compression store.
+pub enum StoreLookup {
+    Found(CompressedPages),
+    /// Not there (yet), or its layout is unknown.
+    Absent,
+    /// Stopped by Ctrl+C; looked for again on the next read.
+    Interrupted,
+}
+
+/// How a resolver finds the guest's memory-compression store; it stops
+/// when the flag it is handed (Ctrl+C) is raised.
+pub type StoreResolver = Box<dyn FnMut(&AtomicBool) -> StoreLookup + Send>;
 
 /// How long a store not found while the guest may be running goes before
 /// it is looked for again.
@@ -108,27 +120,31 @@ impl StoreSlot {
 
     /// The store, as of halt `epoch` (see [`PhysMem::halt_epoch`]):
     /// resolving it on the first call, and while it is not found, again
-    /// whenever [`StoreTry::stale`]. The resolver reads guest memory, which
-    /// asks for the store again: it runs unlocked, and those nested calls
-    /// get `None`.
-    pub fn get(&self, epoch: Option<u64>) -> Option<Arc<CompressedPages>> {
+    /// whenever [`StoreTry::stale`]. A resolver `interrupt` stopped tried
+    /// nothing. The resolver reads guest memory, which asks for the store
+    /// again: it runs unlocked, and those nested calls get `None`.
+    pub fn get(&self, epoch: Option<u64>, interrupt: &AtomicBool) -> Option<Arc<CompressedPages>> {
         let mut state = self.lock();
         match std::mem::replace(&mut *state, StoreState::Resolving) {
             StoreState::Pending { mut resolve, tried }
                 if tried.as_ref().is_none_or(|tried| tried.stale(epoch)) =>
             {
                 drop(state);
-                let pages = resolve().map(Arc::new);
-                *self.lock() = match &pages {
-                    Some(pages) => StoreState::Found(Arc::clone(pages)),
-                    None => StoreState::Pending {
-                        resolve,
-                        tried: Some(StoreTry {
+                let (state, pages) = match resolve(interrupt) {
+                    StoreLookup::Found(pages) => {
+                        let pages = Arc::new(pages);
+                        (StoreState::Found(Arc::clone(&pages)), Some(pages))
+                    }
+                    StoreLookup::Absent => {
+                        let tried = Some(StoreTry {
                             epoch,
                             at: Instant::now(),
-                        }),
-                    },
+                        });
+                        (StoreState::Pending { resolve, tried }, None)
+                    }
+                    StoreLookup::Interrupted => (StoreState::Pending { resolve, tried }, None),
                 };
+                *self.lock() = state;
                 pages
             }
             other => {
@@ -275,6 +291,7 @@ impl PhysMem {
             section_views: Mutex::new(None),
             compressed_pages: StoreSlot::new(),
             store_pages: Mutex::default(),
+            interrupt: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -421,6 +438,11 @@ impl PhysMem {
             .section_views
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = views.map(Arc::new);
+    }
+
+    /// The flag Ctrl+C raises, which the target shares; see the field.
+    pub fn interrupt_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.interrupt)
     }
 
     /// Record how to find the guest's memory-compression store for this boot:
@@ -628,7 +650,8 @@ impl MemoryOps<PhysAddr> for PhysMem {
     }
 
     fn compressed_pages(&self) -> Option<Arc<CompressedPages>> {
-        self.compressed_pages.get(self.halt_epoch())
+        self.compressed_pages
+            .get(self.halt_epoch(), &self.interrupt)
     }
 
     fn cached_store_page(&self, key: u64) -> Option<Box<[u8; PAGE_SIZE]>> {
@@ -698,37 +721,56 @@ mod tests {
     }
 
     /// The resolver runs on first use and, while it finds no store (the
-    /// store manager creates it after boot), again once per halt; a found
+    /// store manager creates it after boot), again once per halt; one
+    /// Ctrl+C stopped tried nothing and runs again on the next ask. A found
     /// store is kept. A read the resolver makes asks for the store again and
     /// gets none instead of deadlocking.
     #[test]
     fn a_missing_store_is_looked_for_again_once_the_guest_has_run() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
         let slot = Arc::new(super::StoreSlot::new());
-        assert!(slot.get(Some(0)).is_none(), "no kernel yet");
+        let interrupt = Arc::new(AtomicBool::new(false));
+        assert!(slot.get(Some(0), &interrupt).is_none(), "no kernel yet");
         let runs = Arc::new(AtomicUsize::new(0));
         let nested = Arc::new(Mutex::new(None));
         let resolver = {
             let (slot, runs, nested) = (Arc::clone(&slot), Arc::clone(&runs), Arc::clone(&nested));
-            Box::new(move || {
-                // No store until the third try.
+            Box::new(move |interrupt: &AtomicBool| {
                 let run = runs.fetch_add(1, Ordering::SeqCst) + 1;
-                *nested.lock().unwrap() = Some(slot.get(Some(9)).is_some());
-                (run >= 3).then(some_store)
+                *nested.lock().unwrap() = Some(slot.get(Some(9), interrupt).is_some());
+                match run {
+                    _ if interrupt.load(Ordering::SeqCst) => super::StoreLookup::Interrupted,
+                    // No store until the third try.
+                    ..3 => super::StoreLookup::Absent,
+                    _ => super::StoreLookup::Found(some_store()),
+                }
             })
         };
         slot.set(resolver);
-        assert!(slot.get(Some(1)).is_none());
-        assert!(slot.get(Some(1)).is_none(), "same halt: not tried again");
+        assert!(slot.get(Some(1), &interrupt).is_none());
+        assert!(
+            slot.get(Some(1), &interrupt).is_none(),
+            "same halt: not tried again"
+        );
         assert_eq!(runs.load(Ordering::SeqCst), 1);
-        assert!(slot.get(Some(2)).is_none());
+        assert!(slot.get(Some(2), &interrupt).is_none());
         assert_eq!(runs.load(Ordering::SeqCst), 2);
-        assert_eq!(slot.get(Some(3)).map(|store| store.manager), Some(1));
+        interrupt.store(true, Ordering::SeqCst);
+        assert!(slot.get(Some(3), &interrupt).is_none());
+        interrupt.store(false, Ordering::SeqCst);
+        assert_eq!(
+            slot.get(Some(3), &interrupt).map(|store| store.manager),
+            Some(1),
+            "the interrupted try did not count"
+        );
         assert_eq!(*nested.lock().unwrap(), Some(false));
-        assert_eq!(slot.get(Some(4)).map(|store| store.owner), Some(2));
-        assert_eq!(slot.get(None).map(|store| store.owner), Some(2));
-        assert_eq!(runs.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            slot.get(Some(4), &interrupt).map(|store| store.owner),
+            Some(2)
+        );
+        assert_eq!(slot.get(None, &interrupt).map(|store| store.owner), Some(2));
+        assert_eq!(runs.load(Ordering::SeqCst), 4);
     }
 
     /// While the guest may be running there is no halt to go by: a missing

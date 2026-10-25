@@ -549,11 +549,13 @@ pub struct MappedCode {
 
 /// The executable sections of the image at `base` (`size` bytes mapped) as
 /// `memory` maps them, laid out by RVA, with the other bytes and unreadable
-/// pages zero.
+/// pages zero. Over KD that is half a minute of reads, which stop when
+/// `interrupt` (Ctrl+C) is raised.
 pub fn mapped_code<B: crate::base::memory::MemoryOps<crate::base::types::PhysAddr>>(
     memory: &crate::base::memory::AddressSpace<'_, B>,
     base: u64,
     size: usize,
+    interrupt: &std::sync::atomic::AtomicBool,
 ) -> Result<MappedCode> {
     use crate::base::memory::MemoryOps;
     use crate::base::types::VirtAddr;
@@ -565,6 +567,9 @@ pub fn mapped_code<B: crate::base::memory::MemoryOps<crate::base::types::PhysAdd
     let code = code_ranges(&view, size);
     for &(start, end) in &code {
         for page in (start as usize..end as usize).step_by(PAGE) {
+            if interrupt.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(layout_error("interrupted"));
+            }
             let chunk = &mut bytes[page..(page + PAGE).min(end as usize)];
             if memory
                 .read_bytes(VirtAddr(base + page as u64), chunk)

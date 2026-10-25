@@ -1,6 +1,6 @@
 use crate::arch::Arch;
 use crate::{
-    backend::phys::PhysMem,
+    backend::phys::{PhysMem, StoreLookup},
     base::{
         error::{Error, Result},
         memory::{
@@ -22,7 +22,10 @@ use ntoseye_macros::record;
 use pelite::pe64::{Pe, PeView};
 use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, atomic::AtomicBool};
+use std::sync::{
+    Arc, Mutex, MutexGuard, OnceLock, PoisonError,
+    atomic::{AtomicBool, Ordering},
+};
 use vad::{MissingOffset, VadTreeOffsets};
 
 mod discovery;
@@ -363,10 +366,17 @@ impl Guest {
                 ntoskrnl.guid,
             );
             let mut layout = None;
-            Box::new(move || {
-                let mut kernel = Image::new(phys.upgrade()?, Arc::clone(&symbols), dtb, base, arch);
+            Box::new(move |interrupt: &AtomicBool| {
+                let Some(phys) = phys.upgrade() else {
+                    return StoreLookup::Absent;
+                };
+                let mut kernel = Image::new(phys, Arc::clone(&symbols), dtb, base, arch);
                 kernel.guid = guid;
-                compressed_pages(&mut kernel, &mut layout)
+                match compressed_pages(&mut kernel, &mut layout, interrupt) {
+                    Some(pages) => StoreLookup::Found(pages),
+                    None if interrupt.load(Ordering::Relaxed) => StoreLookup::Interrupted,
+                    None => StoreLookup::Absent,
+                }
             })
         };
         ntoskrnl.phys.set_compressed_pages(resolve);
@@ -847,7 +857,7 @@ fn kernel_file(kernel: &Image, mapped: &[u8]) -> Option<Arc<PeImage>> {
 /// (AMD64, 1703 and later): the kernel file's when [`kernel_file`] finds
 /// it, at the file's own base as the corpus test reads it, else the mapped
 /// image's.
-fn store_layout_of(kernel: &mut Image) -> Option<StoreLayout> {
+fn store_layout_of(kernel: &mut Image, interrupt: &AtomicBool) -> Option<StoreLayout> {
     let mapped = kernel.view()?.image().to_vec();
     let functions = store_functions(kernel)?;
     let derive = |base: u64, bytes: &[u8], code: Vec<(u32, u32)>| {
@@ -873,7 +883,8 @@ fn store_layout_of(kernel: &mut Image) -> Option<StoreLayout> {
         return derive(view.optional_header().ImageBase, bytes, code);
     }
     let base = kernel.base_address.0;
-    let code = store_layout::mapped_code(&kernel.memory(), base, kernel.binary_size()).ok()?;
+    let code =
+        store_layout::mapped_code(&kernel.memory(), base, kernel.binary_size(), interrupt).ok()?;
     derive(base, &code.bytes, code.code)
 }
 
@@ -885,6 +896,7 @@ fn store_layout_of(kernel: &mut Image) -> Option<StoreLayout> {
 fn compressed_pages(
     kernel: &mut Image,
     layout: &mut Option<StoreLayout>,
+    interrupt: &AtomicBool,
 ) -> Option<CompressedPages> {
     if kernel.arch() != Arch::Amd64 {
         return None;
@@ -935,7 +947,7 @@ fn compressed_pages(
     let owner_root = root & kernel.arch().dtb_page_mask();
     let layout = match layout {
         Some(layout) => layout.clone(),
-        None => layout.insert(store_layout_of(kernel)?).clone(),
+        None => layout.insert(store_layout_of(kernel, interrupt)?).clone(),
     };
     Some(CompressedPages {
         layout,

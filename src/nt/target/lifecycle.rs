@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{ExpressionScope, ReloadReport, StartupMessage, Target, UserProcess};
 use crate::arch::Arch;
@@ -217,6 +217,7 @@ impl Target {
         triage_modules_cache: Option<Vec<ModuleInfo>>,
         notices: Vec<crate::base::notice::Notice>,
     ) -> Self {
+        let interrupt = phys.interrupt_flag();
         Self {
             phys,
             symbols,
@@ -237,7 +238,7 @@ impl Target {
             results_origin: None,
             last_exception_code: None,
             breakpoint_stop: None,
-            interrupt: Arc::new(AtomicBool::new(false)),
+            interrupt,
             interrupt_requests: Arc::new(AtomicU64::new(0)),
             notices,
             generation: Arc::new(AtomicU64::new(0)),
