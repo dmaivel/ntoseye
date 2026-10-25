@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use crate::backend::host::VmHandle;
 use crate::backend::kd::KdMemory;
@@ -34,21 +35,50 @@ pub struct PhysMem {
     compressed_pages: StoreSlot,
 }
 
-/// How a resolver finds the guest's memory-compression store.
-pub type StoreResolver = Box<dyn FnOnce() -> Option<CompressedPages> + Send>;
+/// How a resolver finds the guest's memory-compression store; `None` when
+/// it is not there (yet).
+pub type StoreResolver = Box<dyn FnMut() -> Option<CompressedPages> + Send>;
+
+/// How long a store not found while the guest may be running goes before
+/// it is looked for again.
+const STORE_RETRY_WHILE_RUNNING: Duration = Duration::from_secs(1);
 
 /// Where the guest's memory-compression store stands.
 enum StoreState {
     /// No kernel found yet.
     Unknown,
-    /// A kernel found; its store is resolved when first needed.
-    Pending(StoreResolver),
+    /// A kernel found, and its store not yet: looked for when first needed,
+    /// and again once the guest may have created it since `tried`.
+    Pending {
+        resolve: StoreResolver,
+        tried: Option<StoreTry>,
+    },
     /// Being resolved; reads made meanwhile do not use the store.
     Resolving,
-    Resolved(Option<Arc<CompressedPages>>),
+    Found(Arc<CompressedPages>),
 }
 
-/// The guest's memory-compression store, resolved once on first use.
+/// When a resolver last found no store: in which halt, if any, and when.
+struct StoreTry {
+    epoch: Option<u64>,
+    at: Instant,
+}
+
+impl StoreTry {
+    /// Whether the guest may have created its store since this try, as of
+    /// halt `epoch`: it has run since, or it may be running and a while has
+    /// passed. A dump is one halt forever, so it is tried once.
+    fn stale(&self, epoch: Option<u64>) -> bool {
+        match epoch {
+            Some(_) => epoch != self.epoch,
+            None => self.at.elapsed() >= STORE_RETRY_WHILE_RUNNING,
+        }
+    }
+}
+
+/// The guest's memory-compression store, resolved on first use. Windows
+/// creates it some time after boot, so one not found yet is looked for
+/// again once the guest has run.
 pub struct StoreSlot(Mutex<StoreState>);
 
 impl StoreSlot {
@@ -62,28 +92,44 @@ impl StoreSlot {
 
     /// Resolve the store with `resolve` when it is first asked for.
     pub fn set(&self, resolve: StoreResolver) {
-        *self.lock() = StoreState::Pending(resolve);
+        *self.lock() = StoreState::Pending {
+            resolve,
+            tried: None,
+        };
     }
 
-    /// The store, resolving it on the first call. The resolver reads guest
-    /// memory, which asks for the store again: it runs unlocked, and those
-    /// nested calls get `None`.
-    pub fn get(&self) -> Option<Arc<CompressedPages>> {
+    /// The store, as of halt `epoch` (see [`PhysMem::halt_epoch`]):
+    /// resolving it on the first call, and while it is not found, again
+    /// whenever [`StoreTry::stale`]. The resolver reads guest memory, which
+    /// asks for the store again: it runs unlocked, and those nested calls
+    /// get `None`.
+    pub fn get(&self, epoch: Option<u64>) -> Option<Arc<CompressedPages>> {
         let mut state = self.lock();
         match std::mem::replace(&mut *state, StoreState::Resolving) {
-            StoreState::Pending(resolve) => {
+            StoreState::Pending { mut resolve, tried }
+                if tried.as_ref().is_none_or(|tried| tried.stale(epoch)) =>
+            {
                 drop(state);
                 let pages = resolve().map(Arc::new);
-                *self.lock() = StoreState::Resolved(pages.clone());
-                pages
-            }
-            StoreState::Resolved(pages) => {
-                *state = StoreState::Resolved(pages.clone());
+                *self.lock() = match &pages {
+                    Some(pages) => StoreState::Found(Arc::clone(pages)),
+                    None => StoreState::Pending {
+                        resolve,
+                        tried: Some(StoreTry {
+                            epoch,
+                            at: Instant::now(),
+                        }),
+                    },
+                };
                 pages
             }
             other => {
+                let pages = match &other {
+                    StoreState::Found(pages) => Some(Arc::clone(pages)),
+                    _ => None,
+                };
                 *state = other;
-                None
+                pages
             }
         }
     }
@@ -324,8 +370,9 @@ impl PhysMem {
     }
 
     /// Record how to find the guest's memory-compression store for this boot:
-    /// `resolve` runs once, the first time a page may be in the store, since
-    /// it reads the kernel's code; see [`MemoryOps::compressed_pages`].
+    /// `resolve` runs the first time a page may be in the store, and again
+    /// while it finds none (see [`StoreSlot::get`]); see
+    /// [`MemoryOps::compressed_pages`].
     pub fn set_compressed_pages(&self, resolve: StoreResolver) {
         self.compressed_pages.set(resolve);
     }
@@ -523,7 +570,7 @@ impl MemoryOps<PhysAddr> for PhysMem {
     }
 
     fn compressed_pages(&self) -> Option<Arc<CompressedPages>> {
-        self.compressed_pages.get()
+        self.compressed_pages.get(self.halt_epoch())
     }
 }
 
@@ -555,29 +602,58 @@ mod tests {
         }
     }
 
-    /// The resolver runs once, on first use; a read it makes asks for the
-    /// store again and gets none instead of deadlocking.
+    /// The resolver runs on first use and, while it finds no store (the
+    /// store manager creates it after boot), again once per halt; a found
+    /// store is kept. A read the resolver makes asks for the store again and
+    /// gets none instead of deadlocking.
     #[test]
-    fn the_store_resolves_once_and_not_from_inside_its_resolver() {
+    fn a_missing_store_is_looked_for_again_once_the_guest_has_run() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
         let slot = Arc::new(super::StoreSlot::new());
-        assert!(slot.get().is_none(), "no kernel yet");
+        assert!(slot.get(Some(0)).is_none(), "no kernel yet");
         let runs = Arc::new(AtomicUsize::new(0));
         let nested = Arc::new(Mutex::new(None));
         let resolver = {
             let (slot, runs, nested) = (Arc::clone(&slot), Arc::clone(&runs), Arc::clone(&nested));
             Box::new(move || {
-                runs.fetch_add(1, Ordering::SeqCst);
-                *nested.lock().unwrap() = Some(slot.get().is_some());
-                Some(some_store())
+                // No store until the third try.
+                let run = runs.fetch_add(1, Ordering::SeqCst) + 1;
+                *nested.lock().unwrap() = Some(slot.get(Some(9)).is_some());
+                (run >= 3).then(some_store)
             })
         };
         slot.set(resolver);
-        assert_eq!(slot.get().map(|store| store.manager), Some(1));
-        assert_eq!(*nested.lock().unwrap(), Some(false));
-        assert_eq!(slot.get().map(|store| store.owner), Some(2));
+        assert!(slot.get(Some(1)).is_none());
+        assert!(slot.get(Some(1)).is_none(), "same halt: not tried again");
         assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert!(slot.get(Some(2)).is_none());
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(slot.get(Some(3)).map(|store| store.manager), Some(1));
+        assert_eq!(*nested.lock().unwrap(), Some(false));
+        assert_eq!(slot.get(Some(4)).map(|store| store.owner), Some(2));
+        assert_eq!(slot.get(None).map(|store| store.owner), Some(2));
+        assert_eq!(runs.load(Ordering::SeqCst), 3);
+    }
+
+    /// While the guest may be running there is no halt to go by: a missing
+    /// store is looked for again after a while, or at the next halt.
+    #[test]
+    fn a_store_try_goes_stale_with_a_new_halt_or_time_while_running() {
+        use std::time::{Duration, Instant};
+        let recent = super::StoreTry {
+            epoch: None,
+            at: Instant::now(),
+        };
+        assert!(!recent.stale(None));
+        assert!(recent.stale(Some(5)));
+        let old = super::StoreTry {
+            epoch: Some(5),
+            at: Instant::now() - Duration::from_secs(2),
+        };
+        assert!(old.stale(None));
+        assert!(!old.stale(Some(5)), "a halt's memory does not change");
+        assert!(old.stale(Some(6)));
     }
 
     /// Guest lists are memoized under an epoch; one served after the guest

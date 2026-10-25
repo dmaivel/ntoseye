@@ -3,7 +3,9 @@ use crate::{
     backend::phys::PhysMem,
     base::{
         error::{Error, Result},
-        memory::{CompressedPages, DTB_IDENTITY, MemoryOps, SectionLayout, SectionViews},
+        memory::{
+            CompressedPages, DTB_IDENTITY, MemoryOps, SectionLayout, SectionViews, StoreLayout,
+        },
         types::*,
     },
     nt::{
@@ -339,8 +341,9 @@ impl Guest {
             .phys
             .set_section_views(section_layout(&ntoskrnl).map(SectionViews::new));
         // Reading the kernel's code for the store layout waits until a page
-        // may be in the store. The resolver holds the physical memory
-        // weakly, since that memory holds the resolver.
+        // may be in the store, and is done once; the store itself is
+        // looked for until it exists. The resolver holds the physical
+        // memory weakly, since that memory holds the resolver.
         let resolve = {
             let phys = Arc::downgrade(&ntoskrnl.phys);
             let symbols = Arc::clone(ntoskrnl.symbols());
@@ -350,11 +353,11 @@ impl Guest {
                 ntoskrnl.arch(),
                 ntoskrnl.guid,
             );
+            let mut layout = None;
             Box::new(move || {
-                let mut kernel = Image::new(phys.upgrade()?, symbols, dtb, base, arch);
+                let mut kernel = Image::new(phys.upgrade()?, Arc::clone(&symbols), dtb, base, arch);
                 kernel.guid = guid;
-                kernel.view()?;
-                compressed_pages(&kernel)
+                compressed_pages(&mut kernel, &mut layout)
             })
         };
         ntoskrnl.phys.set_compressed_pages(resolve);
@@ -788,19 +791,14 @@ fn store_functions(kernel: &Image) -> Option<HashMap<String, u64>> {
     )
 }
 
-/// The guest's memory-compression store, when the kernel's code gives its
-/// layout (AMD64, 1703 and later), its PDB types the partition's store
-/// fields, and the store has an owner process (it has none when
-/// compression is off).
-fn compressed_pages(kernel: &Image) -> Option<CompressedPages> {
-    if kernel.arch() != Arch::Amd64 {
-        return None;
-    }
+/// The layout of the kernel's memory-compression store, from its code
+/// (AMD64, 1703 and later).
+fn store_layout_of(kernel: &mut Image) -> Option<StoreLayout> {
+    kernel.view()?;
     let functions = store_functions(kernel)?;
-    let memory = kernel.memory();
     let base = kernel.base_address.0;
-    let mapped = store_layout::mapped_code(&memory, base, kernel.binary_size()).ok()?;
-    let layout = store_layout::derive(&store_layout::KernelCode {
+    let mapped = store_layout::mapped_code(&kernel.memory(), base, kernel.binary_size()).ok()?;
+    store_layout::derive(&store_layout::KernelCode {
         image: hv_layout::ImageView {
             base,
             bytes: &mapped.bytes,
@@ -809,7 +807,22 @@ fn compressed_pages(kernel: &Image) -> Option<CompressedPages> {
         },
         functions: &functions,
     })
-    .ok()?;
+    .ok()
+}
+
+/// The guest's memory-compression store, when its PDB types the
+/// partition's store fields, the store has an owner process (it has none
+/// when compression is off, or before the store manager creates it after
+/// boot), and the kernel's code gives the layout, which is derived into
+/// `layout` once.
+fn compressed_pages(
+    kernel: &mut Image,
+    layout: &mut Option<StoreLayout>,
+) -> Option<CompressedPages> {
+    if kernel.arch() != Arch::Amd64 {
+        return None;
+    }
+    let memory = kernel.memory();
     let types = kernel.types();
     let partition = kernel.symbol("MiSystemPartition").ok()?.address();
     let partition_type = types.layout("_MI_PARTITION").ok()?;
@@ -852,11 +865,16 @@ fn compressed_pages(kernel: &Image) -> Option<CompressedPages> {
                 + kprocess.field_offset("DirectoryTableBase").ok()?,
         )
         .ok()?;
+    let owner_root = root & kernel.arch().dtb_page_mask();
+    let layout = match layout {
+        Some(layout) => layout.clone(),
+        None => layout.insert(store_layout_of(kernel)?).clone(),
+    };
     Some(CompressedPages {
         layout,
         manager,
         owner: owner.0,
-        owner_root: root & kernel.arch().dtb_page_mask(),
+        owner_root,
         page_file: page_file as u8,
     })
 }
