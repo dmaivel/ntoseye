@@ -28,30 +28,31 @@ fn is_valid_kernel_dtb_amd64(phys: &PhysMem, dtb: Dtb) -> Result<bool> {
         return Ok(false);
     }
 
-    // Check if use KUSER_SHARED_DATA is mapped
+    // KUSER_SHARED_DATA mapped kernel-only. Windows 7 maps it executable,
+    // so NX is no test.
     const KUSER_SHARED_DATA_VA: VirtAddr = VirtAddr::from_u64(0xfffff78000000000);
 
     let addr_space = AddressSpace::new_amd64(phys, dtb);
-
-    if let Some(xlat) = addr_space.virt_to_phys(KUSER_SHARED_DATA_VA)?
-        && !xlat.user
-        && xlat.nx
-    {
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+    Ok(addr_space
+        .virt_to_phys(KUSER_SHARED_DATA_VA)?
+        .is_some_and(|xlat| !xlat.user))
 }
 
-fn find_kernel_dtb_amd64(phys: &PhysMem) -> Result<Option<Dtb>> {
+/// Pages in the first 16 MiB of RAM that pass for an AMD64 kernel root, in
+/// address order; the caller keeps the one the kernel image confirms.
+fn find_kernel_dtb_amd64_candidates(phys: &PhysMem) -> Result<Vec<Dtb>> {
+    const MAX_CANDIDATES: usize = 8;
     let base = phys.ram_base();
+    let mut out = Vec::new();
     for dtb in (base + 0x1000..base + 0x1000000).step_by(PAGE_SIZE) {
         if is_valid_kernel_dtb_amd64(phys, dtb)? {
-            return Ok(Some(dtb));
+            out.push(dtb);
+            if out.len() >= MAX_CANDIDATES {
+                break;
+            }
         }
     }
-
-    Ok(None)
+    Ok(out)
 }
 
 /// AArch64 kernel (TTBR1) root candidate: KUSER_SHARED_DATA must translate to
@@ -119,7 +120,7 @@ fn kernel_machine_at(dtb: Dtb, phys: &PhysMem, arch: Arch) -> Result<Option<u16>
 pub(super) fn find_kernel(phys: &PhysMem) -> Result<Option<(Dtb, Arch)>> {
     for arch in Arch::ALL {
         let candidates = match arch {
-            Arch::Amd64 => find_kernel_dtb_amd64(phys)?.into_iter().collect(),
+            Arch::Amd64 => find_kernel_dtb_amd64_candidates(phys)?,
             Arch::Arm64 => find_kernel_dtb_arm64_candidates(phys)?,
         };
         for dtb in candidates {
@@ -179,11 +180,38 @@ fn is_ntoskrnl_page(
     if entry.is_user() || !entry.is_nx() {
         return Ok(false);
     }
+    is_ntoskrnl_header_frame(phys, frame)
+}
 
+fn is_ntoskrnl_header_frame(phys: &impl MemoryOps<PhysAddr>, frame: PhysAddr) -> Result<bool> {
     let Ok(header) = phys.read::<[u8; 0x1000]>(frame) else {
         return Ok(false);
     };
     Ok(is_ntoskrnl_header(&header))
+}
+
+/// The offset of the ntoskrnl header within the kernel-only large page at
+/// `frame`, `size` bytes long, looked for at each 4 KiB page. Windows 7 maps
+/// the image inside a 2 MiB page that also holds the HAL, executable, at no
+/// 2 MiB boundary.
+fn ntoskrnl_in_large_page(
+    phys: &impl MemoryOps<PhysAddr>,
+    entry: Entry,
+    frame: PhysAddr,
+    size: u64,
+) -> Result<Option<u64>> {
+    if entry.is_user() {
+        return Ok(None);
+    }
+    for offset in (0..size).step_by(PAGE_SIZE) {
+        let Ok(magic) = phys.read::<[u8; 4]>(frame + offset) else {
+            continue;
+        };
+        if magic == [0x4d, 0x5a, 0x90, 0x00] && is_ntoskrnl_header_frame(phys, frame + offset)? {
+            return Ok(Some(offset));
+        }
+    }
+    Ok(None)
 }
 
 /// The kernel image's base, found by scanning the kernel range of the page
@@ -237,6 +265,7 @@ fn find_ntoskrnl_va_amd64(
             }
 
             if pdpte.is_large() {
+                // A 1 GiB page is searched at its start only.
                 if let Ok(true) = is_ntoskrnl_page(phys, pdpte, pdpte.huge_frame()) {
                     return Ok(Some(VirtAddr::construct(pml4_index, pdpt_index, 0, 0)));
                 }
@@ -261,10 +290,11 @@ fn find_ntoskrnl_va_amd64(
                 }
 
                 if pde.is_large() {
-                    if let Ok(true) = is_ntoskrnl_page(phys, pde, pde.large_frame()) {
-                        return Ok(Some(VirtAddr::construct(
-                            pml4_index, pdpt_index, pd_index, 0,
-                        )));
+                    if let Ok(Some(offset)) =
+                        ntoskrnl_in_large_page(phys, pde, pde.large_frame(), 1 << PDE_SHIFT)
+                    {
+                        let page = VirtAddr::construct(pml4_index, pdpt_index, pd_index, 0);
+                        return Ok(Some(page + offset));
                     }
 
                     continue;
@@ -547,6 +577,29 @@ mod tests {
         fn write_bytes(&self, addr: PhysAddr, _buf: &[u8]) -> Result<()> {
             Err(Error::BadPhysicalAddress(addr))
         }
+    }
+
+    /// Windows 7 maps the kernel image inside an executable 2 MiB page that
+    /// starts with the HAL, at no 2 MiB boundary: the image is found at its
+    /// own 4 KiB page, past the HAL's header, which names no POOLCODE.
+    #[test]
+    fn an_image_inside_an_executable_large_page_is_found_at_its_page() {
+        const DTB: u64 = 0x1000;
+        const PDPT: u64 = 0x2000;
+        const PD: u64 = 0x3000;
+        const LARGE: u64 = 0x280_0000;
+        // Present, writable, supervisor, large page, executable.
+        const KERNEL_LARGE_PAGE: u64 = 0x80 | 0b11;
+        let kernel = VirtAddr(0xffff_f800_0285_4000);
+        let mut phys = SparsePhys::default();
+        phys.write_u64(DTB + 8 * kernel.pml4_index() as u64, PDPT | 0b11);
+        phys.write_u64(PDPT + 8 * kernel.pdpt_index() as u64, PD | 0b11);
+        phys.write_u64(PD + 8 * kernel.pd_index() as u64, LARGE | KERNEL_LARGE_PAGE);
+        // The HAL: an image header at the large page's start, no POOLCODE.
+        phys.write_u64(LARGE + 0xc000, 0x0000_0090_5a4d);
+        phys.write_ntoskrnl_header(LARGE + 0x54000);
+
+        assert_eq!(find_ntoskrnl_va_amd64(DTB, &phys).unwrap(), Some(kernel));
     }
 
     /// The AMD64 kernel-image scan covers `0xffff_f800_0000_0000` through

@@ -104,16 +104,9 @@ impl Target {
     /// Maps a PTE address to the virtual address it maps, when the PTE lies
     /// in NT's PTE self-map (one top-level slot: 512 GiB of PTEs; AMD64 and
     /// ARM64 lay it out alike), and to `None` for a PTE elsewhere, such as a
-    /// prototype PTE. `None` without `MmPteBase`, which is read once, here.
+    /// prototype PTE. `None` without the PTE base, which is read once, here.
     pub fn va_mapped_by_pte(&self) -> Option<impl Fn(VirtAddr) -> Option<VirtAddr>> {
-        let pte_base: VirtAddr = self
-            .guest()
-            .ok()?
-            .ntoskrnl
-            .symbol("MmPteBase")
-            .ok()?
-            .read()
-            .ok()?;
+        let pte_base = self.guest().ok()?.ntoskrnl.pte_base().ok()?;
         Some(move |pte: VirtAddr| {
             (pte.0.wrapping_sub(pte_base.0) < 1 << 39).then(|| pte_to_va(pte, pte_base))
         })
@@ -140,7 +133,7 @@ impl Target {
             .layout("_MI_SYSTEM_INFORMATION")
             .map_err(|error| unsupported(error.to_string()))?;
         let mi_state = ntos.symbol("MiState")?.address();
-        let pte_base: Option<VirtAddr> = ntos.symbol("MmPteBase").and_then(|s| s.read()).ok();
+        let pte_base = ntos.pte_base().ok();
         let va_types = self
             .symbols
             .find_enum_across_modules(ntos.dtb(), "_MI_SYSTEM_VA_TYPE")

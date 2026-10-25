@@ -329,11 +329,14 @@ impl<'a> HeapReader<'a> {
     }
 
     pub fn classify(&self, heap: VirtAddr) -> Result<HeapKind> {
-        let segment = self.layout("_SEGMENT_HEAP")?;
-        let signature_offset = segment.offset("Signature")?;
-        let signature: u32 = self.memory.read(heap + signature_offset as u64)?;
-        if signature == SEGMENT_HEAP_SIGNATURE {
-            return Ok(HeapKind::Segment);
+        // ntdll has no segment heap before Windows 10 (Windows 7's PDB has
+        // no `_SEGMENT_HEAP`), so every heap there is an NT heap.
+        if let Ok(segment) = self.layout("_SEGMENT_HEAP") {
+            let signature_offset = segment.offset("Signature")?;
+            let signature: u32 = self.memory.read(heap + signature_offset as u64)?;
+            if signature == SEGMENT_HEAP_SIGNATURE {
+                return Ok(HeapKind::Segment);
+            }
         }
         let nt = self.layout("_HEAP")?;
         let nt_signature: u32 = self.memory.read(heap + nt.offset("Signature")? as u64)?;

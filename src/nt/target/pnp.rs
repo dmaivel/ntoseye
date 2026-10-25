@@ -42,8 +42,10 @@ pub struct DevNodeSummary {
     pub problem: u32,
     /// The problem code's name, when it is a known one.
     pub problem_name: Option<String>,
+    /// The status the problem came with; `None` on kernels whose device
+    /// node keeps none (Windows 7).
     #[record(hex)]
-    pub problem_status: u32,
+    pub problem_status: Option<u32>,
     /// The IRP that PnP waits on. 0 for none.
     pub pending_irp: VirtAddr,
     /// `Level`, the depth of the node in the device tree.
@@ -83,8 +85,10 @@ pub struct DevNodeDetail {
     pub problem: u32,
     /// The problem code's name, when it is a known one.
     pub problem_name: Option<String>,
+    /// The status the problem came with; `None` on kernels whose device
+    /// node keeps none (Windows 7).
     #[record(hex)]
-    pub problem_status: u32,
+    pub problem_status: Option<u32>,
     /// The IRP that PnP waits on. 0 for none.
     pub pending_irp: VirtAddr,
     /// The nodes below this node, in depth-first order. Empty if the
@@ -156,7 +160,7 @@ struct DevNode {
     state_history: Vec<u32>,
     state_history_entry: u32,
     problem: u32,
-    problem_status: u32,
+    problem_status: Option<u32>,
     flags: u32,
     user_flags: u32,
     pending_irp: VirtAddr,
@@ -234,7 +238,7 @@ impl<'a> DevNodeReader<'a> {
             state_history,
             state_history_entry: node.read_field("StateHistoryEntry")?,
             problem: node.read_field("Problem")?,
-            problem_status: node.read_field("ProblemStatus")?,
+            problem_status: node.read_field("ProblemStatus").ok(),
             flags: node.read_field("Flags")?,
             user_flags: node.read_field("UserFlags")?,
             pending_irp: node.read_pointer("PendingIrp")?,

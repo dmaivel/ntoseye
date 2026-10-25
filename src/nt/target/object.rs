@@ -1359,6 +1359,13 @@ impl Target {
             })
             .unwrap_or_else(|| Err(Error::FieldNotFound("GrantedAccessBits".to_string())))
             .map(|value| value as u32);
+        // Before Windows 8, `ObAttributes` overlays the object pointer, whose
+        // low three bits are the attributes.
+        let overlaid = entry_layout
+            .field_offset("ObAttributes")
+            .ok()
+            .zip(entry_layout.field_offset("Object").ok())
+            .is_some_and(|(attributes, object)| attributes == object);
         let attributes = ["ObAttributes", "Attributes"]
             .into_iter()
             .find_map(|name| {
@@ -1368,7 +1375,7 @@ impl Target {
                     .then(|| self.extract_kernel_layout_bits(entry_layout, entry, name))
             })
             .unwrap_or_else(|| Err(Error::FieldNotFound("ObAttributes".to_string())))
-            .map(|value| value as u32);
+            .map(|value| if overlaid { value & 0x7 } else { value } as u32);
 
         // The entry holds the object's header; the body follows it, and is
         // what the record names and what `!object` and `!fileobj` take.
@@ -1443,8 +1450,12 @@ impl Target {
                 "unsupported HANDLE_TABLE level {level}"
             )));
         }
-        let next_handle: u64 =
-            self.read_kernel_layout_field(&table_layout, table, "NextHandleNeedingPool")?;
+        // A ULONG; the field after it is not part of the count.
+        let next_handle = u64::from(self.read_kernel_layout_field::<u32>(
+            &table_layout,
+            table,
+            "NextHandleNeedingPool",
+        )?);
         let entry_layout = types.layout("_HANDLE_TABLE_ENTRY")?;
         Ok((
             process,
@@ -1780,10 +1791,17 @@ impl Target {
         let body_off = layout.field_offset("Body")?;
         let type_index_off = layout.field_offset("TypeIndex")?;
         let object_name = self.object_name_layout().ok();
+        // Windows 10 stores TypeIndex obfuscated: the real index is the
+        // stored one ^ the second byte of the header's address ^
+        // nt!ObHeaderCookie. Before, there is no cookie and it is stored as
+        // is.
         let cookie = match guest.ntoskrnl.symbol("ObHeaderCookie") {
-            Ok(symbol) => symbol.read::<u8>()?,
-            Err(Error::SymbolNotFound(_)) => 0,
+            Ok(symbol) => Some(symbol.read::<u8>()?),
+            Err(Error::SymbolNotFound(_)) => None,
             Err(error) => return Err(error),
+        };
+        let decode = |raw: u8, header: VirtAddr| -> u64 {
+            u64::from(cookie.map_or(raw, |cookie| raw ^ (header.0 >> 8) as u8 ^ cookie))
         };
         let type_table = guest
             .ntoskrnl
@@ -1799,8 +1817,7 @@ impl Target {
                 .is_some_and(|end| mem.read::<u8>(header).is_ok() && mem.read::<u8>(end).is_ok())
         };
         let candidate_type_object = |header: VirtAddr| -> Option<VirtAddr> {
-            let raw: u8 = mem.read(header + type_index_off).ok()?;
-            let index = u64::from(raw ^ ((header.0 >> 8) as u8) ^ cookie);
+            let index = decode(mem.read(header + type_index_off).ok()?, header);
             mem.read_pointer(type_table? + index * mem.arch().pointer_size())
                 .ok()
                 .filter(|object| looks_like_kernel_pointer(self.arch(), object.0))
@@ -1832,13 +1849,10 @@ impl Target {
         let h = self.kernel_struct("_OBJECT_HEADER", header)?;
         let info_mask: Option<u8> = h.read_field("InfoMask").ok();
 
-        // On Win10+ the stored TypeIndex is obfuscated; the real index is
-        // raw ^ (second byte of the header address) ^ nt!ObHeaderCookie. The
-        // cookie symbol is absent on older builds (treat as 0 -> raw index).
         let type_index: Option<u64> = h
             .read_field::<u8>("TypeIndex")
             .ok()
-            .map(|raw| (raw ^ ((header.0 >> 8) as u8) ^ cookie) as u64);
+            .map(|raw| decode(raw, header));
 
         // Resolve the type object via ObTypeIndexTable[index] and read its name.
         // ObTypeIndexTable is the array itself, so index it directly.

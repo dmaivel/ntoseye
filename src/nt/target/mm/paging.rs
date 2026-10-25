@@ -184,9 +184,9 @@ impl Target {
         })
     }
 
-    /// The self-map `MmPteBase` heads.
+    /// The self-map the kernel's PTE base heads.
     pub fn pte_self_map(&self) -> Result<PteSelfMap> {
-        let pte: VirtAddr = self.guest()?.ntoskrnl.symbol("MmPteBase")?.read()?;
+        let pte = self.guest()?.ntoskrnl.pte_base()?;
         let pte = pte.0;
         let pde = pte + (pte >> 9 & 0x7F_FFFF_FFFF);
         let ppe = pde + (pde >> 9 & 0x3FFF_FFFF);

@@ -17,6 +17,7 @@ use crate::base::error::{Error, Result};
 pub const DBGKD_READ_VIRTUAL_MEMORY: u32 = 0x0000_3130;
 pub const DBGKD_WRITE_VIRTUAL_MEMORY: u32 = 0x0000_3131;
 pub const DBGKD_GET_CONTEXT: u32 = 0x0000_3132;
+pub const DBGKD_SET_CONTEXT: u32 = 0x0000_3133;
 pub const DBGKD_WRITE_BREAKPOINT: u32 = 0x0000_3134;
 pub const DBGKD_RESTORE_BREAKPOINT: u32 = 0x0000_3135;
 /// Bytes of `InstructionStream` a state change carries from the stop PC;
@@ -446,11 +447,7 @@ fn set_context_ex_chunk<T: Read + Write>(
     write_u32(&mut header, UNION_OFFSET + 4, byte_count);
     write_u32(&mut header, UNION_OFFSET + 8, total_size);
     let (parsed, reply_header, _) = send_manipulate(framing, &header, data)?;
-    check_status(&parsed, DBGKD_SET_CONTEXT_EX).map_err(|error| {
-        Error::Kd(format!(
-            "context-chunk write offset={offset:#x} len={byte_count:#x} total={total_size:#x} failed: {error}"
-        ))
-    })?;
+    check_status(&parsed, DBGKD_SET_CONTEXT_EX)?;
     let bytes_copied = read_u32(&reply_header, UNION_OFFSET + 8);
     if bytes_copied != byte_count {
         return Err(Error::Kd(format!(
@@ -479,9 +476,51 @@ pub fn set_context_chunked<T: Read + Write>(
     for (index, chunk) in context.chunks(CONTEXT_EX_CHUNK_SIZE).enumerate() {
         let offset = u32::try_from(index * CONTEXT_EX_CHUNK_SIZE)
             .map_err(|_| Error::Kd("context chunk offset exceeds 32 bits".into()))?;
-        set_context_ex_chunk(framing, processor, offset, total_size, chunk)?;
+        set_context_ex_chunk(framing, processor, offset, total_size, chunk).map_err(|error| {
+            match error {
+                // The kernel refused the API itself; see `set_context`.
+                Error::KdStatus { .. } if offset == 0 => error,
+                error => Error::Kd(format!(
+                    "context-chunk write offset={offset:#x} len={:#x} total={total_size:#x} \
+                     failed: {error}",
+                    chunk.len()
+                )),
+            }
+        })?;
     }
     Ok(())
+}
+
+/// `DbgKdSetContextApi`: the whole CONTEXT in one packet, with the flags
+/// of what it holds in the union.
+fn set_context_whole<T: Read + Write>(
+    framing: &mut KdFraming<T>,
+    processor: u16,
+    context_flags: u32,
+    context: &[u8],
+) -> Result<()> {
+    let mut header = make_header(DBGKD_SET_CONTEXT, processor);
+    write_u32(&mut header, UNION_OFFSET, context_flags);
+    let (parsed, _, _) = send_manipulate(framing, &header, context)?;
+    check_status(&parsed, DBGKD_SET_CONTEXT)
+}
+
+/// Write a complete CONTEXT holding `context_flags`: in `SetContextEx`
+/// chunks, or whole where the kernel refuses the first chunk. Windows 7
+/// has no `SetContextEx` and answers it `STATUS_UNSUCCESSFUL`.
+pub fn set_context<T: Read + Write>(
+    framing: &mut KdFraming<T>,
+    processor: u16,
+    context_flags: u32,
+    context: &[u8],
+) -> Result<()> {
+    match set_context_chunked(framing, processor, context) {
+        Err(Error::KdStatus { .. }) => {
+            kd_trace!("kd: SetContextEx refused; writing the CONTEXT with SetContext");
+            set_context_whole(framing, processor, context_flags, context)
+        }
+        result => result,
+    }
 }
 
 /// `DbgKdReadVirtualMemoryApi`
@@ -985,6 +1024,38 @@ mod tests {
             &outbound[16 + MANIPULATE_HEADER_SIZE..16 + MANIPULATE_HEADER_SIZE + rip.len()],
             &rip
         );
+    }
+
+    /// Windows 7 has no `SetContextEx` and refuses its first chunk; the
+    /// CONTEXT then goes whole with `SetContext`, its flags in the union.
+    #[test]
+    fn a_refused_set_context_ex_falls_back_to_set_context() {
+        let context: Vec<u8> = (0..amd64::CONTEXT_SIZE)
+            .map(|index| (index & 0xff) as u8)
+            .collect();
+        let mut refused = build_reply(DBGKD_SET_CONTEXT_EX, 1, &[], &[]);
+        write_u32(&mut refused, 8, 0xc000_0001);
+        let mut inbound = ack_then_reply(INITIAL_PACKET_ID, INITIAL_PACKET_ID, &refused);
+        let accepted = build_reply(DBGKD_SET_CONTEXT, 1, &[], &[]);
+        inbound.extend(ack_then_reply(
+            INITIAL_PACKET_ID ^ 1,
+            INITIAL_PACKET_ID ^ 1,
+            &accepted,
+        ));
+        let mut framing = KdFraming::new(Loopback::new(inbound));
+
+        set_context(&mut framing, 1, amd64::CONTEXT_ALL, &context).unwrap();
+
+        let outbound = &framing.transport_ref().outbound;
+        let first = &outbound[16..16 + MANIPULATE_HEADER_SIZE];
+        assert_eq!(read_u32(first, 0), DBGKD_SET_CONTEXT_EX);
+        // The first request, its trailing byte, and the ACK of the refusal.
+        let second_at = 16 + MANIPULATE_HEADER_SIZE + CONTEXT_EX_CHUNK_SIZE + 1 + 16;
+        let second = &outbound[second_at + 16..second_at + 16 + MANIPULATE_HEADER_SIZE];
+        assert_eq!(read_u32(second, 0), DBGKD_SET_CONTEXT);
+        assert_eq!(read_u32(second, UNION_OFFSET), amd64::CONTEXT_ALL);
+        let data = second_at + 16 + MANIPULATE_HEADER_SIZE;
+        assert_eq!(&outbound[data..data + context.len()], &context[..]);
     }
 
     #[test]

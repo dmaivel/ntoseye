@@ -73,10 +73,12 @@ fn compact_devnode_line(node: &DevNodeSummary) -> String {
     );
     if node.problem != 0 {
         line.push_str(&format!(
-            "  problem={} status={:#x}",
-            problem_text(node.problem, node.problem_name.as_deref()),
-            node.problem_status
+            "  problem={}",
+            problem_text(node.problem, node.problem_name.as_deref())
         ));
+        if let Some(status) = node.problem_status {
+            line.push_str(&format!(" status={status:#x}"));
+        }
     }
     line
 }
@@ -121,11 +123,14 @@ fn print_devnode(node: &DevNodeDetail) {
         outln!("  CompletionStatus {:#x}", node.completion_status);
     }
     if node.problem != 0 {
+        let status = node
+            .problem_status
+            .map(|status| format!("  status {status:#x}"))
+            .unwrap_or_default();
         outln!(
-            "  Problem = {} ({})  status {:#x}",
+            "  Problem = {} ({}){status}",
             problem_text(node.problem, node.problem_name.as_deref()),
-            node.problem,
-            node.problem_status
+            node.problem
         );
     }
     if !node.pending_irp.is_zero() {

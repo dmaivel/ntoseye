@@ -281,10 +281,19 @@ impl<'a> StackTracer<'a> {
         let image = match kernel_image {
             Some(image) => image,
             None => {
+                // A session-space driver (win32k) is not mapped in the
+                // kernel's address space, its module's, but is in the
+                // traced thread's process's.
                 match self
                     .target
                     .mapped_pe_image(module.dtb, module.info.base_address)
-                {
+                    .or_else(|error| {
+                        if self.trace.active_dtb == module.dtb {
+                            return Err(error);
+                        }
+                        self.target
+                            .mapped_pe_image(self.trace.active_dtb, module.info.base_address)
+                    }) {
                     Ok(img) => Arc::new(img),
                     Err(_) => {
                         // Triage dumps don't contain PE headers; download the PE from

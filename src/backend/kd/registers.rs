@@ -250,8 +250,9 @@ impl KdBackend {
         // before the write, the stop's report of TF and DR6 included.
         self.registers.invalidate(processor);
         let context = context_payload(self.arch, data)?;
+        let flags = self.arch.context_flags().all;
         with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
-            api::set_context_chunked(framing, processor, context)
+            api::set_context(framing, processor, flags, context)
         })?;
 
         // KD restores the hardware-breakpoint state from KSPECIAL_REGISTERS,

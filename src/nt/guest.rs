@@ -26,7 +26,7 @@ use std::sync::{
     Arc, Mutex, MutexGuard, OnceLock, PoisonError,
     atomic::{AtomicBool, Ordering},
 };
-use vad::{MissingOffset, VadTreeOffsets};
+use vad::{MissingOffset, VadTreeOffsets, vad_root_offset};
 
 mod discovery;
 pub mod ept;
@@ -372,10 +372,7 @@ impl Guest {
                 kernel.guid = guid;
                 compressed_pages(&mut kernel, &mut layout, interrupt)
             }));
-        if let Ok(pte_base) = ntoskrnl
-            .symbol("MmPteBase")
-            .and_then(|symbol| symbol.read_pointer())
-        {
+        if let Ok(pte_base) = ntoskrnl.pte_base() {
             ntoskrnl.phys.set_pte_self_map(pte_base.0);
         }
         Self {
@@ -958,7 +955,6 @@ fn section_layout(kernel: &Image) -> Option<SectionLayout> {
     let types = kernel.types();
     let eprocess = types.layout("_EPROCESS").ok()?;
     let kprocess = types.layout("_KPROCESS").ok()?;
-    let tree = types.layout("_RTL_AVL_TREE").ok()?;
     let short = types.layout("_MMVAD_SHORT").ok()?;
     let links = VadTreeOffsets::resolve(types, &short, MissingOffset::Fail).ok()?;
     let vad = types.layout("_MMVAD").ok()?;
@@ -972,7 +968,7 @@ fn section_layout(kernel: &Image) -> Option<SectionLayout> {
         directory_table_base: eprocess.field_offset("Pcb").ok()?
             + kprocess.field_offset("DirectoryTableBase").ok()?,
         root_mask: kernel.arch().dtb_page_mask(),
-        vad_root: eprocess.field_offset("VadRoot").ok()? + tree.field_offset("Root").ok()?,
+        vad_root: vad_root_offset(types, &eprocess).ok()?,
         left: links.left,
         right: links.right,
         vad_node: links.vad_node,

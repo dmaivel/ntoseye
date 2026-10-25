@@ -9,8 +9,8 @@ use super::{
 };
 use crate::base::error::Result;
 use crate::base::memory::MemoryOps;
-use crate::base::types::{Dtb, VirtAddr};
-use crate::nt::guest::vad::{MissingOffset, VadTreeOffsets, vad_tree_link};
+use crate::base::types::VirtAddr;
+use crate::nt::guest::vad::{MissingOffset, VadTreeOffsets, vad_root_offset, vad_tree_link};
 use crate::nt::guest::{ModuleInfo, ProcessInfo};
 use crate::nt::layout::{ParsedType, TypeInfo, bitfield_value};
 use crate::nt::pe::section_name_at;
@@ -161,8 +161,8 @@ impl Target {
         let memory = self.address_space(process.dtb);
         let types = guest.ntoskrnl.types_in(process.dtb);
         let eprocess_layout = guest.ntoskrnl.types().layout("_EPROCESS")?;
-        let vad_root_base = process.eprocess + eprocess_layout.field_offset("VadRoot")?;
-        let root = self.read_vad_root(process.dtb, vad_root_base)?;
+        let root_pointer = process.eprocess + vad_root_offset(types, &eprocess_layout)?;
+        let root = vad_tree_link(memory.read_pointer(root_pointer)?.0);
         if root.is_zero() {
             return Ok(Vec::new());
         }
@@ -210,20 +210,6 @@ impl Target {
 
         regions.sort_by_key(|region| region.start.0);
         Ok(regions)
-    }
-
-    fn read_vad_root(&self, dtb: Dtb, vad_root_base: VirtAddr) -> Result<VirtAddr> {
-        let memory = self.address_space(dtb);
-        let types = self.guest()?.ntoskrnl.types_in(dtb);
-
-        if let Ok(tree_layout) = types.layout("_RTL_AVL_TREE")
-            && let Ok(root_offset) = tree_layout.field_offset("Root")
-        {
-            return Ok(vad_tree_link(
-                memory.read_pointer(vad_root_base + root_offset)?.0,
-            ));
-        }
-        Ok(vad_tree_link(memory.read_pointer(vad_root_base)?.0))
     }
 
     fn read_integer_field(
@@ -280,9 +266,10 @@ impl Target {
         let start = VirtAddr(start_vpn.checked_shl(12)?);
         let end = VirtAddr(end_vpn.checked_add(1)?.checked_shl(12)?);
 
+        // 8 bytes before Windows 8 (`PrivateMemory` is bit 63 there), 4
+        // after; the bits read are always below the field's end.
         let flags = Self::vad_flags_base_offset(vad_layout)
-            .and_then(|offset| memory.read::<u32>(vad + offset).ok())
-            .map(u64::from);
+            .and_then(|offset| memory.read::<u64>(vad + offset).ok());
         let protection = flags
             .zip(flags_layout)
             .and_then(|(raw, layout)| Self::bitfield_value(layout, "Protection", raw))
@@ -313,9 +300,16 @@ impl Target {
                     Self::bitfield_value(layout, "CommitCharge", raw.into())
                 })
                 .or_else(|| {
-                    flags
-                        .zip(flags_layout)
-                        .and_then(|(raw, layout)| Self::bitfield_value(layout, "CommitCharge", raw))
+                    // Windows 7 sets every bit of the field in the VAD of
+                    // KUSER_SHARED_DATA: no count.
+                    let (raw, layout) = flags.zip(flags_layout)?;
+                    let charge = Self::bitfield_value(layout, "CommitCharge", raw)?;
+                    let ParsedType::Bitfield { len, .. } =
+                        layout.field("CommitCharge").ok()?.type_data
+                    else {
+                        return Some(charge);
+                    };
+                    (charge != u64::MAX >> (64 - u32::from(len))).then_some(charge)
                 }),
         };
         let details = modules

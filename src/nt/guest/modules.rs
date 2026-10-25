@@ -1,7 +1,7 @@
 //! Loader-list walks: a process's native and WOW64 module lists, the
 //! kernel's `PsLoadedModuleList`, and module version population.
 
-use super::vad::{MissingOffset, VadTreeOffsets, vad_tree_link};
+use super::vad::{MissingOffset, VadTreeOffsets, vad_root_offset, vad_tree_link};
 use super::{Guest, ModuleInfo, ProcessInfo, ProcessModulesDetail};
 use crate::{
     base::{
@@ -338,13 +338,8 @@ impl Guest {
                 .ok()
                 .map(|raw| vad_tree_link(raw.0))
         };
-        let vad_root = types
-            .struct_at("_EPROCESS", info.eprocess)
-            .ok()?
-            .embedded("VadRoot")
-            .ok()?;
-        // `_RTL_AVL_TREE.Root`; before it, the root pointer itself.
-        let root = link(vad_root.addr() + vad_root.layout().field_offset("Root").unwrap_or(0))?;
+        let eprocess = types.layout("_EPROCESS").ok()?;
+        let root = link(info.eprocess + vad_root_offset(types, &eprocess).ok()?)?;
         let short = types.layout("_MMVAD_SHORT").ok()?;
         let VadTreeOffsets {
             vad_node,

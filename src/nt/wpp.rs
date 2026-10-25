@@ -240,15 +240,22 @@ impl TmfMessage {
 
         let typev = lines.next().ok_or("no #typev line")?;
         let rest = typev
-            .strip_prefix("#typev ")
+            .strip_prefix("#typev")
+            .filter(|rest| rest.starts_with(char::is_whitespace))
             .ok_or_else(|| format!("expected #typev, found {typev:?}"))?;
-        let mut words = rest.splitn(3, ' ');
-        let _source_tag = words.next();
-        let number = words
-            .next()
-            .and_then(|n| n.parse::<u16>().ok())
+        // Windows 7's PDBs put two spaces after `#typev`.
+        let (_source_tag, rest) = rest
+            .trim_start()
+            .split_once(char::is_whitespace)
             .ok_or_else(|| format!("no message number in {typev:?}"))?;
-        let quoted = words.next().unwrap_or_default();
+        let (number, quoted) = rest
+            .trim_start()
+            .split_once(char::is_whitespace)
+            .ok_or_else(|| format!("no message number in {typev:?}"))?;
+        let number = number
+            .parse::<u16>()
+            .map_err(|_| format!("no message number in {typev:?}"))?;
+        let quoted = quoted.trim_start();
         let quoted = quoted
             .strip_prefix('"')
             .ok_or_else(|| format!("no format string in {typev:?}"))?;
@@ -815,6 +822,21 @@ mod tests {
         );
 
         assert!(TmfMessage::parse(&["PUBLIC_TMF:", "FxDriverGlobals"], None).is_err());
+
+        // Windows 7's ole32 puts two spaces after `#typev`.
+        let win7 = TmfMessage::parse(
+            &[
+                "TMF:",
+                "583c7b0b-364c-33d7-41a5-1294b28378e9 Ole32 // SRC=services.cxx",
+                "#typev  services_cxx1755 37 \"%0%10!s!\" //   LEVEL=ERRORS",
+                "{",
+                "Arg, ItemString -- 10",
+                "}",
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!((win7.number, win7.format.as_str()), (37, "%0%10!s!"));
     }
 
     #[test]

@@ -180,10 +180,10 @@ pub struct IdtGate {
     pub present: DiagnosticValue<bool>,
     /// Whether the handler is in a module other than NT.
     pub non_nt_hook: DiagnosticValue<bool>,
-    /// For a handler in `KiIsrThunk` (a chained interrupt), the offset of
-    /// the handler in `KiIsrThunk` and the location of
-    /// `_KINTERRUPT.DispatchCode`. The diagnostic value is None for other
-    /// handlers.
+    /// For a handler in `KiIsrThunk`, which dispatches through the
+    /// processor's `_KPRCB.InterruptObject` table, the `_KINTERRUPT`
+    /// connected to the vector and its service routine. None for other
+    /// handlers and for a vector nothing is connected to.
     pub ki_isr_thunk: DiagnosticValue<Option<String>>,
 }
 
@@ -1047,7 +1047,16 @@ fn is_nt_module(name: &str) -> bool {
     name.contains("ntoskrnl") || name.contains("ntkrnl") || name == "nt"
 }
 
-fn interrupt_chain_hint(target: &Target, handler: u64) -> Option<String> {
+/// The `_KINTERRUPT` connected to `vector`, for a `handler` in `KiIsrThunk`,
+/// which dispatches through `objects` (the processor's
+/// `_KPRCB.InterruptObject` table): its address and service routine. None
+/// for another handler, and for a vector nothing is connected to.
+fn connected_interrupt(
+    target: &Target,
+    objects: Option<VirtAddr>,
+    handler: u64,
+    vector: u16,
+) -> Option<String> {
     let thunk = target
         .symbols
         .find_symbol_with_module(target.kernel_dtb(), "nt!KiIsrThunk")
@@ -1057,18 +1066,44 @@ fn interrupt_chain_hint(target: &Target, handler: u64) -> Option<String> {
     if handler < thunk || handler - thunk >= 0x1000 {
         return None;
     }
-    let dispatch = layout(target, "_KINTERRUPT").ok().and_then(|layout| {
-        layout.fields.get("DispatchCode").map(|field| {
-            format!(
-                "KiIsrThunk (+{:#x}); _KINTERRUPT.DispatchCode offset {:#x}",
-                handler - thunk,
-                field.offset
-            )
+    let memory = kernel(target).ok()?.memory();
+    let Some(objects) = objects else {
+        return Some("KiIsrThunk: the processor's interrupt object table is not known".into());
+    };
+    let interrupt = memory
+        .read_pointer(objects + u64::from(vector) * 8)
+        .ok()
+        .filter(|interrupt| !interrupt.is_zero())?;
+    // A message-signalled interrupt's ServiceRoutine is the kernel's
+    // KiInterruptMessageDispatch; the driver's is MessageServiceRoutine.
+    let interrupt_layout = layout(target, "_KINTERRUPT").ok();
+    let routine_in = |field: &str| {
+        let offset = interrupt_layout.as_ref()?.field_offset(field).ok()?;
+        memory
+            .read_pointer(interrupt + offset)
+            .ok()
+            .filter(|routine| !routine.is_zero())
+    };
+    let routine = routine_in("MessageServiceRoutine")
+        .or_else(|| routine_in("ServiceRoutine"))
+        .map(|routine| {
+            target
+                .symbols
+                .format_closest_symbol_for_address(target.kernel_dtb(), routine)
+                .unwrap_or_else(|| format!("{:#x}", routine.0))
         })
-    });
-    Some(dispatch.unwrap_or_else(|| {
-        "KiIsrThunk (chained interrupt; _KINTERRUPT.DispatchCode unavailable)".into()
-    }))
+        .unwrap_or_else(|| "-".into());
+    Some(format!("KINTERRUPT {:#x}  {routine}", interrupt.0))
+}
+
+/// Where `processor`'s `_KPRCB.InterruptObject` table is.
+fn interrupt_objects(target: &Target, processor: u16) -> Option<VirtAddr> {
+    let prcb = cpu_state::kprcb_for_processor(target, processor).ok()?;
+    let offset = layout(target, "_KPRCB")
+        .ok()?
+        .field_offset("InterruptObject")
+        .ok()?;
+    Some(prcb + offset)
 }
 
 fn unavailable_idt_entry(vector: u16, address: VirtAddr, error: String) -> IdtGate {
@@ -1088,7 +1123,7 @@ fn unavailable_idt_entry(vector: u16, address: VirtAddr, error: String) -> IdtGa
     }
 }
 
-fn decode_idt_entry(target: &Target, base: u64, vector: u16) -> IdtGate {
+fn decode_idt_entry(target: &Target, base: u64, vector: u16, objects: Option<VirtAddr>) -> IdtGate {
     let address = VirtAddr(base.wrapping_add(u64::from(vector) * 16));
     let mut bytes = [0u8; 16];
     let read = kernel(target).and_then(|nt| nt.memory().read_bytes(address, &mut bytes));
@@ -1136,7 +1171,9 @@ fn decode_idt_entry(target: &Target, base: u64, vector: u16) -> IdtGate {
             dpl: DiagnosticValue::Available(dpl),
             present: DiagnosticValue::Available(present),
             non_nt_hook: DiagnosticValue::Available(hook),
-            ki_isr_thunk: DiagnosticValue::Available(interrupt_chain_hint(target, offset)),
+            ki_isr_thunk: DiagnosticValue::Available(connected_interrupt(
+                target, objects, offset, vector,
+            )),
         };
     };
     unavailable_idt_entry(vector, address, error.to_string())
@@ -1152,9 +1189,10 @@ pub fn decode_idt(
     let vectors: Vec<u16> = vector
         .map(|vector| vec![vector])
         .unwrap_or_else(|| (0..IDT_VECTOR_COUNT).collect());
+    let objects = interrupt_objects(target, processor);
     let entries = vectors
         .into_iter()
-        .map(|vector| decode_idt_entry(target, descriptor.base.0, vector))
+        .map(|vector| decode_idt_entry(target, descriptor.base.0, vector, objects))
         .collect();
     let descriptor_entries = descriptor.limit.saturating_add(1) / 16;
     let truncated = match vector {

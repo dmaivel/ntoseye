@@ -96,7 +96,9 @@ impl SectionViews {
         let eprocess = self.process(kernel, dtb & layout.root_mask)?;
         let vpn = va.0 >> 12;
         let (vad, start) = self.find_vad(kernel, eprocess, vpn)?;
-        let flags: u32 = kernel.read(vad + layout.vad_flags).ok()?;
+        // 8 bytes of flags before Windows 8 (`PrivateMemory` is bit 63
+        // there), 4 after; the bits read are always below the field's end.
+        let flags: u64 = kernel.read(vad + layout.vad_flags).ok()?;
         if flags >> layout.private_memory_bit & 1 != 0 {
             return None;
         }

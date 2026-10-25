@@ -284,7 +284,7 @@ fn print_irql(detail: &Irql) {
 }
 
 /// One IDT gate's row of the `!idt` table, and a row under it for the
-/// KiIsrThunk chain it dispatches to.
+/// interrupt object connected to a KiIsrThunk vector.
 fn push_idt_entry(builder: &mut Builder, gaps: &mut Gaps, detail: &IdtGate) {
     let vector = format!("{:02x}", detail.vector);
     let field = |name: &str| format!("vector {vector} {name}");
@@ -319,7 +319,7 @@ fn push_idt_entry(builder: &mut Builder, gaps: &mut Gaps, detail: &IdtGate) {
     ]);
     if let DiagnosticValue::Available(Some(chain)) = &detail.ki_isr_thunk {
         let mut row = vec![String::new(); 6];
-        row.push(format!("chain: {chain}"));
+        row.push(format!("connected: {chain}"));
         builder.push_record(row);
     }
 }
@@ -848,8 +848,9 @@ fn idt_vector(
 /// Decode one IDT entry or the bounded 256-entry IDT.
 ///
 /// Shows one IDT vector or all 256 entries, with the handler, selector, gate
-/// type, DPL, presence, non-nt hooks, and KiIsrThunk chain hints of each
-/// entry.
+/// type, DPL, presence, and non-nt hooks of each entry. Under a vector that
+/// dispatches through KiIsrThunk, the KINTERRUPT the processor has
+/// connected to it and its service routine.
 #[command(
     names = ["!idt", "idt"],
     category = "cpu",

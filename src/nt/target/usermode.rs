@@ -971,7 +971,8 @@ impl Target {
             wow_teb_offset,
             wow64_reserved: DiagnosticValue::from_result(
                 teb_ref
-                    .read_pointer("Wow32Reserved")
+                    .read_pointer("WOW32Reserved")
+                    .or_else(|_| teb_ref.read_pointer("Wow32Reserved"))
                     .or_else(|_| teb_ref.read_pointer("Wow64Reserved")),
             ),
             activation_context: DiagnosticValue::from_result(

@@ -1103,13 +1103,16 @@ impl Target {
                 Error::DebugInfo("_KPRCB.DpcData element type unavailable".to_string())
             })?;
         let data_layout = layout_for(self, data_type_name)?;
+        // `DpcList`, or Windows 7's `DpcListHead`.
         let dpc_list = data_layout
             .fields
             .get("DpcList")
+            .or_else(|| data_layout.fields.get("DpcListHead"))
             .ok_or_else(|| Error::FieldNotFound(format!("{data_type_name}.DpcList")))?;
         // Newer builds queue DPCs on a `_KDPC_LIST`, a singly linked list
-        // that ends at a null link; only a `_LIST_ENTRY` queue returns to its
-        // head, and a null link there is damage.
+        // that ends at a null link; only a `_LIST_ENTRY` queue (Windows 7's
+        // `DpcListHead`) returns to its head, and a null link there is
+        // damage.
         let singly_linked =
             !matches!(&dpc_list.type_data, ParsedType::Struct(name) if name == "_LIST_ENTRY");
         let dpc_link_offset = link_offset(self, "_KDPC", &["DpcListEntry", "ListEntry", "SLink"]);

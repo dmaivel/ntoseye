@@ -138,7 +138,10 @@ struct ObjectQuery {
     type_index_offset: u64,
     pointer_count_offset: u64,
     handle_count_offset: u64,
-    cookie: u8,
+    /// `nt!ObHeaderCookie`, which Windows 10 XORs into the stored
+    /// `TypeIndex` with the header address's second byte; `None` before,
+    /// where the index is stored as is.
+    cookie: Option<u8>,
     process_index: Option<u8>,
     thread_index: Option<u8>,
 }
@@ -160,7 +163,9 @@ impl ObjectQuery {
             let header = start + offset;
             let at = |field: u64| bytes.get((offset + field) as usize).copied();
             let raw = at(self.type_index_offset)?;
-            let decoded = raw ^ ((header.0 >> 8) as u8) ^ self.cookie;
+            let decoded = self
+                .cookie
+                .map_or(raw, |cookie| raw ^ (header.0 >> 8) as u8 ^ cookie);
             if decoded != index || at(self.body_offset)? != kind {
                 return None;
             }
@@ -200,8 +205,8 @@ impl Target {
             pointer_count_offset: header.field_offset("PointerCount")?,
             handle_count_offset: header.field_offset("HandleCount")?,
             cookie: match nt.symbol("ObHeaderCookie") {
-                Ok(symbol) => symbol.read::<u8>()?,
-                Err(Error::SymbolNotFound(_)) => 0,
+                Ok(symbol) => Some(symbol.read::<u8>()?),
+                Err(Error::SymbolNotFound(_)) => None,
                 Err(error) => return Err(error),
             },
             process_index: kinds

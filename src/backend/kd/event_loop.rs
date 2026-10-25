@@ -720,13 +720,13 @@ pub fn advance_pc_past_breakpoint(
     let next_pc = pc.wrapping_add(u64::from(arch.breakpoint_size()));
     register_map.write_u64(arch.pc_register(), &mut context, next_pc)?;
     kd_trace!(
-        "kd: advance_pc: p{} read pc={:#x}, writing {}-byte CONTEXT in chunks",
+        "kd: advance_pc: p{} read pc={:#x}, writing {}-byte CONTEXT",
         processor + 1,
         pc,
         context.len()
     );
     with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
-        api::set_context_chunked(framing, processor, &context)
+        api::set_context(framing, processor, context_flags, &context)
     })?;
     if trace_enabled()
         && let Ok(verify_context) =

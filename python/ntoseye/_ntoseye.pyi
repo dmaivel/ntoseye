@@ -2786,8 +2786,9 @@ class Cpu:
         Decode one IDT entry or the bounded 256-entry IDT.
         
         Shows one IDT vector or all 256 entries, with the handler, selector, gate
-        type, DPL, presence, non-nt hooks, and KiIsrThunk chain hints of each
-        entry.
+        type, DPL, presence, and non-nt hooks of each entry. Under a vector that
+        dispatches through KiIsrThunk, the KINTERRUPT the processor has
+        connected to it and its service routine.
         """
     @property
     def info(self, /) -> VcpuInfo:
@@ -3661,7 +3662,11 @@ class DevNodeDetail(BaseRecord):
         The problem code's name, when it is a known one.
         """
     @property
-    def problem_status(self, /) -> int: ...
+    def problem_status(self, /) -> int |None:
+        """
+        The status the problem came with; `None` on kernels whose device
+        node keeps none (Windows 7).
+        """
     @property
     def service_name(self, /) -> str: ...
     @property
@@ -3762,7 +3767,11 @@ class DevNodeSummary(BaseRecord):
         The problem code's name, when it is a known one.
         """
     @property
-    def problem_status(self, /) -> int: ...
+    def problem_status(self, /) -> int |None:
+        """
+        The status the problem came with; `None` on kernels whose device
+        node keeps none (Windows 7).
+        """
     @property
     def service_name(self, /) -> str: ...
     @property
@@ -7680,10 +7689,10 @@ class IdtGate(BaseRecord):
     @property
     def ki_isr_thunk(self, /) -> Diagnostic[str |None]:
         """
-        For a handler in `KiIsrThunk` (a chained interrupt), the offset of
-        the handler in `KiIsrThunk` and the location of
-        `_KINTERRUPT.DispatchCode`. The diagnostic value is None for other
-        handlers.
+        For a handler in `KiIsrThunk`, which dispatches through the
+        processor's `_KPRCB.InterruptObject` table, the `_KINTERRUPT`
+        connected to the vector and its service routine. None for other
+        handlers and for a vector nothing is connected to.
         """
     @property
     def non_nt_hook(self, /) -> Diagnostic[bool]:
