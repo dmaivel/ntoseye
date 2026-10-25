@@ -32,6 +32,7 @@ pub mod pdb_recovery;
 mod process;
 pub mod secure_kernel;
 pub mod store_layout;
+pub mod store_tree;
 mod symbol_load;
 mod trustlet_layout;
 pub mod vad;
