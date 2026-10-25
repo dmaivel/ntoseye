@@ -43,6 +43,7 @@ pub struct StoreLayout {
     pub chunk_fields: [u32; 4],
     /// `SMKM_STORE_MGR`: the tree from page key to store index.
     pub key_tree: u32,
+    pub compression: Compression,
 }
 
 /// The store layout `code` uses, when every anchor is found and agrees.
@@ -52,6 +53,7 @@ pub fn derive(code: &KernelCode<'_>) -> Result<StoreLayout> {
     let (region_shift, region_offset_mask) = region_key_fields(code)?;
     let (chunk_array, chunk_fields) = chunk_fields(code)?;
     let key_tree = key_tree(code)?;
+    let compression = compression(code)?;
     Ok(StoreLayout {
         owner_process,
         region_array,
@@ -62,6 +64,7 @@ pub fn derive(code: &KernelCode<'_>) -> Result<StoreLayout> {
         chunk_array,
         chunk_fields,
         key_tree,
+        compression,
     })
 }
 
@@ -473,6 +476,68 @@ fn key_tree(code: &KernelCode<'_>) -> Result<u32> {
     }
     agreed(&votes, "key-to-store tree")
 }
+
+/// How a store's pages are compressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compression {
+    /// Before 24H2: the `ST_STORE` word at this offset is the
+    /// `RtlDecompressBuffer` format.
+    FormatField(u32),
+    /// From 24H2: LZ4 when the `SMKM_STORE` count at this offset is zero.
+    Lz4UnlessCount(u32),
+}
+
+/// From `SmStoreDecompressBuffer` (24H2 and later), the count it tests
+/// first; otherwise the field loaded into `ecx` before a call to
+/// `RtlDecompressBufferEx` by `StDmSinglePageCopy`.
+fn compression(code: &KernelCode<'_>) -> Result<Compression> {
+    use iced_x86::{Mnemonic, OpKind, Register};
+    if let Ok(decompress) = code.address("SmStoreDecompressBuffer") {
+        let instructions = code.instructions(decompress);
+        for (index, load) in instructions.iter().enumerate() {
+            let counted = matches!(load.mnemonic(), Mnemonic::Mov | Mnemonic::Movsxd)
+                && load.op1_kind() == OpKind::Memory
+                && load.memory_base() == Register::RCX
+                && load.memory_size().size() == 4;
+            let tested = instructions[index + 1..].iter().take(4).any(|test| {
+                test.mnemonic() == Mnemonic::Test
+                    && test.op0_kind() == OpKind::Register
+                    && test.op0_register().full_register() == load.op0_register().full_register()
+            });
+            if counted
+                && tested
+                && let Some(count) = based_offset(load)
+            {
+                return Ok(Compression::Lz4UnlessCount(count));
+            }
+        }
+        return Err(layout_error(
+            "no algorithm count in SmStoreDecompressBuffer",
+        ));
+    }
+    let decompress = code.address("RtlDecompressBufferEx")?;
+    let copy = code.address("ST_STORE<SM_TRAITS>::StDmSinglePageCopy")?;
+    let mut votes: HashMap<u32, usize> = HashMap::new();
+    let mut ecx = None;
+    for instruction in code.instructions(copy) {
+        if instruction.mnemonic() == Mnemonic::Call {
+            if near_target(&instruction) == Some(decompress)
+                && let Some(field) = ecx
+            {
+                *votes.entry(field).or_default() += 1;
+            }
+            ecx = None;
+        } else if instruction.op0_kind() == OpKind::Register
+            && instruction.op0_register().full_register() == Register::RCX
+        {
+            ecx = (instruction.mnemonic() == Mnemonic::Movzx
+                && instruction.op1_kind() == OpKind::Memory)
+                .then(|| based_offset(&instruction))
+                .flatten();
+        }
+    }
+    most(&votes, "decompression format").map(Compression::FormatField)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +570,14 @@ mod tests {
                 functions: HashMap::new(),
             };
             builder.function("KeStackAttachProcess", |a| a.ret().unwrap());
+            // 24H2's decompression: LZ4 unless the count at 0x12c0 is set.
+            builder.function("SmStoreDecompressBuffer", |a| {
+                a.mov(rax, qword_ptr(rcx + 0x1d90)).unwrap();
+                a.mov(eax, dword_ptr(rcx + 0x12c0)).unwrap();
+                a.mov(dword_ptr(rsp + 0x10), eax).unwrap();
+                a.test(eax, eax).unwrap();
+                a.ret().unwrap();
+            });
             // A record's chunk: its pointer from the array at 0xc0, the
             // record from the fields at 0x1c8..0x1d8.
             builder.function("ST_STORE<SM_TRAITS>::ST_PAGE_RECORD_GET", |a| {
@@ -610,6 +683,7 @@ mod tests {
                 chunk_array: 0xc0,
                 chunk_fields: [0x1c8, 0x1cc, 0x1d0, 0x1d8],
                 key_tree: 0x1c0,
+                compression: Compression::Lz4UnlessCount(0x12c0),
             }
         );
     }
