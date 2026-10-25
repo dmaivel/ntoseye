@@ -463,8 +463,8 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
     /// Each non-present, non-zero PTE-level entry that maps a page in
     /// `[start, end)`, with the address of its page: pages that are paged
     /// out or otherwise not in memory. Absent tables are skipped whole,
-    /// except table pages in the memory-compression store, whose entries
-    /// are read from there.
+    /// except ones the guest trimmed: in transition, or in the
+    /// memory-compression store.
     pub fn for_each_absent_pte(
         &self,
         start: VirtAddr,
@@ -495,7 +495,8 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
     /// One table of [`Self::for_each_present_page`], `depth` levels below
     /// the root, covering from `base`; entries outside `[start, end)` are
     /// skipped. With `absent`, it is handed each non-present PTE-level
-    /// entry, and tables in the memory-compression store are visited too.
+    /// entry, and tables the guest trimmed are visited too
+    /// ([`Self::absent_table`]).
     #[allow(clippy::too_many_arguments)]
     fn visit_table(
         &self,
@@ -538,18 +539,10 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
                         }
                         continue;
                     }
-                    let Some(Ok(page)) = self.stored_page(entry) else {
+                    let Some(page) = self.absent_table(entry) else {
                         continue;
                     };
-                    self.visit_table(
-                        TablePage::Stored(page),
-                        depth + 1,
-                        entry_base,
-                        start,
-                        end,
-                        visit,
-                        absent,
-                    )?
+                    self.visit_table(page, depth + 1, entry_base, start, end, visit, absent)?
                 }
                 TableEntry::Leaf(frame) => {
                     let from = entry_base.max(start);
@@ -599,7 +592,8 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
 
     /// Walk the tables for `va`, handing `on_step` each entry read from a
     /// table's frame; a table read from the memory-compression store has
-    /// none, and its entries are not handed on.
+    /// none, and its entries are not handed on. A table the guest trimmed
+    /// is read where it is ([`Self::absent_table`]).
     fn walk_tables(&self, va: VirtAddr, mut on_step: impl FnMut(WalkStep)) -> Result<Walked> {
         let paging = self.arch.paging();
         let mut table = TablePage::Frame(self.root_for(va));
@@ -634,12 +628,10 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
                         permissions,
                     )));
                 }
-                // A table page the guest compressed into its store: the
-                // walk goes on through a copy of it.
                 TableEntry::Absent if level != PageTableLevel::Pte => {
-                    match self.stored_page(entry) {
-                        Some(Ok(page)) => table = TablePage::Stored(page),
-                        _ => return Ok(Walked::Unmapped(None)),
+                    match self.absent_table(entry) {
+                        Some(page) => table = page,
+                        None => return Ok(Walked::Unmapped(None)),
                     }
                 }
                 TableEntry::Absent => {
@@ -749,6 +741,17 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             return None;
         };
         self.stored_page(pte)
+    }
+
+    /// Where the table a non-present table entry `entry` names is: its frame
+    /// when the guest trimmed the table and it is in transition, still in
+    /// memory; a copy from the memory-compression store when it is there.
+    fn absent_table(&self, entry: PageTableEntry) -> Option<TablePage> {
+        if entry.is_transition() {
+            let entry = entry.unswizzled(self.backend.invalid_pte_mask());
+            return Some(TablePage::Frame(entry.page_frame()));
+        }
+        self.stored_page(entry)?.ok().map(TablePage::Stored)
     }
 
     /// The page whose non-present PTE or table entry is `entry`, from the
@@ -1135,6 +1138,46 @@ mod tests {
         );
     }
 
+    /// A page table the guest trimmed stays in its frame while it is in
+    /// transition; the walk reads it there, for a read, for the walk of
+    /// non-present PTEs, and for the steps `!vtop` shows.
+    #[test]
+    fn a_page_under_a_table_in_transition_reads_from_its_frame() {
+        // PD[0] at 0x3000 names the table at 0x4000, in transition; its
+        // entry 2 is a page in transition at 0x5000.
+        let mut data = vec![0u8; 0x6000];
+        let mut put = |at: usize, value: u64| {
+            data[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        };
+        put(0x1000, 0x2000 | 0x7);
+        put(0x2000, 0x3000 | 0x7);
+        put(0x3000, 0x4000 | 1 << 11 | 0x80);
+        put(0x4000 + 2 * 8, 0x5000 | 1 << 11 | 0x80);
+        put(0x5000 + 0x18, 0x1122_3344_5566_7788);
+        let mem = FakePhysMem {
+            data,
+            invalid_pte_mask: 0,
+        };
+        let space = AddressSpace::new_amd64(&mem, 0x1000);
+        let page = VirtAddr(2 * PAGE_SIZE as u64);
+        assert_eq!(
+            space.read::<u64>(page + 0x18u64).unwrap(),
+            0x1122_3344_5566_7788
+        );
+        let mut absent = Vec::new();
+        space
+            .for_each_absent_pte(VirtAddr(0), VirtAddr(0x20_0000), |va, pte| {
+                absent.push((va.0, pte.0));
+            })
+            .unwrap();
+        assert_eq!(absent, [(page.0, 0x5000 | 1 << 11 | 0x80)]);
+        let (steps, translation) = space.walk_steps(page).unwrap();
+        assert_eq!(
+            steps.iter().map(|step| step.address).collect::<Vec<_>>(),
+            [0x1000, 0x2000, 0x3000, 0x4010]
+        );
+        assert_eq!(translation.map(|t| t.address), Some(0x5000));
+    }
     #[test]
     fn present_page_walk_skips_absent_tables_and_clips_large_pages() {
         // Kernel half: PML4[0x1f0] -> PDPT at 0x2000. PDPT[0] -> PD at
