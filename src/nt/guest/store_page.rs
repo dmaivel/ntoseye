@@ -153,6 +153,25 @@ pub fn store_for_key(
     Ok((store != 0).then_some(store))
 }
 
+/// The `ST_STORE` embedded in the `SMKM_STORE` at `store`: the offset (0x40
+/// on 26H1, 0x50 before it; others nearby are tried) whose back pointer at
+/// `back_pointer` points to `store`.
+pub fn embedded_store(
+    read: &mut impl FnMut(u64, &mut [u8]) -> crate::base::error::Result<()>,
+    store: u64,
+    back_pointer: u32,
+) -> crate::base::error::Result<u64> {
+    for offset in (0x40..=0x60).step_by(8) {
+        let st = store + offset;
+        if read_u64(read, st + u64::from(back_pointer)).ok() == Some(store) {
+            return Ok(st);
+        }
+    }
+    Err(crate::base::error::Error::DebugInfo(format!(
+        "store {store:#x}: no embedded ST_STORE points back to it"
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +294,23 @@ mod tests {
             store_for_key(&mut read, manager, 0x1c0, 0x2000_1235).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn the_embedded_store_is_the_one_that_points_back() {
+        let store = 0x10_000;
+        let values: Vec<(u64, Vec<u8>)> = vec![
+            // A pointer elsewhere at 0x40's back-pointer slot, the store at 0x50's.
+            (store + 0x40 + 0x320, 0x99_000u64.to_le_bytes().to_vec()),
+            (store + 0x50 + 0x320, store.to_le_bytes().to_vec()),
+        ];
+        let borrowed: Vec<(u64, &[u8])> = values.iter().map(|(a, b)| (*a, b.as_slice())).collect();
+        let mut read = memory(&borrowed);
+        assert_eq!(
+            embedded_store(&mut read, store, 0x320).unwrap(),
+            store + 0x50
+        );
+        assert!(embedded_store(&mut read, store + 0x1000, 0x320).is_err());
     }
     #[test]
     fn a_page_record_is_found_through_its_chunk() {
