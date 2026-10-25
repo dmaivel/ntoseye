@@ -832,10 +832,20 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             return None;
         }
         let store = self.backend.compressed_pages()?;
+        let (file, offset) = entry
+            .unswizzled(self.backend.invalid_pte_mask())
+            .page_file_location(self.backend.page_file_low());
+        let key = u64::from(file) << 32 | u64::from(offset);
+        if let Some(page) = self.backend.cached_store_page(key) {
+            return Some(Ok(page));
+        }
         let mut page = Box::new([0u8; PAGE_SIZE]);
         IN_STORE.set(true);
         let result = store.read(self, entry, &mut page);
         IN_STORE.set(false);
+        if let Some(Ok(())) = result {
+            self.backend.cache_store_page(key, &page);
+        }
         Some(result?.map(|()| page))
     }
 }

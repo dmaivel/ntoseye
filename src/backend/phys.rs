@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -7,7 +8,7 @@ use crate::backend::host::VmHandle;
 use crate::backend::kd::KdMemory;
 use crate::base::error::{Error, Result};
 use crate::base::memory::{
-    CompressedPages, MemoryOps, PAGE_FILE_LOW, SectionViews, TranslationCache,
+    CompressedPages, MemoryOps, PAGE_FILE_LOW, PAGE_SIZE, SectionViews, TranslationCache,
 };
 use crate::base::types::{Dtb, PhysAddr, VirtAddr};
 use crate::nt::dmp::{DmpInfo, DmpMem};
@@ -38,6 +39,8 @@ pub struct PhysMem {
     /// The guest's memory-compression store, resolved on first use (see
     /// [`Self::set_compressed_pages`]).
     compressed_pages: StoreSlot,
+    /// Pages decompressed from that store during the current halt.
+    store_pages: Mutex<StorePageCache>,
 }
 
 /// How a resolver finds the guest's memory-compression store; `None` when
@@ -140,6 +143,44 @@ impl StoreSlot {
     }
 }
 
+/// How many decompressed store pages [`StorePageCache`] keeps (64 MiB)
+/// before it starts over.
+const STORE_PAGE_CACHE_PAGES: usize = 0x4000;
+
+/// Pages decompressed from the memory-compression store during one halt,
+/// by page-file number and page. A walk under a page table in the store
+/// decompresses that table each time, and `.dump /u` walks each page
+/// several times; the guest changes neither until it runs.
+#[derive(Default)]
+pub struct StorePageCache {
+    epoch: Option<u64>,
+    pages: HashMap<u64, Box<[u8; PAGE_SIZE]>>,
+}
+
+impl StorePageCache {
+    /// The page cached under `key` in halt `epoch`; none while the guest
+    /// may be running.
+    pub fn get(&self, epoch: Option<u64>, key: u64) -> Option<Box<[u8; PAGE_SIZE]>> {
+        if epoch.is_none() || epoch != self.epoch {
+            return None;
+        }
+        self.pages.get(&key).cloned()
+    }
+
+    /// Cache `page` under `key` for halt `epoch`, dropping the pages of an
+    /// earlier halt, or all of them once full.
+    pub fn put(&mut self, epoch: Option<u64>, key: u64, page: &[u8; PAGE_SIZE]) {
+        if epoch.is_none() {
+            return;
+        }
+        if epoch != self.epoch || self.pages.len() >= STORE_PAGE_CACHE_PAGES {
+            self.pages.clear();
+            self.epoch = epoch;
+        }
+        self.pages.insert(key, Box::new(*page));
+    }
+}
+
 /// Where [`PhysMem`] reads from. `Dmp` is boxed because it is much larger than
 /// the live handle.
 enum Source {
@@ -233,6 +274,7 @@ impl PhysMem {
             pte_self_map: AtomicU64::new(0),
             section_views: Mutex::new(None),
             compressed_pages: StoreSlot::new(),
+            store_pages: Mutex::default(),
         }
     }
 
@@ -588,11 +630,48 @@ impl MemoryOps<PhysAddr> for PhysMem {
     fn compressed_pages(&self) -> Option<Arc<CompressedPages>> {
         self.compressed_pages.get(self.halt_epoch())
     }
+
+    fn cached_store_page(&self, key: u64) -> Option<Box<[u8; PAGE_SIZE]>> {
+        self.store_pages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(self.halt_epoch(), key)
+    }
+
+    fn cache_store_page(&self, key: u64, page: &[u8; PAGE_SIZE]) {
+        let epoch = self.halt_epoch();
+        self.store_pages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .put(epoch, key, page);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::HaltClock;
+
+    /// A page decompressed from the store is reused within a halt, and not
+    /// after the guest ran, nor while it may be running.
+    #[test]
+    fn a_store_page_is_cached_for_one_halt_only() {
+        let mut cache = super::StorePageCache::default();
+        let page = [7u8; crate::base::memory::PAGE_SIZE];
+        cache.put(Some(1), 0x2_0000_0042, &page);
+        assert_eq!(cache.get(Some(1), 0x2_0000_0042).as_deref(), Some(&page));
+        assert!(cache.get(Some(1), 0x2_0000_0043).is_none());
+        assert!(cache.get(Some(2), 0x2_0000_0042).is_none(), "the guest ran");
+        assert!(
+            cache.get(None, 0x2_0000_0042).is_none(),
+            "it may be running"
+        );
+        cache.put(None, 0x2_0000_0044, &page);
+        assert!(cache.get(Some(1), 0x2_0000_0044).is_none());
+        // A put in a later halt drops the earlier halt's pages.
+        cache.put(Some(2), 0x2_0000_0045, &page);
+        assert!(cache.get(Some(2), 0x2_0000_0042).is_none());
+        assert!(cache.get(Some(2), 0x2_0000_0045).is_some());
+    }
 
     /// A store with a placeholder layout.
     fn some_store() -> super::CompressedPages {

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
 
 use crate::base::error::Result;
-use crate::base::memory::{CompressedPages, SectionViews, TranslationCache};
+use crate::base::memory::{CompressedPages, PAGE_SIZE, SectionViews, TranslationCache};
 use crate::base::types::{Dtb, VirtAddr};
 
 /// Where a software PTE's page-file number starts on kernels with the L1TF
@@ -72,6 +72,17 @@ pub trait MemoryOps<A> {
         PAGE_FILE_LOW
     }
 
+    /// A page of the memory-compression store this backend decompressed
+    /// earlier while the guest has been halted, by its page-file number and
+    /// page (`file << 32 | offset`); see [`Self::cache_store_page`].
+    fn cached_store_page(&self, _key: u64) -> Option<Box<[u8; PAGE_SIZE]>> {
+        None
+    }
+
+    /// Keep a page decompressed from the memory-compression store until the
+    /// guest runs again; a backend that cannot tell when it runs keeps none.
+    fn cache_store_page(&self, _key: u64, _page: &[u8; PAGE_SIZE]) {}
+
     /// The guest's mapped views, for pages a process's page tables do not
     /// map (see [`SectionViews`]); `None` until a kernel is found.
     fn section_views(&self) -> Option<Arc<SectionViews>> {
@@ -138,6 +149,14 @@ impl<A, B: MemoryOps<A>> MemoryOps<A> for Arc<B> {
 
     fn page_file_low(&self) -> u32 {
         (**self).page_file_low()
+    }
+
+    fn cached_store_page(&self, key: u64) -> Option<Box<[u8; PAGE_SIZE]>> {
+        (**self).cached_store_page(key)
+    }
+
+    fn cache_store_page(&self, key: u64, page: &[u8; PAGE_SIZE]) {
+        (**self).cache_store_page(key, page);
     }
 
     fn section_views(&self) -> Option<Arc<SectionViews>> {
