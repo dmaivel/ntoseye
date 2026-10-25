@@ -645,9 +645,18 @@ impl<'a> ReplState<'a> {
     }
 }
 
+/// What the command line asks of the REPL besides its prompt: command
+/// lists to run first (`-c`), and with `batch`, to quit after them instead
+/// of prompting, leaving out the startup summary and the stop.
+#[derive(Debug, Default, Clone)]
+pub struct Startup {
+    pub commands: Vec<String>,
+    pub batch: bool,
+}
+
 #[cfg(feature = "cli")]
-pub fn start_repl(ctx: &mut Session) -> Result<()> {
-    start_repl_with_mode(ctx, false)
+pub fn start_repl(ctx: &mut Session, startup: &Startup) -> Result<()> {
+    start_repl_with_mode(ctx, false, startup)
 }
 
 /// Signal-handler safe: one atomic store through an already-initialized static.
@@ -787,8 +796,37 @@ fn read_line_interruptible<R: BufRead>(
 }
 
 #[cfg(feature = "cli")]
-pub fn start_plain_repl(ctx: &mut Session) -> Result<()> {
-    start_repl_with_mode(ctx, true)
+pub fn start_plain_repl(ctx: &mut Session, startup: &Startup) -> Result<()> {
+    start_repl_with_mode(ctx, true, startup)
+}
+
+/// Run `line` as if typed at the prompt.
+#[cfg(feature = "cli")]
+fn run_typed_line(state: &mut ReplState<'_>, line: &str) -> Result<Flow> {
+    log_input_line(line);
+    drop_leading_blank_lines();
+    state.line = line.to_string();
+    // A Ctrl+C that ended the last command's step is spent.
+    state.ctx.target.interrupt.store(false, Ordering::SeqCst);
+    state.dispatch_line(line)
+}
+
+/// Run the command line's `-c` lists in order, each echoed after the prompt
+/// and run as if typed there: an error ends its own list, not the next one.
+/// `true` when one quits (`q`).
+#[cfg(feature = "cli")]
+fn run_startup_commands(state: &mut ReplState<'_>, commands: &[String]) -> Result<bool> {
+    for command in commands.iter().map(|command| command.trim()) {
+        if command.is_empty() {
+            continue;
+        }
+        separate_prompt();
+        outln!("{} {command}", state.plain_prompt());
+        if run_typed_line(state, command)? == Flow::Quit {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// What the session found of the target's kernel.
@@ -898,7 +936,12 @@ fn print_user_dump_target(dump: &UserDumpSummary) {
 }
 
 #[cfg(feature = "cli")]
-fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
+fn start_repl_with_mode(ctx: &mut Session, plain: bool, startup: &Startup) -> Result<()> {
+    if startup.batch {
+        // Nothing comes before the first command's output to set it apart
+        // from.
+        drop_leading_blank_lines();
+    }
     // Warnings the attach raised (unreadable PRCB contexts, a corrupt triage
     // signature, kernel discovery falling back) precede the banner.
     for notice in ctx.take_notices() {
@@ -935,7 +978,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         }
         loaded_parts.push(part);
     }
-    if !loaded_parts.is_empty() {
+    if !loaded_parts.is_empty() && !startup.batch {
         outln!(
             "{}",
             ui::muted(&format!("loaded: {}", loaded_parts.join(", ")))
@@ -947,7 +990,9 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     print_python_commands_notice();
     print_alias_load_failures(&alias_report);
 
-    if let Some(dump) = user_dump_summary(debugger) {
+    if startup.batch {
+        // A batch run's output is its commands'.
+    } else if let Some(dump) = user_dump_summary(debugger) {
         print_user_dump_target(&dump);
     } else {
         // Triage dumps may lack the ntoskrnl PE header needed for full kernel
@@ -969,11 +1014,13 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         print_target(&target);
     }
     let capabilities = client.capabilities();
-    print_backend_capability_warning(&capabilities);
+    if !startup.batch {
+        print_backend_capability_warning(&capabilities);
+    }
 
     let has_register_context = supports_capability(&capabilities, DebugCapability::ReadRegisters);
 
-    if has_register_context {
+    if has_register_context && !startup.batch {
         // A user dump written for an exception stops on the thread that
         // raised it; `.ecxr` selects the exception's own context.
         let cause = ctx.target.user_exception().map(|exception| {
@@ -1155,6 +1202,9 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     // An error ends the prompt, not the cleanup below: breakpoints left
     // planted in a guest that resumes without a debugger crash it.
     let prompt: Result<()> = (|| {
+        if run_startup_commands(&mut state, &startup.commands)? || startup.batch {
+            return Ok(());
+        }
         if plain {
             let stdin = io::stdin();
             let mut input = stdin.lock();
@@ -1181,13 +1231,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                     drop_leading_blank_lines();
                     continue;
                 }
-
-                log_input_line(command);
-                drop_leading_blank_lines();
-                state.line = command.to_string();
-                // A Ctrl+C that ended the last command's step is spent.
-                state.ctx.target.interrupt.store(false, Ordering::SeqCst);
-                if state.dispatch_line(command)? == Flow::Quit {
+                if run_typed_line(&mut state, command)? == Flow::Quit {
                     break;
                 }
             }
@@ -1484,6 +1528,29 @@ mod tests {
         }
     }
 
+    /// The command line's lists run in order, each echoed after the prompt:
+    /// an error ends its own list and not the next one, and `q` ends them
+    /// all.
+    #[cfg(feature = "cli")]
+    #[test]
+    fn startup_commands_run_as_typed_lines() {
+        let mut session = session_over_memory(0x1000, &[0u8; 8]);
+        let mut state = ReplState::for_oneshot(&mut session);
+        let prompt = state.plain_prompt();
+        let lists = ["? 11; ? no_such_symbol; ? 12", "? 13", "q", "? 14"].map(String::from);
+        let (quit, text) = capture(|| super::run_startup_commands(&mut state, &lists));
+        assert!(quit.unwrap(), "q quits");
+        assert!(text.contains(&format!("{prompt} ? 13")), "{text}");
+        for (value, shown) in [(0x11, true), (0x12, false), (0x13, true), (0x14, false)] {
+            assert_eq!(
+                text.contains(&format!("{value:016x}")),
+                shown,
+                "{value:#x}: {text}"
+            );
+        }
+        let (quit, _) = capture(|| super::run_startup_commands(&mut state, &lists[..2]));
+        assert!(!quit.unwrap(), "no q, no quit");
+    }
     #[test]
     fn session_radix_switch_applies_to_later_expressions() {
         let mut session = session_over_memory(0x1000, &[0u8; 8]);

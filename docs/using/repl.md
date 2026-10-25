@@ -17,6 +17,19 @@ As you type, the rest of the most recent earlier line that starts with what you'
 
 With `--plain-repl`, ntoseye reads commands line by line without completion or history, so you can pipe a command file into it.
 
+## Commands from the command line
+
+`-c <commands>` runs commands after ntoseye attaches, before the prompt, as `cdb -c` does. Each value is a line as you would type it at the prompt, so it can hold several commands separated by semicolons, and an error ends that line. Give `-c` more than once to run several lines in order; ntoseye echoes each one after the prompt before its output. A script file runs the same way, with `-c '$$<file'`.
+
+`--batch` quits after the `-c` lines instead of showing the prompt, and leaves a live target as {command}`q` does: it removes the breakpoints and lets the target run. It prints only what the commands print, without the target summary, the stop and the backend's capability notice that ntoseye shows when it attaches; a problem the attach found, such as a processor context it could not read, is still reported. The exit status is 1 if a command reported an error, and 0 otherwise:
+
+```text
+ntoseye --dump crash.dmp -c '!analyze -v' --batch
+ntoseye -c 'lm; !process 0 0' -c '$$<checks.txt' --batch > report.txt
+```
+
+A command that runs the target, such as {command}`g`, waits for the target to stop, and **Ctrl+C** breaks in, as at the prompt.
+
 ntoseye shows color only when the output goes to a terminal. If you redirect the output, or if `NO_COLOR` is set, the output is plain text, and so are the prompt and its completion menu. With `TERM=dumb`, as in Emacs's `M-x shell`, ntoseye also reads commands as `--plain-repl` does, since that terminal can't move the cursor for the line editor.
 
 The prompt marks where each command and its output start and end, as a shell does for its terminal (OSC 133). A terminal that reads these marks, such as Ghostty, kitty, WezTerm, iTerm2, Windows Terminal, the VS Code terminal or Tern, can then jump from one command to the next, select a command's output, or flag one that reported an error.

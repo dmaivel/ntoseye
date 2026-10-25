@@ -22,7 +22,10 @@ use crate::{
     },
     hosts::{
         configure,
-        repl::{command_reference_json, json_string, open_session, start_plain_repl, start_repl},
+        repl::{
+            Startup, command_reference_json, json_string, open_session, start_plain_repl,
+            start_repl,
+        },
     },
     nt::symbols,
 };
@@ -46,6 +49,19 @@ struct Cli {
     /// and no history
     #[arg(long)]
     plain_repl: bool,
+
+    /// Run these debugger commands after attaching, each echoed after the
+    /// prompt and run as if typed there (a ;-separated list, as at the
+    /// prompt); give it more than once to run several lists in order
+    #[arg(short = 'c', long = "command", value_name = "COMMANDS")]
+    commands: Vec<String>,
+
+    /// Quit after the -c commands instead of prompting, leaving a live
+    /// target as q does, and print only the commands' output, not the
+    /// startup summary or the stop. The exit status is 1 if a command
+    /// reported an error
+    #[arg(long, requires = "commands")]
+    batch: bool,
 
     /// Print the command-line and REPL command help as JSON for the
     /// documentation build
@@ -337,7 +353,7 @@ fn reference_json() -> String {
 pub fn run_with_args(args: impl IntoIterator<Item = OsString>) -> i32 {
     let cli = parse_cli(args).unwrap_or_else(|error| error.exit());
     match run(cli) {
-        Ok(()) => 0,
+        Ok(status) => status,
         Err(error) => {
             diagnostics::print_error(error);
             1
@@ -383,32 +399,35 @@ fn values_at_every_level<T: Clone + Send + Sync + 'static>(
         .collect()
 }
 
-fn run(cli: Cli) -> Result<()> {
+/// Run the CLI; the process exit status.
+fn run(cli: Cli) -> Result<i32> {
     let Cli {
         version,
         gdbstub_instructions,
         kd_instructions,
         plain_repl,
+        commands,
+        batch,
         dump_command_reference,
         target: mut args,
         command,
     } = cli;
     if version {
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-        return Ok(());
+        return Ok(0);
     }
     if dump_command_reference {
         println!("{}", reference_json());
-        return Ok(());
+        return Ok(0);
     }
     if gdbstub_instructions {
         println!("{}", GDBSTUB_INSTRUCTIONS);
-        return Ok(());
+        return Ok(0);
     }
 
     if kd_instructions {
         println!("{}", KD_INSTRUCTIONS);
-        return Ok(());
+        return Ok(0);
     }
 
     let backend = args.backend.unwrap_or(Backend::Kd);
@@ -489,7 +508,13 @@ fn run(cli: Cli) -> Result<()> {
     }
 
     if let Some(command) = command {
-        return match command {
+        if !commands.is_empty() {
+            return Err(Error::DebugInfo(
+                "-c and --batch run commands at the prompt, which a subcommand does not have"
+                    .to_string(),
+            ));
+        }
+        let result = match command {
             Command::Configure => configure::run_interactive(),
             Command::Status => configure::print_status(),
             #[cfg(feature = "mcp")]
@@ -524,6 +549,7 @@ fn run(cli: Cli) -> Result<()> {
                 gdbserver::run(spec, &gdbserver_args.listen)
             }
         };
+        return result.map(|()| 0);
     }
 
     let spec = match args.dump.as_ref() {
@@ -531,8 +557,8 @@ fn run(cli: Cli) -> Result<()> {
         None => live_spec(&args, backend),
     };
     // The line editor draws by moving the cursor, which a dumb terminal
-    // does not do.
-    let plain_repl = plain_repl || output::dumb_terminal();
+    // does not do; a batch run reads no line.
+    let plain_repl = plain_repl || batch || output::dumb_terminal();
     // Before the attach, which already indexes symbols behind a progress
     // bar that Tern draws natively, and before anything reads stdin.
     if !plain_repl {
@@ -541,10 +567,12 @@ fn run(cli: Cli) -> Result<()> {
     let mut ctx = open_session(&spec, &mut |line| {
         output::write_stderr_fmt(format_args!("{}\n", line.bright_black()));
     })?;
+    let startup = Startup { commands, batch };
+    let errors = diagnostics::errors_reported();
     let result = if plain_repl {
-        start_plain_repl(&mut ctx)
+        start_plain_repl(&mut ctx, &startup)
     } else {
-        start_repl(&mut ctx)
+        start_repl(&mut ctx, &startup)
     };
     // The process ends with the REPL. The session still drops, so the
     // backend resumes and detaches as it must, but the symbol store is
@@ -553,7 +581,8 @@ fn run(cli: Cli) -> Result<()> {
     // the operating system reclaims at exit anyway, so one reference to it
     // is leaked to keep it from being freed.
     std::mem::forget(std::sync::Arc::clone(&ctx.target.symbols));
-    result
+    // A batch run fails when a command did; its errors are already shown.
+    result.map(|()| i32::from(batch && diagnostics::errors_reported() != errors))
 }
 
 fn live_spec(args: &TargetOptions, backend: Backend) -> TargetSpec {
