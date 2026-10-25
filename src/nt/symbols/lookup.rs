@@ -339,6 +339,19 @@ impl SymbolStore {
         records
     }
 
+    /// The names of `guid`'s symbols that start with `prefix`, in order.
+    pub fn names_starting_with(&self, guid: u128, prefix: &str) -> Vec<String> {
+        let Some(index) = self.index.get(&guid) else {
+            return Vec::new();
+        };
+        let start = index.names.partition_point(|name| name.as_str() < prefix);
+        index.names[start..]
+            .iter()
+            .take_while(|name| name.starts_with(prefix))
+            .cloned()
+            .collect()
+    }
+
     pub fn symbol_rva<S>(&self, guid: u128, symbol_name: S) -> Result<Option<u32>>
     where
         S: AsRef<str>,

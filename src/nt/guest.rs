@@ -3,7 +3,7 @@ use crate::{
     backend::phys::PhysMem,
     base::{
         error::{Error, Result},
-        memory::{DTB_IDENTITY, MemoryOps, SectionLayout, SectionViews},
+        memory::{CompressedPages, DTB_IDENTITY, MemoryOps, SectionLayout, SectionViews},
         types::*,
     },
     nt::{
@@ -338,6 +338,26 @@ impl Guest {
         ntoskrnl
             .phys
             .set_section_views(section_layout(&ntoskrnl).map(SectionViews::new));
+        // Reading the kernel's code for the store layout waits until a page
+        // may be in the store. The resolver holds the physical memory
+        // weakly, since that memory holds the resolver.
+        let resolve = {
+            let phys = Arc::downgrade(&ntoskrnl.phys);
+            let symbols = Arc::clone(ntoskrnl.symbols());
+            let (dtb, base, arch, guid) = (
+                ntoskrnl.dtb(),
+                ntoskrnl.base_address,
+                ntoskrnl.arch(),
+                ntoskrnl.guid,
+            );
+            Box::new(move || {
+                let mut kernel = Image::new(phys.upgrade()?, symbols, dtb, base, arch);
+                kernel.guid = guid;
+                kernel.view()?;
+                compressed_pages(&kernel)
+            })
+        };
+        ntoskrnl.phys.set_compressed_pages(resolve);
         if let Ok(pte_base) = ntoskrnl
             .symbol("MmPteBase")
             .and_then(|symbol| symbol.read_pointer())
@@ -733,6 +753,112 @@ fn invalid_pte_mask(kernel: &Image) -> Option<u64> {
         .field_offset("InvalidPteMask")
         .ok()?;
     kernel.memory().read::<u64>(state + hardware + mask).ok()
+}
+
+/// The kernel functions the store layout is read from, by name.
+fn store_functions(kernel: &Image) -> Option<HashMap<String, u64>> {
+    let guid = kernel.guid?;
+    let symbols = kernel.symbols();
+    let mut names: Vec<String> = [
+        "SMKM_STORE<SM_TRAITS>::",
+        "SMKM_STORE_MGR<SM_TRAITS>::",
+        "ST_STORE<SM_TRAITS>::",
+        "B_TREE<_SM_PAGE_KEY, ",
+    ]
+    .iter()
+    .flat_map(|prefix| symbols.names_starting_with(guid, prefix))
+    .collect();
+    names.extend(
+        [
+            "SmStoreDecompressBuffer",
+            "RtlDecompressBufferEx",
+            "KeStackAttachProcess",
+            "KiStackAttachProcess",
+        ]
+        .map(String::from),
+    );
+    Some(
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let rva = symbols.symbol_rva(guid, &name).ok()??;
+                Some((name, kernel.address_of(rva).0))
+            })
+            .collect(),
+    )
+}
+
+/// The guest's memory-compression store, when the kernel's code gives its
+/// layout (AMD64, 1703 and later), its PDB types the partition's store
+/// fields, and the store has an owner process (it has none when
+/// compression is off).
+fn compressed_pages(kernel: &Image) -> Option<CompressedPages> {
+    if kernel.arch() != Arch::Amd64 {
+        return None;
+    }
+    let functions = store_functions(kernel)?;
+    let memory = kernel.memory();
+    let base = kernel.base_address.0;
+    let mapped = store_layout::mapped_code(&memory, base, kernel.binary_size()).ok()?;
+    let layout = store_layout::derive(&store_layout::KernelCode {
+        image: hv_layout::ImageView {
+            base,
+            bytes: &mapped.bytes,
+            code: mapped.code,
+            data: Vec::new(),
+        },
+        functions: &functions,
+    })
+    .ok()?;
+    let types = kernel.types();
+    let partition = kernel.symbol("MiSystemPartition").ok()?.address();
+    let partition_type = types.layout("_MI_PARTITION").ok()?;
+    let stores_type = types.layout("_MI_PARTITION_STORES").ok()?;
+    let stores = partition + partition_type.field_offset("Store").ok()?;
+    let page_file = memory
+        .read::<u32>(stores + stores_type.field_offset("VirtualPageFileNumber").ok()?)
+        .ok()?;
+    let owner = memory
+        .read_pointer(stores + stores_type.field_offset("StoreProcess").ok()?)
+        .ok()?;
+    if owner.0 == 0 {
+        return None;
+    }
+    // From 22H2 the manager is the system partition's SmPartition; before
+    // it, SmGlobals itself.
+    let manager = match types
+        .layout("_EPARTITION")
+        .ok()
+        .and_then(|epartition| epartition.field_offset("SmPartition").ok())
+    {
+        Some(sm_partition) => {
+            let core = partition_type.field_offset("Core").ok()?
+                + types
+                    .layout("_MI_PARTITION_CORE")
+                    .ok()?
+                    .field_offset("PartitionObject")
+                    .ok()?;
+            let epartition = memory.read_pointer(partition + core).ok()?;
+            memory.read_pointer(epartition + sm_partition).ok()?.0
+        }
+        None => kernel.symbol("SmGlobals").ok()?.address().0,
+    };
+    let eprocess = types.layout("_EPROCESS").ok()?;
+    let kprocess = types.layout("_KPROCESS").ok()?;
+    let root = memory
+        .read::<u64>(
+            owner
+                + eprocess.field_offset("Pcb").ok()?
+                + kprocess.field_offset("DirectoryTableBase").ok()?,
+        )
+        .ok()?;
+    Some(CompressedPages {
+        layout,
+        manager,
+        owner: owner.0,
+        owner_root: root & kernel.arch().dtb_page_mask(),
+        page_file: page_file as u8,
+    })
 }
 
 /// Where the kernel keeps what [`SectionViews`] reads: the process list and

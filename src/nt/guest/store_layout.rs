@@ -539,6 +539,49 @@ fn pages_tree(code: &KernelCode<'_>) -> Result<u32> {
     }
     most(&votes, "pages tree")
 }
+
+/// An image's executable sections laid out by RVA, and their `(start,
+/// end)` RVAs.
+pub struct MappedCode {
+    pub bytes: Vec<u8>,
+    pub code: Vec<(u32, u32)>,
+}
+
+/// The executable sections of the image at `base` (`size` bytes mapped) as
+/// `memory` maps them, laid out by RVA, with the other bytes and unreadable
+/// pages zero.
+pub fn mapped_code<B: crate::base::memory::MemoryOps<crate::base::types::PhysAddr>>(
+    memory: &crate::base::memory::AddressSpace<'_, B>,
+    base: u64,
+    size: usize,
+) -> Result<MappedCode> {
+    use crate::base::memory::MemoryOps;
+    use crate::base::types::VirtAddr;
+    use pelite::pe64::{Pe, PeView};
+    const PAGE: usize = 0x1000;
+    let headers = crate::nt::pe::read_pe_header_page(VirtAddr(base), memory)?;
+    let view = PeView::from_bytes(&headers).map_err(|_| layout_error("no kernel headers"))?;
+    let mut bytes = vec![0u8; size];
+    let mut code = Vec::new();
+    for section in view.section_headers() {
+        if section.Characteristics & 0x2000_0000 == 0 {
+            continue;
+        }
+        let start = section.VirtualAddress as usize;
+        let end = (start + section.VirtualSize.max(section.SizeOfRawData) as usize).min(size);
+        for page in (start..end).step_by(PAGE) {
+            let chunk = &mut bytes[page..(page + PAGE).min(end)];
+            if memory
+                .read_bytes(VirtAddr(base + page as u64), chunk)
+                .is_err()
+            {
+                chunk.fill(0);
+            }
+        }
+        code.push((start as u32, end as u32));
+    }
+    Ok(MappedCode { bytes, code })
+}
 #[cfg(test)]
 mod tests {
     use super::*;

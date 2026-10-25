@@ -1,11 +1,11 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::backend::host::VmHandle;
 use crate::backend::kd::KdMemory;
 use crate::base::error::{Error, Result};
-use crate::base::memory::{MemoryOps, SectionViews, TranslationCache};
+use crate::base::memory::{CompressedPages, MemoryOps, SectionViews, TranslationCache};
 use crate::base::types::{Dtb, PhysAddr, VirtAddr};
 use crate::nt::dmp::{DmpInfo, DmpMem};
 use crate::nt::guest::ept::EptMemory;
@@ -29,6 +29,64 @@ pub struct PhysMem {
     /// The guest kernel's mapped-view lookup, set when a kernel is found (see
     /// [`Self::set_section_views`]).
     section_views: Mutex<Option<Arc<SectionViews>>>,
+    /// The guest's memory-compression store, resolved on first use (see
+    /// [`Self::set_compressed_pages`]).
+    compressed_pages: StoreSlot,
+}
+
+/// How a resolver finds the guest's memory-compression store.
+pub type StoreResolver = Box<dyn FnOnce() -> Option<CompressedPages> + Send>;
+
+/// Where the guest's memory-compression store stands.
+enum StoreState {
+    /// No kernel found yet.
+    Unknown,
+    /// A kernel found; its store is resolved when first needed.
+    Pending(StoreResolver),
+    /// Being resolved; reads made meanwhile do not use the store.
+    Resolving,
+    Resolved(Option<Arc<CompressedPages>>),
+}
+
+/// The guest's memory-compression store, resolved once on first use.
+pub struct StoreSlot(Mutex<StoreState>);
+
+impl StoreSlot {
+    fn new() -> Self {
+        Self(Mutex::new(StoreState::Unknown))
+    }
+
+    fn lock(&self) -> MutexGuard<'_, StoreState> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Resolve the store with `resolve` when it is first asked for.
+    pub fn set(&self, resolve: StoreResolver) {
+        *self.lock() = StoreState::Pending(resolve);
+    }
+
+    /// The store, resolving it on the first call. The resolver reads guest
+    /// memory, which asks for the store again: it runs unlocked, and those
+    /// nested calls get `None`.
+    pub fn get(&self) -> Option<Arc<CompressedPages>> {
+        let mut state = self.lock();
+        match std::mem::replace(&mut *state, StoreState::Resolving) {
+            StoreState::Pending(resolve) => {
+                drop(state);
+                let pages = resolve().map(Arc::new);
+                *self.lock() = StoreState::Resolved(pages.clone());
+                pages
+            }
+            StoreState::Resolved(pages) => {
+                *state = StoreState::Resolved(pages.clone());
+                pages
+            }
+            other => {
+                *state = other;
+                None
+            }
+        }
+    }
 }
 
 /// Where [`PhysMem`] reads from. `Dmp` is boxed because it is much larger than
@@ -122,6 +180,7 @@ impl PhysMem {
             invalid_pte_mask: AtomicU64::new(0),
             pte_self_map: AtomicU64::new(0),
             section_views: Mutex::new(None),
+            compressed_pages: StoreSlot::new(),
         }
     }
 
@@ -262,6 +321,13 @@ impl PhysMem {
             .section_views
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = views.map(Arc::new);
+    }
+
+    /// Record how to find the guest's memory-compression store for this boot:
+    /// `resolve` runs once, the first time a page may be in the store, since
+    /// it reads the kernel's code; see [`MemoryOps::compressed_pages`].
+    pub fn set_compressed_pages(&self, resolve: StoreResolver) {
+        self.compressed_pages.set(resolve);
     }
 
     pub fn dmp_info(&self) -> Option<&DmpInfo> {
@@ -455,11 +521,64 @@ impl MemoryOps<PhysAddr> for PhysMem {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+
+    fn compressed_pages(&self) -> Option<Arc<CompressedPages>> {
+        self.compressed_pages.get()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::HaltClock;
+
+    /// A store with a placeholder layout.
+    fn some_store() -> super::CompressedPages {
+        use crate::base::memory::{Compression, StoreLayout};
+        super::CompressedPages {
+            layout: StoreLayout {
+                owner_process: 0,
+                region_array: 0,
+                virtual_flag: (0, 0),
+                back_pointer: 0,
+                region_shift: 0,
+                region_offset_mask: 0,
+                chunk_array: 0,
+                chunk_fields: [0; 4],
+                key_tree: 0,
+                pages_tree: 0,
+                compression: Compression::FormatField(0),
+            },
+            manager: 1,
+            owner: 2,
+            owner_root: 3,
+            page_file: 2,
+        }
+    }
+
+    /// The resolver runs once, on first use; a read it makes asks for the
+    /// store again and gets none instead of deadlocking.
+    #[test]
+    fn the_store_resolves_once_and_not_from_inside_its_resolver() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        let slot = Arc::new(super::StoreSlot::new());
+        assert!(slot.get().is_none(), "no kernel yet");
+        let runs = Arc::new(AtomicUsize::new(0));
+        let nested = Arc::new(Mutex::new(None));
+        let resolver = {
+            let (slot, runs, nested) = (Arc::clone(&slot), Arc::clone(&runs), Arc::clone(&nested));
+            Box::new(move || {
+                runs.fetch_add(1, Ordering::SeqCst);
+                *nested.lock().unwrap() = Some(slot.get().is_some());
+                Some(some_store())
+            })
+        };
+        slot.set(resolver);
+        assert_eq!(slot.get().map(|store| store.manager), Some(1));
+        assert_eq!(*nested.lock().unwrap(), Some(false));
+        assert_eq!(slot.get().map(|store| store.owner), Some(2));
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
 
     /// Guest lists are memoized under an epoch; one served after the guest
     /// ran would be stale.

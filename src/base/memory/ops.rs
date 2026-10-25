@@ -3,7 +3,7 @@ use std::sync::Arc;
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
 
 use crate::base::error::Result;
-use crate::base::memory::{SectionViews, TranslationCache};
+use crate::base::memory::{CompressedPages, SectionViews, TranslationCache};
 use crate::base::types::{Dtb, VirtAddr};
 
 /// Reads and writes of guest memory at addresses of type `A`: physical
@@ -67,6 +67,13 @@ pub trait MemoryOps<A> {
         None
     }
 
+    /// The guest's memory-compression store, for pages whose PTE is in the
+    /// store's page file (see [`CompressedPages`]); `None` when the guest has
+    /// none or its layout is not known.
+    fn compressed_pages(&self) -> Option<Arc<CompressedPages>> {
+        None
+    }
+
     fn read<T: Copy + FromZeros + FromBytes + IntoBytes>(&self, addr: A) -> Result<T> {
         let mut obj = T::new_zeroed();
 
@@ -120,5 +127,9 @@ impl<A, B: MemoryOps<A>> MemoryOps<A> for Arc<B> {
 
     fn section_views(&self) -> Option<Arc<SectionViews>> {
         (**self).section_views()
+    }
+
+    fn compressed_pages(&self) -> Option<Arc<CompressedPages>> {
+        (**self).compressed_pages()
     }
 }

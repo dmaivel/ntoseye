@@ -13,7 +13,7 @@ mod store_tree;
 
 pub use ops::MemoryOps;
 pub use sections::{SectionLayout, SectionViews};
-pub use store::{Compression, StoreLayout};
+pub use store::{CompressedPages, Compression, StoreLayout};
 
 pub const PAGE_SIZE: usize = 0x1000; // 4KiB
 
@@ -626,6 +626,36 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
     }
 }
 
+thread_local! {
+    /// Set while a page is read from the compression store, whose own reads
+    /// must not go back to the store.
+    static IN_STORE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
+    /// The page at `va` from the guest's memory-compression store, when the
+    /// page tables leave it unmapped with a PTE in the store's page file.
+    fn compressed_page(&self, va: VirtAddr) -> Option<Result<Box<[u8; PAGE_SIZE]>>> {
+        if IN_STORE.get() {
+            return None;
+        }
+        let Ok(Walked::Unmapped(Some(pte))) = self.walk_tables(va, |_| {}) else {
+            return None;
+        };
+        // Only a page-file PTE (software, with a page-file offset) can be a
+        // store page; anything else does not need the store resolved.
+        if pte.is_present() || pte.is_prototype() || pte.is_transition() || pte.0 >> 32 == 0 {
+            return None;
+        }
+        let store = self.backend.compressed_pages()?;
+        let mut page = Box::new([0u8; PAGE_SIZE]);
+        IN_STORE.set(true);
+        let result = store.read(self, pte, &mut page);
+        IN_STORE.set(false);
+        Some(result?.map(|()| page))
+    }
+}
+
 /// Where a table walk ended.
 enum Walked {
     Mapped(Translation),
@@ -648,6 +678,14 @@ impl<'a, B: MemoryOps<PhysAddr>> MemoryOps<VirtAddr> for AddressSpace<'a, B> {
 
             let translation = match self.virt_to_phys(curr_vaddr)? {
                 Some(translation) => translation,
+                None if let Some(Ok(page)) = self.compressed_page(curr_vaddr) => {
+                    let start = curr_vaddr.page_offset() as usize;
+                    let chunk_size = (buf.len() - offset).min(PAGE_SIZE - start);
+                    buf[offset..offset + chunk_size]
+                        .copy_from_slice(&page[start..start + chunk_size]);
+                    offset += chunk_size;
+                    continue;
+                }
                 None if offset > 0 => return Err(Error::PartialRead(offset)),
                 None => return Err(Error::BadVirtualAddress(curr_vaddr)),
             };

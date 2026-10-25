@@ -307,6 +307,70 @@ pub enum Compression {
     Lz4UnlessCount(u32),
 }
 
+/// What reading a page from the memory-compression store needs besides its
+/// PTE: the store layout, the store manager, the process that owns the
+/// stores' regions, and the page-file number of the store's virtual page
+/// file.
+#[derive(Debug, Clone)]
+pub struct CompressedPages {
+    pub layout: StoreLayout,
+    /// The `SMKM_STORE_MGR`.
+    pub manager: u64,
+    /// The owning process's `EPROCESS`, which each store names.
+    pub owner: u64,
+    /// The root of the owning process's address space.
+    pub owner_root: crate::base::types::Dtb,
+    /// The page-file number that PTEs of store pages carry.
+    pub page_file: u8,
+}
+
+impl CompressedPages {
+    /// The page whose non-present PTE in `space` is `pte`, when that PTE
+    /// is in the store's page file; `None` for any other PTE.
+    pub fn read<B: super::MemoryOps<crate::base::types::PhysAddr>>(
+        &self,
+        space: &super::AddressSpace<'_, B>,
+        pte: crate::base::types::PageTableEntry,
+        page: &mut [u8; 4096],
+    ) -> Option<crate::base::error::Result<()>> {
+        use super::MemoryOps;
+        use crate::base::types::VirtAddr;
+        if pte.is_present() || pte.is_prototype() || pte.is_transition() {
+            return None;
+        }
+        let pte = pte.unswizzled(space.backend.invalid_pte_mask());
+        if ((pte.0 >> 12) & 0xf) as u8 != self.page_file || pte.0 >> 32 == 0 {
+            return None;
+        }
+        let mut kernel = |address: u64, buf: &mut [u8]| space.read_bytes(VirtAddr(address), buf);
+        let owner = super::AddressSpace::for_arch(
+            space.backend,
+            self.owner_root,
+            space.kernel_dtb,
+            space.arch,
+        );
+        let mut regions = |address: u64, buf: &mut [u8]| owner.read_bytes(VirtAddr(address), buf);
+        // The key carries the page-file number in its top four bits before
+        // 24H2 and not from it; a kernel's tree holds one form only.
+        let offset = (pte.0 >> 32) as u32;
+        let with_file = u32::from(self.page_file) << 28 | offset;
+        let key = match store_for_key(&mut kernel, self.manager, self.layout.key_tree, with_file) {
+            Ok(Some(_)) => with_file,
+            Ok(None) => offset,
+            Err(error) => return Some(Err(error)),
+        };
+        Some(read_page(
+            &mut kernel,
+            &mut regions,
+            &self.layout,
+            self.manager,
+            self.owner,
+            key,
+            page,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
