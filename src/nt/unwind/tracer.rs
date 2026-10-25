@@ -20,7 +20,7 @@ use crate::{
     },
     nt::{
         guest::{Image, ModuleInfo},
-        pe::{CodeLayout, PeImage, pe_headers_end},
+        pe::{CodeLayout, PeImage, headers_match_relocated, pe_headers_end},
         symbols::ImageFetch,
         target::Target,
     },
@@ -390,30 +390,6 @@ fn executable_ranges(image: &PeImage) -> Vec<(u32, u32)> {
             ))
         })
         .collect()
-}
-
-/// Whether `disk` is the file `mapped` was loaded from: the headers agree
-/// except in `OptionalHeader.ImageBase`, which the loader rewrites to the
-/// address it relocated the image to.
-fn headers_match_relocated(disk: &[u8], mapped: &[u8]) -> bool {
-    if disk.len() != mapped.len() || disk.len() < 0x40 {
-        return false;
-    }
-    let e_lfanew = u32::from_le_bytes(disk[0x3c..0x40].try_into().unwrap()) as usize;
-    let optional = e_lfanew + 24;
-    let Some(magic) = disk.get(optional..optional + 2) else {
-        return false;
-    };
-    let image_base = match u16::from_le_bytes([magic[0], magic[1]]) {
-        0x20b => optional + 24..optional + 32,
-        0x10b => optional + 28..optional + 32,
-        _ => return false,
-    };
-    if image_base.end > disk.len() {
-        return false;
-    }
-    disk[..image_base.start] == mapped[..image_base.start]
-        && disk[image_base.end..] == mapped[image_base.end..]
 }
 
 impl FrameMemory for StackTracer<'_> {

@@ -557,20 +557,15 @@ pub fn mapped_code<B: crate::base::memory::MemoryOps<crate::base::types::PhysAdd
 ) -> Result<MappedCode> {
     use crate::base::memory::MemoryOps;
     use crate::base::types::VirtAddr;
-    use pelite::pe64::{Pe, PeView};
+    use pelite::pe64::PeView;
     const PAGE: usize = 0x1000;
     let headers = crate::nt::pe::read_pe_header_page(VirtAddr(base), memory)?;
     let view = PeView::from_bytes(&headers).map_err(|_| layout_error("no kernel headers"))?;
     let mut bytes = vec![0u8; size];
-    let mut code = Vec::new();
-    for section in view.section_headers() {
-        if section.Characteristics & 0x2000_0000 == 0 {
-            continue;
-        }
-        let start = section.VirtualAddress as usize;
-        let end = (start + section.VirtualSize.max(section.SizeOfRawData) as usize).min(size);
-        for page in (start..end).step_by(PAGE) {
-            let chunk = &mut bytes[page..(page + PAGE).min(end)];
+    let code = code_ranges(&view, size);
+    for &(start, end) in &code {
+        for page in (start as usize..end as usize).step_by(PAGE) {
+            let chunk = &mut bytes[page..(page + PAGE).min(end as usize)];
             if memory
                 .read_bytes(VirtAddr(base + page as u64), chunk)
                 .is_err()
@@ -578,9 +573,22 @@ pub fn mapped_code<B: crate::base::memory::MemoryOps<crate::base::types::PhysAdd
                 chunk.fill(0);
             }
         }
-        code.push((start as u32, end as u32));
     }
     Ok(MappedCode { bytes, code })
+}
+
+/// The `(start, end)` RVAs of the executable sections `view`'s headers
+/// list, clipped to an image of `size` bytes.
+pub fn code_ranges<'a>(view: &impl pelite::pe64::Pe<'a>, size: usize) -> Vec<(u32, u32)> {
+    view.section_headers()
+        .iter()
+        .filter(|section| section.Characteristics & 0x2000_0000 != 0)
+        .map(|section| {
+            let start = section.VirtualAddress as usize;
+            let end = (start + section.VirtualSize.max(section.SizeOfRawData) as usize).min(size);
+            (start.min(end) as u32, end as u32)
+        })
+        .collect()
 }
 #[cfg(test)]
 mod tests {

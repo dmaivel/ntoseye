@@ -9,11 +9,16 @@ use crate::{
         types::*,
     },
     nt::{
-        dmp::DmpInfo, layout::ParsedType, pe::headers::CodeView, symbols::SymbolStore,
-        target::ListTermination, target::object::DriverObjectInfo,
+        dmp::DmpInfo,
+        layout::ParsedType,
+        pe::{PeImage, headers::CodeView, headers_match_relocated, pe_headers_end},
+        symbols::{ImageFetch, SymbolStore},
+        target::ListTermination,
+        target::object::DriverObjectInfo,
     },
 };
 use ntoseye_macros::record;
+use pelite::pe64::{Pe, PeView};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, atomic::AtomicBool};
@@ -758,7 +763,8 @@ fn invalid_pte_mask(kernel: &Image) -> Option<u64> {
     kernel.memory().read::<u64>(state + hardware + mask).ok()
 }
 
-/// The kernel functions the store layout is read from, by name.
+/// The RVAs of the kernel functions the store layout is read from, by
+/// name.
 fn store_functions(kernel: &Image) -> Option<HashMap<String, u64>> {
     let guid = kernel.guid?;
     let symbols = kernel.symbols();
@@ -785,29 +791,75 @@ fn store_functions(kernel: &Image) -> Option<HashMap<String, u64>> {
             .into_iter()
             .filter_map(|name| {
                 let rva = symbols.symbol_rva(guid, &name).ok()??;
-                Some((name, kernel.address_of(rva).0))
+                Some((name, u64::from(rva)))
             })
             .collect(),
     )
 }
 
+/// The file names the symbol servers keep x64 kernels under: the usual
+/// one, and the kernel for 5-level paging.
+const KERNEL_FILE_NAMES: [&str; 2] = ["ntoskrnl.exe", "ntkrla57.exe"];
+
+/// The kernel's file from the image cache, matched by the mapped headers
+/// `mapped`; from the symbol servers too when reads go through the target,
+/// where reading the kernel's 12 MiB of code takes over half a minute.
+fn kernel_file(kernel: &Image, mapped: &[u8]) -> Option<Arc<PeImage>> {
+    let view = PeView::from_bytes(mapped).ok()?;
+    let (stamp, size) = (
+        view.file_header().TimeDateStamp,
+        view.optional_header().SizeOfImage,
+    );
+    let end = pe_headers_end(mapped)?;
+    let fetches: &[ImageFetch] = if kernel.phys.reads_through_target() {
+        &[ImageFetch::CacheOnly, ImageFetch::Download]
+    } else {
+        &[ImageFetch::CacheOnly]
+    };
+    fetches
+        .iter()
+        .flat_map(|&fetch| KERNEL_FILE_NAMES.map(|name| (name, fetch)))
+        .find_map(|(name, fetch)| {
+            let file = kernel
+                .symbols()
+                .module_image_on_disk(name, stamp, size, fetch)
+                .ok()?;
+            headers_match_relocated(file.headers().get(..end)?, mapped.get(..end)?).then_some(file)
+        })
+}
+
 /// The layout of the kernel's memory-compression store, from its code
-/// (AMD64, 1703 and later).
+/// (AMD64, 1703 and later): the kernel file's when [`kernel_file`] finds
+/// it, at the file's own base as the corpus test reads it, else the mapped
+/// image's.
 fn store_layout_of(kernel: &mut Image) -> Option<StoreLayout> {
-    kernel.view()?;
+    let mapped = kernel.view()?.image().to_vec();
     let functions = store_functions(kernel)?;
+    let derive = |base: u64, bytes: &[u8], code: Vec<(u32, u32)>| {
+        let functions = functions
+            .iter()
+            .map(|(name, rva)| (name.clone(), base + rva))
+            .collect();
+        store_layout::derive(&store_layout::KernelCode {
+            image: hv_layout::ImageView {
+                base,
+                bytes,
+                code,
+                data: Vec::new(),
+            },
+            functions: &functions,
+        })
+        .ok()
+    };
+    if let Some(file) = kernel_file(kernel, &mapped) {
+        let bytes = file.headers();
+        let view = PeView::from_bytes(bytes).ok()?;
+        let code = store_layout::code_ranges(&view, bytes.len());
+        return derive(view.optional_header().ImageBase, bytes, code);
+    }
     let base = kernel.base_address.0;
-    let mapped = store_layout::mapped_code(&kernel.memory(), base, kernel.binary_size()).ok()?;
-    store_layout::derive(&store_layout::KernelCode {
-        image: hv_layout::ImageView {
-            base,
-            bytes: &mapped.bytes,
-            code: mapped.code,
-            data: Vec::new(),
-        },
-        functions: &functions,
-    })
-    .ok()
+    let code = store_layout::mapped_code(&kernel.memory(), base, kernel.binary_size()).ok()?;
+    derive(base, &code.bytes, code.code)
 }
 
 /// The guest's memory-compression store, when its PDB types the
