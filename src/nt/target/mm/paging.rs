@@ -36,6 +36,45 @@ impl PteSelfMap {
 }
 
 impl Target {
+    /// The kernel's `_MI_VISIBLE_STATE`, `MiState.Vs`: where
+    /// `nt!MiVisibleState`, the kernel's own pointer to it, points, else the
+    /// PDB's offset in `MiState`. They differ on 19045, whose `MiState` has
+    /// 0x40 bytes the PDB does not, between `Hardware` and `Partitions`.
+    pub fn visible_state(&self) -> Result<VirtAddr> {
+        let ntos = &self.guest()?.ntoskrnl;
+        if let Some(pointer) = ntos
+            .symbol("MiVisibleState")
+            .ok()
+            .and_then(|symbol| symbol.read_pointer().ok())
+            .filter(|pointer| !pointer.is_zero())
+        {
+            return Ok(pointer);
+        }
+        self.pdb_visible_state()
+    }
+
+    /// `MiState.Vs` where the PDB places it.
+    fn pdb_visible_state(&self) -> Result<VirtAddr> {
+        let ntos = &self.guest()?.ntoskrnl;
+        Ok(ntos.symbol("MiState")?.address()
+            + ntos
+                .types()
+                .layout("_MI_SYSTEM_INFORMATION")?
+                .field_offset("Vs")?)
+    }
+
+    /// How far past the PDB's offsets the kernel keeps `MiState`'s later
+    /// members (0x40 on 19045, 0 where the two agree), as `MiVisibleState`
+    /// shows it.
+    pub fn mi_state_displacement(&self) -> u64 {
+        match (self.visible_state(), self.pdb_visible_state()) {
+            (Ok(kernel), Ok(pdb)) if kernel.0 > pdb.0 && kernel.0 - pdb.0 < 0x1000 => {
+                kernel.0 - pdb.0
+            }
+            _ => 0,
+        }
+    }
+
     /// Read guest-physical memory directly through the target's physical-memory
     /// backend without translating the supplied address.
     pub fn read_physical(&self, address: u64, buf: &mut [u8]) -> Result<()> {

@@ -1226,9 +1226,6 @@ fn assigned_system_va_region(debugger: &Target, region: &str) -> Result<(VirtAdd
         .and_then(|values| values.into_iter().find(|(name, _)| name == region))
         .map(|(_, value)| value as u64)
         .ok_or_else(|| missing("no _MI_ASSIGNED_REGION_TYPES value".into()))?;
-    let info = types
-        .layout("_MI_SYSTEM_INFORMATION")
-        .map_err(|error| missing(error.to_string()))?;
     let visible = types
         .layout("_MI_VISIBLE_STATE")
         .map_err(|error| missing(error.to_string()))?;
@@ -1243,10 +1240,7 @@ fn assigned_system_va_region(debugger: &Target, region: &str) -> Result<(VirtAdd
         return Err(missing(format!("index {index} past {count} regions")));
     }
     let entry_size = regions.size / count;
-    let entry = ntos.symbol("MiState")?.address()
-        + info.field_offset("Vs")?
-        + regions.offset as u64
-        + index * entry_size;
+    let entry = debugger.visible_state()? + regions.offset as u64 + index * entry_size;
     let assignment = types.struct_at("_MI_SYSTEM_VA_ASSIGNMENT", entry)?;
     let base = assignment.read_pointer("BaseAddress")?;
     let size = assignment.read_uint("NumberOfBytes")?;

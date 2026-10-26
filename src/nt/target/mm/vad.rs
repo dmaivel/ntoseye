@@ -134,7 +134,7 @@ impl Target {
             return None;
         }
 
-        let vs = ntos.symbol("MiVisibleState").ok()?.read_pointer().ok()?;
+        let vs = self.visible_state().ok()?;
         let type_off = ntos
             .types()
             .layout("_MI_VISIBLE_STATE")

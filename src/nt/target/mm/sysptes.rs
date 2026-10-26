@@ -133,6 +133,9 @@ impl Target {
             .layout("_MI_SYSTEM_INFORMATION")
             .map_err(|error| unsupported(error.to_string()))?;
         let mi_state = ntos.symbol("MiState")?.address();
+        let displacement = self.mi_state_displacement();
+        let va_type_offset = pte_layout.field_offset("VaType").ok();
+        let memory = ntos.memory();
         let pte_base = ntos.pte_base().ok();
         let va_types = self
             .symbols
@@ -150,11 +153,32 @@ impl Target {
                 continue;
             };
             let layout = types.layout(container_type)?;
-            let base = mi_state + field.offset as u64;
+            let base = match container {
+                "Vs" => self.visible_state()?,
+                _ => mi_state + field.offset as u64,
+            };
+            // Outside `Vs`, an allocator at its PDB offset that says it
+            // allocates nothing is looked for where the kernel's later
+            // `MiState` members are (`mi_state_displacement`).
+            let placed = |at: VirtAddr| -> VirtAddr {
+                if container == "Vs" || displacement == 0 {
+                    return at;
+                }
+                let in_use = |at: VirtAddr| {
+                    va_type_offset
+                        .and_then(|offset| memory.read::<u32>(at + offset).ok())
+                        .is_some_and(|va_type| va_type != 0)
+                };
+                if !in_use(at) && in_use(at + displacement) {
+                    at + displacement
+                } else {
+                    at
+                }
+            };
             let mut members: Vec<_> = layout.fields.iter().collect();
             members.sort_by_key(|(_, member)| member.offset);
             for (name, member) in members {
-                let at = base + member.offset as u64;
+                let at = placed(base + member.offset as u64);
                 match &member.type_data {
                     ty if is_pte_type(ty) => allocators.push((format!("{container}.{name}"), at)),
                     ParsedType::Array(inner, count) if is_pte_type(inner) => {
@@ -175,7 +199,6 @@ impl Target {
             ));
         }
 
-        let memory = ntos.memory();
         let mut detail = SystemPtesDetail {
             types: Vec::with_capacity(allocators.len()),
             total: 0,

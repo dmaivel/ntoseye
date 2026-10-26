@@ -458,11 +458,21 @@ impl Target {
             let (leaf, parents) = path
                 .split_last()
                 .ok_or_else(|| Error::DebugInfo("empty MiState field path".into()))?;
-            let base = guest.ntoskrnl.symbol("MiState")?.address();
-            let mut cursor = guest
-                .ntoskrnl
-                .types()
-                .struct_at("_MI_SYSTEM_INFORMATION", base)?;
+            let types = guest.ntoskrnl.types();
+            // `Vs` where the kernel keeps it (see `visible_state`).
+            let (mut cursor, parents) = match parents.split_first() {
+                Some((&"Vs", rest)) => (
+                    types.struct_at("_MI_VISIBLE_STATE", self.visible_state()?)?,
+                    rest,
+                ),
+                _ => (
+                    types.struct_at(
+                        "_MI_SYSTEM_INFORMATION",
+                        guest.ntoskrnl.symbol("MiState")?.address(),
+                    )?,
+                    parents,
+                ),
+            };
             for parent in parents {
                 cursor = cursor.embedded(parent)?;
             }
