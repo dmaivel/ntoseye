@@ -11,20 +11,21 @@ use pdb2::{FallibleIterator, TypeFinder, TypeIndex};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-#[cfg(test)]
-pub(super) fn live_range_contains(
+/// Whether `target_rva` is live in the definition range of `length` bytes
+/// at `start_rva`: inside it and in none of its `gaps`, each
+/// `(start, length)` from the range's start.
+pub fn live_range_contains(
     start_rva: u32,
     length: u16,
-    gaps: &[(u16, u16)],
+    gaps: impl IntoIterator<Item = (u16, u16)>,
     target_rva: u32,
 ) -> bool {
     let Some(relative) = target_rva.checked_sub(start_rva) else {
         return false;
     };
     relative < u32::from(length)
-        && !gaps.iter().any(|(start, length)| {
-            relative >= u32::from(*start)
-                && relative < u32::from(*start).saturating_add(u32::from(*length))
+        && !gaps.into_iter().any(|(start, length)| {
+            relative >= u32::from(start) && relative < u32::from(start) + u32::from(length)
         })
 }
 
@@ -52,15 +53,12 @@ fn pdb_live_range_contains(
     let Some(start) = range.offset.to_rva(address_map) else {
         return false;
     };
-    let Some(relative) = target_rva.checked_sub(start.0) else {
-        return false;
-    };
-    relative < u32::from(range.cb_range)
-        && !gaps.iter().any(|gap| {
-            relative >= u32::from(gap.gap_start_offset)
-                && relative
-                    < u32::from(gap.gap_start_offset).saturating_add(u32::from(gap.cb_range))
-        })
+    live_range_contains(
+        start.0,
+        range.cb_range,
+        gaps.iter().map(|gap| (gap.gap_start_offset, gap.cb_range)),
+        target_rva,
+    )
 }
 
 // pdb2 0.10.1 debug-asserts on valid Windows S_CALLEES/S_CALLERS records whose

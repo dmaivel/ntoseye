@@ -572,11 +572,12 @@ fn source_line_extent_reports_explicit_next_and_missing_ends() {
 #[test]
 fn definition_range_excludes_gaps() {
     let gaps = [(4, 2)];
-    assert!(live_range_contains(0x100, 10, &gaps, 0x103));
-    assert!(!live_range_contains(0x100, 10, &gaps, 0x104));
-    assert!(!live_range_contains(0x100, 10, &gaps, 0x105));
-    assert!(live_range_contains(0x100, 10, &gaps, 0x106));
-    assert!(!live_range_contains(0x100, 10, &gaps, 0x10a));
+    assert!(!live_range_contains(0x100, 10, gaps, 0xff));
+    assert!(live_range_contains(0x100, 10, gaps, 0x103));
+    assert!(!live_range_contains(0x100, 10, gaps, 0x104));
+    assert!(!live_range_contains(0x100, 10, gaps, 0x105));
+    assert!(live_range_contains(0x100, 10, gaps, 0x106));
+    assert!(!live_range_contains(0x100, 10, gaps, 0x10a));
 }
 
 #[test]
