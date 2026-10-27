@@ -532,13 +532,19 @@ pub const STEP_UNDER_WINDOWS_HYPERVISOR: &str = "single-stepping is unsafe over 
      Windows runs its own hypervisor (VBS, Hyper-V): a step can complete inside the hypervisor and \
      leave its trap to Windows. Use the kd or kdnet backend to step";
 
-/// Where the current thread's TEB is: the pointer to the current thread at
-/// `kpcr + current_thread` (`_KPCR.Prcb.CurrentThread`), and the TEB pointer
-/// at `thread + teb` (`_KTHREAD.Teb`).
+/// Where a processor's current thread keeps its TEB and address space: the
+/// pointer to the thread at `kpcr + current_thread`
+/// (`_KPCR.Prcb.CurrentThread`), its TEB pointer at `thread + teb`
+/// (`_KTHREAD.Teb`), the process whose address space it runs in at
+/// `thread + process` (`_KTHREAD.ApcState.Process`), and that process's
+/// page-table root at `process + directory_table_base`
+/// (`_KPROCESS.DirectoryTableBase`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TebPath {
+pub struct ThreadLayout {
     pub current_thread: u64,
     pub teb: u64,
+    pub process: u64,
+    pub directory_table_base: u64,
 }
 
 /// Debug transport abstraction; guest memory access is provided separately by
@@ -556,10 +562,12 @@ pub trait DebugBackend {
     /// DTB. No-op on backends whose register file carries the DTB natively.
     fn set_kernel_dtb(&mut self, _dtb: u64) {}
 
-    /// Provide where the current thread's TEB is, from the kernel's PDB, so
-    /// a register snapshot whose transport drops the TEB (KD on ARM64 in
-    /// user mode, where `x18` holds it) can fill it. No-op elsewhere.
-    fn set_teb_path(&mut self, _path: Option<TebPath>) {}
+    /// Provide where a processor's current thread keeps its TEB and address
+    /// space, from the kernel's PDB, so a register snapshot whose transport
+    /// drops them (KD on ARM64: `x18` in user mode, and every processor's
+    /// but the stopping one's system registers) can fill them. No-op
+    /// elsewhere.
+    fn set_thread_layout(&mut self, _path: Option<ThreadLayout>) {}
 
     fn read_registers(&mut self) -> Result<Vec<u8>>;
     fn write_registers(&mut self, data: &[u8]) -> Result<()>;

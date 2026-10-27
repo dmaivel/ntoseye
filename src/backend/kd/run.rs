@@ -350,9 +350,8 @@ impl KdBackend {
         // flag is set in a state where no step can occur.
         if processor != owner && self.arch.family() == Family::Arm {
             return Err(Error::Kd(format!(
-                "{} stopped the target, and on ARM64 only that processor can step; select it \
-                 with ~{owner}s, or resume with g",
-                thread_id_for(owner)
+                "processor {owner} stopped the target, and on ARM64 only that processor can \
+                 step; select it with ~{owner}s, or resume with g"
             )));
         }
         self.switch_report_pcs.clear();
@@ -414,9 +413,8 @@ impl KdBackend {
             Family::X86 => {}
             Family::Arm => {
                 return Err(Error::Kd(format!(
-                    "{} stopped the target, and on ARM64 the target reads registers only on that \
-                     processor",
-                    thread_id_for(owner)
+                    "processor {owner} stopped the target, and on ARM64 the target reads \
+                     registers only on that processor"
                 )));
             }
         }
@@ -461,9 +459,9 @@ impl KdBackend {
         if stop.processor != processor {
             self.record_stop(&stop);
             return Err(Error::Kd(format!(
-                "expected {} to report during the processor switch, but {} reported",
-                thread_id_for(processor),
-                thread_id_for(stop.processor)
+                "expected processor {processor} to report during the processor switch, but \
+                 processor {} reported",
+                stop.processor
             )));
         }
         self.switch_report_pcs.push(stop.program_counter);

@@ -8,7 +8,7 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::thread::{JoinHandle, spawn};
 
-use crate::backend::dbg_backend::TebPath;
+use crate::backend::dbg_backend::ThreadLayout;
 use crate::backend::kd::framing::{
     INITIAL_PACKET_ID, PACKET_TYPE_KD_STATE_MANIPULATE, data_packet,
 };
@@ -249,6 +249,17 @@ fn arm64_registers_survive_refused_control_space() {
         kernel,
         vec![
             (api::DBGKD_GET_CONTEXT, api::STATUS_SUCCESS, ctx),
+            // TTBR0, ESR and FAR of the processor that stopped the target.
+            (
+                api::DBGKD_READ_MACHINE_SPECIFIC_REGISTER,
+                0xc000_0001,
+                Vec::new(),
+            ),
+            (
+                api::DBGKD_READ_MACHINE_SPECIFIC_REGISTER,
+                0xc000_0001,
+                Vec::new(),
+            ),
             (
                 api::DBGKD_READ_MACHINE_SPECIFIC_REGISTER,
                 0xc000_0001,
@@ -388,9 +399,11 @@ fn an_arm64_context_gets_its_real_x18() {
     const KPCR: u64 = 0xffff_f800_a1b7_0000;
     const THREAD: u64 = 0xffff_ba87_e0ab_3080;
     const TEB: u64 = 0x0000_00c8_4ac8_e000;
-    const PATH: TebPath = TebPath {
+    const PATH: ThreadLayout = ThreadLayout {
         current_thread: 0x988,
         teb: 0xf0,
+        process: 0xb8,
+        directory_table_base: 0x28,
     };
     struct Guest(Option<u64>);
     impl Arm64X18Source for Guest {

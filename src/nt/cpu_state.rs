@@ -5,7 +5,7 @@
 use std::mem::offset_of;
 
 use crate::arch::{Arch, amd64, arm64};
-use crate::backend::dbg_backend::TebPath;
+use crate::backend::dbg_backend::ThreadLayout;
 use crate::backend::debugger_data::KdDebuggerData64;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
@@ -37,9 +37,9 @@ fn prcb_offset(target: &Target) -> Result<u64> {
         .field_offset("Prcb")
 }
 
-/// Where the current thread's TEB is, from the kernel's PDB; `None` when a
-/// layout lacks one of the fields.
-pub fn teb_path(target: &Target) -> Option<TebPath> {
+/// Where a processor's current thread keeps its TEB and address space, from
+/// the kernel's PDB; `None` when a layout lacks one of the fields.
+pub fn thread_layout(target: &Target) -> Option<ThreadLayout> {
     let types = kernel(target).ok()?.types();
     let current_thread = prcb_offset(target).ok()?
         + types
@@ -47,10 +47,22 @@ pub fn teb_path(target: &Target) -> Option<TebPath> {
             .ok()?
             .field_offset("CurrentThread")
             .ok()?;
-    let teb = types.layout("_KTHREAD").ok()?.field_offset("Teb").ok()?;
-    Some(TebPath {
+    let thread = types.layout("_KTHREAD").ok()?;
+    let process = thread.field_offset("ApcState").ok()?
+        + types
+            .layout("_KAPC_STATE")
+            .ok()?
+            .field_offset("Process")
+            .ok()?;
+    Some(ThreadLayout {
         current_thread,
-        teb,
+        teb: thread.field_offset("Teb").ok()?,
+        process,
+        directory_table_base: types
+            .layout("_KPROCESS")
+            .ok()?
+            .field_offset("DirectoryTableBase")
+            .ok()?,
     })
 }
 

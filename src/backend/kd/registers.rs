@@ -3,7 +3,7 @@
 
 use super::machine::machine;
 use crate::arch::{Arch, arm64};
-use crate::backend::dbg_backend::TebPath;
+use crate::backend::dbg_backend::ThreadLayout;
 use crate::base::bytes;
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
@@ -11,8 +11,11 @@ use crate::base::types::VirtAddr;
 use super::{KD_REQUEST_TIMEOUT, KdBackend, api, trace_enabled, with_framing_read_timeout};
 
 /// The control-space selector for `KSPECIAL_REGISTERS`, on both
-/// architectures (0 returns a KPCR pointer).
+/// architectures.
 pub const CONTROL_SPACE_KSPECIAL: u64 = 2;
+/// The control-space selector for a processor's KPCR pointer, which the
+/// target reads from its processor block for the processor a request names.
+const CONTROL_SPACE_KPCR: u64 = 0;
 pub const MSR_EFER: u32 = 0xC000_0080;
 
 /// Windows KD encoding of `TTBR1_EL1`: op0=3, op1=0, CRn=2, CRm=0, op2=1.
@@ -44,7 +47,7 @@ pub(super) trait Arm64X18Source {
 /// answer.
 pub(super) fn arm64_x18(
     context: &[u8],
-    teb_path: Option<TebPath>,
+    thread_layout: Option<ThreadLayout>,
     source: &mut impl Arm64X18Source,
 ) -> Option<u64> {
     let cpsr = bytes::read_u32(context, arm64::OFFSET_CPSR);
@@ -54,7 +57,7 @@ pub(super) fn arm64_x18(
     match (cpsr >> 2) & 3 {
         1 => source.kpcr().filter(|kpcr| *kpcr != 0),
         0 if x18 == 0 => {
-            let path = teb_path?;
+            let path = thread_layout?;
             let kpcr = source.kpcr().filter(|kpcr| *kpcr != 0)?;
             let thread = source.read_pointer(kpcr.wrapping_add(path.current_thread))?;
             source
@@ -114,10 +117,7 @@ pub fn context_payload(arch: Arch, data: &[u8]) -> Result<&[u8]> {
 
 impl Arm64X18Source for KdBackend {
     fn kpcr(&mut self) -> Option<u64> {
-        self.read_msr_value(self.current_processor, ARM64_WINDBG_TPIDR_EL1)
-            .inspect_err(|error| kd_trace!("kd: ARM64 TPIDR_EL1 read unavailable: {error}"))
-            .ok()
-            .map(|value| value & !0xfff)
+        self.processor_kpcr(self.current_processor)
     }
 
     fn read_pointer(&mut self, address: u64) -> Option<u64> {
@@ -130,6 +130,37 @@ impl Arm64X18Source for KdBackend {
 }
 
 impl KdBackend {
+    /// `processor`'s KPCR. On the processor that stopped the target it is
+    /// `TPIDR_EL1` with its flag bits (the low 12) cleared; the target reads
+    /// system registers only there, so any other processor's comes from
+    /// control space.
+    pub(super) fn processor_kpcr(&mut self, processor: u16) -> Option<u64> {
+        let kpcr = if processor == self.last_stop_processor {
+            self.read_msr_value(processor, ARM64_WINDBG_TPIDR_EL1)
+                .inspect_err(|error| kd_trace!("kd: ARM64 TPIDR_EL1 read unavailable: {error}"))
+                .ok()
+                .map(|value| value & !0xfff)
+        } else {
+            with_framing_read_timeout(self.framing().ok()?, KD_REQUEST_TIMEOUT, |framing| {
+                api::read_control_space(framing, processor, CONTROL_SPACE_KPCR, 8)
+            })
+            .inspect_err(|error| kd_trace!("kd: p{} KPCR read unavailable: {error}", processor + 1))
+            .ok()
+            .and_then(|bytes| Some(u64::from_le_bytes(bytes.get(..8)?.try_into().ok()?)))
+        };
+        kpcr.filter(|kpcr| *kpcr != 0)
+    }
+
+    /// The page-table root of the address space `processor`'s current
+    /// thread runs in, read from its process (see [`ThreadLayout`]).
+    pub(super) fn processor_process_root(&mut self, processor: u16) -> Option<u64> {
+        let layout = self.thread_layout?;
+        let kpcr = self.processor_kpcr(processor)?;
+        let thread = self.read_pointer(kpcr.wrapping_add(layout.current_thread))?;
+        let process = self.read_pointer(thread.wrapping_add(layout.process))?;
+        self.read_pointer(process.wrapping_add(layout.directory_table_base))
+    }
+
     pub(super) fn read_special_registers_uncached(&mut self, processor: u16) -> Result<Vec<u8>> {
         let size = self.arch.special_register_map().extent() as u32;
         with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {

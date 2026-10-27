@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::arch::{HwBreakpointAccess, RegisterMap};
 use crate::backend::dbg_backend::{
     BackendCapability, ContinueDisposition, DebugBackend, DebugOutputPage, ExceptionRecord,
-    PciConfigAddress, ProcessorRead, StopEvent, TebPath, TrapState,
+    PciConfigAddress, ProcessorRead, StopEvent, ThreadLayout, TrapState,
 };
 use crate::backend::debugger_data::DebuggerDataCandidate;
 use crate::backend::phys::PhysMem;
@@ -118,8 +118,8 @@ impl DebugBackend for KdBackendHandle {
         self.lock().set_kernel_dtb(dtb);
     }
 
-    fn set_teb_path(&mut self, path: Option<TebPath>) {
-        self.lock().set_teb_path(path);
+    fn set_thread_layout(&mut self, path: Option<ThreadLayout>) {
+        self.lock().set_thread_layout(path);
     }
 
     fn read_registers(&mut self) -> Result<Vec<u8>> {
