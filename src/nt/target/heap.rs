@@ -570,20 +570,22 @@ impl HeapReader<'_> {
         for record in self.list(address + heap.offset("SegmentList")? as u64, segment_link)? {
             segments.push(self.nt_segment(&segment_layout, record)?);
         }
-        let virtual_layout = self.layout("_HEAP_VIRTUAL_ALLOC_ENTRY")?;
-        let virtual_link = virtual_layout.offset("Entry")? as u64;
+        let virtual_head = address + heap.offset("VirtualAllocdBlocks")? as u64;
         let mut virtual_blocks = Vec::new();
-        for record in self.list(
-            address + heap.offset("VirtualAllocdBlocks")? as u64,
-            virtual_link,
-        )? {
-            let entry = self.read_struct(&virtual_layout, record)?;
-            virtual_blocks.push(NtVirtualBlock {
-                entry: record,
-                commit_size: virtual_layout.read(&entry, 0, "CommitSize")?,
-                reserve_size: virtual_layout.read(&entry, 0, "ReserveSize")?,
-                user: record + virtual_layout.size() as u64,
-            });
+        // Only a heap with virtual blocks needs their layout, which Windows
+        // 7's x86 ntdll PDB does not describe.
+        if self.read_pointer(virtual_head)? != virtual_head.0 {
+            let virtual_layout = self.layout("_HEAP_VIRTUAL_ALLOC_ENTRY")?;
+            let virtual_link = virtual_layout.offset("Entry")? as u64;
+            for record in self.list(virtual_head, virtual_link)? {
+                let entry = self.read_struct(&virtual_layout, record)?;
+                virtual_blocks.push(NtVirtualBlock {
+                    entry: record,
+                    commit_size: virtual_layout.read(&entry, 0, "CommitSize")?,
+                    reserve_size: virtual_layout.read(&entry, 0, "ReserveSize")?,
+                    user: record + virtual_layout.size() as u64,
+                });
+            }
         }
         let front_end = VirtAddr(heap.read(&image, 0, "FrontEndHeap")?);
         Ok(NtHeap {

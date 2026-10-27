@@ -24,6 +24,7 @@ Keeping this file:
 - On ARM64, a stack through .NET code unwinds to the thread's start: a caller whose unwind data is not there to read, JIT-compiled code or an NGEN image's paged-out `.pdata`, is found by the frame record its x29 points at, where the frames below the first JIT frame were found by scanning the stack.
 - On a live kernel target, an address outside every module is taken as a return into code only when a call precedes it, where any address in an executable page was, so a stale pointer into JIT-compiled code no longer passes for a frame.
 - On Windows 8.1, images loaded in only some sessions, `cdd.dll` and `TSDDD.dll`, get their symbols: `ntoseye` reads a session image through a process of each session in turn, and finds the PDB of one whose header is out of memory, and whose loader entry has no timestamp to fetch the file by, from the CodeView record in its resident pages.
+- On Windows 7, the stack of a WOW64 thread in a system call shows its 32-bit frames, which stopped at `wow64cpu`, and `!heap` shows the sizes of a WOW64 process's heaps.
 
 ## v0.52.0 (2026-10-25)
 

@@ -21,10 +21,13 @@ use crate::nt::target::Target;
 
 /// `WOW64_TLS_CPURESERVED`: the TLS slot of the 64-bit TEB that points at
 /// the thread's CPU area, `{ u16 Flags; u16 Machine; }` then the context.
+/// Windows 7's has a zero `ULONG` for that header.
 const WOW64_TLS_CPURESERVED: u64 = 1;
 const IMAGE_FILE_MACHINE_I386: u32 = 0x14c;
 /// The x86 context follows the CPU area's 4-byte header.
 const CPU_AREA_CONTEXT: u64 = 4;
+/// `CONTEXT_i386`, which an x86 context's `ContextFlags` carry.
+const CONTEXT_I386: u32 = 0x0001_0000;
 /// `WOW64_CONTEXT` (x86 `CONTEXT`) offsets.
 const CONTEXT_EBP: u64 = 0xb4;
 const CONTEXT_EIP: u64 = 0xb8;
@@ -100,8 +103,10 @@ struct X86Registers {
 /// stub's caller is found on the stack, not through `ebp`: on ARM64 `eip` is
 /// the transition itself, outside any image, and `[esp]` returns into the
 /// stub, `[esp+4]` into its caller; on AMD64 `eip` is already that return
-/// into the stub and `[esp]` returns into the caller. Then the `ebp` chain,
-/// while it climbs the stack and holds plausible return addresses.
+/// into the stub and `[esp]` returns into the caller, except that Windows 7
+/// saves `esp` with the transition's return (`eip`) still on it. Then the
+/// `ebp` chain, while it climbs the stack and holds plausible return
+/// addresses.
 fn walk_x86(
     u32_at: &dyn Fn(u64) -> Option<u32>,
     registers: X86Registers,
@@ -119,6 +124,8 @@ fn walk_x86(
         && let Some(stub) = return_in_image(esp)
     {
         raw.push((stub, esp + 4, FrameSource::Unwind));
+        caller_slot = esp + 4;
+    } else if u32_at(esp).map(u64::from) == Some(eip) {
         caller_slot = esp + 4;
     }
     if let Some(caller) = return_in_image(caller_slot) {
@@ -238,10 +245,14 @@ fn x86_frames(
     let area: u64 = memory
         .read(teb + tls_slots + WOW64_TLS_CPURESERVED * 8)
         .ok()?;
-    if area == 0 || u32_at(area)? >> 16 != IMAGE_FILE_MACHINE_I386 {
+    let context = area + CPU_AREA_CONTEXT;
+    let x86 = match u32_at(area)? {
+        0 => u32_at(context)? & CONTEXT_I386 != 0,
+        header => header >> 16 == IMAGE_FILE_MACHINE_I386,
+    };
+    if area == 0 || !x86 {
         return None;
     }
-    let context = area + CPU_AREA_CONTEXT;
     let registers = X86Registers {
         eip: u64::from(u32_at(context + CONTEXT_EIP)?),
         esp: u64::from(u32_at(context + CONTEXT_ESP)?),
@@ -372,6 +383,25 @@ mod tests {
             eip: 0x778b_904c,
             esp: 0x39f45c,
             ebp: 0x39f470,
+        };
+        let frames = walk_x86(&u32_at, registers, &|_| true, 16);
+        let ips: Vec<u64> = frames.iter().map(|(ip, _, _)| *ip).collect();
+        assert_eq!(
+            ips,
+            [
+                0x778b_904c,
+                0x771e_7860,
+                0x7708_8fb4,
+                0x771d_560c,
+                0x0051_a52c
+            ]
+        );
+
+        // Windows 7 on AMD64: `esp` still holds the transition's return,
+        // which is `eip`, and the caller's is above it.
+        let registers = X86Registers {
+            esp: 0x39f458,
+            ..registers
         };
         let frames = walk_x86(&u32_at, registers, &|_| true, 16);
         let ips: Vec<u64> = frames.iter().map(|(ip, _, _)| *ip).collect();
