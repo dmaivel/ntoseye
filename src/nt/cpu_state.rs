@@ -4,7 +4,7 @@
 
 use std::mem::offset_of;
 
-use crate::arch::{amd64, arm64};
+use crate::arch::{Arch, amd64, arm64};
 use crate::backend::dbg_backend::TebPath;
 use crate::backend::debugger_data::KdDebuggerData64;
 use crate::base::error::{Error, Result};
@@ -205,6 +205,28 @@ pub fn prcb_context_offset(target: &Target, debugger_data: VirtAddr) -> Option<u
     let field = offset_of!(KdDebuggerData64, offset_prcb_context) as u64;
     let offset: u16 = memory.read(debugger_data + field).ok()?;
     (offset > 0).then_some(offset)
+}
+
+/// Where processor `index`'s `_KPRCB` keeps the context the kernel saves
+/// when it stops the processor, which a crash dump's reader takes the
+/// processor's registers from: on AMD64 the `CONTEXT` its `Context` points
+/// at (the field `KDDEBUGGER_DATA64.OffsetPrcbContext` names), on ARM64
+/// its `ProcessorState.ContextFrame`.
+pub fn prcb_context_address(target: &Target, index: u16) -> Result<VirtAddr> {
+    let prcb = kprcb_for_processor(target, index)?;
+    let address = match target.arch() {
+        Arch::Amd64 => kernel(target)?
+            .types()
+            .struct_at("_KPRCB", prcb)?
+            .read_pointer("Context")?,
+        Arch::Arm64 => prcb + arm64_prcb_context_offset(target)?,
+    };
+    if address.is_zero() {
+        return Err(Error::DebugInfo(format!(
+            "processor {index}'s _KPRCB has no context"
+        )));
+    }
+    Ok(address)
 }
 
 /// Processors `0..processors`' AMD64 contexts, each through the pointer at

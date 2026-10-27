@@ -10,13 +10,18 @@ use std::ops::{ControlFlow, Range};
 use pelite::image::{IMAGE_DEBUG_TYPE_CODEVIEW, IMAGE_DIRECTORY_ENTRY_DEBUG};
 
 use crate::arch::Arch;
+use crate::backend::dbg_backend::processor_index_from_backend_thread_id;
 use crate::backend::phys::PhysMem;
-use crate::base::bytes::{utf16le_lossy, utf16le_nul_terminated, write_u32};
+use crate::base::bytes::{utf16le_lossy, utf16le_nul_terminated};
 use crate::base::error::Result;
 use crate::base::memory::{AddressSpace, MemoryOps, PAGE_SIZE};
-use crate::base::types::{MAX_PROCESSORS, VirtAddr};
+use crate::base::types::{MAX_PROCESSORS, PhysAddr, VirtAddr};
 use crate::nt::bugchecks::current_bugcheck;
-use crate::nt::dump_writer::{DumpException, DumpMetadata, context_from_registers, physical_runs};
+use crate::nt::cpu_state::prcb_context_address;
+use crate::nt::dump_writer::{
+    DumpException, DumpMetadata, ProcessorContext, context_from_named_registers, nt_context,
+    physical_runs,
+};
 use crate::nt::guest::{ModuleInfo, ProcessInfo};
 use crate::nt::kuser_shared::KuserSharedData;
 use crate::nt::pe::headers::{MAX_CODEVIEW_BYTES, decode_headers, read_debug_directory};
@@ -28,7 +33,9 @@ use crate::nt::target::mm::{
     page_protection,
 };
 use crate::nt::target::{KTHREAD_STATE_TERMINATED, Target, ThreadInfo};
-use crate::nt::unwind::{RecoveredStackTrace, build_parked_thread_recovered_stack};
+use crate::nt::unwind::{
+    RecoveredStackTrace, build_parked_thread_recovered_stack, guest_vp_running,
+};
 use crate::nt::userdump::write::{
     MinidumpException, MinidumpHandle, MinidumpModule, MinidumpProcess, MinidumpRegion,
     MinidumpSystem, MinidumpThread, MinidumpUnloadedModule,
@@ -82,21 +89,106 @@ fn read_kernel_build_number(target: &Target) -> u32 {
         .unwrap_or(0)
 }
 
-/// Gather the header metadata for a full kernel dump of the halted target:
-/// the current CONTEXT, processor count, physical runs, kernel globals, and
-/// the bugcheck/exception of the last stop when there is one.
-pub fn collect_dump_metadata(session: &mut Session) -> Result<DumpMetadata> {
-    let registers = session.read_registers()?;
-    let context = if session.backend.registers_are_context() {
-        registers
+/// The VTL0 registers of NT on `vcpu`, whose live registers are `live`,
+/// when those are not NT's: halted in the Windows hypervisor, the state it
+/// saved, which a stop there selects as the vCPU's context; running VTL1 or
+/// a guest partition's VP, the state NT waits in until the hypervisor runs
+/// its VTL0 again. `None` for a vCPU running NT, or when no state is found,
+/// as the session then shows the vCPU's own registers too.
+fn vtl0_registers(
+    target: &Target,
+    vcpu: &str,
+    live: &HashMap<String, u64>,
+) -> Option<HashMap<String, u64>> {
+    if let Some(saved) = target.saved_vtl0_registers(vcpu, live) {
+        return Some(saved);
+    }
+    let arch = target.arch();
+    let cr3 = *live.get(arch.dtb_register())?;
+    let rip = *live.get(arch.pc_register())?;
+    let processor = processor_index_from_backend_thread_id(vcpu)?;
+    if target.recognize_secure_root(cr3)
+        || guest_vp_running(target, cr3, rip, Some(processor)).is_some()
+    {
+        target.waiting_vtl0_registers(processor)
     } else {
-        context_from_registers(session.target.arch(), &session.register_map, &registers)
+        None
+    }
+}
+
+/// `vcpu`'s live register file `registers` as NT's `CONTEXT` on it (see
+/// [`nt_context`]). Only a backend that stops outside Windows can find a
+/// vCPU outside NT.
+fn vcpu_nt_context(session: &Session, vcpu: &str, registers: &[u8]) -> Vec<u8> {
+    let vtl0 = if session.backend.halts_in_windows_hypervisor() {
+        vtl0_registers(
+            &session.target,
+            vcpu,
+            &session.register_map.to_hashmap(registers),
+        )
+    } else {
+        None
     };
-    let processor_count = session
-        .backend
-        .thread_list()
-        .map(|threads| threads.len().clamp(1, usize::from(MAX_PROCESSORS)) as u32)
-        .unwrap_or(1);
+    let source = (!session.backend.registers_are_context()).then_some(&session.register_map);
+    nt_context(session.target.arch(), source, registers, vtl0.as_ref())
+}
+
+/// The guest-physical pieces, in order, of where NT processor `index`'s
+/// `_KPRCB` keeps its saved context; `None` unless all of it is in RAM.
+fn saved_context_pieces(target: &Target, index: u16) -> Option<Vec<(PhysAddr, u64)>> {
+    let start = prcb_context_address(target, index).ok()?;
+    let length = target.arch().context_size() as u64;
+    let mut pieces = Vec::new();
+    target
+        .kernel_address_space()
+        .for_each_present_page(start, start + length, |_, physical, piece| {
+            pieces.push((physical, piece));
+            ControlFlow::Continue(())
+        })
+        .ok()?;
+    (pieces.iter().map(|&(_, piece)| piece).sum::<u64>() == length).then_some(pieces)
+}
+
+/// The current vCPU's `CONTEXT` as NT sees it, for the dump header, and that
+/// of each of `vcpus`, with where its `_KPRCB` keeps the context a dump's
+/// reader takes its registers from. RAM there holds what the kernel saved
+/// when it last stopped the processor itself, if it ever did, as the
+/// debugger stopped it from outside. A processor whose registers cannot be
+/// read, or whose `_KPRCB` context is not in RAM, keeps what RAM holds there.
+fn processor_contexts(
+    session: &mut Session,
+    vcpus: &[String],
+) -> Result<(Vec<u8>, Vec<ProcessorContext>)> {
+    let current = session.current_thread.clone();
+    let registers = session.read_registers()?;
+    let context = vcpu_nt_context(session, &current, &registers);
+    let mut processors = Vec::with_capacity(vcpus.len());
+    for vcpu in vcpus {
+        let Some(saved_at) = processor_index_from_backend_thread_id(vcpu)
+            .and_then(|index| saved_context_pieces(&session.target, index))
+        else {
+            continue;
+        };
+        let context = if *vcpu == current {
+            context.clone()
+        } else {
+            match session.read_vcpu_registers(vcpu)? {
+                Some(registers) => vcpu_nt_context(session, vcpu, &registers),
+                None => continue,
+            }
+        };
+        processors.push(ProcessorContext { context, saved_at });
+    }
+    Ok((context, processors))
+}
+
+/// Gather the header metadata for a full kernel dump of the halted target:
+/// the processors' NT contexts, processor count, physical runs, kernel
+/// globals, and the bugcheck/exception of the last stop when there is one.
+pub fn collect_dump_metadata(session: &mut Session) -> Result<DumpMetadata> {
+    let vcpus = session.backend.thread_list().unwrap_or_default();
+    let (context, processors) = processor_contexts(session, &vcpus)?;
+    let processor_count = vcpus.len().clamp(1, usize::from(MAX_PROCESSORS)) as u32;
     let runs = physical_runs(&session.target)?;
     let major_version = WINDOWS_MAJOR_VERSION;
     let minor_version = read_kernel_build_number(&session.target);
@@ -174,6 +266,7 @@ pub fn collect_dump_metadata(session: &mut Session) -> Result<DumpMetadata> {
         bug_check_parameters,
         kd_debugger_data_block,
         context,
+        processors,
         exception,
         runs,
         displaced: session.displaced_frames(),
@@ -185,31 +278,6 @@ fn unix_seconds(filetime: u64) -> Option<u32> {
     filetime
         .checked_sub(FILETIME_UNIX_EPOCH)
         .and_then(|since| u32::try_from(since / FILETIME_SECOND).ok())
-}
-
-/// A `CONTEXT` from the registers a walk recovered by name, claiming the
-/// control and integer state. AMD64's segments are a 64-bit user thread's
-/// when the walk did not recover them.
-fn context_from_named_registers(arch: Arch, registers: &HashMap<String, u64>) -> Vec<u8> {
-    let map = arch.register_map();
-    let mut context = vec![0u8; arch.context_size()];
-    for (name, value) in registers {
-        if map.contains(name) {
-            let _ = map.write_u64(name, &mut context, *value);
-        }
-    }
-    let flags = arch.context_flags();
-    let mut claimed = flags.control | flags.integer;
-    if arch == Arch::Amd64 {
-        for (segment, selector) in [("cs", 0x33), ("ss", 0x2b)] {
-            if !registers.contains_key(segment) {
-                let _ = map.write_u64(segment, &mut context, selector);
-            }
-        }
-        claimed |= flags.segments;
-    }
-    write_u32(&mut context, flags.offset, claimed);
-    context
 }
 
 /// The registers of the first frame of `trace` in user mode, with its

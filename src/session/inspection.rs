@@ -670,7 +670,7 @@ impl Session {
 
     /// `vcpu`'s register file, read without making it the current vCPU;
     /// `None` while the target runs or when the backend cannot read it.
-    fn read_vcpu_registers(&mut self, vcpu: &str) -> Result<Option<Vec<u8>>> {
+    pub fn read_vcpu_registers(&mut self, vcpu: &str) -> Result<Option<Vec<u8>>> {
         if self.backend.is_running() {
             return Ok(None);
         }

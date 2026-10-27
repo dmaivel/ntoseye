@@ -636,6 +636,38 @@ impl Target {
         Some(vtl0.registers())
     }
 
+    /// The VTL0 state NT waits in on NT processor `processor`, whose vCPU
+    /// runs VTL1 or a guest partition's VP: the hypervisor saved it when
+    /// VTL0 last left, in the VTL0 eVMCS of the processor's root VP, which
+    /// is in kernel mode on an NT root with the processor's KPCR as its GS
+    /// base (a VTL call is made from kernel mode). Without general-purpose
+    /// registers: the hypervisor's exit block has held other exits' since.
+    /// `None` without eVMCS pages, or unless exactly one state matches.
+    pub fn waiting_vtl0_registers(&self, processor: u16) -> Option<HashMap<String, u64>> {
+        if self.arch() != Arch::Amd64 {
+            return None;
+        }
+        let kpcr = kpcr_for_processor(self, processor).ok()?;
+        let pages = self
+            .guest()
+            .ok()?
+            .any_evmcs_pages(&self.phys, &self.interrupt)
+            .ok()?;
+        let mask = self.arch().dtb_page_mask();
+        let kernel = self.kernel_dtb() & mask;
+        let mut states = pages.all_states(&*self.phys).into_iter().filter(|state| {
+            let root = state.cr3 & mask;
+            state.cs & 3 == 0
+                && state.gs_base == kpcr.0
+                && (root == kernel || self.process_for_cr3(root).is_some())
+        });
+        let state = states.next()?;
+        states
+            .next()
+            .is_none()
+            .then(|| exit_registers(&state, None))
+    }
+
     /// Make where NT left off the inspection context of `vcpu`, whose live
     /// registers are [`Self::registers`], when it is halted in the Windows
     /// hypervisor and nothing else is selected: NT is what a stop there is

@@ -69,7 +69,10 @@ fn crash(session: &mut Session) -> Result<Motion> {
 /// minidump of the current process.
 ///
 /// Without /u, .dump writes a full PAGEDU64 kernel dump of a live target;
-/// it accepts /f and /ma as WinDbg's full-dump switches. With /u, it writes
+/// it accepts /f and /ma as WinDbg's full-dump switches. The dump holds each
+/// processor's registers as NT sees them: a vCPU halted in the Windows
+/// hypervisor, or running VTL1, has the VTL0 state the hypervisor saved for
+/// it, when one is found. With /u, it writes
 /// a user-mode minidump (MDMP) of the current process: the one that .process
 /// selected, else the owner of the current thread. The minidump holds the
 /// process's threads with the user-mode registers their stacks give, its
