@@ -6,23 +6,34 @@ What changed in each release of ntoseye, newest first. The command-line tool, th
 Keeping this file:
 
 - Add a line under "## Unreleased" in the commit that makes the change users will notice: a new command, option or SDK API, changed behavior or output, a fixed bug, a removal. Refactors, tests, CI and docs rewording get none. Start the section at the top if it is not there.
-- Group the lines under "### Added", "
-- `dx` and `dt` show a global or static variable of a module whose PDB is private (your own driver's, or a virtio driver's) with its type: `dx balloon!GUID_DEVINTERFACE_BALLOON` reads the GUID's fields, where they asked for a cast. Public PDBs, such as Windows', still record no types for their variables.
-
-### Added
-
-- `!handle <handle> f` on a user-mode minidump shows the object information the dump records: a thread's or process's IDs, TEB or PEB, priority and exit status, an event's, mutant's or semaphore's state, and a section's size. The SDK has it as `UserHandle.object_info`.
-
-### Changed", "### Fixed" and "
-- `lm v` and `vertarget` give the PDB age the image names its PDB by, as symbol stores file it, where they gave the age the PDB file itself records, which can be higher.
-- `dt` shows a byte array that holds no text (a GUID's `Data4`) as hex bytes, where it printed escapes such as `\u{fffd}`, and shows non-ASCII text in strings as written instead of escaped.
-
-### Removed", in that order, leaving out empty groups. A fix to something not yet released is no "Fixed" line; amend the line that added it. A change that breaks scripts starts with "**Breaking:**" and comes first in its group.
+- Group the lines under "### Added", "### Changed", "### Fixed" and "### Removed", in that order, leaving out empty groups. A fix to something not yet released is no "Fixed" line; amend the line that added it. A change that breaks scripts starts with "**Breaking:**" and comes first in its group.
 - A release with a theme opens with one or two sentences before the groups, saying what users can now do. A release without one goes straight to the groups.
 - Say what users can now do, or what went wrong and no longer does, not how. Name commands and SDK APIs in backticks as users type them.
 - Link only with absolute https://ntoseye.com/... URLs. The same text is shown in the GitHub release, in this file on GitHub, and on the docs site, which each resolve a relative link differently.
 - To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes, under the tag as the release title.
 -->
+
+## Unreleased
+
+### Added
+
+- `!handle <handle> f` on a user-mode minidump shows the object information the dump records: a thread's or process's IDs, TEB or PEB, priority and exit status, an event's, mutant's or semaphore's state, and a section's size. The SDK has it as `UserHandle.object_info`.
+- `dx` and `dt` show a global or static variable of a module whose PDB is private (your own driver's, or a virtio driver's) with its type: `dx balloon!GUID_DEVINTERFACE_BALLOON` reads the GUID's fields, where they asked for a cast. Public PDBs, such as Windows', still record no types for their variables.
+
+### Changed
+
+- `PteWalk`, the SDK's `!pte` result, lists the entries the walk read as `levels`, root first, as `VtopDetail` does, in place of its `pxe`, `ppe`, `pde` and `pte` fields.
+- `SystemPteTypeDetail.used` is `None` where `SystemPteTypeDetail.counters_hold` is false, and `SystemPtesDetail.uncounted` names the allocators its totals leave out.
+- `LfhSubsegment.block_count` counts the blocks a subsegment withholds, and `LfhSubsegment.bit_stride` gives its bitmap's bits per block; `LfhSubsegment.bucket` is `None` for a subsegment that names no bucket, and `VtopDetail.physical_walk` says whether its entry addresses are physical (an explicit DTB) or in the self-map.
+
+### Fixed
+
+- On ARM64, a stack through .NET code unwinds to the thread's start: a caller whose unwind data is not there to read, JIT-compiled code or an NGEN image's paged-out `.pdata`, is found by the frame record its x29 points at, where the frames below the first JIT frame were found by scanning the stack.
+- On a live kernel target, an address outside every module is taken as a return into code only when a call precedes it, where any address in an executable page was, so a stale pointer into JIT-compiled code no longer passes for a frame.
+- On Windows 8.1, images loaded in only some sessions, `cdd.dll` and `TSDDD.dll`, get their symbols: `ntoseye` reads a session image through a process of each session in turn, and finds the PDB of one whose header is out of memory, and whose loader entry has no timestamp to fetch the file by, from the CodeView record in its resident pages.
+- On Windows 7, the stack of a WOW64 thread in a system call shows its 32-bit frames, which stopped at `wow64cpu`, and `!heap` shows the sizes of a WOW64 process's heaps.
+- `lm v` and `vertarget` give the PDB age the image names its PDB by, as symbol stores file it, where they gave the age the PDB file itself records, which can be higher.
+- `dt` shows a byte array that holds no text (a GUID's `Data4`) as hex bytes, where it printed escapes such as `\u{fffd}`, and shows non-ASCII text in strings as written instead of escaped.
 - On Windows 11 26200, `!heap` lists every heap of the process, where it listed only the process heap: the PEB holds only that one there, and `ntoseye` now reads ntdll's own heap list.
 - `!heap -x` gave an NT-heap block's user size 0x10 bytes short.
 - `!heap` decodes segment-heap LFH subsegments: on Windows 11 22631 every one failed with `field 'BucketRef' not found` and its busy counts were wrong, and on 22631 and 26200 blocks of a subsegment above 4 GiB were placed at the wrong offset, so `!heap -x` could not find them.
@@ -65,21 +76,6 @@ Keeping this file:
 - `!sysptes` and `!vm` no longer report system-PTE totals from counters their allocator's bitmap contradicts: on Windows 11 22631 ARM64 the kernel keeps SystemPtes' free count below zero and its total at three times what its bitmap covers, and the driver-image allocator's free count far above its total. Such an allocator's total and use show as unknown, with the reason, and are left out of the summary.
 - On ARM64 over KD, `r` on a processor other than the one that stopped the target shows that processor's own `x18` (its KPCR, or its thread's TEB) and `ttbr0` (its thread's process), where it showed the stopping processor's, and `~` labelled every processor with the stopping one's process; `esr` and `far` are read at every stop, not only after a step.
 - A KD attach made right after another debugger session ended no longer fails with "invalid virtual-memory read … received 1024 bytes … for request 512": a memory read takes only the reply to its own address and length, and passes over the target's stale reply to the last session's read.
-
-## Unreleased
-
-### Changed
-
-- `PteWalk`, the SDK's `!pte` result, lists the entries the walk read as `levels`, root first, as `VtopDetail` does, in place of its `pxe`, `ppe`, `pde` and `pte` fields.
-- `SystemPteTypeDetail.used` is `None` where `SystemPteTypeDetail.counters_hold` is false, and `SystemPtesDetail.uncounted` names the allocators its totals leave out.
-- `LfhSubsegment.block_count` counts the blocks a subsegment withholds, and `LfhSubsegment.bit_stride` gives its bitmap's bits per block; `LfhSubsegment.bucket` is `None` for a subsegment that names no bucket, and `VtopDetail.physical_walk` says whether its entry addresses are physical (an explicit DTB) or in the self-map.
-
-### Fixed
-
-- On ARM64, a stack through .NET code unwinds to the thread's start: a caller whose unwind data is not there to read, JIT-compiled code or an NGEN image's paged-out `.pdata`, is found by the frame record its x29 points at, where the frames below the first JIT frame were found by scanning the stack.
-- On a live kernel target, an address outside every module is taken as a return into code only when a call precedes it, where any address in an executable page was, so a stale pointer into JIT-compiled code no longer passes for a frame.
-- On Windows 8.1, images loaded in only some sessions, `cdd.dll` and `TSDDD.dll`, get their symbols: `ntoseye` reads a session image through a process of each session in turn, and finds the PDB of one whose header is out of memory, and whose loader entry has no timestamp to fetch the file by, from the CodeView record in its resident pages.
-- On Windows 7, the stack of a WOW64 thread in a system call shows its 32-bit frames, which stopped at `wow64cpu`, and `!heap` shows the sizes of a WOW64 process's heaps.
 
 ## v0.52.0 (2026-10-25)
 
