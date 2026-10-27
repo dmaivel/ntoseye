@@ -44,6 +44,8 @@ Keeping this file:
 - On a dump, `status` no longer suggests an execute breakpoint or `t` for a page that is not in memory, and `dt` lists a flags word before the bitfields it holds.
 - On a minidump that holds no module memory (MiniDumpNormal), `u`, `uf`, `db`, `!dh` and `!lmi` read a module's code and headers from its image file, relocated to where it was loaded, as the Windows debugger does, where they said the address was not in the dump; `!chkimg` still compares only what the dump holds.
 - Kernel dumps written with `.dump` hold every processor's registers as NT sees them, where a processor stopped in the Windows hypervisor had the hypervisor's registers and the others had whatever their PRCB last held.
+- Pages a process maps through a prototype PTE read when Windows' L1TF mitigation swizzles the PTE, where they read as `??` and their image's unwind data as paged out, so stacks through them fell back to scanning.
+- `!pte` shows a zero PTE inside a mapped view as the view's page, not as unmapped, goes on to the PTE when its page table is in transition, and refuses an address that is not canonical.
 
 ## Unreleased
 

@@ -56,12 +56,15 @@ impl PteSelfMap {
         address: u64,
     ) -> impl DoubleEndedIterator<Item = (PageTableLevel, VirtAddr)> + '_ {
         let index = address & self.index_mask;
-        self.levels.iter().zip(self.bases).map(move |(&level, base)| {
-            (
-                level,
-                VirtAddr(base + (index >> level.shift()) * ENTRY_SIZE),
-            )
-        })
+        self.levels
+            .iter()
+            .zip(self.bases)
+            .map(move |(&level, base)| {
+                (
+                    level,
+                    VirtAddr(base + (index >> level.shift()) * ENTRY_SIZE),
+                )
+            })
     }
 
     /// The first address of the self-map and its length: the last level's
@@ -273,6 +276,14 @@ impl Target {
     /// that does not (a stop in the Windows hypervisor or VTL1) is not NT's,
     /// and the walk uses the kernel's instead.
     pub fn pte_traverse(&self, address: VirtAddr) -> Result<PteWalk> {
+        // No table maps the hole between the halves; walked anyway, the
+        // self-map would fold the address onto one it does map.
+        let (user_end, kernel_start) = self.arch().paging().canonical_halves();
+        if (user_end..kernel_start).contains(&address.0) {
+            return Err(Error::InvalidArgument(format!(
+                "{address:#x} is not a canonical address"
+            )));
+        }
         let current = self.current_dtb();
         match self.pte_traverse_in(current, address) {
             Err(error) if current != self.kernel_dtb() => self
@@ -295,8 +306,9 @@ impl Target {
             let value: PageTableEntry = memory.read(at)?;
             let attributes = paging.entry_attributes(value, level, address);
             // The walk ends at an entry that maps (a large page) or maps
-            // nothing: the self-map has no table below it to read.
-            let ends = attributes.large_page || !attributes.present;
+            // nothing: the self-map has no table below it to read. A table
+            // in transition is still in memory, and the self-map reads it.
+            let ends = attributes.large_page || (!attributes.present && !value.is_transition());
             levels.push(PteLevel {
                 level,
                 address: at,

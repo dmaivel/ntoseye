@@ -405,11 +405,14 @@ impl PageTableEntry {
     /// The kernel address of the section PTE a prototype PTE points at
     /// (`ProtoAddress`, bits 63:16 sign-extended), or `None` for
     /// `MI_PTE_LOOKUP_NEEDED`, which leaves it to the VAD mapping the page.
-    pub const fn prototype_address(self) -> Option<VirtAddr> {
+    /// The address is read with the L1TF swizzle (`mask`) undone, since a
+    /// swizzled entry points at no real memory; `MI_PTE_LOOKUP_NEEDED` is
+    /// all ones in the raw entry, the swizzle bits included.
+    pub const fn prototype_address(self, mask: u64) -> Option<VirtAddr> {
         if self.0 >> 32 == 0xFFFF_FFFF {
             return None;
         }
-        Some(VirtAddr(((self.0 as i64) >> 16) as u64))
+        Some(VirtAddr(((self.unswizzled(mask).0 as i64) >> 16) as u64))
     }
 
     /// A Windows demand-zero PTE, its L1TF swizzle undone: a software PTE
@@ -466,3 +469,25 @@ impl_plain_fmt!(
     fmt::UpperHex,
     fmt::Binary
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A prototype PTE Windows swizzled for L1TF (SwizzleBit clear) points
+    /// at its section PTE only with `InvalidPteMask` cleared; read raw it
+    /// names an address no kernel memory backs.
+    #[test]
+    fn a_swizzled_prototype_pte_points_at_its_section_pte() {
+        const MASK: u64 = 1 << 45;
+        let pte = PageTableEntry(0xcd84_2767_2c50_0400);
+        assert_eq!(
+            pte.prototype_address(MASK),
+            Some(VirtAddr(0xffff_cd84_0767_2c50))
+        );
+        assert_eq!(
+            PageTableEntry(0xffff_ffff_0000_0400).prototype_address(MASK),
+            None
+        );
+    }
+}

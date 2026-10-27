@@ -649,25 +649,35 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         unreachable!("the last level maps a page or nothing")
     }
 
+    /// The section PTE that user page `va` of a mapped view maps through:
+    /// from its PTE when that is a prototype one, from the VAD when the PTE
+    /// is zero or its table is absent; `None` for a kernel address, private
+    /// memory, or a PTE that holds the process's own copy of the page.
+    fn view_prototype(&self, va: VirtAddr, leaf: Option<PageTableEntry>) -> Option<VirtAddr> {
+        // Views are mapped in a process's user half only.
+        if self.arch.paging().is_kernel_address(va) {
+            return None;
+        }
+        let views = self.backend.section_views()?;
+        let from_vad = || views.prototype_pte(self, self.dtb, va);
+        match leaf {
+            None => from_vad(),
+            Some(pte) if pte.0 == 0 => from_vad(),
+            Some(pte) if pte.is_prototype() => pte
+                .prototype_address(self.backend.invalid_pte_mask())
+                .or_else(from_vad),
+            // A page-file PTE: the process's own copy of the page, paged out.
+            Some(_) => None,
+        }
+    }
+
     /// A user page of a mapped view that the tables do not map, read from
     /// the frame its section PTE holds when that page is in memory (see
     /// [`SectionViews`]). `leaf` is the page's PTE, `None` when a table above
     /// it is absent.
     fn section_page(&self, va: VirtAddr, leaf: Option<PageTableEntry>) -> Option<Translation> {
-        // Views are mapped in a process's user half only.
+        let prototype = self.view_prototype(va, leaf)?;
         let paging = self.arch.paging();
-        if paging.is_kernel_address(va) {
-            return None;
-        }
-        let views = self.backend.section_views()?;
-        let from_vad = || views.prototype_pte(self, self.dtb, va);
-        let prototype = match leaf {
-            None => from_vad(),
-            Some(pte) if pte.0 == 0 => from_vad(),
-            Some(pte) if pte.is_prototype() => pte.prototype_address().or_else(from_vad),
-            // A page-file PTE: the process's own copy of the page, paged out.
-            Some(_) => None,
-        }?;
         let pte = PageTableEntry(self.read::<u64>(prototype).ok()?);
         let valid = match paging.decode_entry(PageTableLevel::Pte, pte) {
             TableEntry::Leaf(frame) => Some(frame),
@@ -708,17 +718,7 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
                 Walked::Mapped(_) | Walked::Stopped(Stop::Root | Stop::Unreadable(_)) => false,
             };
         }
-        let Some(views) = self.backend.section_views() else {
-            return false;
-        };
-        let from_vad = || views.prototype_pte(self, self.dtb, va);
-        let prototype = match walked.leaf() {
-            None => from_vad(),
-            Some(pte) if pte.0 == 0 => from_vad(),
-            Some(pte) if pte.is_prototype() => pte.prototype_address().or_else(from_vad),
-            Some(_) => None,
-        };
-        prototype
+        self.view_prototype(va, walked.leaf())
             .and_then(|address| self.read::<u64>(address).ok())
             .is_some_and(|pte| PageTableEntry(pte).unswizzled(mask).is_demand_zero(low))
     }
@@ -775,8 +775,18 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
         if self.section_page(va, walked.leaf()).is_some() {
             return None;
         }
+        // A zero entry inside a view leaves the page to the view's section
+        // PTE, which the VAD names: the page is the file's, not unmapped.
+        let leaf = walked.leaf();
+        let zero_in_view =
+            |entry: PageTableEntry| entry.0 == 0 && self.view_prototype(va, leaf).is_some();
         let (table, place) = match walked {
             Walked::Mapped(_) | Walked::Stopped(Stop::Root) => return None,
+            Walked::Unmapped(entry) | Walked::Stopped(Stop::Absent(_, entry))
+                if zero_in_view(entry) =>
+            {
+                (None, Place::Prototype)
+            }
             Walked::Unmapped(pte) => (None, self.place_of(pte, true)),
             Walked::Stopped(Stop::Absent(level, entry)) => {
                 (Some(level), self.place_of(entry, false))
