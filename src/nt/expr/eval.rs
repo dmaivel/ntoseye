@@ -333,9 +333,14 @@ impl Expr {
                 "registers belong to the VTL0 context; use .vtl 0 first".into(),
             ));
         }
+        // Either the VM runs or the selected thread is parked off any
+        // processor (after `attach` or `.thread`); the target sees neither
+        // cause, only the empty register file.
         if context.registers.is_none() {
             return Err(Error::InvalidExpression(
-                "registers unavailable while VM is running".into(),
+                "registers unavailable: the VM is running or the selected thread is not on a \
+                 processor"
+                    .into(),
             ));
         }
         // A 128-bit register reaches the scalar file only as its halves.

@@ -33,6 +33,7 @@ struct ParsedSymbols {
     rvas: SymbolRvas,
     source_lines: Vec<SourceLineEntry>,
     procedures: Vec<ProcedureSpan>,
+    sections: Vec<(u32, u32)>,
     source_checksums: FxHashMap<String, SourceChecksum>,
     wpp_messages: HashMap<MessageKey, Arc<TmfMessage>>,
     diagnostics: Vec<SymbolIndexDiagnostic>,
@@ -267,6 +268,7 @@ impl SymbolStore {
             rvas,
             source_lines,
             procedures,
+            sections: section_ranges(&mut pdb_lock),
             source_checksums,
             wpp_messages,
             diagnostics,
@@ -329,6 +331,7 @@ impl SymbolStore {
         self.publish_symbol_rvas(guid, parsed.rvas);
         self.source_lines.insert(guid, parsed.source_lines);
         self.procedures.insert(guid, parsed.procedures);
+        self.sections.insert(guid, parsed.sections);
         self.source_checksums.insert(guid, parsed.source_checksums);
         self.index_types
             .insert(guid, SymbolIndex::from_names(types.type_strings));
@@ -793,6 +796,30 @@ pub(super) fn section_offset_limit(pdb: &mut pdb2::PDB<'static, Cursor<&'static 
                 .max()
         })
         .unwrap_or(u32::MAX)
+}
+
+/// The image sections' RVA ranges, `[start, end)` sorted by start, from the
+/// PDB's copy of the section headers; empty when the PDB has none.
+fn section_ranges(pdb: &mut pdb2::PDB<'static, Cursor<&'static [u8]>>) -> Vec<(u32, u32)> {
+    let mut ranges: Vec<(u32, u32)> = pdb
+        .sections()
+        .ok()
+        .flatten()
+        .map(|sections| {
+            sections
+                .iter()
+                .map(|section| {
+                    let size = section.virtual_size.max(section.size_of_raw_data);
+                    (
+                        section.virtual_address,
+                        section.virtual_address.saturating_add(size),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    ranges.sort_unstable();
+    ranges
 }
 
 /// The type stream's index inputs, read through a `pdb2` handle of its own

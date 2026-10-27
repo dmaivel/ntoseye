@@ -223,6 +223,9 @@ pub struct SymbolStore {
     /// where [`Self::frame_locals`] and [`Self::inline_frames`] find the
     /// procedure an address is in without scanning every module stream.
     procedures: DashMap<u128, Vec<ProcedureSpan>>,
+    /// GUID -> the image sections' RVA ranges, sorted: a symbol names no
+    /// address in another section.
+    sections: DashMap<u128, Vec<(u32, u32)>>,
     /// GUID -> recorded source file -> the checksum the compiler recorded for
     /// its contents. Files without one have no entry.
     source_checksums: DashMap<u128, FxHashMap<String, SourceChecksum>>,
@@ -984,6 +987,7 @@ impl SymbolStore {
             symbol_extents: DashMap::new(),
             source_lines: DashMap::new(),
             procedures: DashMap::new(),
+            sections: DashMap::new(),
             source_checksums: DashMap::new(),
             local_source_digests: Mutex::new(HashMap::new()),
             index_diagnostics: DashMap::new(),
@@ -1453,6 +1457,7 @@ impl SymbolStore {
             self.symbol_addresses.remove(&guid);
             self.source_lines.remove(&guid);
             self.procedures.remove(&guid);
+            self.sections.remove(&guid);
             self.source_checksums.remove(&guid);
             self.index_diagnostics.remove(&guid);
             self.wpp_messages.remove(&guid);

@@ -499,6 +499,23 @@ fn closest_symbol_picks_nearest_lower_record_and_prefers_public_at_ties() {
 }
 
 #[test]
+fn closest_symbol_stops_at_its_section_end() {
+    let store = SymbolStore::new();
+    let base = VirtAddr(0x0000_0001_8000_0000);
+    let mut rvas = FxHashMap::default();
+    insert_symbol_rva(&mut rvas, "last", 0x1f88, SymbolVisibility::Public, None);
+    store.publish_symbol_rvas(1, rvas);
+    store
+        .sections
+        .insert(1, vec![(0x1000, 0x1fc0), (0x2000, 0x3000)]);
+
+    let closest = |rva: u64| store.closest_symbol(1, base, base + rva);
+    assert_eq!(closest(0x1fbf), Some(("last".to_string(), 0x37)));
+    assert_eq!(closest(0x1fc0), None);
+    assert_eq!(closest(0x2000), None);
+}
+
+#[test]
 fn source_line_lookup_obeys_line_ranges() {
     let lines = vec![
         SourceLineEntry {

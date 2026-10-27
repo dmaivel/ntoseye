@@ -723,7 +723,17 @@ fn read_first_uint(root: &StructRef<'_>, paths: &[&[&str]]) -> Option<u64> {
 
 /// A handle table's open handles: its `HandleCount`, or on builds that
 /// count them per free list (`FreeLists[n].HandleCount`, 24H2), the sum.
-fn handle_table_count(table: &StructRef<'_>, types: Types<'_>) -> Option<u64> {
+/// The PDB declares `FreeLists[1]`, but the kernel allocates
+/// `nt!ExpFreeListCount` lists, so
+/// `free_lists` overrides the declared length when known. Each list's count
+/// is a signed `LONG`: a handle opened on one list and closed on another
+/// leaves one negative and the other high, and only the wrapping sum is the
+/// table's count.
+fn handle_table_count(
+    table: &StructRef<'_>,
+    types: Types<'_>,
+    free_lists: Option<u32>,
+) -> Option<u64> {
     if let Ok(count) = table.read_uint("HandleCount") {
         return Some(count);
     }
@@ -736,14 +746,14 @@ fn handle_table_count(table: &StructRef<'_>, types: Types<'_>) -> Option<u64> {
     };
     let layout = types.layout(name.as_str()).ok()?;
     let first = table.addr() + u64::from(field.offset);
-    (0..u64::from(*lists))
-        .map(|index| {
-            types
-                .struct_with_layout(layout.clone(), first + index * layout.size as u64)
-                .read_uint("HandleCount")
-                .ok()
-        })
-        .sum()
+    let total = (0..u64::from(free_lists.unwrap_or(*lists))).try_fold(0i32, |total, index| {
+        let count = types
+            .struct_with_layout(layout.clone(), first + index * layout.size as u64)
+            .read_field::<i32>("HandleCount")
+            .ok()?;
+        Some(total.wrapping_add(count))
+    })?;
+    u64::try_from(total).ok()
 }
 
 /// Element `index` of the integer array field `name`.
@@ -1659,12 +1669,20 @@ impl Target {
         let vm = |name: &str| field(&[&["Vm", name], &["Vm", "Instance", name], &[name]]);
 
         let object_table = pointer("ObjectTable");
+        let free_lists = self.guest().ok().and_then(|guest| {
+            guest
+                .ntoskrnl
+                .symbol("ExpFreeListCount")
+                .ok()?
+                .read::<u32>()
+                .ok()
+        });
         let handle_count = object_table
             .and_then(|table| {
                 let table = types
                     .struct_at("_HANDLE_TABLE", VirtAddr(table.0 & !0xf))
                     .ok()?;
-                handle_table_count(&table, types)
+                handle_table_count(&table, types, free_lists)
             })
             .or_else(|| field(&[&["HandleCount"]]));
         ProcessDetail {

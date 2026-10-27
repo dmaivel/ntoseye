@@ -441,6 +441,22 @@ impl SymbolStore {
         {
             return None;
         }
+        // A public PDB gives functions no length, but the next symbol can lie
+        // far past a function's end, across padding into the next section.
+        // Neither a private procedure's own length nor its section's end can
+        // be crossed.
+        if let Some(procedures) = self.procedures.get(&guid)
+            && let Ok(index) = procedures.binary_search_by_key(&rva, |procedure| procedure.rva)
+            && offset >= procedures[index].len
+        {
+            return None;
+        }
+        if let Some(sections) = self.sections.get(&guid) {
+            let index = sections.partition_point(|&(start, _)| start <= rva);
+            if index > 0 && target_rva >= sections[index - 1].1 {
+                return None;
+            }
+        }
         let first = entries.partition_point(|entry| entry.rva < rva);
         Some((entries[first].name.to_string(), offset))
     }

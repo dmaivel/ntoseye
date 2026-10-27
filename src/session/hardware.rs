@@ -86,20 +86,22 @@ impl Session {
         })
     }
 
+    /// `table`'s register for `processor` from its `_KPRCB`'s
+    /// `ProcessorState` (or `_KPCR`), which Windows keeps for every
+    /// processor; only the processor the backend reports registers for can
+    /// fall back to the live register.
     fn descriptor_for_cpu(
         &mut self,
         processor: u16,
         table: DescriptorTable,
     ) -> Result<DescriptorRegister> {
-        if processor != self.current_processor_for_cpu() {
-            return Err(Error::DebugInfo(
-                "IDTR/GDTR ProcessorState is valid only for the halting processor".into(),
-            ));
-        }
         let location = cpu_location(&self.target, processor)?;
         match descriptor_from_target(&self.target, &location, table) {
             Ok(descriptor) => Ok(descriptor),
-            Err(error) => self.backend_descriptor(table.register()).or(Err(error)),
+            Err(error) if processor == self.current_processor_for_cpu() => {
+                self.backend_descriptor(table.register()).or(Err(error))
+            }
+            Err(error) => Err(error),
         }
     }
 

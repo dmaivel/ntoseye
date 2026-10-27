@@ -3,7 +3,7 @@ use std::fs;
 use crate::arch::Arch;
 use crate::base::disasm::instruction_length;
 use crate::base::error::{Error, Result};
-use crate::base::memory::MemoryOps;
+use crate::base::memory::{MemoryOps, PAGE_SIZE};
 use crate::base::ntstatus::{ntstatus_name, win32_error_name};
 use crate::base::types::{Dtb, VirtAddr};
 use crate::nt::guest::{
@@ -1356,6 +1356,15 @@ impl Target {
                 };
             }
         }
+        if allow_kernel_self_patches
+            && self.section_reclaimed(base + section.rva as u64, &section.expected, &live)
+        {
+            return SectionCheckResult {
+                skipped: true,
+                skip_reason: Some("freed by the kernel"),
+                ..SectionCheckResult::default()
+            };
+        }
         let mut result = SectionCheckResult::default();
         // Byte diffs kept so far: genuine, then set aside.
         let mut kept = [0usize; 2];
@@ -1435,6 +1444,43 @@ impl Target {
             offset = end;
         }
         result
+    }
+
+    /// Whether the kernel freed the image section at `start` after boot and
+    /// gave its pages to other owners. Windows frees sections the PE does not
+    /// mark discardable (INITKDBG on ARM64), and the large page that maps the
+    /// kernel still maps them, so neither the headers nor a failed read
+    /// tells; the PFN database does. A page still the image's is active
+    /// and its `_MMPFN.PteAddress` is the 4 KiB self-map entry of its own
+    /// address, large page or not; a reused one names its new owner's PTE.
+    /// Only pages that differ from the file are looked up.
+    fn section_reclaimed(&self, start: VirtAddr, expected: &[u8], live: &[u8]) -> bool {
+        let Ok(self_map) = self.pte_self_map() else {
+            return false;
+        };
+        expected
+            .chunks(PAGE_SIZE)
+            .zip(live.chunks(PAGE_SIZE))
+            .enumerate()
+            .filter(|(_, (expected, live))| expected != live)
+            .any(|(index, _)| {
+                let page = start + (index * PAGE_SIZE) as u64;
+                let Some(physical) = self
+                    .virt_to_phys(Some(self.kernel_dtb()), page)
+                    .ok()
+                    .flatten()
+                else {
+                    return false;
+                };
+                let Ok(pfn) = self.inspect_pfn(PfnSelector::Pfn(physical / PAGE_SIZE as u64))
+                else {
+                    return false;
+                };
+                let Some((_, pte)) = self_map.entries(page.0).last() else {
+                    return false;
+                };
+                pfn.page_location.name() != "ActiveAndValid" || pfn.pte_address != pte
+            })
     }
 
     fn classify_self_patch(

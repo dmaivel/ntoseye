@@ -18,7 +18,7 @@ Keeping this file:
 -->
 - On Windows 11 26200, `!heap` lists every heap of the process, where it listed only the process heap: the PEB holds only that one there, and `ntoseye` now reads ntdll's own heap list.
 - `!heap -x` gave an NT-heap block's user size 0x10 bytes short.
-- `!heap` decodes segment-heap LFH subsegments: on Windows 11 22631 every one failed with `field 'BucketRef' not found`, and blocks of a subsegment above 4 GiB were placed at the wrong offset, so `!heap -x` could not find them.
+- `!heap` decodes segment-heap LFH subsegments: on Windows 11 22631 every one failed with `field 'BucketRef' not found` and its busy counts were wrong, and on 22631 and 26200 blocks of a subsegment above 4 GiB were placed at the wrong offset, so `!heap -x` could not find them.
 - `!address` and `!address -summary` count every segment and large block of a heap as Heap, not only its first region.
 - Inlined calls into code from another object file of the module show the function's name, `combase!WaitCoalesced [inline]`, where `k` showed `combase!inlinee_0x81300001`, and `dv` shows such locals' types, where it showed `type(0x81300003)`.
 - `dv` shows an `HRESULT` local's type, where it showed `__unknown_t`.
@@ -47,10 +47,14 @@ Keeping this file:
 - Pages a process maps through a prototype PTE read when Windows' L1TF mitigation swizzles the PTE, where they read as `??` and their image's unwind data as paged out, so stacks through them fell back to scanning.
 - `!pte` shows a zero PTE inside a mapped view as the view's page, not as unmapped, goes on to the PTE when its page table is in transition, and refuses an address that is not canonical.
 - `!poolfind` and `!pool` take a block's state on a segment-heap LFH pool page from its subsegment's bitmap, where they called freed blocks Allocated (775 for 560 mutants), no longer read the subsegment's header as a block hiding the first real one, and show paged-pool blocks as PagedPool.
-- `!heap` decodes segment-heap LFH subsegments on Windows 11 26200, where blocks above 4 GiB were placed at the wrong offset, and reads each build's busy bitmap as it lays it out, where 22631's busy counts were wrong.
 - ARM64 stacks of processors stopped in an interrupt unwind through `nt!KxSwitchStackAndPlayInterrupt` to the interrupted thread, where they fell back to scanning.
 - The stack scan lists only addresses a call instruction precedes, where any code address on the stack passed.
 - `u` shows a negative ARM64 pre-index offset as `#-0x40`, where it showed a 64-bit value.
+- `!process`, `ps` and `!vm` count a process's handles across every free list of its handle table, where they read only the first and showed counts such as 4294967070.
+- `!pcr` decodes IDTR and GDTR for every processor from its PRCB, where it refused all but the halting one.
+- `!chkimg` skips a kernel image section Windows freed after boot and gave to other owners, such as INITKDBG on ARM64, where it counted the section as mismatches.
+- `ln` and symbolized addresses stop at the end of a symbol's section and of a private function, showing module+offset past them, where they named a function far beyond its end.
+- A register in an expression with a thread selected that runs on no processor says why it is unavailable, where it said the VM was running.
 
 ## Unreleased
 
