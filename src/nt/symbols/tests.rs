@@ -1569,6 +1569,24 @@ fn msvc_inline_sites_become_frames_with_their_own_locals() {
     );
 }
 
+/// A static of a private PDB has its type, as the source declares it
+/// (`static volatile LONG g_Counter`); the code's address has none.
+#[test]
+fn a_private_pdb_global_has_its_type() {
+    let (store, dtb) = load_fixture(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/msvc_inline.pdb"
+    ));
+    let (counter, _) = store
+        .find_symbol_with_module(dtb, "fixture!g_Counter")
+        .unwrap()
+        .unwrap();
+    let (type_data, size) = store.global_type(dtb, counter).unwrap();
+    assert_eq!(type_data.to_string(), "LONG");
+    assert_eq!(size, Some(4));
+    assert!(store.global_type(dtb, fixture_address(0x1000)).is_none());
+}
+
 /// A header reached only through inlined code (`wdm.h`, holding
 /// `_InlineInterlockedAdd`) has its checksum recorded, so a local copy of it
 /// is checked like any source file.

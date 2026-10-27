@@ -902,7 +902,23 @@ impl ReplState<'_> {
                 }) =
                     Expr::parse(&parsed.type_name).and_then(|expr| expr.evaluate(&self.ctx.target))
                 {
-                    error!("{}", untyped_symbol_message(&parsed.type_name, address));
+                    // A variable whose PDB records its type: a structure is
+                    // shown as `dt` shows its type at the variable, any
+                    // other value as `dx` shows it.
+                    let global = self
+                        .ctx
+                        .target
+                        .symbols
+                        .global_type(self.ctx.target.current_dtb(), address);
+                    match global {
+                        Some((ParsedType::Struct(name) | ParsedType::Union(name), _)) => {
+                            parsed.type_name = name;
+                            parsed.words.insert(0, format!("{:#x}", address.0));
+                            return self.dt(parsed);
+                        }
+                        Some(_) => return self.dx(&parsed.type_name),
+                        None => error!("{}", untyped_symbol_message(&parsed.type_name, address)),
+                    }
                 } else {
                     error!("type '{}' not found", parsed.type_name);
                 }

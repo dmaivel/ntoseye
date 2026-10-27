@@ -3,7 +3,7 @@
 
 use super::SymbolStore;
 use crate::{
-    base::types::Dtb,
+    base::types::{Dtb, VirtAddr},
     nt::layout::{EnumDef, FieldInfo, ParsedType, TypeInfo, aggregate_key},
 };
 use pdb2::{FallibleIterator, PrimitiveKind, TypeData, TypeFinder, TypeIndex};
@@ -257,6 +257,29 @@ impl SymbolStore {
             pdb2::TypeData::Procedure(_) => Ok(ptr_size),
             _ => Ok(0),
         }
+    }
+
+    /// The type of the global or static variable at `address`, and its
+    /// size when known, from the variable's record in its module's PDB:
+    /// a private PDB has them (a driver's own), a public one (Windows')
+    /// has none. `None` when no variable's record is at that address.
+    pub fn global_type(&self, dtb: Dtb, address: VirtAddr) -> Option<(ParsedType, Option<u64>)> {
+        let module = self.find_module_for_address(dtb, address)?;
+        let rva = u32::try_from(address.0.checked_sub(module.base_address.0)?).ok()?;
+        let index = *self.data_types.get(&module.guid)?.get(&rva)?;
+        let pdb = self.pdbs.get_mut(&module.guid)?;
+        let mut pdb_lock = pdb.lock();
+        let type_information = pdb_lock.type_information().ok()?;
+        let mut finder = type_information.finder();
+        let mut types = type_information.iter();
+        while types.next().ok()?.is_some() {
+            finder.update(&types);
+        }
+        let prefix = self.nested_type_prefix(module.guid);
+        let parsed = self
+            .resolve_type(module.guid, &finder, index, &prefix)
+            .ok()?;
+        Some((parsed, self.type_size(module.guid, &finder, index).ok()))
     }
 
     pub(super) fn resolve_type<'p>(

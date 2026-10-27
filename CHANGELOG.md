@@ -6,7 +6,10 @@ What changed in each release of ntoseye, newest first. The command-line tool, th
 Keeping this file:
 
 - Add a line under "## Unreleased" in the commit that makes the change users will notice: a new command, option or SDK API, changed behavior or output, a fixed bug, a removal. Refactors, tests, CI and docs rewording get none. Start the section at the top if it is not there.
-- Group the lines under "### Added", "### Added
+- Group the lines under "### Added", "
+- `dx` and `dt` show a global or static variable of a module whose PDB is private (your own driver's, or a virtio driver's) with its type: `dx balloon!GUID_DEVINTERFACE_BALLOON` reads the GUID's fields, where they asked for a cast. Public PDBs, such as Windows', still record no types for their variables.
+
+### Added
 
 - `!handle <handle> f` on a user-mode minidump shows the object information the dump records: a thread's or process's IDs, TEB or PEB, priority and exit status, an event's, mutant's or semaphore's state, and a section's size. The SDK has it as `UserHandle.object_info`.
 

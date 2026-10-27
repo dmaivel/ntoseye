@@ -416,7 +416,7 @@ enum Place {
 
 impl ReplState<'_> {
     /// `dx` on a line [`dx_request`] accepted.
-    fn dx(&mut self, raw: &str) -> Result<()> {
+    pub fn dx(&mut self, raw: &str) -> Result<()> {
         let args = parse_dx_args(raw).map_err(Error::DebugInfo)?;
         let text = args.text;
         // A grid shows each element's fields, so it reads two levels.
@@ -619,9 +619,10 @@ impl ReplState<'_> {
             // A register is an `unsigned __int64` in WinDbg's C++
             // expressions; any other untyped number is an integer, which
             // `dx` writes in decimal. A symbol or module name evaluates to
-            // its address with no type, which is not the value stored
-            // there: public symbols carry no type, so `dx` asks for one, as
-            // WinDbg's "No type (or void) for object" does.
+            // its address: a variable whose PDB records its type (a private
+            // PDB's) is the value stored there, and with none (public
+            // symbols carry none) `dx` asks for one, as WinDbg's "No type
+            // (or void) for object" does.
             ExprValue::Raw { value, address } => {
                 if matches!(expr, Expr::Register(_)) {
                     (
@@ -630,9 +631,21 @@ impl ReplState<'_> {
                         Some(8),
                     )
                 } else if let Some(address) = address {
-                    return Err(Error::InvalidExpression(untyped_symbol_message(
-                        text, *address,
-                    )));
+                    match self
+                        .ctx
+                        .target
+                        .symbols
+                        .global_type(self.ctx.target.current_dtb(), *address)
+                    {
+                        Some((type_data, byte_size)) => {
+                            (Place::Memory(*address), type_data, byte_size)
+                        }
+                        None => {
+                            return Err(Error::InvalidExpression(untyped_symbol_message(
+                                text, *address,
+                            )));
+                        }
+                    }
                 } else {
                     return Ok(DxLine {
                         name: Some(text.to_string()),

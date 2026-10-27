@@ -121,6 +121,9 @@ type SymbolRecords = SmallVec<[IndexedSymbol; 1]>;
 /// Symbol name -> its records, for one PDB. The name is shared with the
 /// PDB's [`AddressEntry`] list rather than copied into it.
 type SymbolRvas = FxHashMap<Arc<str>, SymbolRecords>;
+/// RVA -> the type of the global or static variable there, from its
+/// `S_GDATA32`/`S_LDATA32` record; public symbols carry none.
+type DataTypes = FxHashMap<u32, TypeIndex>;
 
 /// One address-bearing record of the RVA-sorted index behind
 /// [`SymbolStore::closest_symbol`]. Records sharing an RVA are ordered by
@@ -226,6 +229,8 @@ pub struct SymbolStore {
     /// GUID -> the image sections' RVA ranges, sorted: a symbol names no
     /// address in another section.
     sections: DashMap<u128, Vec<(u32, u32)>>,
+    /// GUID -> the types of its PDB's global and static variables.
+    data_types: DashMap<u128, DataTypes>,
     /// GUID -> recorded source file -> the checksum the compiler recorded for
     /// its contents. Files without one have no entry.
     source_checksums: DashMap<u128, FxHashMap<String, SourceChecksum>>,
@@ -988,6 +993,7 @@ impl SymbolStore {
             source_lines: DashMap::new(),
             procedures: DashMap::new(),
             sections: DashMap::new(),
+            data_types: DashMap::new(),
             source_checksums: DashMap::new(),
             local_source_digests: Mutex::new(HashMap::new()),
             index_diagnostics: DashMap::new(),
@@ -1458,6 +1464,7 @@ impl SymbolStore {
             self.source_lines.remove(&guid);
             self.procedures.remove(&guid);
             self.sections.remove(&guid);
+            self.data_types.remove(&guid);
             self.source_checksums.remove(&guid);
             self.index_diagnostics.remove(&guid);
             self.wpp_messages.remove(&guid);

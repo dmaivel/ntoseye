@@ -4,9 +4,9 @@
 use std::borrow::Cow;
 
 use super::{
-    AddressEntry, IndexedSymbol, LoadedModule, ProcedureSpan, SourceChecksum, SourceLineEntry,
-    SourceLocation, SymbolIndex, SymbolIndexDiagnostic, SymbolRvas, SymbolStore, SymbolVisibility,
-    source::recorded_checksum,
+    AddressEntry, DataTypes, IndexedSymbol, LoadedModule, ProcedureSpan, SourceChecksum,
+    SourceLineEntry, SourceLocation, SymbolIndex, SymbolIndexDiagnostic, SymbolRvas, SymbolStore,
+    SymbolVisibility, source::recorded_checksum,
 };
 use crate::base::error::{Error, Result};
 use crate::base::types::Dtb;
@@ -34,6 +34,7 @@ struct ParsedSymbols {
     source_lines: Vec<SourceLineEntry>,
     procedures: Vec<ProcedureSpan>,
     sections: Vec<(u32, u32)>,
+    data_types: DataTypes,
     source_checksums: FxHashMap<String, SourceChecksum>,
     wpp_messages: HashMap<MessageKey, Arc<TmfMessage>>,
     diagnostics: Vec<SymbolIndexDiagnostic>,
@@ -232,6 +233,7 @@ impl SymbolStore {
         let mut rvas = FxHashMap::default();
         let mut source_lines = Vec::new();
         let mut procedures = Vec::new();
+        let mut data_types = DataTypes::default();
         let mut source_checksums = FxHashMap::default();
         let mut wpp_messages = HashMap::new();
 
@@ -246,6 +248,7 @@ impl SymbolStore {
             &mut rvas,
             &mut source_lines,
             &mut procedures,
+            &mut data_types,
             &mut source_checksums,
             &mut wpp_messages,
             &mut diagnostics,
@@ -260,6 +263,7 @@ impl SymbolStore {
             x86,
             &mut strings,
             &mut rvas,
+            &mut data_types,
             &mut diagnostics,
         )?;
 
@@ -269,6 +273,7 @@ impl SymbolStore {
             source_lines,
             procedures,
             sections: section_ranges(&mut pdb_lock),
+            data_types,
             source_checksums,
             wpp_messages,
             diagnostics,
@@ -332,6 +337,7 @@ impl SymbolStore {
         self.source_lines.insert(guid, parsed.source_lines);
         self.procedures.insert(guid, parsed.procedures);
         self.sections.insert(guid, parsed.sections);
+        self.data_types.insert(guid, parsed.data_types);
         self.source_checksums.insert(guid, parsed.source_checksums);
         self.index_types
             .insert(guid, SymbolIndex::from_names(types.type_strings));
@@ -445,6 +451,7 @@ fn parse_module_streams(
     rvas: &mut SymbolRvas,
     source_lines: &mut Vec<SourceLineEntry>,
     procedures: &mut Vec<ProcedureSpan>,
+    data_types: &mut DataTypes,
     source_checksums: &mut FxHashMap<String, SourceChecksum>,
     wpp_messages: &mut HashMap<MessageKey, Arc<TmfMessage>>,
     diagnostics: &mut Vec<SymbolIndexDiagnostic>,
@@ -548,6 +555,9 @@ fn parse_module_streams(
                                     Some((procedure.name.to_string().into(), procedure.offset))
                                 }
                                 pdb2::SymbolData::Data(data) => {
+                                    if let Some(rva) = data.offset.to_rva(address_map) {
+                                        data_types.insert(rva.0, data.type_index);
+                                    }
                                     Some((data.name.to_string().into(), data.offset))
                                 }
                                 _ => None,
@@ -742,6 +752,7 @@ fn parse_public_symbols(
     x86: bool,
     strings: &mut Vec<String>,
     rvas: &mut SymbolRvas,
+    data_types: &mut DataTypes,
     diagnostics: &mut Vec<SymbolIndexDiagnostic>,
 ) -> Result<()> {
     let offset_limit = section_offset_limit(pdb);
@@ -762,6 +773,15 @@ fn parse_public_symbols(
                     insert_symbol_rva(rvas, &name, rva.0, SymbolVisibility::Public, None);
                 }
                 strings.push(name);
+            }
+            // A global variable's record in the global stream: its name is
+            // a public symbol's too, but only this record has its type.
+            Ok(pdb2::SymbolData::Data(data)) => {
+                if data.offset.offset <= offset_limit
+                    && let Some(rva) = data.offset.to_rva(address_map)
+                {
+                    data_types.entry(rva.0).or_insert(data.type_index);
+                }
             }
             Ok(_) => {}
             Err(error) => record_index_diagnostic(
