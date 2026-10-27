@@ -12,6 +12,10 @@ Keeping this file:
 - Link only with absolute https://ntoseye.com/... URLs. The same text is shown in the GitHub release, in this file on GitHub, and on the docs site, which each resolve a relative link differently.
 - To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes, under the tag as the release title.
 -->
+- On Windows 11 26200, `!heap` lists every heap of the process, where it listed only the process heap: the PEB holds only that one there, and `ntoseye` now reads ntdll's own heap list.
+- `!heap -x` gave an NT-heap block's user size 0x10 bytes short.
+- `!heap` decodes segment-heap LFH subsegments: on Windows 11 22631 every one failed with `field 'BucketRef' not found`, and blocks of a subsegment above 4 GiB were placed at the wrong offset, so `!heap -x` could not find them.
+- `!address` and `!address -summary` count every segment and large block of a heap as Heap, not only its first region.
 
 ## Unreleased
 

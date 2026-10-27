@@ -200,7 +200,7 @@ impl Process {
         })
     }
 
-    /// The heaps in the PEB of this process.
+    /// The heaps of this process.
     #[getter]
     fn heaps(&self, py: Python<'_>) -> PyResult<Heaps> {
         self.owner.check(py)?;
@@ -261,7 +261,7 @@ impl Regions {
     }
 }
 
-/// The PEB heap list of a process.
+/// The heap list of a process.
 #[pyclass(module = "ntoseye")]
 pub struct Heaps {
     pub owner: Owner,
@@ -307,7 +307,7 @@ impl Heaps {
     }
 }
 
-/// One heap of a process, from its PEB heap list.
+/// One heap of a process, from its heap list.
 #[handle(
     record = HeapInfo,
     key = address,

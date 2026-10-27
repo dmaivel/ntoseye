@@ -13,7 +13,7 @@ use crate::base::error::{Error, Result};
 use crate::base::memory::{AddressSpace, MemoryOps};
 use crate::base::types::{Dtb, VirtAddr};
 use crate::nt::layout::{ParsedType, TypeInfo, le_uint};
-use crate::nt::target::{DiagnosticValue, ListCursor, Target};
+use crate::nt::target::{DiagnosticValue, ListCursor, ListTermination, Target};
 
 pub const NT_HEAP_SIGNATURE: u32 = 0xEEFF_EEFF;
 pub const SEGMENT_HEAP_SIGNATURE: u32 = 0xDDEE_DDEE;
@@ -130,7 +130,7 @@ pub struct ProcessHeap {
     pub address: VirtAddr,
     pub kind: HeapKind,
     /// Classification can fail when one heap pointer is unreadable; callers
-    /// can keep that item in a listing instead of losing the whole PEB list.
+    /// can keep that item in a listing instead of losing the whole list.
     pub classification_error: Option<String>,
 }
 
@@ -289,15 +289,68 @@ impl<'a> HeapReader<'a> {
         Ok(records)
     }
 
-    /// The heaps `_PEB.ProcessHeaps` lists, classified by signature. `peb` is
-    /// the 32-bit PEB for a WOW64 process.
+    /// The process's heaps, in creation order, classified by signature. `peb`
+    /// is the 32-bit PEB for a WOW64 process.
     pub fn process_heaps(&self, peb: VirtAddr) -> Result<Vec<ProcessHeap>> {
         self.process_heaps_with_status(peb).map(|(heaps, _)| heaps)
     }
 
     /// As [`Self::process_heaps`], also reporting whether `MAX_HEAPS` clipped
-    /// the advertised PEB list.
+    /// the list.
     pub fn process_heaps_with_status(&self, peb: VirtAddr) -> Result<(Vec<ProcessHeap>, bool)> {
+        let (addresses, truncated) = match self.heap_descriptor_list()? {
+            Some(list) => list,
+            None => self.peb_heap_array(peb)?,
+        };
+        let heaps = addresses
+            .into_iter()
+            .enumerate()
+            .map(|(index, address)| {
+                let (kind, classification_error) = match self.classify(address) {
+                    Ok(kind) => (kind, None),
+                    Err(error) => (HeapKind::Unknown(0), Some(error.to_string())),
+                };
+                ProcessHeap {
+                    index,
+                    address,
+                    kind,
+                    classification_error,
+                }
+            })
+            .collect();
+        Ok((heaps, truncated))
+    }
+
+    /// The heaps on `ntdll!RtlpProcessHeaps`, a list of
+    /// `_RTLP_PROCESS_HEAP_DESCRIPTOR`s, and whether `MAX_HEAPS` clipped it.
+    /// An ntdll that keeps this list (Windows 11 build 26200's does, 22631's
+    /// does not) leaves `_PEB.ProcessHeaps` pointing at a static one-entry
+    /// buffer that names only the process heap. None when this ntdll has no
+    /// such list.
+    fn heap_descriptor_list(&self) -> Result<Option<(Vec<VirtAddr>, bool)>> {
+        let (Ok(descriptor), Ok(head)) = (
+            self.layout("_RTLP_PROCESS_HEAP_DESCRIPTOR"),
+            self.symbol("RtlpProcessHeaps"),
+        ) else {
+            return Ok(None);
+        };
+        let link = descriptor.offset("DescriptorLink")? as u64;
+        let heap = descriptor.offset("Heap")? as u64;
+        let mut heaps = Vec::new();
+        let mut cursor = ListCursor::new(head, MAX_HEAPS);
+        cursor.advance(Ok(VirtAddr(self.read_pointer(head)?)));
+        while let Some(entry) = cursor.take_current() {
+            let record = VirtAddr(entry.0.wrapping_sub(link));
+            heaps.push(VirtAddr(self.read_pointer(record + heap)?));
+            cursor.advance(Ok(VirtAddr(self.read_pointer(entry)?)));
+        }
+        let truncated = cursor.finish() == ListTermination::Bound;
+        Ok(Some((heaps, truncated)))
+    }
+
+    /// The heaps of the `_PEB.ProcessHeaps` array, and whether `MAX_HEAPS`
+    /// clipped `NumberOfHeaps`.
+    fn peb_heap_array(&self, peb: VirtAddr) -> Result<(Vec<VirtAddr>, bool)> {
         let peb_layout = self.layout("_PEB")?;
         let image = self.read_struct(&peb_layout, peb)?;
         let count = peb_layout.read(&image, 0, "NumberOfHeaps")? as usize;
@@ -307,24 +360,11 @@ impl<'a> HeapReader<'a> {
         }
         let truncated = count > MAX_HEAPS;
         let count = count.min(MAX_HEAPS);
-        let pointers = self.read(table, count * self.pointer_size)?;
-        let heaps = pointers
+        let heaps = self
+            .read(table, count * self.pointer_size)?
             .chunks_exact(self.pointer_size)
-            .enumerate()
-            .map(|(index, bytes)| {
-                let address = VirtAddr(le_uint(bytes));
-                let (kind, classification_error) = match self.classify(address) {
-                    Ok(kind) => (kind, None),
-                    Err(error) => (HeapKind::Unknown(0), Some(error.to_string())),
-                };
-                Ok(ProcessHeap {
-                    index,
-                    address,
-                    kind,
-                    classification_error,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+            .map(|bytes| VirtAddr(le_uint(bytes)))
+            .collect();
         Ok((heaps, truncated))
     }
 
@@ -486,11 +526,12 @@ impl NtEntry {
     }
 
     /// The number of bytes that the caller requested: the block size minus
-    /// the header and the unused bytes.
+    /// the unused bytes, which ntdll counts with the header's overhead in
+    /// them (an x64 header's first qword holds the previous block's data, so
+    /// only its second is overhead).
     #[record(getter)]
     pub fn user_size(&self) -> u64 {
         self.size
-            .saturating_sub(self.granule)
             .saturating_sub(u64::from(self.unused_bytes & !NT_ENTRY_LFH_BLOCK))
     }
 }
@@ -996,8 +1037,9 @@ pub struct LfhSubsegment {
     pub block_size: u64,
     pub block_count: u32,
     pub free_count: u32,
-    /// The LFH bucket of the subsegment.
-    pub bucket: u16,
+    /// The LFH bucket of the subsegment. None while a subsegment without
+    /// `BucketRef` is in its delayed-free state, which hides its owner.
+    pub bucket: Option<u16>,
     pub first_block: VirtAddr,
     /// The `BlockBitmap` words (a qword on x64, a dword on x86), each
     /// holding `blocks_per_word` blocks: the low bit for a block is set
@@ -1273,16 +1315,15 @@ impl HeapReader<'_> {
         })
     }
 
-    /// Decode the LFH subsegment occupying a page range. The block geometry
-    /// is XORed with the LFH key and the subsegment's page number.
+    /// Decode the LFH subsegment occupying a page range (see
+    /// [`lfh_block_offsets`] for its block geometry).
     pub fn lfh_subsegment(&self, heap: &SegmentHeap, range: &PageRange) -> Result<LfhSubsegment> {
         let layout = self.layout("_HEAP_LFH_SUBSEGMENT")?;
         let image = self.read_struct(&layout, range.address)?;
         let block_count = layout.read(&image, 0, "BlockCount")? as u32;
         let encoded = layout.read(&image, 0, "BlockOffsets")? as u32;
-        let decoded = encoded ^ heap.encoding_keys.lfh_key as u32 ^ (range.address.0 >> 12) as u32;
-        let block_size = u64::from(decoded & 0xFFFF);
-        let first_offset = u64::from(decoded >> 16);
+        let (block_size, first_offset) =
+            lfh_block_offsets(encoded, heap.encoding_keys.lfh_key, range.address);
         let word_size = layout
             .0
             .fields
@@ -1304,16 +1345,37 @@ impl HeapReader<'_> {
             .chunks_exact(word_size)
             .map(le_uint)
             .collect();
+        let bucket = if layout.0.fields.contains_key("BucketRef") {
+            Some(layout.read(&image, 0, "BucketRef")? as u16)
+        } else {
+            self.lfh_owner_bucket(&layout, &image)?
+        };
         Ok(LfhSubsegment {
             address: range.address,
             block_size,
             block_count,
             free_count: layout.read(&image, 0, "FreeCount")? as u32,
-            bucket: layout.read(&image, 0, "BucketRef")? as u16,
+            bucket,
             first_block: range.address + first_offset,
             bitmap,
             blocks_per_word,
         })
+    }
+
+    /// The bucket of an LFH subsegment whose layout has no `BucketRef`
+    /// (Windows 11 22631's): `Owner` points at the bucket's or an affinity
+    /// slot's `_HEAP_LFH_SUBSEGMENT_OWNER`, which carries `BucketIndex`.
+    /// `Owner` shares its word with `DelayFree`; while that bit is set the
+    /// word counts delayed frees and names no owner, so the bucket is
+    /// unknown.
+    fn lfh_owner_bucket(&self, layout: &Layout, image: &[u8]) -> Result<Option<u16>> {
+        let delay_free = self.field_layout(layout, "DelayFree")?;
+        if delay_free.read(image, layout.offset("DelayFree")?, "DelayFree")? != 0 {
+            return Ok(None);
+        }
+        let owner_layout = self.layout("_HEAP_LFH_SUBSEGMENT_OWNER")?;
+        let owner = self.read_struct(&owner_layout, VirtAddr(layout.read(image, 0, "Owner")?))?;
+        Ok(Some(owner_layout.read(&owner, 0, "BucketIndex")? as u16))
     }
 }
 
@@ -1373,6 +1435,47 @@ pub enum BlockMatch {
 }
 
 impl HeapReader<'_> {
+    /// The address ranges `heap` reserved, as `(start, end)`, each its own
+    /// allocation: an NT heap's segments (the first holds the `_HEAP`) and
+    /// virtual blocks; a segment heap's `_SEGMENT_HEAP`, page segments, and
+    /// large allocations. None for a heap of unknown kind.
+    pub fn heap_extents(&self, heap: &ProcessHeap) -> Result<Vec<(VirtAddr, VirtAddr)>> {
+        match heap.kind {
+            HeapKind::Nt => {
+                let nt = self.nt_heap(heap.address)?;
+                let segments = nt
+                    .segments
+                    .iter()
+                    .map(|segment| (segment.base, segment.end()));
+                let blocks = nt.virtual_blocks.iter().map(|block| {
+                    let size = block.reserve_size.max(block.commit_size);
+                    (block.entry, block.entry + size)
+                });
+                Ok(segments.chain(blocks).collect())
+            }
+            HeapKind::Segment => {
+                let segment = self.segment_heap(heap.address)?;
+                let header = self.layout("_SEGMENT_HEAP")?.size() as u64;
+                let pages = segment.contexts.iter().flat_map(|context| {
+                    let size = context.segment_size();
+                    context
+                        .segments
+                        .iter()
+                        .map(move |page| (page.address, page.address + size))
+                });
+                let large = segment
+                    .large_allocations
+                    .iter()
+                    .map(|large| (large.address, large.address + large.size()));
+                Ok(std::iter::once((segment.address, segment.address + header))
+                    .chain(pages)
+                    .chain(large)
+                    .collect())
+            }
+            HeapKind::Unknown(_) => Ok(Vec::new()),
+        }
+    }
+
     pub fn find_in_nt(&self, heap: &NtHeap, address: VirtAddr) -> Result<Option<BlockMatch>> {
         for block in &heap.virtual_blocks {
             if (block.entry.0..block.entry.0 + block.reserve_size.max(block.commit_size))
@@ -1495,14 +1598,14 @@ impl HeapReader<'_> {
 pub struct HeapSummaryDetail {
     pub peb: VirtAddr,
     pub heaps: Vec<HeapInfo>,
-    /// True when the PEB advertised more than `MAX_HEAPS` entries.
+    /// True when the heap list holds more than `MAX_HEAPS` entries.
     pub truncated: bool,
 }
 
-/// One heap of a process, from its PEB heap list (`!heap -s`).
+/// One heap of a process, from its heap list (`!heap -s`).
 #[record(impl)]
 pub struct HeapInfo {
-    /// The index of the heap in the PEB list.
+    /// The index of the heap in the process's heap list.
     pub index: usize,
     /// The heap address.
     pub address: VirtAddr,
@@ -1550,7 +1653,7 @@ pub struct HeapStats {
 /// One decoded heap (`!heap -h|-a <heap>`, `Heap.inspect()`).
 #[record(impl)]
 pub struct HeapDetail {
-    /// Position in the PEB heap list.
+    /// Position in the process's heap list.
     pub index: usize,
     pub address: VirtAddr,
     #[record(skip)]
@@ -1706,7 +1809,7 @@ pub struct HeapBlock {
 /// A heap, identified by its PEB-list position, address, and kind.
 #[record(impl)]
 pub struct HeapIdentity {
-    /// Position in the PEB heap list.
+    /// Position in the process's heap list.
     pub index: usize,
     pub address: VirtAddr,
     #[record(skip)]
@@ -1736,8 +1839,8 @@ pub struct HeapBlockSearch {
     pub address: VirtAddr,
     /// Whether a heap contains the address.
     pub found: bool,
-    /// Whether the PEB listed more heaps than the search bound, in which
-    /// case the search may have missed the block.
+    /// Whether the process listed more heaps than the search bound, in
+    /// which case the search may have missed the block.
     pub truncated: bool,
     /// The heap that contains the address. None if no heap contains it.
     pub heap: Option<HeapIdentity>,
@@ -1759,7 +1862,7 @@ pub struct HeapBlockSearch {
 /// A heap that `!heap -x` could not search, and why.
 #[derive(Clone, Debug)]
 pub struct HeapSearchFailure {
-    /// Position in the PEB heap list.
+    /// Position in the process's heap list.
     pub index: usize,
     pub address: VirtAddr,
     pub kind: HeapKind,
@@ -2062,7 +2165,7 @@ impl Target {
         Ok((process.dtb, peb, wow64))
     }
 
-    /// Decode the attached process's PEB heap list.  `stats` is unavailable
+    /// Decode the attached process's heap list.  `stats` is unavailable
     /// for an individual heap when its signature, layout, memory, or required
     /// symbols cannot be read; other heaps remain in the returned list.
     pub fn heap_summary(&self) -> Result<HeapSummaryDetail> {
@@ -2103,7 +2206,7 @@ impl Target {
                 HeapSelector::Address(address) => address.0,
             };
             Error::DebugInfo(format!(
-                "{value:#x} is neither a heap index (0..{}) nor a heap in the PEB list",
+                "{value:#x} is neither a heap index (0..{}) nor a heap of the process",
                 heaps.len()
             ))
         })?;
@@ -2219,6 +2322,15 @@ impl Target {
     }
 }
 
+/// An LFH subsegment's block size and the offset of its first block, from
+/// its `BlockOffsets`: XORed with the LFH key and with the subsegment's
+/// address truncated to 32 bits and shifted down a page, as the heap does,
+/// not with its full page number.
+fn lfh_block_offsets(encoded: u32, lfh_key: u64, subsegment: VirtAddr) -> (u64, u64) {
+    let decoded = encoded ^ lfh_key as u32 ^ (subsegment.0 as u32 >> 12);
+    (u64::from(decoded & 0xFFFF), u64::from(decoded >> 16))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2254,7 +2366,7 @@ mod tests {
         assert!(entry.busy());
         assert!(entry.checksum_ok);
         assert_eq!(entry.unused_bytes, 0x14);
-        assert_eq!(entry.user_size(), 0x50 - 0x10 - 0x14);
+        assert_eq!(entry.user_size(), 0x50 - 0x14);
 
         let corrupt = decode_nt_entry(VirtAddr(0x1190740), raw ^ 0x100, Some(encoding), 16);
         assert!(!corrupt.checksum_ok);
@@ -2264,7 +2376,24 @@ mod tests {
         let x86 = decode_nt_entry(VirtAddr(0x1190740), raw, Some(encoding), 8);
         assert_eq!(x86.size, 0x28);
         assert_eq!(x86.user(), VirtAddr(0x1190748));
-        assert_eq!(x86.user_size(), 0x28 - 8 - 0x14);
+        assert_eq!(x86.user_size(), 0x28 - 0x14);
+    }
+
+    /// Two subsegments of an ARM64 Windows 11 charmap's process heap: 83
+    /// blocks of 0x30 after 0x50 bytes of header and bitmap, and 248 of 0x10
+    /// after 0x80. The page number's bits above the low 32 of the address
+    /// take no part.
+    #[test]
+    fn lfh_block_offsets_decode_with_the_truncated_page_number() {
+        let key = 0x4055_f3e2_076d_0278;
+        assert_eq!(
+            lfh_block_offsets(0x0731_bc5b, key, VirtAddr(0x250_cbe1_3000)),
+            (0x30, 0x50)
+        );
+        assert_eq!(
+            lfh_block_offsets(0x07e1_bc71, key, VirtAddr(0x250_cbe1_9000)),
+            (0x10, 0x80)
+        );
     }
 
     #[test]
@@ -2274,7 +2403,7 @@ mod tests {
             block_size: 0x30,
             block_count: 40,
             free_count: 3,
-            bucket: 0,
+            bucket: Some(0),
             first_block: VirtAddr(0x1060),
             // Blocks 0 and 33 busy; the high halves are not block state.
             bitmap: vec![0xFFFF_FFFF_0000_0001, 0xFFFF_FFFF_0000_0002],

@@ -3,16 +3,17 @@
 //! of each the dump captured.
 //!
 //! Usage comes only from what the dump already holds: its module list
-//! (images), its threads' stacks and TEBs, the PEB, and the heaps the PEB's
-//! `ProcessHeaps` array names when that array was captured. A region none
-//! of these explain is `<unknown>`, not guessed at.
+//! (images), its threads' stacks and TEBs, the PEB, and the process's heaps
+//! with every range they reserved, as far as the dump captured their
+//! headers. A region none of these explain is `<unknown>`, not guessed at.
 
 use ntoseye_macros::record;
 
 use crate::base::error::{Error, Result};
-use crate::base::memory::MemoryOps;
+
 use crate::base::types::VirtAddr;
 use crate::nt::target::Target;
+use crate::nt::target::heap::HeapReader;
 use crate::nt::target::mm::{
     MEM_COMMIT, MEM_FREE, MEM_IMAGE, memory_state_name, memory_type_name, page_protection_name,
 };
@@ -27,9 +28,6 @@ const PEB_SPAN: u64 = 0x1000;
 /// a TEB (the `NT_TIB` layout is part of the Windows ABI).
 const TIB_STACK_BASE_SLOT: u64 = 1;
 const TIB_STACK_LIMIT_SLOT: u64 = 2;
-/// The most `ProcessHeaps` entries read; the loader's own limit is far
-/// lower.
-const MAX_PROCESS_HEAPS: u32 = 1024;
 
 /// What a region of the address space is used for: `Free`, `Image`,
 /// `Stack`, `TEB`, `PEB`, `Heap`, or `<unknown>` (in use, for nothing the
@@ -73,8 +71,28 @@ pub struct UsageSources {
     /// `(TEB, thread)` of each thread.
     pub tebs: Vec<(u64, String)>,
     pub peb: Option<u64>,
-    /// The heap handles `PEB.ProcessHeaps` holds, in its order.
-    pub heaps: Vec<u64>,
+    /// The process's heaps, in `!heap`'s order.
+    pub heaps: Vec<HeapSource>,
+}
+
+/// A heap of the process and the ranges it reserved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeapSource {
+    pub handle: u64,
+    /// `(start, end)` of each range the heap reserved: its segments, and its
+    /// blocks too large for one. Empty when the heap could not be decoded,
+    /// which leaves only the allocation holding its handle attributed.
+    pub extents: Vec<(u64, u64)>,
+}
+
+impl HeapSource {
+    fn contains(&self, address: u64) -> bool {
+        self.handle == address
+            || self
+                .extents
+                .iter()
+                .any(|(start, end)| (*start..*end).contains(&address))
+    }
 }
 
 /// One region of a user-mode minidump's memory-info list (`!address`),
@@ -222,11 +240,11 @@ impl UsageSources {
         }
         self.heaps
             .iter()
-            .position(|heap| *heap == address)
+            .position(|heap| heap.contains(address))
             .map(|index| {
                 (
                     RegionUsage::Heap,
-                    Some(heap_label(index, self.heaps[index])),
+                    Some(heap_label(index, self.heaps[index].handle)),
                 )
             })
     }
@@ -237,9 +255,12 @@ fn heap_label(index: usize, handle: u64) -> String {
 }
 
 /// Attribute each region of a memory-info list (sorted by base) to its use.
-/// A stack, heap, or image covers its whole allocation (every region of the
-/// allocation holding its base), as `VirtualAlloc` reserved it: a stack's
-/// guard and reserved pages are the stack's too.
+/// A stack, heap range, or image covers its whole allocation (every region
+/// of the allocation holding its base), as `VirtualAlloc` reserved it: a
+/// stack's guard and reserved pages are the stack's too.
+/// A region inside a heap range is that heap's even when the allocation
+/// holding it starts in another heap's range: the segment heap carves page
+/// segments of different heaps out of one reservation.
 pub fn attribute_regions(
     regions: &[MemoryRegion],
     sources: &UsageSources,
@@ -262,9 +283,17 @@ pub fn attribute_regions(
         .heaps
         .iter()
         .enumerate()
-        .filter_map(|(index, heap)| {
-            let region = containing(*heap)?;
-            (region.state != MEM_FREE).then_some((region.allocation_base, index, *heap))
+        .flat_map(|(index, heap)| {
+            std::iter::once(heap.handle)
+                .chain(heap.extents.iter().map(|(start, _)| *start))
+                .filter_map(move |start| {
+                    let region = containing(start)?;
+                    (region.state != MEM_FREE).then_some((
+                        region.allocation_base,
+                        index,
+                        heap.handle,
+                    ))
+                })
         })
         .collect();
     regions
@@ -326,6 +355,14 @@ fn region_usage(
         .find(|(allocation, _)| *allocation == region.allocation_base)
     {
         return (RegionUsage::Stack, Some((*thread).to_string()));
+    }
+    if let Some(index) = sources
+        .heaps
+        .iter()
+        .position(|heap| heap.contains(region.base))
+    {
+        let handle = sources.heaps[index].handle;
+        return (RegionUsage::Heap, Some(heap_label(index, handle)));
     }
     if let Some((_, index, heap)) = heap_allocations
         .iter()
@@ -442,7 +479,7 @@ pub fn human_size(bytes: u64) -> String {
 
 impl Target {
     /// What the dump shows of the address space's users: modules, thread
-    /// stacks and TEBs, the PEB, and the heaps its `ProcessHeaps` names.
+    /// stacks and TEBs, the PEB, and the heaps `!heap` lists.
     pub fn user_usage_sources(&self) -> Result<UsageSources> {
         let info = self.user_dump_info().ok_or_else(not_a_user_dump)?;
         let memory = self.context_memory();
@@ -495,7 +532,21 @@ impl Target {
         }
         sources.peb = self.user_process_peb();
         if let Some(peb) = sources.peb {
-            sources.heaps = self.user_process_heaps(VirtAddr(peb)).unwrap_or_default();
+            let reader = HeapReader::new(self, self.current_dtb(), false);
+            sources.heaps = reader
+                .process_heaps(VirtAddr(peb))
+                .unwrap_or_default()
+                .iter()
+                .map(|heap| HeapSource {
+                    handle: heap.address.0,
+                    extents: reader
+                        .heap_extents(heap)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(start, end)| (start.0, end.0))
+                        .collect(),
+                })
+                .collect();
         }
         Ok(sources)
     }
@@ -516,26 +567,6 @@ impl Target {
             )
             .find_map(|teb| self.user_peb(types, teb).ok())
             .map(|peb| peb.0)
-    }
-
-    /// The heap handles of `PEB.ProcessHeaps`, when the PEB and the array
-    /// are captured.
-    fn user_process_heaps(&self, peb: VirtAddr) -> Result<Vec<u64>> {
-        let types = self.user_mode_types(self.current_dtb())?;
-        let peb = types.struct_at("_PEB", peb)?;
-        let count = peb
-            .read_field::<u32>("NumberOfHeaps")?
-            .min(MAX_PROCESS_HEAPS);
-        let array = peb.read_pointer("ProcessHeaps")?;
-        let mut bytes = vec![0u8; count as usize * 8];
-        self.context_memory().read_bytes(array, &mut bytes)?;
-        Ok(bytes
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|chunk| u64::from_le_bytes(*chunk))
-            .filter(|heap| *heap != 0)
-            .collect())
     }
 
     /// The regions the dump's memory-info list records, attributed to their
@@ -648,7 +679,8 @@ mod tests {
     #[test]
     fn a_stack_covers_its_whole_allocation_and_other_regions_keep_their_own_use() {
         // A stack reservation (reserved, guard, committed), its TEB, the
-        // PEB, an image, a heap, and an unexplained private region.
+        // PEB, an image, a heap whose second segment is an allocation of its
+        // own, and an unexplained private region.
         let mut guard = region(0x10_2000, 0x3000, 0x10_0000, MEM_COMMIT, MEM_PRIVATE);
         guard.protect = PAGE_READWRITE | PAGE_GUARD;
         let regions = [
@@ -663,6 +695,8 @@ mod tests {
             region(0x40_0000, 0x1_0000, 0x40_0000, MEM_COMMIT, MEM_PRIVATE),
             region(0x41_0000, 0x1_0000, 0x40_0000, MEM_RESERVE, MEM_PRIVATE),
             region(0x50_0000, 0x1000, 0x50_0000, MEM_COMMIT, MEM_PRIVATE),
+            region(0x60_0000, 0x1000, 0x60_0000, MEM_COMMIT, MEM_PRIVATE),
+            region(0x60_1000, 0xf000, 0x60_0000, MEM_RESERVE, MEM_PRIVATE),
         ];
         let sources = UsageSources {
             modules: vec![(0x30_0000, 0x30_5000, "app.exe".into())],
@@ -673,7 +707,10 @@ mod tests {
             }],
             tebs: vec![(0x20_1000, "~0; 10.20".into())],
             peb: Some(0x20_0000),
-            heaps: vec![0x40_0000],
+            heaps: vec![HeapSource {
+                handle: 0x40_0000,
+                extents: vec![(0x40_0000, 0x42_0000), (0x60_0000, 0x61_0000)],
+            }],
         };
         let attributed = attribute_regions(&regions, &sources, &[range(0x10_c000, 0x4000)]);
         let usages: Vec<_> = attributed
@@ -694,6 +731,8 @@ mod tests {
                 (RegionUsage::Heap, Some("heap 0; handle 0x400000")),
                 (RegionUsage::Heap, Some("heap 0; handle 0x400000")),
                 (RegionUsage::Unknown, None),
+                (RegionUsage::Heap, Some("heap 0; handle 0x400000")),
+                (RegionUsage::Heap, Some("heap 0; handle 0x400000")),
             ]
         );
         assert_eq!(attributed[3].captured, 0x4000);
@@ -704,7 +743,45 @@ mod tests {
         };
         assert_eq!(map.region_at(0x10_5000).unwrap().region.base, 0x10_5000);
         assert_eq!(map.region_at(0x10_4fff).unwrap().region.base, 0x10_2000);
-        assert!(map.region_at(0x60_0000).is_none());
+        assert!(map.region_at(0x70_0000).is_none());
+    }
+
+    #[test]
+    fn a_heap_range_inside_another_heaps_reservation_is_its_own() {
+        // One reservation holding a page segment of heap 0, then one of
+        // heap 1, as the segment heap carves them.
+        let regions = [
+            region(0x80_0000, 0x1_0000, 0x80_0000, MEM_COMMIT, MEM_PRIVATE),
+            region(0x81_0000, 0xf_0000, 0x80_0000, MEM_RESERVE, MEM_PRIVATE),
+            region(0x90_0000, 0x1000, 0x80_0000, MEM_COMMIT, MEM_PRIVATE),
+            region(0x90_1000, 0xf_f000, 0x80_0000, MEM_RESERVE, MEM_PRIVATE),
+        ];
+        let sources = UsageSources {
+            heaps: vec![
+                HeapSource {
+                    handle: 0x70_0000,
+                    extents: vec![(0x80_0000, 0x90_0000)],
+                },
+                HeapSource {
+                    handle: 0x60_0000,
+                    extents: vec![(0x90_0000, 0xa0_0000)],
+                },
+            ],
+            ..UsageSources::default()
+        };
+        let details: Vec<_> = attribute_regions(&regions, &sources, &[])
+            .into_iter()
+            .map(|region| region.detail)
+            .collect();
+        assert_eq!(
+            details,
+            [
+                Some("heap 0; handle 0x700000".into()),
+                Some("heap 0; handle 0x700000".into()),
+                Some("heap 1; handle 0x600000".into()),
+                Some("heap 1; handle 0x600000".into()),
+            ]
+        );
     }
 
     #[test]
@@ -800,7 +877,10 @@ mod tests {
             }],
             tebs: vec![(0x20_2000, "~1; 10.24".into())],
             peb: Some(0x20_0000),
-            heaps: vec![0x40_0000],
+            heaps: vec![HeapSource {
+                handle: 0x40_0000,
+                extents: vec![(0x40_0000, 0x42_0000), (0x60_0000, 0x61_0000)],
+            }],
         };
         assert_eq!(
             sources.usage_at(0x30_4fff),
@@ -820,6 +900,11 @@ mod tests {
             sources.usage_at(0x40_0000).map(|(usage, _)| usage),
             Some(RegionUsage::Heap)
         );
+        assert_eq!(
+            sources.usage_at(0x60_8000).map(|(usage, _)| usage),
+            Some(RegionUsage::Heap)
+        );
+        assert_eq!(sources.usage_at(0x61_0000), None);
     }
 
     #[test]

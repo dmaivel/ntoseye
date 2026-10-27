@@ -18,11 +18,13 @@ use ntoseye_macros::{command, grammar};
 /// Summarize, walk, or search the user-mode heaps of the attached process,
 /// or of a user-mode minidump's process.
 ///
-/// With no arguments or with -s, the command lists each heap in the PEB with
-/// its kind and sizes. -h decodes the segments of one heap, and -a does the
+/// With no arguments or with -s, the command lists each heap of the process
+/// with its kind and sizes: the heaps on ntdll!RtlpProcessHeaps where ntdll
+/// keeps that list, else those in the PEB's ProcessHeaps array. -h decodes
+/// the segments of one heap, and -a does the
 /// same and also lists each entry, chunk, and block. -x finds the block that
 /// contains an address, and -p -a does the same search. To identify a heap,
-/// use its index in the PEB list or its address. The command decodes NT
+/// use its index in that list or its address. The command decodes NT
 /// heaps, including legacy-LFH blocks, and segment heaps, including VS, LFH,
 /// page, and large allocations. It gets the encoding keys from ntdll
 /// symbols. For NT heaps, it uses _HEAP.Encoding and finds legacy-LFH blocks
@@ -664,7 +666,9 @@ impl ReplState<'_> {
                 (Some(SegmentSubsegment::Lfh(subsegment)), _) => {
                     outln!(
                         "{head}  LFH subsegment  bucket {}: {} x {:#x}, {} busy, {} free",
-                        subsegment.bucket,
+                        subsegment
+                            .bucket
+                            .map_or_else(|| "-".into(), |bucket| bucket.to_string()),
                         subsegment.block_count,
                         subsegment.block_size,
                         subsegment.busy_count(),
@@ -707,7 +711,7 @@ impl ReplState<'_> {
         let Some(heap) = &detail.heap else {
             if detail.failures.is_empty() {
                 outln!(
-                    "{:#x} is not inside any heap in the PEB list",
+                    "{:#x} is not inside any heap of the process",
                     detail.address.0
                 );
             } else {
@@ -843,7 +847,12 @@ fn block_fields(block: &BlockMatch) -> Vec<(&'static str, String)> {
                 ),
             ),
             ("LFH subsegment", ui::addr(subsegment.address.0)),
-            ("bucket", subsegment.bucket.to_string()),
+            (
+                "bucket",
+                subsegment
+                    .bucket
+                    .map_or_else(|| "-".into(), |bucket| bucket.to_string()),
+            ),
             (
                 "blocks",
                 format!("{} x {:#x}", subsegment.block_count, subsegment.block_size),
