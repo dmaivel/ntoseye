@@ -98,7 +98,11 @@ pub(super) fn module_info_from_record(record: &StructRef<'_>) -> Result<Option<M
     {
         info.entry_point = Some(entry_point);
     }
-    if let Ok(tds) = record.read_field::<u32>("TimeDateStamp") {
+    // Windows 8.1 leaves it 0 in a session image's entry: no build's stamp,
+    // and no key to fetch the file by.
+    if let Ok(tds) = record.read_field::<u32>("TimeDateStamp")
+        && tds != 0
+    {
         info = info.with_time_date_stamp(tds);
     }
     if let Ok(cs) = record.read_field::<u32>("CheckSum") {

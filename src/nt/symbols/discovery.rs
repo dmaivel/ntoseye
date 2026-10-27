@@ -12,7 +12,7 @@ use crate::{
     base::{
         error::{Error, Result},
         memory,
-        memory::MemoryOps,
+        memory::{MemoryOps, PAGE_SIZE},
         output,
         types::{Dtb, PhysAddr, VirtAddr},
     },
@@ -249,6 +249,19 @@ impl SymbolStore {
             | Err(Error::NotCaptured { .. })
             | Err(Error::PartialRead(_))
             | Err(Error::DebugInfo(_)) => {
+                // With no stamp to fetch the file by, the record itself may
+                // still be in memory.
+                if module.time_date_stamp.is_none()
+                    && let Some(headers::CodeView::Rsds { guid, age, path }) =
+                        Self::scan_codeview_record(&addr_space, module)
+                {
+                    let (job, guid) = self.build_download_job(&path, guid_to_u128(guid), age)?;
+                    return Ok(ModuleSymbolDiscovery::Ready {
+                        job,
+                        guid,
+                        source: ModuleSymbolSource::Memory,
+                    });
+                }
                 Self::plan_image_fallback(&addr_space, module_name, base_address)
             }
             Err(err) => Err(err),
@@ -368,6 +381,50 @@ impl SymbolStore {
             }
         }
         Ok(None)
+    }
+
+    /// The RSDS record of `module` found in its own resident pages, for an
+    /// image whose headers are out of memory: one naming the module's PDB
+    /// (`cdd.pdb` for `cdd.dll`), since another name would be some other
+    /// build's record carried as data. A Windows 8.1 session image can have
+    /// its header page out and no TimeDateStamp in its loader entry, while
+    /// the `.rdata` page holding its record is in.
+    fn scan_codeview_record<B: MemoryOps<PhysAddr>>(
+        memory: &memory::AddressSpace<'_, B>,
+        module: &ModuleInfo,
+    ) -> Option<headers::CodeView> {
+        // The record's fixed part, and a path as long as Windows' own.
+        const RECORD_BYTES: usize = 24 + 260;
+        let wanted = format!("{}.pdb", ModuleInfo::derive_short_name(&module.name));
+        let names_module = |path: &str| {
+            path.rsplit(['\\', '/'])
+                .next()
+                .is_some_and(|name| name.eq_ignore_ascii_case(&wanted))
+        };
+        let mut page = vec![0u8; PAGE_SIZE];
+        for offset in (0..u64::from(module.size)).step_by(PAGE_SIZE) {
+            let at = module.base_address + offset;
+            if memory.read_bytes(at, &mut page).is_err() {
+                continue;
+            }
+            for found in memchr::memmem::find_iter(&page, b"RSDS") {
+                // The path may run into the next page; the rest of this one
+                // holds it when that page is out.
+                let mut record = vec![0u8; RECORD_BYTES];
+                let bytes = match memory.read_bytes(at + found as u64, &mut record) {
+                    Ok(()) => &record[..],
+                    Err(_) => &page[found..],
+                };
+                if let Ok(codeview @ headers::CodeView::Rsds { .. }) =
+                    headers::decode_codeview(bytes)
+                    && let headers::CodeView::Rsds { path, .. } = &codeview
+                    && names_module(path)
+                {
+                    return Some(codeview);
+                }
+            }
+        }
+        None
     }
 
     fn plan_image_fallback<B: MemoryOps<PhysAddr>>(

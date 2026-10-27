@@ -199,7 +199,7 @@ impl Guest {
             symbols,
             modules,
             dtb,
-            session_space,
+            &session_space,
             arch,
             recovery,
             &mut report,
@@ -252,7 +252,7 @@ impl Guest {
             symbols,
             modules,
             dtb,
-            SessionSpace::Load,
+            &SessionSpace::Load,
             arch,
             PdbRecovery::Automatic,
             &mut report,
@@ -268,7 +268,7 @@ impl Guest {
                 symbols,
                 stale,
                 dtb,
-                SessionSpace::Load,
+                &SessionSpace::Load,
                 arch,
                 PdbRecovery::Automatic,
                 &mut report,
@@ -366,7 +366,7 @@ impl Guest {
         symbols: &SymbolStore,
         modules: Vec<ModuleInfo>,
         dtb: Dtb,
-        session_space: SessionSpace,
+        session_space: &SessionSpace,
         arch: Arch,
         recovery: PdbRecovery,
         report: &mut ModuleSymbolLoadReport,
@@ -378,7 +378,7 @@ impl Guest {
 
         for module in modules {
             let session = Self::is_session_space(module.base_address);
-            if session_space == SessionSpace::Skip && session {
+            if *session_space == SessionSpace::Skip && session {
                 Self::apply_module_symbol_status(
                     symbols,
                     report,
@@ -388,10 +388,25 @@ impl Guest {
                 );
                 continue;
             }
-            // The root the image is read through.
-            let image_dtb = match session_space {
-                SessionSpace::Through(root) if session => root,
-                _ => dtb,
+            // The roots the image may be read through, and the one it is:
+            // the first whose view names its PDB, else the first.
+            let roots = match session_space {
+                SessionSpace::Through(roots) if session => roots.as_slice(),
+                _ => std::slice::from_ref(&dtb),
+            };
+            let mut discovered = None;
+            for &root in roots {
+                let discovery = symbols.extract_download_job(phys, root, &module, arch);
+                let ready = matches!(discovery, Ok(ModuleSymbolDiscovery::Ready { .. }));
+                if discovered.is_none() || ready {
+                    discovered = Some((root, discovery));
+                }
+                if ready {
+                    break;
+                }
+            }
+            let Some((image_dtb, discovery)) = discovered else {
+                continue;
             };
 
             // A file no source had earlier this session is not asked for
@@ -403,7 +418,7 @@ impl Guest {
                     ))
                 })
             };
-            match symbols.extract_download_job(phys, image_dtb, &module, arch) {
+            match discovery {
                 Ok(ModuleSymbolDiscovery::Ready { job, guid, source }) => {
                     let mut load = ModuleSymbolLoad::new(job, guid, source, module, dtb);
                     let ready = plan.is_ready(symbols, &load);
@@ -841,31 +856,39 @@ impl Guest {
         {
             return otherwise;
         }
-        self.session_process_dtb()
-            .map_or(otherwise, SessionSpace::Through)
+        let roots = self.session_process_dtbs();
+        if roots.is_empty() {
+            otherwise
+        } else {
+            SessionSpace::Through(roots)
+        }
     }
 
-    /// The page-table root of a process attached to a session, which maps
-    /// session space where the kernel's root does not (win32k on Windows 7
-    /// and 8.1).
-    fn session_process_dtb(&self) -> Option<Dtb> {
-        let session = self
+    /// The page-table root of a process attached to each session, which
+    /// maps that session's space where the kernel's root does not (win32k on
+    /// Windows 7 and 8.1).
+    fn session_process_dtbs(&self) -> Vec<Dtb> {
+        let Some(session) = self
             .ntoskrnl
             .types()
             .layout("_EPROCESS")
-            .ok()?
-            .field_offset("Session")
-            .ok()?;
+            .ok()
+            .and_then(|layout| layout.field_offset("Session").ok())
+        else {
+            return Vec::new();
+        };
         let memory = self.ntoskrnl.memory();
+        let mut sessions = HashSet::new();
         self.enumerate_processes()
-            .ok()?
+            .unwrap_or_default()
             .into_iter()
-            .find(|process| {
+            .filter(|process| {
                 memory
                     .read_pointer(process.eprocess + session)
-                    .is_ok_and(|pointer| !pointer.is_zero())
+                    .is_ok_and(|pointer| !pointer.is_zero() && sessions.insert(pointer))
             })
             .map(|process| process.dtb)
+            .collect()
     }
 
     pub fn load_missing_kernel_module_symbols(

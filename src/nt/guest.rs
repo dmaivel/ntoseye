@@ -207,13 +207,15 @@ pub struct ModuleSymbolDiagnostic {
 
 /// Whether a symbol load covers modules in session space (win32k and
 /// friends), which only a process attached to a session maps.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionSpace {
     Load,
     Skip,
-    /// Read their images through this root, a session process's; the
-    /// symbols stay under the load's own root.
-    Through(Dtb),
+    /// Read their images through these roots, one process's per session,
+    /// the first that holds an image's PDB identity; the symbols stay under
+    /// the load's own root. Sessions load images of their own (`cdd.dll`
+    /// only where there is a display).
+    Through(Vec<Dtb>),
 }
 
 /// When a symbol load rebuilds a missing PDB from guest memory (see
