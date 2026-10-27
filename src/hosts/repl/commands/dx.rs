@@ -18,7 +18,7 @@ use crate::session::typeview::TypeView;
 
 use super::dx_model::{self as model, ModelValue};
 use super::dx_query;
-use super::types::MAX_RECURSION_DEPTH;
+use super::types::{MAX_RECURSION_DEPTH, untyped_symbol_message};
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::hosts::repl::*;
 use ntoseye_macros::{command, grammar};
@@ -618,14 +618,21 @@ impl ReplState<'_> {
             } => (Place::Value(value.0), type_data.clone(), *byte_size),
             // A register is an `unsigned __int64` in WinDbg's C++
             // expressions; any other untyped number is an integer, which
-            // `dx` writes in decimal.
-            ExprValue::Raw { value, .. } => {
+            // `dx` writes in decimal. A symbol or module name evaluates to
+            // its address with no type, which is not the value stored
+            // there: public symbols carry no type, so `dx` asks for one, as
+            // WinDbg's "No type (or void) for object" does.
+            ExprValue::Raw { value, address } => {
                 if matches!(expr, Expr::Register(_)) {
                     (
                         Place::Value(value.0),
                         ParsedType::Primitive("ULONGLONG".to_string()),
                         Some(8),
                     )
+                } else if let Some(address) = address {
+                    return Err(Error::InvalidExpression(untyped_symbol_message(
+                        text, *address,
+                    )));
                 } else {
                     return Ok(DxLine {
                         name: Some(text.to_string()),

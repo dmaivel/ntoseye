@@ -46,7 +46,7 @@ fn locate_debugger_data(target: &mut Target, backend: &mut dyn DebugBackend) {
 /// its PRCB; the dump header holds only the crashing processor's. Failures
 /// become the backend's notices, and the header's context still stands. An
 /// AMD64 dump whose PRCB context offset is unknown keeps the header's
-/// context alone.
+/// context alone, though its PRCBs still give the control registers.
 fn read_processor_contexts(target: &Target, info: &DmpInfo, backend: &mut DmpBackend) {
     let processors = backend.processor_count();
     let saved = match info.context.arch() {
@@ -57,13 +57,10 @@ fn read_processor_contexts(target: &Target, info: &DmpInfo, backend: &mut DmpBac
             let offset = info.offset_prcb_context.or_else(|| {
                 cpu_state::prcb_context_offset(target, VirtAddr(info.debugger_data_block?))
             });
-            let Some(offset) = offset else {
-                return;
-            };
             cpu_state::read_amd64_prcb_contexts(target, processors, offset)
         }
     };
-    backend.set_processor_contexts(saved.contexts, saved.warnings);
+    backend.set_processor_contexts(saved.contexts, saved.special_registers, saved.warnings);
     // Without a header context to match, the processor that bugchecked is
     // the one it did not freeze.
     if backend.header_context_is_empty()

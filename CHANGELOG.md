@@ -6,7 +6,11 @@ What changed in each release of ntoseye, newest first. The command-line tool, th
 Keeping this file:
 
 - Add a line under "## Unreleased" in the commit that makes the change users will notice: a new command, option or SDK API, changed behavior or output, a fixed bug, a removal. Refactors, tests, CI and docs rewording get none. Start the section at the top if it is not there.
-- Group the lines under "### Added", "### Changed", "### Fixed" and "### Removed", in that order, leaving out empty groups. A fix to something not yet released is no "Fixed" line; amend the line that added it. A change that breaks scripts starts with "**Breaking:**" and comes first in its group.
+- Group the lines under "### Added", "### Added
+
+- `!handle <handle> f` on a user-mode minidump shows the object information the dump records: a thread's or process's IDs, TEB or PEB, priority and exit status, an event's, mutant's or semaphore's state, and a section's size. The SDK has it as `UserHandle.object_info`.
+
+### Changed", "### Fixed" and "### Removed", in that order, leaving out empty groups. A fix to something not yet released is no "Fixed" line; amend the line that added it. A change that breaks scripts starts with "**Breaking:**" and comes first in its group.
 - A release with a theme opens with one or two sentences before the groups, saying what users can now do. A release without one goes straight to the groups.
 - Say what users can now do, or what went wrong and no longer does, not how. Name commands and SDK APIs in backticks as users type them.
 - Link only with absolute https://ntoseye.com/... URLs. The same text is shown in the GitHub release, in this file on GitHub, and on the docs site, which each resolve a relative link differently.
@@ -32,12 +36,19 @@ Keeping this file:
 - `!vad` names the file of every file-backed mapped view and image, as `!ca` does, where its File column was empty for all but the loader's modules, and decodes the no-access, no-cache, guard and write-combine protections, where it showed `prot:24`.
 - `!process 0 0` and `!session` show System, Registry, smss and Secure System in no session, where they counted them in session 0.
 - `!vtop <dtb> <address>` marks the table entries its walk read as physical addresses; `!pfn` no longer repeats a field's name as the reason it is unavailable; `!devstack` keeps its columns lined up with long driver names; and `!acl <address> 1` names well-known SIDs, as `!sd <address> 1` does.
+- `r` on a kernel dump shows cr0, cr2, cr4, cr8, gdtr, idtr, tr and ldtr as each processor's PRCB saved them, where it showed zeros, and a register the dump does not hold, such as efer, as unavailable.
+- Kernel dumps written with `.dump` hold the guest's code where `ntoseye` had planted breakpoints, such as its int3 at `nt!KeBugCheckEx`, and record the product type; minidumps written with `.dump /u` record the processor's family, model and stepping instead of 0.
+- `!chkimg` sets aside the import-call and retpoline patches the kernel applies to every driver at load, where `!chkimg ntfs` counted 2476 genuine mismatches, and `!chkimg -d` lists genuine differences before the set-aside patches.
+- `dx` and `dt` on a symbol with no type, such as `nt!KeNumberProcessors`, say so and show the cast that reads it, where `dx` printed the symbol's address as a negative number.
+- On a minidump that holds no ntdll data, `!cs` reports that the critical-section list cannot be read, where it listed none, and `!chkimg` says the code is not in the dump and nothing was compared, where it said the section was paged out and found 0 mismatches.
+- On a dump, `status` no longer suggests an execute breakpoint or `t` for a page that is not in memory, and `dt` lists a flags word before the bitfields it holds.
 
 ## Unreleased
 
 ### Changed
 
 - `PteWalk`, the SDK's `!pte` result, lists the entries the walk read as `levels`, root first, as `VtopDetail` does, in place of its `pxe`, `ppe`, `pde` and `pte` fields.
+- `LfhSubsegment.bucket` is `None` for a subsegment that names no bucket, and `VtopDetail.physical_walk` says whether its entry addresses are physical (an explicit DTB) or in the self-map.
 
 ### Fixed
 

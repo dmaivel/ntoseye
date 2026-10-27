@@ -127,6 +127,10 @@ pub struct PrcbContexts {
     /// Each processor's raw `CONTEXT`, by index; `None` where it could not
     /// be read.
     pub contexts: Vec<Option<Vec<u8>>>,
+    /// Each processor's control and descriptor-table registers, which no
+    /// `CONTEXT` records, by register-map name; empty where they could not
+    /// be read.
+    pub special_registers: Vec<Vec<(&'static str, u64)>>,
     /// Why a context, or the rest of them, could not be read.
     pub warnings: Vec<String>,
 }
@@ -135,6 +139,7 @@ impl PrcbContexts {
     fn new(processors: usize) -> Self {
         Self {
             contexts: vec![None; processors],
+            special_registers: vec![Vec::new(); processors],
             warnings: Vec::new(),
         }
     }
@@ -203,25 +208,88 @@ pub fn prcb_context_offset(target: &Target, debugger_data: VirtAddr) -> Option<u
 }
 
 /// Processors `0..processors`' AMD64 contexts, each through the pointer at
-/// `context_offset` in its `_KPRCB`.
+/// `context_offset` in its `_KPRCB` (none without the offset), and the
+/// special registers each `_KPRCB` saves.
 pub fn read_amd64_prcb_contexts(
     target: &Target,
     processors: usize,
-    context_offset: u16,
+    context_offset: Option<u16>,
 ) -> PrcbContexts {
     let mut saved = PrcbContexts::new(processors);
-    let read = kernel(target).and_then(|nt| {
-        let memory = nt.memory();
-        saved.read(target, amd64::CONTEXT_SIZE, "PRCB", |prcb| {
-            memory.read(prcb + u64::from(context_offset))
-        })
-    });
-    if let Err(error) = read {
-        saved
-            .warnings
-            .push(format!("could not read PRCB contexts from dump: {error}"));
+    if let Some(context_offset) = context_offset {
+        let read = kernel(target).and_then(|nt| {
+            let memory = nt.memory();
+            saved.read(target, amd64::CONTEXT_SIZE, "PRCB", |prcb| {
+                memory.read(prcb + u64::from(context_offset))
+            })
+        });
+        if let Err(error) = read {
+            saved
+                .warnings
+                .push(format!("could not read PRCB contexts from dump: {error}"));
+        }
+    }
+    // With none read, the registers are left out as unavailable; a
+    // processor whose read failed beside others that did would show zeros,
+    // so that one is named.
+    let mut failures = Vec::new();
+    for (index, slot) in saved.special_registers.iter_mut().enumerate() {
+        let read = u16::try_from(index)
+            .map_err(|_| Error::DebugInfo(format!("processor index {index} is out of range")))
+            .and_then(|index| kprcb_for_processor(target, index))
+            .and_then(|prcb| amd64_special_registers(target, prcb));
+        match read {
+            Ok(registers) => *slot = registers,
+            Err(error) => failures.push(format!(
+                "processor {index}'s control registers are unavailable: {error}"
+            )),
+        }
+    }
+    if failures.len() < saved.special_registers.len() {
+        saved.warnings.extend(failures);
     }
     saved
+}
+
+/// The registers an AMD64 `_KSPECIAL_REGISTERS` saves that no `CONTEXT`
+/// holds, each by its register-map name and field. `Cr3` is left out: a
+/// dump's processors are served the kernel's page-table root.
+const AMD64_SPECIAL_REGISTERS: [(&str, &str); 6] = [
+    ("cr0", "Cr0"),
+    ("cr2", "Cr2"),
+    ("cr4", "Cr4"),
+    ("cr8", "Cr8"),
+    ("tr", "Tr"),
+    ("ldtr", "Ldtr"),
+];
+
+/// The descriptor-table registers it saves, each a `_KDESCRIPTOR` field
+/// whose limit and base the register map names apart.
+const AMD64_SPECIAL_DESCRIPTORS: [(&str, &str, &str); 2] = [
+    ("Gdtr", "gdtr_limit", "gdtr_base"),
+    ("Idtr", "idtr_limit", "idtr_base"),
+];
+
+/// The control and descriptor-table registers the kernel saved in the AMD64
+/// `_KPRCB` at `prcb` (`ProcessorState.SpecialRegisters`), by register-map
+/// name. A crash dump's `CONTEXT` records carry none of them.
+fn amd64_special_registers(target: &Target, prcb: VirtAddr) -> Result<Vec<(&'static str, u64)>> {
+    let special = kernel(target)?
+        .types()
+        .struct_at("_KPRCB", prcb)?
+        .embedded("ProcessorState")?
+        .embedded("SpecialRegisters")?
+        .prefetch();
+    let mut registers = Vec::with_capacity(AMD64_SPECIAL_REGISTERS.len() + 4);
+    for (register, field) in AMD64_SPECIAL_REGISTERS {
+        registers.push((register, special.read_uint(field)?));
+    }
+    for (field, limit, base) in AMD64_SPECIAL_DESCRIPTORS {
+        let descriptor = special.embedded(field)?;
+        registers.push((limit, descriptor.read_uint("Limit")?));
+        registers.push((base, descriptor.read_uint("Base")?));
+    }
+    Ok(registers)
 }
 
 /// Processors `0..processors`' ARM64 contexts, each its `_KPRCB`'s

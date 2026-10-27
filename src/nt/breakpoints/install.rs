@@ -635,10 +635,7 @@ impl BreakpointManager {
     /// address space that cannot resolve the site at all, such as a
     /// non-resident page or a dump carrying no page tables.
     fn site_is_in_view(debugger: &Target, bp: &BreakpointInfo, cr3: u64) -> bool {
-        let owner = match &bp.scope {
-            BreakpointScope::Process { dtb, .. } => *dtb,
-            BreakpointScope::Kernel => debugger.kernel_dtb(),
-        };
+        let owner = Self::site_dtb(debugger, bp);
         let frame = |dtb| {
             debugger
                 .address_space(dtb)
@@ -651,6 +648,37 @@ impl BreakpointManager {
             (Some(patched), Some(viewed)) => patched == viewed,
             _ => bp.scope.matches_dtb(cr3, debugger.arch()),
         }
+    }
+
+    /// The address space `bp` was planted in.
+    fn site_dtb(debugger: &Target, bp: &BreakpointInfo) -> Dtb {
+        match &bp.scope {
+            BreakpointScope::Process { dtb, .. } => *dtb,
+            BreakpointScope::Kernel => debugger.kernel_dtb(),
+        }
+    }
+
+    /// Each of our breakpoints in guest memory: the guest-physical address
+    /// of its site and the bytes it displaced, which a copy of guest RAM
+    /// holds there instead. A site that does not translate in the address
+    /// space it was planted in is left out: its page is not in RAM to copy.
+    pub fn displaced_frames(&self, debugger: &Target) -> Vec<(PhysAddr, Vec<u8>)> {
+        self.breakpoints
+            .values()
+            .filter(|bp| bp.resolved && bp.enabled && bp.hardware.is_none())
+            .filter_map(|bp| {
+                let bytes = bp.backend.original_bytes();
+                if bytes.is_empty() {
+                    return None;
+                }
+                let translation = debugger
+                    .address_space(Self::site_dtb(debugger, bp))
+                    .virt_to_phys(bp.address)
+                    .ok()
+                    .flatten()?;
+                Some((translation.address, bytes.to_vec()))
+            })
+            .collect()
     }
 }
 

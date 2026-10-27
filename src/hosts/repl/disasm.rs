@@ -3,10 +3,12 @@ use std::collections::HashMap;
 use owo_colors::OwoColorize;
 
 use crate::arch::{Arch, RegisterMap};
+use crate::backend::dbg_backend::DebugCapability;
 use crate::base::error::Error;
 use crate::base::memory::MemoryOps;
 use crate::base::types::{CodeMachine, VirtAddr};
 use crate::hosts::repl::listing::{self, Listing};
+use crate::hosts::repl::supports_capability;
 use crate::hosts::ui;
 use crate::nt::bugchecks::looks_like_kernel_pointer;
 use crate::nt::symbols::{LocalSourceState, SourceLocation};
@@ -297,15 +299,20 @@ const DISASM_CONTEXT_INSTRUCTIONS: usize = 7;
 /// Events": code breakpoint fault is priority 7, faults from fetching the next
 /// instruction priority 8), so the trap is delivered before the page is
 /// faulted in. The bytes appear once the instruction is actually fetched, so a
-/// single step reveals them.
-pub fn non_resident_note(pc: u64, error: &Error) -> String {
+/// single step reveals them: on a target that `runs`, which a dump does not.
+pub fn non_resident_note(pc: u64, error: &Error, runs: bool) -> String {
     match error {
-        Error::BadVirtualAddress(_) | Error::AddressNotInDump(_) | Error::PartialRead(0) => {
+        Error::BadVirtualAddress(_) | Error::AddressNotInDump(_) | Error::PartialRead(0)
+            if runs =>
+        {
             format!(
                 "  (the page holding {pc:#x} is not resident, so there is nothing to decode yet; \
                  an execute breakpoint traps before the fetch that pages it in, and `t` \
                  single-steps through the fetch)"
             )
+        }
+        Error::BadVirtualAddress(_) | Error::AddressNotInDump(_) | Error::PartialRead(0) => {
+            format!("  (the page holding {pc:#x} is not resident, so there is nothing to decode)")
         }
         error => format!("  (could not read memory at {pc:#x}: {error})"),
     }
@@ -413,7 +420,8 @@ pub fn disasm_context_rows(
         Err(_) => code_memory.read_bytes(VirtAddr(rip), &mut bytes),
     };
     if let Err(error) = read {
-        return Err(non_resident_note(rip, &error));
+        let runs = supports_capability(&session.capabilities(), DebugCapability::SingleStep);
+        return Err(non_resident_note(rip, &error, runs));
     }
 
     session.mask_code(VirtAddr(rip), &mut bytes, trace.active_dtb);

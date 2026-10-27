@@ -22,6 +22,7 @@ use crate::nt::kuser_shared::KuserSharedData;
 use crate::nt::pe::headers::{MAX_CODEVIEW_BYTES, decode_headers, read_debug_directory};
 use crate::nt::pe::{read_pe_fixed_file_info, read_pe_header_page};
 use crate::nt::target::DiagnosticValue;
+use crate::nt::target::cpu::CpuInfo;
 use crate::nt::target::mm::{
     MEM_COMMIT, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE, MEM_RESERVE, MemoryRegionInfo, VadType,
     page_protection,
@@ -164,6 +165,10 @@ pub fn collect_dump_metadata(session: &mut Session) -> Result<DumpMetadata> {
         pfn_database,
         ps_loaded_module_list,
         ps_active_process_head,
+        product_type: KuserSharedData::new(&session.target)
+            .nt_product_type()
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(0),
         number_processors: processor_count,
         bug_check_code,
         bug_check_parameters,
@@ -171,6 +176,7 @@ pub fn collect_dump_metadata(session: &mut Session) -> Result<DumpMetadata> {
         context,
         exception,
         runs,
+        displaced: session.displaced_frames(),
     })
 }
 
@@ -624,12 +630,25 @@ pub fn collect_process_minidump(
     let kuser = KuserSharedData::new(&session.target);
     let product_type = kuser.nt_product_type().unwrap_or(1) as u8;
     let now = kuser.system_time();
+    // `SYSTEM_INFO`'s processor level and revision, which the PRCB keeps as
+    // the family, and the model and stepping: what `!cpuinfo` shows.
+    let cpu = session.target.inspect_cpuinfo(0).ok();
+    let cpu_field = |field: fn(&CpuInfo) -> &DiagnosticValue<u64>| {
+        cpu.as_ref()
+            .and_then(|cpu| field(cpu).as_result().ok().copied())
+    };
+    let processor_level = cpu_field(|cpu| &cpu.family).map_or(0, |family| family as u16);
+    let processor_revision = cpu_field(|cpu| &cpu.model)
+        .zip(cpu_field(|cpu| &cpu.stepping))
+        .map_or(0, |(model, stepping)| ((model << 8) | stepping) as u16);
     let system = MinidumpSystem {
         arch,
         major: version.major_version.unwrap_or(0) as u32,
         minor: version.minor_version.unwrap_or(0) as u32,
         build: version.build_number.unwrap_or(0) as u32,
         processors: version.processors.unwrap_or(1).min(u16::from(u8::MAX)) as u8,
+        processor_level,
+        processor_revision,
         product_type,
     };
 

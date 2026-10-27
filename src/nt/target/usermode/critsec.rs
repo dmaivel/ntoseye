@@ -98,6 +98,15 @@ impl Target {
             .layout(types.qualified("_RTL_CRITICAL_SECTION_DEBUG"))?;
         let link_offset = debug_layout.field_offset("ProcessLocksList")?;
         let memory = self.address_space(dtb);
+        // A head that does not read lists nothing, which is not a list of
+        // no sections: a minidump written without ntdll's data has none.
+        memory.read_pointer(head).map_err(|error| {
+            Error::DebugInfo(format!(
+                "cannot read the critical section list, ntdll!RtlCriticalSectionList at \
+                 {:#x}: {error}",
+                head.0
+            ))
+        })?;
         let (records, termination) =
             bounded_record_list_walk(head, link_offset, MAX_CRITICAL_SECTIONS, |link| {
                 memory.read_pointer(link)

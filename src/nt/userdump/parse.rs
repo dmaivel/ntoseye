@@ -10,9 +10,10 @@ use std::collections::{BTreeMap, HashMap};
 use zerocopy::{FromBytes, Immutable, KnownLayout};
 
 use super::{
-    CapturedStack, DynamicFunction, FunctionTable, MemoryRange, MemoryRegion, UnloadedModule,
-    UserDumpInfo, UserException, UserHandle, UserModule, UserSystemInfo, UserThreadInfo,
-    UserThreadTimes, UserTimeZone,
+    CapturedStack, DynamicFunction, FunctionTable, HandleEventInfo, HandleMutantInfo,
+    HandleObjectInfo, HandleOtherInfo, HandleProcessInfo, HandleSectionInfo, HandleSemaphoreInfo,
+    HandleThreadInfo, MemoryRange, MemoryRegion, UnloadedModule, UserDumpInfo, UserException,
+    UserHandle, UserModule, UserSystemInfo, UserThreadInfo, UserThreadTimes, UserTimeZone,
 };
 use crate::arch::{self, Arch};
 use crate::base::bytes::{utf16le_lossy, utf16le_nul_terminated};
@@ -236,7 +237,7 @@ struct RawHandleDataHeader {
 }
 
 /// `MINIDUMP_HANDLE_DESCRIPTOR`; `MINIDUMP_HANDLE_DESCRIPTOR_2` appends an
-/// object-information RVA, which this does not read.
+/// object-information RVA ([`RawHandleObjectRvas`]).
 #[derive(FromBytes, Immutable, KnownLayout)]
 #[repr(C, packed)]
 struct RawHandleDescriptor {
@@ -247,6 +248,73 @@ struct RawHandleDescriptor {
     granted_access: u32,
     handle_count: u32,
     pointer_count: u32,
+}
+
+/// What `MINIDUMP_HANDLE_DESCRIPTOR_2` appends to
+/// [`RawHandleDescriptor`]: the RVA of the first
+/// `MINIDUMP_HANDLE_OBJECT_INFORMATION`.
+#[derive(FromBytes, Immutable, KnownLayout)]
+#[repr(C, packed)]
+struct RawHandleObjectRvas {
+    object_info_rva: u32,
+    reserved: u32,
+}
+
+/// `MINIDUMP_HANDLE_OBJECT_INFORMATION`: one link of a handle's chain of
+/// object information, its `size_of_info` bytes following it.
+#[derive(FromBytes, Immutable, KnownLayout)]
+#[repr(C, packed)]
+struct RawHandleObjectInfo {
+    next_info_rva: u32,
+    info_type: u32,
+    size_of_info: u32,
+}
+
+/// `MINIDUMP_HANDLE_OBJECT_INFORMATION_TYPE`s.
+const MINI_THREAD_INFORMATION_1: u32 = 1;
+const MINI_MUTANT_INFORMATION_1: u32 = 2;
+const MINI_MUTANT_INFORMATION_2: u32 = 3;
+const MINI_PROCESS_INFORMATION_1: u32 = 4;
+const MINI_PROCESS_INFORMATION_2: u32 = 5;
+const MINI_EVENT_INFORMATION_1: u32 = 6;
+const MINI_SECTION_INFORMATION_1: u32 = 7;
+const MINI_SEMAPHORE_INFORMATION_1: u32 = 8;
+/// The most links of one handle's object-information chain read: Windows
+/// writes at most two.
+const MAX_HANDLE_OBJECT_INFOS: usize = 8;
+
+/// `THREAD_BASIC_INFORMATION` on a 64-bit process.
+#[derive(FromBytes, Immutable, KnownLayout)]
+#[repr(C)]
+struct RawThreadBasicInformation {
+    exit_status: u32,
+    teb_base_address: u64,
+    unique_process: u64,
+    unique_thread: u64,
+    affinity_mask: u64,
+    priority: i32,
+    base_priority: i32,
+}
+
+/// `PROCESS_BASIC_INFORMATION` on a 64-bit process.
+#[derive(FromBytes, Immutable, KnownLayout)]
+#[repr(C)]
+struct RawProcessBasicInformation {
+    exit_status: u32,
+    peb_base_address: u64,
+    affinity_mask: u64,
+    base_priority: i32,
+    unique_process_id: u64,
+    inherited_from_unique_process_id: u64,
+}
+
+/// `SECTION_BASIC_INFORMATION` on a 64-bit process.
+#[derive(FromBytes, Immutable, KnownLayout)]
+#[repr(C)]
+struct RawSectionBasicInformation {
+    base_address: u64,
+    allocation_attributes: u32,
+    maximum_size: u64,
 }
 
 #[derive(FromBytes, Immutable, KnownLayout)]
@@ -1151,6 +1219,17 @@ fn parse_handle_data(data: &[u8], stream: &[u8], notes: &mut Vec<String>) -> Vec
             break;
         };
         let handle = raw.handle;
+        let object_info = if entry_size as usize
+            >= size_of::<RawHandleDescriptor>() + size_of::<RawHandleObjectRvas>()
+        {
+            read_at::<RawHandleObjectRvas>(
+                stream,
+                offset + size_of::<RawHandleDescriptor>() as u64,
+            )
+            .and_then(|rvas| handle_object_info(data, rvas.object_info_rva, handle, notes))
+        } else {
+            None
+        };
         handles.push(UserHandle {
             handle,
             type_name: string(raw.type_name_rva, "type name", handle, notes),
@@ -1159,9 +1238,134 @@ fn parse_handle_data(data: &[u8], stream: &[u8], notes: &mut Vec<String>) -> Vec
             granted_access: raw.granted_access,
             handle_count: raw.handle_count,
             pointer_count: raw.pointer_count,
+            object_info,
         });
     }
     handles
+}
+
+/// The object information of `handle` whose chain starts at `rva`, `None`
+/// when it has none. A mutant's two links, its state and its owner, make
+/// one value; of other links, the first is kept.
+fn handle_object_info(
+    data: &[u8],
+    mut rva: u32,
+    handle: u64,
+    notes: &mut Vec<String>,
+) -> Option<HandleObjectInfo> {
+    let mut info: Option<HandleObjectInfo> = None;
+    for _ in 0..MAX_HANDLE_OBJECT_INFOS {
+        if rva == 0 {
+            break;
+        }
+        let Some(link) = read_at::<RawHandleObjectInfo>(data, u64::from(rva)) else {
+            notes.push(format!(
+                "handle {handle:#x} object information at {rva:#x} is outside the file"
+            ));
+            break;
+        };
+        let (kind, size) = (link.info_type, link.size_of_info);
+        let body = u64::from(rva) + size_of::<RawHandleObjectInfo>() as u64;
+        let Some(bytes) = located(data, body, u64::from(size)) else {
+            notes.push(format!(
+                "handle {handle:#x} object information of kind {kind} leaves the file"
+            ));
+            break;
+        };
+        let decoded = match kind {
+            MINI_THREAD_INFORMATION_1 => read_at::<RawThreadBasicInformation>(bytes, 0).map(|raw| {
+                HandleObjectInfo::Thread(HandleThreadInfo {
+                    exit_status: raw.exit_status,
+                    teb: raw.teb_base_address,
+                    process_id: raw.unique_process,
+                    thread_id: raw.unique_thread,
+                    affinity: raw.affinity_mask,
+                    priority: raw.priority,
+                    base_priority: raw.base_priority,
+                })
+            }),
+            // The second form is `PROCESS_EXTENDED_BASIC_INFORMATION`: its
+            // size, then the basic information.
+            MINI_PROCESS_INFORMATION_1 | MINI_PROCESS_INFORMATION_2 => {
+                let at = if kind == MINI_PROCESS_INFORMATION_2 { 8 } else { 0 };
+                read_at::<RawProcessBasicInformation>(bytes, at).map(|raw| {
+                    HandleObjectInfo::Process(HandleProcessInfo {
+                        exit_status: raw.exit_status,
+                        peb: raw.peb_base_address,
+                        affinity: raw.affinity_mask,
+                        base_priority: raw.base_priority,
+                        process_id: raw.unique_process_id,
+                        parent_process_id: raw.inherited_from_unique_process_id,
+                    })
+                })
+            }
+            // `EVENT_TYPE`: 0 is `NotificationEvent`.
+            MINI_EVENT_INFORMATION_1 => read_at::<[u32; 2]>(bytes, 0).map(|[kind, state]| {
+                HandleObjectInfo::Event(HandleEventInfo {
+                    manual_reset: kind == 0,
+                    signaled: state != 0,
+                })
+            }),
+            MINI_MUTANT_INFORMATION_1 => read_at::<[u8; 6]>(bytes, 0).map(|raw| {
+                let (owner_process_id, owner_thread_id) = match &info {
+                    Some(HandleObjectInfo::Mutant(owner)) => {
+                        (owner.owner_process_id, owner.owner_thread_id)
+                    }
+                    _ => (None, None),
+                };
+                HandleObjectInfo::Mutant(HandleMutantInfo {
+                    current_count: i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
+                    owned_by_caller: raw[4] != 0,
+                    abandoned: raw[5] != 0,
+                    owner_process_id,
+                    owner_thread_id,
+                })
+            }),
+            MINI_MUTANT_INFORMATION_2 => read_at::<[u64; 2]>(bytes, 0).map(|[process, thread]| {
+                let mut mutant = match info.take() {
+                    Some(HandleObjectInfo::Mutant(mutant)) => mutant,
+                    _ => HandleMutantInfo {
+                        current_count: 0,
+                        owned_by_caller: false,
+                        abandoned: false,
+                        owner_process_id: None,
+                        owner_thread_id: None,
+                    },
+                };
+                mutant.owner_process_id = Some(process);
+                mutant.owner_thread_id = Some(thread);
+                HandleObjectInfo::Mutant(mutant)
+            }),
+            MINI_SECTION_INFORMATION_1 => {
+                read_at::<RawSectionBasicInformation>(bytes, 0).map(|raw| {
+                    HandleObjectInfo::Section(HandleSectionInfo {
+                        base_address: raw.base_address,
+                        attributes: raw.allocation_attributes,
+                        maximum_size: raw.maximum_size,
+                    })
+                })
+            }
+            MINI_SEMAPHORE_INFORMATION_1 => read_at::<[i32; 2]>(bytes, 0).map(|[current, maximum]| {
+                HandleObjectInfo::Semaphore(HandleSemaphoreInfo {
+                    current_count: current,
+                    maximum_count: maximum,
+                })
+            }),
+            _ => Some(HandleObjectInfo::Other(HandleOtherInfo { kind, size })),
+        };
+        match decoded {
+            Some(decoded @ HandleObjectInfo::Mutant(_)) => info = Some(decoded),
+            Some(decoded) => {
+                info.get_or_insert(decoded);
+            }
+            None => notes.push(format!(
+                "handle {handle:#x} object information of kind {kind} is {size} bytes, too \
+                 few for it"
+            )),
+        }
+        rva = link.next_info_rva;
+    }
+    info
 }
 
 fn parse_memory_info_list(stream: &[u8], notes: &mut Vec<String>) -> Vec<MemoryRegion> {

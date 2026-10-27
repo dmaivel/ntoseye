@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::base::error::Result;
 use crate::base::types::VirtAddr;
 use crate::hosts::ui;
-use crate::nt::expr::Expr;
+use crate::nt::expr::{Expr, ExprValue};
 use crate::nt::layout::{
     FieldInfo, ParsedType, TypeInfo, abi_layout, find_field, le_uint, named_type,
     nested_layout_name, unqualified_type_name,
@@ -21,6 +21,17 @@ use crate::hosts::repl::*;
 const MAX_LIST_ENTRIES: usize = 4096;
 pub const MAX_RECURSION_DEPTH: usize = 64;
 const MAX_DL_WORDS: usize = 64;
+
+/// Why `dt` and `dx` cannot show the value of `name`, a symbol or module at
+/// `address` that has no type: public symbols record a global's address but
+/// not its type, so the value is only readable once a cast names the type.
+pub fn untyped_symbol_message(name: &str, address: VirtAddr) -> String {
+    format!(
+        "{name} ({:#x}) has no type information in its symbols; name the type \
+         with a cast, as in `dx *(<type> *){name}`",
+        address.0
+    )
+}
 
 /// Show a type layout or a decoded structure.
 ///
@@ -885,6 +896,13 @@ impl ReplState<'_> {
                 if let Some(variants) = self.lookup_enum(&parsed.type_name) {
                     let name = unqualified_type_name(&parsed.type_name);
                     print_enum(name, &variants);
+                } else if let Ok(ExprValue::Raw {
+                    address: Some(address),
+                    ..
+                }) = Expr::parse(&parsed.type_name)
+                    .and_then(|expr| expr.evaluate(&self.ctx.target))
+                {
+                    error!("{}", untyped_symbol_message(&parsed.type_name, address));
                 } else {
                     error!("type '{}' not found", parsed.type_name);
                 }

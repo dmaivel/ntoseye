@@ -391,11 +391,10 @@ pub struct DmpBackend {
     per_cpu_registers: Vec<Vec<u8>>,
     current_processor: usize,
     number_processors: u32,
-    // The dump header's CONTEXT record (the crashing CPU's) and DTB, kept so
-    // the crash context can be re-seated after the PRCB pass (see
+    // The dump header's CONTEXT record (the crashing CPU's), kept so the
+    // crash context can be re-seated after the PRCB pass (see
     // `select_crash_processor`)
     header_context: RegisterFile,
-    directory_table_base: u64,
     debugger_data_hint: Option<DebuggerDataCandidate>,
     /// Dump-integrity and per-CPU context warnings raised while opening,
     /// drained by the session through [`DebugBackend::take_notices`].
@@ -420,7 +419,6 @@ impl DmpBackend {
             current_processor: 0,
             number_processors: info.number_processors,
             header_context: info.context.clone(),
-            directory_table_base: info.directory_table_base,
             debugger_data_hint: info
                 .debugger_data_block
                 .map(|address| DebuggerDataCandidate {
@@ -456,9 +454,11 @@ impl DmpBackend {
         match self.per_cpu_registers.iter().position(matches_header) {
             Some(i) => self.current_processor = i,
             None => {
-                self.per_cpu_registers[0] = self
-                    .header_context
-                    .with_kernel_dtb(self.directory_table_base);
+                // Only the `CONTEXT`: the slots past it hold what the PRCB
+                // saved, which the header does not carry.
+                let context = arch.context_size();
+                self.per_cpu_registers[0][..context]
+                    .copy_from_slice(&self.header_context.bytes()[..context]);
                 self.current_processor = 0;
             }
         }
@@ -491,9 +491,16 @@ impl DmpBackend {
     /// only the crashing processor's context, and finding the others takes
     /// the kernel's symbols, so the session reads them once it has located
     /// the kernel. A `None` context keeps what the processor had.
+    ///
+    /// `special_registers` are each processor's registers that lie past the
+    /// `CONTEXT`, which the PRCB saves apart from it. A slot past the
+    /// `CONTEXT` that no processor's are given for, other than the page-table
+    /// roots the backend serves, leaves the register map, so it reads as
+    /// unavailable rather than as zero.
     pub fn set_processor_contexts(
         &mut self,
         contexts: Vec<Option<Vec<u8>>>,
+        special_registers: Vec<Vec<(&'static str, u64)>>,
         warnings: Vec<String>,
     ) {
         for (registers, context) in self.per_cpu_registers.iter_mut().zip(contexts) {
@@ -501,6 +508,28 @@ impl DmpBackend {
                 registers[..context.len()].copy_from_slice(&context);
             }
         }
+        let mut recorded = Vec::new();
+        for (registers, special) in self.per_cpu_registers.iter_mut().zip(special_registers) {
+            for (name, value) in special {
+                if self.register_map.write_u64(name, registers, value).is_ok()
+                    && let Some(info) = self.register_map.info(name)
+                {
+                    recorded.push(info.offset);
+                }
+            }
+        }
+        let arch = self.header_context.arch();
+        for root in [arch.kernel_dtb_register(), arch.dtb_register()] {
+            recorded.extend(self.register_map.info(root).map(|info| info.offset));
+        }
+        self.register_map = RegisterMap::from_registers(
+            self.register_map
+                .registers()
+                .iter()
+                .filter(|info| info.offset < arch.context_size() || recorded.contains(&info.offset))
+                .cloned()
+                .collect(),
+        );
         self.notices
             .extend(warnings.into_iter().map(Notice::warning));
         self.select_crash_processor();

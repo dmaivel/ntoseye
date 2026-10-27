@@ -95,6 +95,9 @@ pub struct DumpMetadata {
     pub pfn_database: u64,
     pub ps_loaded_module_list: u64,
     pub ps_active_process_head: u64,
+    /// `VER_NT_*` (`KUSER_SHARED_DATA.NtProductType`): 1 workstation,
+    /// 2 domain controller, 3 server; 0 when unknown.
+    pub product_type: u32,
     pub number_processors: u32,
     pub bug_check_code: u32,
     pub bug_check_parameters: [u64; 4],
@@ -107,6 +110,10 @@ pub struct DumpMetadata {
     /// Physical RAM runs as `(base_page, page_count)`, in the order in which
     /// their page contents are streamed after the header.
     pub runs: Vec<(u64, u64)>,
+    /// The debugger's own breakpoints in guest RAM: each site's
+    /// guest-physical address and the bytes it displaced, which the dump
+    /// holds in its place.
+    pub displaced: Vec<(PhysAddr, Vec<u8>)>,
 }
 
 /// Removes a dump's temporary file unless the dump completed.
@@ -278,6 +285,11 @@ fn build_header(metadata: &DumpMetadata, pages: u64) -> Result<Vec<u8>> {
     );
     write_u32(
         &mut header,
+        offset_of!(Header64, product_type),
+        metadata.product_type,
+    );
+    write_u32(
+        &mut header,
         offset_of!(Header64, number_processors),
         metadata.number_processors,
     );
@@ -410,6 +422,17 @@ where
     let mut writer = BufWriter::new(file);
     writer.write_all(&header)?;
 
+    // The displaced bytes one by one, in address order, so each page finds
+    // its own with a search rather than a pass over every site.
+    let mut displaced: Vec<(PhysAddr, u8)> = metadata
+        .displaced
+        .iter()
+        .flat_map(|(address, bytes)| {
+            (0..).map(move |index| address + index).zip(bytes.iter().copied())
+        })
+        .collect();
+    displaced.sort_unstable_by_key(|&(address, _)| address);
+
     let mut page = [0u8; PAGE_SIZE];
     let mut unreadable_pages = 0u64;
     for &(base_page, page_count) in &metadata.runs {
@@ -426,6 +449,13 @@ where
             if memory.read_bytes(address, &mut page).is_err() {
                 page.fill(0);
                 unreadable_pages += 1;
+            }
+            let first = displaced.partition_point(|&(site, _)| site < address);
+            for &(site, byte) in displaced[first..]
+                .iter()
+                .take_while(|&&(site, _)| site - address < PAGE_SIZE as u64)
+            {
+                page[(site - address) as usize] = byte;
             }
             writer.write_all(&page)?;
             on_page();
@@ -732,6 +762,8 @@ mod tests {
             context: vec![0u8; amd64::CONTEXT_SIZE],
             exception: None,
             runs,
+            product_type: 1,
+            displaced: Vec::new(),
         }
     }
 
@@ -767,6 +799,18 @@ mod tests {
         let memory = SyntheticMemory { bytes };
         let mut context = vec![0u8; amd64::CONTEXT_SIZE];
         write_u64(&mut context, amd64::OFFSET_RIP, 0xffff_f800_1234_5678);
+        // Breakpoints in the first page, across the first two, and in the
+        // last, which the dump must hold the displaced bytes of instead.
+        let displaced = vec![
+            (0x4000 + 0x123, vec![0x48]),
+            (0x10, vec![0x4c]),
+            (0xffe, vec![0x11, 0x22, 0x33, 0x44]),
+        ];
+        let mut expected = memory.bytes.clone();
+        for (address, bytes) in &displaced {
+            let start = *address as usize;
+            expected[start..start + bytes.len()].copy_from_slice(bytes);
+        }
         let metadata = DumpMetadata {
             arch: Arch::Amd64,
             major_version: 0xf,
@@ -775,6 +819,7 @@ mod tests {
             pfn_database: 0xffff_f800_1111_0000,
             ps_loaded_module_list: 0xffff_f800_2222_0000,
             ps_active_process_head: 0xffff_f800_3333_0000,
+            product_type: 1,
             number_processors: 1,
             bug_check_code: 0,
             bug_check_parameters: [0; 4],
@@ -782,6 +827,7 @@ mod tests {
             context,
             exception: None,
             runs: runs.clone(),
+            displaced,
         };
         let path = std::env::temp_dir().join(format!(
             "ntoseye-dump-writer-{}-{}.dmp",
@@ -799,6 +845,7 @@ mod tests {
         let system_info = info.system_info.as_ref().unwrap();
         assert_eq!(system_info.major_version, metadata.major_version);
         assert_eq!(system_info.minor_version, metadata.minor_version);
+        assert_eq!(system_info.product_type, 1);
         let physical = offset_of!(Header64, physical_memory_block_buffer);
         let raw = fs::read(&path).unwrap();
         assert_eq!(
@@ -826,7 +873,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 &actual,
-                &memory.bytes[page as usize * PAGE_SIZE..(page as usize + 1) * PAGE_SIZE]
+                &expected[page as usize * PAGE_SIZE..(page as usize + 1) * PAGE_SIZE]
             );
         }
 

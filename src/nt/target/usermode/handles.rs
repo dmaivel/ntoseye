@@ -80,6 +80,7 @@ mod tests {
             granted_access: 0,
             handle_count: 1,
             pointer_count: 1,
+            object_info: None,
         }
     }
 

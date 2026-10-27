@@ -84,6 +84,11 @@ pub struct MinidumpSystem {
     pub minor: u32,
     pub build: u32,
     pub processors: u8,
+    /// `ProcessorLevel`: on AMD64, the processor family; 0 when unknown.
+    pub processor_level: u16,
+    /// `ProcessorRevision`: on AMD64, the model (high byte) and stepping
+    /// (low byte); 0 when unknown.
+    pub processor_revision: u16,
     /// `VER_NT_WORKSTATION` (1), `VER_NT_DOMAIN_CONTROLLER` (2) or
     /// `VER_NT_SERVER` (3).
     pub product_type: u8,
@@ -319,8 +324,8 @@ pub fn write_minidump(
     // SystemInfoStream: MINIDUMP_SYSTEM_INFO and its (empty) CSD version.
     let system_rva = streams.rva();
     streams.u16(arch);
-    streams.u16(0); // ProcessorLevel
-    streams.u16(0); // ProcessorRevision
+    streams.u16(process.system.processor_level);
+    streams.u16(process.system.processor_revision);
     streams.bytes.push(process.system.processors);
     streams.bytes.push(process.system.product_type);
     streams.u32(process.system.major);

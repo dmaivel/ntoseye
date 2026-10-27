@@ -204,15 +204,15 @@ impl TypeInfo {
         names.into_iter().map(|(_, name)| name.clone()).collect()
     }
 
-    /// The fields in `dt`'s layout order: by offset, then bit position, then
-    /// name, so every host lists a union's members and a bitfield group the
-    /// same way.
+    /// The fields in `dt`'s layout order: by offset, the whole fields there
+    /// before the bitfields they hold, then bit position, then name, so
+    /// every host lists a union's members and a bitfield group the same way.
     pub fn fields_in_order(&self) -> Vec<(&String, &FieldInfo)> {
         let mut fields: Vec<_> = self.fields.iter().collect();
         fields.sort_by_key(|(name, field)| {
             let bit = match &field.type_data {
-                ParsedType::Bitfield { pos, .. } => *pos,
-                _ => 0,
+                ParsedType::Bitfield { pos, .. } => Some(*pos),
+                _ => None,
             };
             (field.offset, bit, *name)
         });

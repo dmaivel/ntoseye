@@ -238,7 +238,13 @@ impl Render for CriticalSectionView {
                     .filter(|section| !locked_only || section.locked() == Some(true))
                     .collect();
                 if shown.is_empty() {
-                    outln!("{}", ui::muted("no critical section is held"));
+                    // An incomplete walk says nothing of the sections it
+                    // did not reach.
+                    let none = match list.termination {
+                        ListTermination::Head => "no critical section is held",
+                        _ => "none of the sections read is held",
+                    };
+                    outln!("{}", ui::muted(none));
                     return;
                 }
                 let mut builder = Builder::default();
@@ -967,6 +973,15 @@ fn print_image_check(detail: &ImageCheck, no_spec: bool, verbose: bool) {
         if verbose || section.skipped || section.unavailable.is_some() {
             print_section_result(section, no_spec, verbose);
         }
+    }
+    // Counting mismatches in nothing compared would claim a clean image.
+    if detail
+        .sections
+        .iter()
+        .all(|section| section.skipped || section.unavailable.is_some())
+    {
+        outln!("{}: no section was compared", detail.module);
+        return;
     }
     let mismatched = if no_spec {
         detail.total_mismatched_bytes

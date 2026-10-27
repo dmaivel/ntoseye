@@ -511,6 +511,67 @@ fn handle_data_reads_both_descriptor_sizes_and_keeps_a_handle_whose_name_is_unre
 }
 
 #[test]
+fn handle_object_information_decodes_and_joins_a_mutants_owner_and_state() {
+    let mut builder = Builder::new(2);
+    builder.system_info(AMD64, WIN32_NT);
+    let link = |next: u32, kind: u32, body: &[u8]| {
+        let mut link = u32s(&[next, kind, body.len() as u32]);
+        link.extend_from_slice(body);
+        link
+    };
+    // A mutant's state follows its owner, as Windows writes them.
+    // MUTANT_BASIC_INFORMATION: a count of 1 (free), then the two flags.
+    let mut state = u32s(&[1]);
+    state.extend([0, 0, 0, 0]);
+    let mutant_state = builder.blob(&link(0, 2, &state));
+    let mutant = builder.blob(&link(mutant_state, 3, &u64s(&[0xe24, 0x278c])));
+    // THREAD_BASIC_INFORMATION: status and padding, TEB, client ID,
+    // affinity, priority and base priority.
+    let mut basic = u32s(&[0x103, 0]);
+    basic.extend(u64s(&[0xf3_5d17_2000, 0xe24, 0x278c, 0xf]));
+    basic.extend(u32s(&[10, 0]));
+    let thread = builder.blob(&link(0, 1, &basic));
+    let descriptor = |handle: u64, info: u32| {
+        let mut record = handle_descriptor(handle, (0, 0), [0, 0, 1, 1], 32);
+        record.extend(u32s(&[info, 0]));
+        record
+    };
+    let mut stream = u32s(&[16, 40, 3, 0]);
+    stream.extend(descriptor(0x68, mutant));
+    stream.extend(descriptor(0x21c, thread));
+    stream.extend(descriptor(0x4, 0));
+    builder.stream(12, &stream);
+    let dump = open(&builder.finish()).unwrap();
+    let handles = dump.info().handles.as_ref().unwrap();
+
+    let Some(HandleObjectInfo::Mutant(mutant)) = &handles[0].object_info else {
+        panic!("{:?}", handles[0].object_info);
+    };
+    assert_eq!(
+        (
+            mutant.current_count,
+            mutant.owner_process_id,
+            mutant.owner_thread_id
+        ),
+        (1, Some(0xe24), Some(0x278c))
+    );
+    let Some(HandleObjectInfo::Thread(thread)) = &handles[1].object_info else {
+        panic!("{:?}", handles[1].object_info);
+    };
+    assert_eq!(
+        (
+            thread.exit_status,
+            thread.teb,
+            thread.thread_id,
+            thread.priority,
+            thread.base_priority
+        ),
+        (0x103, 0xf3_5d17_2000, 0x278c, 10, 0)
+    );
+    assert!(handles[2].object_info.is_none());
+}
+
+#[test]
 fn memory_info_regions_are_sorted_and_overlaps_and_empty_regions_dropped() {
     let mut builder = Builder::new(2);
     builder.system_info(AMD64, WIN32_NT);
@@ -820,6 +881,8 @@ fn a_written_minidump_reads_back_as_written() {
             minor: 0,
             build: 26100,
             processors: 4,
+            processor_level: 6,
+            processor_revision: 0x5e03,
             product_type: 1,
         },
         time_date_stamp: 1_760_000_000,
@@ -913,8 +976,10 @@ fn a_written_minidump_reads_back_as_written() {
             info.system.minor_version,
             info.system.build_number,
             info.system.number_of_processors,
+            info.system.processor_level,
+            info.system.processor_revision,
         ),
-        (10, 0, 26100, 4)
+        (10, 0, 26100, 4, 6, 0x5e03)
     );
     assert_eq!(info.process_id, Some(4242));
     assert_eq!(info.process_create_time, Some(1_759_999_000));

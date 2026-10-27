@@ -1225,7 +1225,14 @@ impl Target {
             });
         }
         apply_relocations(&view, &bytes, module_info.base_address.0, &mut sections);
-        let allow_kernel_self_patches = is_kernel_self_patch_module(&module_info);
+        // The kernel applies the same load-time patches (import calls,
+        // retpoline and CFG dispatch) to every image it loads, itself and
+        // each driver; they are the kernel's, so a user-mode image's
+        // differences all count.
+        let allow_kernel_self_patches = self
+            .arch()
+            .paging()
+            .is_kernel_address(module_info.base_address);
         let preferred_base = image_base(&view);
         let mut section_results = Vec::with_capacity(sections.len());
         let mut genuine_total = 0u64;
@@ -1276,13 +1283,7 @@ impl Target {
                 );
             }
             self_patch_range_overflow |= result.self_patch_range_overflow;
-            for diff in result.diffs {
-                if diffs.len() < MAX_BYTE_DIFFS {
-                    diffs.push(diff);
-                } else {
-                    diff_overflow = true;
-                }
-            }
+            diffs.extend(result.diffs);
             section_results.push(ImageSectionCheck {
                 name: section.name.clone(),
                 rva: section.rva,
@@ -1294,6 +1295,13 @@ impl Target {
                 unavailable: result.unavailable,
             });
             diff_overflow |= result.diff_overflow;
+        }
+        // The genuine diffs first, in address order, then the set-aside
+        // patches, so a limited listing shows the ones that matter.
+        diffs.sort_by_key(|diff| diff.kind.is_some());
+        if diffs.len() > MAX_BYTE_DIFFS {
+            diffs.truncate(MAX_BYTE_DIFFS);
+            diff_overflow = true;
         }
         Ok(ImageCheck {
             module: module_info.name,
@@ -1336,10 +1344,10 @@ impl Target {
             let take = (section.expected.len() - offset).min(SECTION_READ_CHUNK);
             let address = base + section.rva as u64 + offset as u64;
             if let Err(error) = read_code(address, &mut live[offset..offset + take]) {
-                if is_skippable_section_read_error(&error) {
+                if let Some(reason) = section_skip_reason(&error) {
                     return SectionCheckResult {
                         skipped: true,
-                        skip_reason: Some("paged out"),
+                        skip_reason: Some(reason),
                         ..SectionCheckResult::default()
                     };
                 }
@@ -1350,6 +1358,8 @@ impl Target {
             }
         }
         let mut result = SectionCheckResult::default();
+        // Byte diffs kept so far: genuine, then set aside.
+        let mut kept = [0usize; 2];
         let mut offset = 0usize;
         let machine = self.executing_machine(base + section.rva as u64);
         while offset < section.expected.len() {
@@ -1397,12 +1407,17 @@ impl Target {
                         run_start = Some(index);
                     }
                     if include_diffs {
-                        if result.diffs.len() < MAX_BYTE_DIFFS {
+                        // Each kind fills its own share, so the set-aside
+                        // patches never crowd out the genuine diffs.
+                        let kind = patch.as_ref().map(|patch| patch.kind);
+                        let share = &mut kept[usize::from(kind.is_some())];
+                        if *share < MAX_BYTE_DIFFS {
+                            *share += 1;
                             result.diffs.push(ImageByteDiff {
                                 rva: section.rva + (offset + index) as u32,
                                 expected: expected[index],
                                 actual: actual[index],
-                                kind: patch.as_ref().map(|patch| patch.kind),
+                                kind,
                             });
                         } else {
                             result.diff_overflow = true;
@@ -1655,23 +1670,17 @@ fn push_self_patch_range(
     }
 }
 
-fn is_kernel_self_patch_module(module: &ModuleInfo) -> bool {
-    module.short_name.eq_ignore_ascii_case("nt")
-        || module.name.rsplit(['\\', '/']).next().is_some_and(|name| {
-            name.eq_ignore_ascii_case("ntoskrnl.exe")
-                || name.to_ascii_lowercase().starts_with("ntkrnl")
-        })
-}
-
-fn is_skippable_section_read_error(error: &Error) -> bool {
-    matches!(
-        error,
-        Error::BadVirtualAddress(_)
-            | Error::PartialRead(_)
-            | Error::AddressNotInDump(_)
-            | Error::NotCaptured { .. }
-            | Error::BadPhysicalAddress(_)
-    )
+/// Why a section whose read failed with `error` is skipped rather than
+/// reported unavailable: its code is not in memory, or not in the dump;
+/// `None` for a failure that is neither.
+fn section_skip_reason(error: &Error) -> Option<&'static str> {
+    match error {
+        Error::BadVirtualAddress(_) | Error::PartialRead(_) | Error::BadPhysicalAddress(_) => {
+            Some("paged out")
+        }
+        Error::AddressNotInDump(_) | Error::NotCaptured { .. } => Some("not in the dump"),
+        _ => None,
+    }
 }
 
 fn rel32_target(address: u64, bytes: &[u8]) -> Option<u64> {

@@ -3,6 +3,7 @@ use std::fmt::Display;
 use tabled::builder::Builder;
 
 use crate::base::error::{Error, Result};
+use crate::base::ntstatus::ntstatus_name;
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::hosts::repl::*;
@@ -18,7 +19,7 @@ use crate::nt::target::usermode::handles::{
     handle_attribute_names, handle_type_counts, handle_type_label,
 };
 use crate::nt::target::{DiagnosticValue, ListTermination, TargetKind};
-use crate::nt::userdump::UserHandle;
+use crate::nt::userdump::{HandleObjectInfo, UserHandle};
 use crate::session::Session;
 use ntoseye_macros::{command, grammar};
 
@@ -183,7 +184,8 @@ pub fn print_process_memory(summary: &SystemMemorySummary) {
 
 /// `!handle`'s flags on a user-mode minidump, as WinDbg's user-mode flags:
 /// the handle's type; its access, attributes, and counts; its object's
-/// name; and object-specific information, which a minidump does not record.
+/// name; and object-specific information, which a minidump records for
+/// some types when it was written with it.
 const SHOW_TYPE: u64 = 0x1;
 const SHOW_BASIC: u64 = 0x2;
 const SHOW_NAME: u64 = 0x4;
@@ -216,6 +218,97 @@ fn print_user_handle(entry: &UserHandle, show: u64) {
             "  name           {}",
             entry.object_name.as_deref().unwrap_or("-")
         );
+    }
+    if show & SHOW_OBJECT != 0 {
+        match &entry.object_info {
+            Some(info) => {
+                for (label, value) in object_info_fields(info) {
+                    outln!("  {label:<14} {value}");
+                }
+            }
+            None => outln!("  object         {}", ui::muted("not recorded")),
+        }
+    }
+}
+
+/// The fields of a handle's object information, labeled as `!handle`
+/// shows them.
+fn object_info_fields(info: &HandleObjectInfo) -> Vec<(&'static str, String)> {
+    let client = |process: u64, thread: u64| format!("{process:x}.{thread:x}");
+    match info {
+        HandleObjectInfo::Thread(thread) => vec![
+            ("thread", client(thread.process_id, thread.thread_id)),
+            ("TEB", ui::addr(thread.teb)),
+            ("priority", thread.priority.to_string()),
+            ("base priority", thread.base_priority.to_string()),
+            ("affinity", format!("{:#x}", thread.affinity)),
+            ("exit status", ntstatus_text(thread.exit_status)),
+        ],
+        HandleObjectInfo::Process(process) => vec![
+            ("process", format!("{:x}", process.process_id)),
+            ("parent", format!("{:x}", process.parent_process_id)),
+            ("PEB", ui::addr(process.peb)),
+            ("base priority", process.base_priority.to_string()),
+            ("affinity", format!("{:#x}", process.affinity)),
+            ("exit status", ntstatus_text(process.exit_status)),
+        ],
+        HandleObjectInfo::Event(event) => vec![
+            (
+                "event type",
+                if event.manual_reset {
+                    "manual reset"
+                } else {
+                    "auto reset"
+                }
+                .to_string(),
+            ),
+            (
+                "event state",
+                if event.signaled { "set" } else { "waiting" }.to_string(),
+            ),
+        ],
+        HandleObjectInfo::Mutant(mutant) => {
+            let state = if mutant.current_count > 0 {
+                "free"
+            } else {
+                "owned"
+            };
+            let mut fields = vec![
+                ("mutex", state.to_string()),
+                ("count", mutant.current_count.to_string()),
+                ("abandoned", if mutant.abandoned { "yes" } else { "no" }.to_string()),
+            ];
+            if let (Some(process), Some(thread)) = (mutant.owner_process_id, mutant.owner_thread_id)
+                && (process, thread) != (0, 0)
+            {
+                fields.push(("owner", client(process, thread)));
+            }
+            fields
+        }
+        HandleObjectInfo::Semaphore(semaphore) => vec![
+            ("count", semaphore.current_count.to_string()),
+            ("limit", semaphore.maximum_count.to_string()),
+        ],
+        HandleObjectInfo::Section(section) => vec![
+            ("section base", format!("{:#x}", section.base_address)),
+            ("section flags", format!("{:#x}", section.attributes)),
+            ("maximum size", format!("{:#x}", section.maximum_size)),
+        ],
+        HandleObjectInfo::Other(other) => vec![(
+            "object",
+            format!(
+                "information of kind {} ({} bytes), not decoded",
+                other.kind, other.size
+            ),
+        )],
+    }
+}
+
+/// An NTSTATUS, with its name when it has one.
+fn ntstatus_text(status: u32) -> String {
+    match ntstatus_name(status) {
+        Some(name) => format!("{status:#x} ({name})"),
+        None => format!("{status:#x}"),
     }
 }
 
@@ -330,10 +423,12 @@ fn print_resource_table(repl: &ReplState<'_>, resources: &[&ExecutiveResource]) 
 /// a handle, it shows the object, type, name, access mask, and attributes, if
 /// it can decode them. On a user-mode minidump it lists the handles the
 /// dump's handle data records, as Windows reported them when the dump was
-/// written, with a count of each type; it has no objects to show. There, a
-/// handle of 0 selects every handle, flags choose what to show (1 type, 2
-/// access, attributes, and counts, 4 name; the default shows all), and a
-/// type, such as File, keeps only handles of that type.
+/// written, with a count of each type. There, a handle of 0 selects every
+/// handle, flags choose what to show (1 type, 2 access, attributes, and
+/// counts, 4 name, 8 the object-specific information, such as an event's
+/// state or a thread's ID, that a dump written with it records for some
+/// types; the default shows all but 8), and a type, such as File, keeps
+/// only handles of that type.
 #[command(
     names = ["!handle"],
     category = "objects and I/O",
@@ -544,12 +639,6 @@ fn print_user_handles(listing: &UserHandles) {
             type_filter.is_none_or(|filter| handle_type_label(entry).eq_ignore_ascii_case(filter))
         })
         .collect();
-    if show & SHOW_OBJECT != 0 {
-        outln!(
-            "{}",
-            ui::muted("object-specific information is not recorded in a user-mode minidump")
-        );
-    }
     if handle != 0 {
         let Some(entry) = shown.first() else {
             match type_filter {
@@ -585,6 +674,9 @@ fn print_user_handles(listing: &UserHandles) {
     if show & SHOW_NAME != 0 {
         header.push("Name");
     }
+    if show & SHOW_OBJECT != 0 {
+        header.push("Object");
+    }
     let mut builder = Builder::default();
     builder.push_record(header);
     for entry in &shown {
@@ -602,6 +694,16 @@ fn print_user_handles(listing: &UserHandles) {
         }
         if show & SHOW_NAME != 0 {
             row.push(entry.object_name.clone().unwrap_or_else(|| "-".to_string()));
+        }
+        if show & SHOW_OBJECT != 0 {
+            row.push(match &entry.object_info {
+                Some(info) => object_info_fields(info)
+                    .into_iter()
+                    .map(|(label, value)| format!("{label} {value}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                None => "-".to_string(),
+            });
         }
         builder.push_record(row);
     }

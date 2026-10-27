@@ -10,7 +10,7 @@ use crate::backend::partition_backend::PartitionBackend;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::notice::Notice;
-use crate::base::types::VirtAddr;
+use crate::base::types::{PhysAddr, VirtAddr};
 use crate::nt::breakpoints::{
     BreakpointConfig, BreakpointInfo, BreakpointManager, BreakpointScope, BreakpointSpec,
     HypercallFilter, ThreadScope, lift_target_site, plant_target_site,
@@ -816,6 +816,28 @@ impl Session {
     pub fn remove_all_breakpoints(&mut self) -> Result<()> {
         let (breakpoints, backend, target) = self.breakpoint_sites();
         breakpoints.remove_all(backend, target)
+    }
+
+    /// Every debugger-owned site in guest RAM, the manager's breakpoints and
+    /// the session's own traps: its guest-physical address and the bytes it
+    /// displaced. A copy of guest RAM, such as a kernel dump, writes these in
+    /// their place, so it holds the guest's code and not our breakpoints.
+    pub fn displaced_frames(&self) -> Vec<(PhysAddr, Vec<u8>)> {
+        if self.partition().is_some() {
+            return Vec::new();
+        }
+        let mut frames = self.breakpoints.displaced_frames(&self.target);
+        let memory = self.target.address_space(self.target.kernel_dtb());
+        let module_sites = self.module_traps.iter().map(|trap| &trap.site);
+        for trap in self.bugcheck_trap.iter().chain(module_sites) {
+            if trap.original.is_empty() {
+                continue;
+            }
+            if let Ok(Some(translation)) = memory.virt_to_phys(trap.address) {
+                frames.push((translation.address, trap.original.clone()));
+            }
+        }
+        frames
     }
 
     /// Whether any debugger-owned site is installed in the guest. The traps

@@ -259,6 +259,10 @@ pub struct UserHandle {
     pub granted_access: u32,
     pub handle_count: u32,
     pub pointer_count: u32,
+    /// What Windows reported of the object when the dump was written: a
+    /// `MINIDUMP_HANDLE_DESCRIPTOR_2`'s object information, for the types
+    /// it records any for. `None` when the dump records none.
+    pub object_info: Option<HandleObjectInfo>,
 }
 
 #[record]
@@ -268,6 +272,116 @@ impl UserHandle {
     pub fn attribute_names(&self) -> Vec<String> {
         crate::nt::target::usermode::handles::handle_attribute_names(self.attributes)
     }
+}
+
+/// A handle's object, as the information class `NtQueryInformationThread`,
+/// `NtQueryEvent` and the like return for its type reported it.
+#[record]
+#[derive(Debug, Clone)]
+pub enum HandleObjectInfo {
+    Thread(HandleThreadInfo),
+    Process(HandleProcessInfo),
+    Event(HandleEventInfo),
+    Mutant(HandleMutantInfo),
+    Semaphore(HandleSemaphoreInfo),
+    Section(HandleSectionInfo),
+    /// A kind of information ntoseye does not decode.
+    Other(HandleOtherInfo),
+}
+
+/// A thread (`THREAD_BASIC_INFORMATION`).
+#[record]
+#[derive(Debug, Clone)]
+pub struct HandleThreadInfo {
+    /// `STATUS_PENDING` (0x103) while the thread runs.
+    #[record(hex)]
+    pub exit_status: u32,
+    #[record(hex)]
+    pub teb: u64,
+    #[record(hex)]
+    pub process_id: u64,
+    #[record(hex)]
+    pub thread_id: u64,
+    #[record(hex)]
+    pub affinity: u64,
+    pub priority: i32,
+    pub base_priority: i32,
+}
+
+/// A process (`PROCESS_BASIC_INFORMATION`).
+#[record]
+#[derive(Debug, Clone)]
+pub struct HandleProcessInfo {
+    /// `STATUS_PENDING` (0x103) while the process runs.
+    #[record(hex)]
+    pub exit_status: u32,
+    #[record(hex)]
+    pub peb: u64,
+    #[record(hex)]
+    pub affinity: u64,
+    pub base_priority: i32,
+    #[record(hex)]
+    pub process_id: u64,
+    #[record(hex)]
+    pub parent_process_id: u64,
+}
+
+/// An event (`EVENT_BASIC_INFORMATION`).
+#[record]
+#[derive(Debug, Clone)]
+pub struct HandleEventInfo {
+    /// A notification event, which stays set until reset; otherwise a
+    /// synchronization event, which a satisfied wait resets.
+    pub manual_reset: bool,
+    pub signaled: bool,
+}
+
+/// A mutant (`MUTANT_BASIC_INFORMATION`, and `MUTANT_OWNER_INFORMATION`
+/// when the dump records the owner).
+#[record]
+#[derive(Debug, Clone)]
+pub struct HandleMutantInfo {
+    /// 1 when free; 0 or less when owned, by recursion depth.
+    pub current_count: i32,
+    pub owned_by_caller: bool,
+    pub abandoned: bool,
+    /// The owning thread's process and thread IDs, zero when free.
+    #[record(hex)]
+    pub owner_process_id: Option<u64>,
+    #[record(hex)]
+    pub owner_thread_id: Option<u64>,
+}
+
+/// A semaphore (`SEMAPHORE_BASIC_INFORMATION`).
+#[record]
+#[derive(Debug, Clone)]
+pub struct HandleSemaphoreInfo {
+    pub current_count: i32,
+    pub maximum_count: i32,
+}
+
+/// A section (`SECTION_BASIC_INFORMATION`).
+#[record]
+#[derive(Debug, Clone)]
+pub struct HandleSectionInfo {
+    /// The base of a based section; 0 otherwise.
+    #[record(hex)]
+    pub base_address: u64,
+    /// The `SEC_*` allocation attributes.
+    #[record(hex)]
+    pub attributes: u32,
+    #[record(hex)]
+    pub maximum_size: u64,
+}
+
+/// Object information of a kind ntoseye does not decode
+/// (`MINIDUMP_HANDLE_OBJECT_INFORMATION_TYPE`).
+#[record]
+#[derive(Debug, Clone)]
+pub struct HandleOtherInfo {
+    pub kind: u32,
+    /// Its size in bytes.
+    pub size: u32,
 }
 
 /// `MINIDUMP_MEMORY_INFO`: one region of the address space, as

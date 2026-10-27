@@ -6476,6 +6476,112 @@ class HandleEntry(BaseRecord):
     def type_name(self, /) -> Diagnostic[str |None]: ...
 
 @final
+class HandleEventInfo(BaseRecord):
+    """
+    An event (`EVENT_BASIC_INFORMATION`).
+    """
+    __match_args__: Final[tuple[Literal["manual_reset"], Literal["signaled"]]]
+    @property
+    def manual_reset(self, /) -> bool:
+        """
+        A notification event, which stays set until reset; otherwise a
+        synchronization event, which a satisfied wait resets.
+        """
+    @property
+    def signaled(self, /) -> bool: ...
+
+@final
+class HandleMutantInfo(BaseRecord):
+    """
+    A mutant (`MUTANT_BASIC_INFORMATION`, and `MUTANT_OWNER_INFORMATION`
+    when the dump records the owner).
+    """
+    __match_args__: Final[tuple[Literal["current_count"], Literal["owned_by_caller"], Literal["abandoned"], Literal["owner_process_id"], Literal["owner_thread_id"]]]
+    @property
+    def abandoned(self, /) -> bool: ...
+    @property
+    def current_count(self, /) -> int:
+        """
+        1 when free; 0 or less when owned, by recursion depth.
+        """
+    @property
+    def owned_by_caller(self, /) -> bool: ...
+    @property
+    def owner_process_id(self, /) -> int |None:
+        """
+        The owning thread's process and thread IDs, zero when free.
+        """
+    @property
+    def owner_thread_id(self, /) -> int |None: ...
+
+@final
+class HandleOtherInfo(BaseRecord):
+    """
+    Object information of a kind ntoseye does not decode
+    (`MINIDUMP_HANDLE_OBJECT_INFORMATION_TYPE`).
+    """
+    __match_args__: Final[tuple[Literal["kind"], Literal["size"]]]
+    @property
+    def kind(self, /) -> int: ...
+    @property
+    def size(self, /) -> int:
+        """
+        Its size in bytes.
+        """
+
+@final
+class HandleProcessInfo(BaseRecord):
+    """
+    A process (`PROCESS_BASIC_INFORMATION`).
+    """
+    __match_args__: Final[tuple[Literal["exit_status"], Literal["peb"], Literal["affinity"], Literal["base_priority"], Literal["process_id"], Literal["parent_process_id"]]]
+    @property
+    def affinity(self, /) -> int: ...
+    @property
+    def base_priority(self, /) -> int: ...
+    @property
+    def exit_status(self, /) -> int:
+        """
+        `STATUS_PENDING` (0x103) while the process runs.
+        """
+    @property
+    def parent_process_id(self, /) -> int: ...
+    @property
+    def peb(self, /) -> int: ...
+    @property
+    def process_id(self, /) -> int: ...
+
+@final
+class HandleSectionInfo(BaseRecord):
+    """
+    A section (`SECTION_BASIC_INFORMATION`).
+    """
+    __match_args__: Final[tuple[Literal["base_address"], Literal["attributes"], Literal["maximum_size"]]]
+    @property
+    def attributes(self, /) -> int:
+        """
+        The `SEC_*` allocation attributes.
+        """
+    @property
+    def base_address(self, /) -> int:
+        """
+        The base of a based section; 0 otherwise.
+        """
+    @property
+    def maximum_size(self, /) -> int: ...
+
+@final
+class HandleSemaphoreInfo(BaseRecord):
+    """
+    A semaphore (`SEMAPHORE_BASIC_INFORMATION`).
+    """
+    __match_args__: Final[tuple[Literal["current_count"], Literal["maximum_count"]]]
+    @property
+    def current_count(self, /) -> int: ...
+    @property
+    def maximum_count(self, /) -> int: ...
+
+@final
 class HandleTable(BaseRecord):
     """
     The handle table of a process (`!handle`).
@@ -6516,6 +6622,30 @@ class HandleTable(BaseRecord):
         """
         Whether the enumeration stopped at its limit.
         """
+
+@final
+class HandleThreadInfo(BaseRecord):
+    """
+    A thread (`THREAD_BASIC_INFORMATION`).
+    """
+    __match_args__: Final[tuple[Literal["exit_status"], Literal["teb"], Literal["process_id"], Literal["thread_id"], Literal["affinity"], Literal["priority"], Literal["base_priority"]]]
+    @property
+    def affinity(self, /) -> int: ...
+    @property
+    def base_priority(self, /) -> int: ...
+    @property
+    def exit_status(self, /) -> int:
+        """
+        `STATUS_PENDING` (0x103) while the thread runs.
+        """
+    @property
+    def priority(self, /) -> int: ...
+    @property
+    def process_id(self, /) -> int: ...
+    @property
+    def teb(self, /) -> int: ...
+    @property
+    def thread_id(self, /) -> int: ...
 
 @final
 class HandleTrace(BaseRecord):
@@ -6655,7 +6785,7 @@ class HangThread(BaseRecord):
 @final
 class Heap:
     """
-    One heap of a process, from its PEB heap list.
+    One heap of a process, from its heap list.
     """
     def __eq__(self, other: object, /) -> bool: ...
     def __hash__(self, /) -> int: ...
@@ -6668,7 +6798,7 @@ class Heap:
     @property
     def index(self, /) -> int:
         """
-        The index of the heap in the PEB list.
+        The index of the heap in the process's heap list.
         """
     @property
     def info(self, /) -> HeapInfo:
@@ -6795,8 +6925,8 @@ class HeapBlockSearch(BaseRecord):
     @property
     def truncated(self, /) -> bool:
         """
-        Whether the PEB listed more heaps than the search bound, in which
-        case the search may have missed the block.
+        Whether the process listed more heaps than the search bound, in
+        which case the search may have missed the block.
         """
 
 @final
@@ -6815,7 +6945,7 @@ class HeapDetail(BaseRecord):
     @property
     def index(self, /) -> int:
         """
-        Position in the PEB heap list.
+        Position in the process's heap list.
         """
     @property
     def kind(self, /) -> Literal["nt", "segment", "unknown"]: ...
@@ -6854,7 +6984,7 @@ class HeapIdentity(BaseRecord):
     @property
     def index(self, /) -> int:
         """
-        Position in the PEB heap list.
+        Position in the process's heap list.
         """
     @property
     def kind(self, /) -> Literal["nt", "segment", "unknown"]: ...
@@ -6868,7 +6998,7 @@ class HeapIdentity(BaseRecord):
 @final
 class HeapInfo(BaseRecord):
     """
-    One heap of a process, from its PEB heap list (`!heap -s`).
+    One heap of a process, from its heap list (`!heap -s`).
     """
     __match_args__: Final[tuple[Literal["index"], Literal["address"], Literal["stats"]]]
     @property
@@ -6879,7 +7009,7 @@ class HeapInfo(BaseRecord):
     @property
     def index(self, /) -> int:
         """
-        The index of the heap in the PEB list.
+        The index of the heap in the process's heap list.
         """
     @property
     def kind(self, /) -> Literal["nt", "segment", "unknown"]: ...
@@ -6945,7 +7075,7 @@ class HeapWalkStop(BaseRecord):
 @final
 class Heaps:
     """
-    The PEB heap list of a process.
+    The heap list of a process.
     """
     def __contains__(self, item: Any, /) -> bool:
         """
@@ -8172,6 +8302,8 @@ class Inspect:
     def acl(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> Acl:
         """
         Decode an ACL and its ACEs.
+        
+        The optional 1 adds the names of well-known SIDs.
         """
     def alpc_message(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> AlpcMessage:
         """
@@ -10219,9 +10351,10 @@ class LfhSubsegment(BaseRecord):
     @property
     def blocks_per_word(self, /) -> int: ...
     @property
-    def bucket(self, /) -> int:
+    def bucket(self, /) -> int |None:
         """
-        The LFH bucket of the subsegment.
+        The LFH bucket of the subsegment. None while a subsegment without
+        `BucketRef` is in its delayed-free state, which hides its owner.
         """
     @property
     def busy_count(self, /) -> int: ...
@@ -12598,7 +12731,9 @@ class NtEntry(BaseRecord):
     def user_size(self, /) -> int:
         """
         The number of bytes that the caller requested: the block size minus
-        the header and the unused bytes.
+        the unused bytes, which ntdll counts with the header's overhead in
+        them (an x64 header's first qword holds the previous block's data, so
+        only its second is overhead).
         """
 
 @final
@@ -15052,7 +15187,7 @@ class Process:
     @property
     def heaps(self, /) -> Heaps:
         """
-        The heaps in the PEB of this process.
+        The heaps of this process.
         """
     @property
     def info(self, /) -> ProcessInfo:
@@ -16970,7 +17105,8 @@ class Session(BaseRecord):
     @property
     def id(self, /) -> int |None:
         """
-        `None` for processes whose session is unknown.
+        `None` for processes outside every session (System, Registry, smss)
+        and those whose session is unknown.
         """
     @property
     def processes(self, /) -> list[ProcessInfo]:
@@ -20448,7 +20584,7 @@ class UserHandle(BaseRecord):
     `MINIDUMP_HANDLE_DESCRIPTOR_2`), as the dump records it. The dump names
     no object address.
     """
-    __match_args__: Final[tuple[Literal["handle"], Literal["type_name"], Literal["object_name"], Literal["attributes"], Literal["granted_access"], Literal["handle_count"], Literal["pointer_count"]]]
+    __match_args__: Final[tuple[Literal["handle"], Literal["type_name"], Literal["object_name"], Literal["attributes"], Literal["granted_access"], Literal["handle_count"], Literal["pointer_count"], Literal["object_info"]]]
     @property
     def attribute_names(self, /) -> list[str]:
         """
@@ -20465,6 +20601,13 @@ class UserHandle(BaseRecord):
     def handle(self, /) -> int: ...
     @property
     def handle_count(self, /) -> int: ...
+    @property
+    def object_info(self, /) -> HandleThreadInfo |HandleProcessInfo |HandleEventInfo |HandleMutantInfo |HandleSemaphoreInfo |HandleSectionInfo |HandleOtherInfo |None:
+        """
+        What Windows reported of the object when the dump was written: a
+        `MINIDUMP_HANDLE_DESCRIPTOR_2`'s object information, for the types
+        it records any for. `None` when the dump records none.
+        """
     @property
     def object_name(self, /) -> str |None: ...
     @property
@@ -21797,7 +21940,7 @@ class VtopDetail(BaseRecord):
     A virtual address translated through the page tables of a DTB
     (`!vtop`), with every level read.
     """
-    __match_args__: Final[tuple[Literal["address"], Literal["dtb"], Literal["levels"], Literal["physical"], Literal["large"], Literal["transition"], Literal["section"]]]
+    __match_args__: Final[tuple[Literal["address"], Literal["dtb"], Literal["levels"], Literal["physical_walk"], Literal["physical"], Literal["large"], Literal["transition"], Literal["section"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -21816,6 +21959,12 @@ class VtopDetail(BaseRecord):
     def physical(self, /) -> int |None:
         """
         The physical address; `None` when the address is not mapped.
+        """
+    @property
+    def physical_walk(self, /) -> bool:
+        """
+        Whether the levels' addresses are physical (a walk of the tables
+        from the DTB) rather than virtual through NT's self-map.
         """
     @property
     def section(self, /) -> bool:
