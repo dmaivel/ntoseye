@@ -172,20 +172,40 @@ impl<'a> StackTracer<'a> {
 
     /// Whether a return address the unwind found is code: by
     /// [`Self::is_executable_address`], or, outside every module of a
-    /// kernel target, in a page the tables map executable. JIT-compiled code
-    /// is there, and .NET Framework's has no tables to read: an in-process
-    /// callback gives its unwind data. The stack scan keeps to the strict
-    /// test, which needs no page walk for each slot it reads.
+    /// kernel target, in a page the tables map executable and just after a
+    /// call. JIT-compiled code is there, and .NET Framework's has no tables
+    /// to read: an in-process callback gives its unwind data. The call is
+    /// what tells a return address from any other pointer into such a page.
+    /// The stack scan keeps to the strict test, which needs no page walk for
+    /// each slot it reads.
     pub(super) fn is_return_address(&mut self, address: u64) -> bool {
         if self.is_executable_address(address) {
             return true;
         }
-        self.target.kind() == TargetKind::Kernel
+        if !(self.target.kind() == TargetKind::Kernel
             && self.module_containing(address).is_none()
             && matches!(
                 self.memory.virt_to_phys(VirtAddr(address)),
                 Ok(Some(page)) if page.residency == Residency::Mapped && !page.nx
-            )
+            ))
+        {
+            return false;
+        }
+        self.follows_call(address)
+    }
+
+    /// Whether the instruction before `address` is a call: what a return
+    /// address follows.
+    pub(super) fn follows_call(&mut self, address: u64) -> bool {
+        // The longest call `ends_in_call` reads.
+        let mut before = [0u8; 7];
+        address
+            .checked_sub(before.len() as u64)
+            .is_some_and(|start| self.memory.read_bytes(VirtAddr(start), &mut before).is_ok())
+            && self
+                .code_machine_at(address)
+                .instruction_set()
+                .ends_in_call(&before)
     }
 
     pub(super) fn module_containing(&mut self, address: u64) -> Option<&CachedModule> {

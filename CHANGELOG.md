@@ -19,6 +19,11 @@ Keeping this file:
 
 - `PteWalk`, the SDK's `!pte` result, lists the entries the walk read as `levels`, root first, as `VtopDetail` does, in place of its `pxe`, `ppe`, `pde` and `pte` fields.
 
+### Fixed
+
+- On ARM64, a stack through .NET code unwinds to the thread's start: a caller whose unwind data is not there to read, JIT-compiled code or an NGEN image's paged-out `.pdata`, is found by the frame record its x29 points at, where the frames below the first JIT frame were found by scanning the stack.
+- On a live kernel target, an address outside every module is taken as a return into code only when a call precedes it, where any address in an executable page was, so a stale pointer into JIT-compiled code no longer passes for a frame.
+
 ## v0.52.0 (2026-10-25)
 
 Support for 64-bit Windows 7, 8.1, Vista and XP ([platform support](https://ntoseye.com/#platform-support)), reads of memory Windows compressed into its memory-compression store (on x64 and ARM64), scripted runs with `-c` and `--batch`, UI improvements and many bug fixes. Stops and `u` now show where the code goes: the instructions around the stop in its function, jump and call targets by name, the jumps between them drawn as arrows, and whether the next one is taken; a bugcheck stop shows the registers the faulting instruction ran with, and its stack starts at the frame that faulted.
