@@ -15,6 +15,7 @@ Keeping this file:
 
 ### Changed", "### Fixed" and "
 - `lm v` and `vertarget` give the PDB age the image names its PDB by, as symbol stores file it, where they gave the age the PDB file itself records, which can be higher.
+- `dt` shows a byte array that holds no text (a GUID's `Data4`) as hex bytes, where it printed escapes such as `\u{fffd}`, and shows non-ASCII text in strings as written instead of escaped.
 
 ### Removed", in that order, leaving out empty groups. A fix to something not yet released is no "Fixed" line; amend the line that added it. A change that breaks scripts starts with "**Breaking:**" and comes first in its group.
 - A release with a theme opens with one or two sentences before the groups, saying what users can now do. A release without one goes straight to the groups.

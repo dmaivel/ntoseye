@@ -435,13 +435,18 @@ impl<'a> TypeView<'a> {
         }
     }
 
+    /// A `CHAR`/`UCHAR` array: its text when it holds text, else its
+    /// bytes (a GUID's `Data4`, a hash), which as text would be noise.
     fn format_c_string(&self, address: VirtAddr, count: u32) -> String {
         let size = (count as usize).min(MAX_UNICODE_BYTES);
         let bytes = match self.read_display_bytes(address, size) {
             Ok(bytes) => bytes,
             Err(error) => return format!("<unavailable: {error}>"),
         };
-        quote_bounded(&String::from_utf8_lossy(before_nul(&bytes)))
+        match std::str::from_utf8(before_nul(&bytes)) {
+            Ok(text) if !text.chars().any(char::is_control) => quote_bounded(text),
+            _ => byte_list(&bytes),
+        }
     }
 
     /// `type_data` is the field's own type: its (possibly `module!`-qualified)
@@ -501,15 +506,33 @@ impl<'a> TypeView<'a> {
 /// Quote and escape a decoded guest string, stopping after
 /// [`MAX_STRING_CHARS`]. A truncated string carries the trailing `...` that
 /// `da`/`du` use, so a clamped value is never mistaken for the whole string.
+/// Printable characters of any script stay as they are; control
+/// characters, quotes and backslashes are escaped.
 fn quote_bounded(text: &str) -> String {
     let mut escaped = String::new();
     for (index, ch) in text.chars().enumerate() {
         if index == MAX_STRING_CHARS {
             return format!("\"{escaped}\"...");
         }
-        escaped.extend(ch.escape_default());
+        escaped.extend(ch.escape_debug());
     }
     format!("\"{escaped}\"")
+}
+
+/// Bytes in hex, `[8f 01 ec]`, stopping after [`MAX_STRING_CHARS`] of
+/// them with the trailing `...` [`quote_bounded`] uses.
+fn byte_list(bytes: &[u8]) -> String {
+    let shown: Vec<String> = bytes
+        .iter()
+        .take(MAX_STRING_CHARS)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let more = if bytes.len() > MAX_STRING_CHARS {
+        "..."
+    } else {
+        ""
+    };
+    format!("[{}]{more}", shown.join(" "))
 }
 
 #[cfg(test)]
@@ -541,7 +564,7 @@ mod tests {
         );
 
         assert!(value.ends_with("\"..."), "{value}");
-        assert_eq!(value.matches("\\u{").count(), MAX_STRING_CHARS);
+        assert_eq!(value.matches('\u{101}').count(), MAX_STRING_CHARS);
     }
 
     #[test]
