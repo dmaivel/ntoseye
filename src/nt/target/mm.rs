@@ -227,6 +227,9 @@ pub struct VtopDetail {
     pub dtb: Dtb,
     /// The levels read, top down.
     pub levels: Vec<PteLevel>,
+    /// Whether the levels' addresses are physical (a walk of the tables
+    /// from the DTB) rather than virtual through NT's self-map.
+    pub physical_walk: bool,
     /// The physical address; `None` when the address is not mapped.
     #[record(hex)]
     pub physical: Option<u64>,
@@ -870,48 +873,20 @@ impl MemoryRegionInfo {
     }
 }
 
-/// `_MMVAD_FLAGS.Protection`: an index into the memory manager's protection
-/// table, not a `PAGE_*` mask.
+/// `_MMVAD_FLAGS.Protection`: a 5-bit MM protection value, whose low three
+/// bits index the access and whose 0x8 and 0x10 bits add no caching, guard,
+/// or (both) write combining; any value with no access bits is no access
+/// (`MmProtectToValue`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VadProtection {
-    NoAccess,
-    ReadOnly,
-    Execute,
-    ExecuteRead,
-    ReadWrite,
-    WriteCopy,
-    ExecuteReadWrite,
-    ExecuteWriteCopy,
-    Unknown(u64),
-}
+pub struct VadProtection(u64);
 
 impl VadProtection {
     pub fn from_raw(raw: u64) -> Self {
-        match raw {
-            0 => Self::NoAccess,
-            1 => Self::ReadOnly,
-            2 => Self::Execute,
-            3 => Self::ExecuteRead,
-            4 => Self::ReadWrite,
-            5 => Self::WriteCopy,
-            6 => Self::ExecuteReadWrite,
-            7 => Self::ExecuteWriteCopy,
-            other => Self::Unknown(other),
-        }
+        Self(raw)
     }
 
     pub fn raw(self) -> u64 {
-        match self {
-            Self::NoAccess => 0,
-            Self::ReadOnly => 1,
-            Self::Execute => 2,
-            Self::ExecuteRead => 3,
-            Self::ReadWrite => 4,
-            Self::WriteCopy => 5,
-            Self::ExecuteReadWrite => 6,
-            Self::ExecuteWriteCopy => 7,
-            Self::Unknown(raw) => raw,
-        }
+        self.0
     }
 }
 

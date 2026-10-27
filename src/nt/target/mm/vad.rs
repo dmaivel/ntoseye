@@ -194,7 +194,7 @@ impl Target {
             }
 
             let vad = node - offsets.vad_node;
-            if let Some(region) = Self::read_vad_region(
+            if let Some(mut region) = Self::read_vad_region(
                 &memory,
                 &vad_layout,
                 flags_layout.as_deref(),
@@ -204,6 +204,14 @@ impl Target {
                 vad,
                 &modules,
             ) {
+                // A section view names its file through the control area,
+                // which also covers data files and images the loader list
+                // lacks; the loader's name is the fallback.
+                if region.private_memory == Some(false)
+                    && let Some(path) = guest.vad_file_path(process.dtb, vad)
+                {
+                    region.details = Some(path);
+                }
                 regions.push(region);
             }
         }

@@ -932,12 +932,14 @@ fn print_pfn(detail: &PfnDetail) {
     notes.print("  ");
 }
 
-fn print_pte_entry(level: &PteLevel) {
+/// `space` is "phys " for an entry address read from physical memory, so a
+/// walk from an explicit DTB isn't mistaken for the self-map's addresses.
+fn print_pte_entry(level: &PteLevel, space: &str) {
     let name = level.level;
     let (address, raw, attributes) = (level.address.0, level.value, &level.attributes);
     if attributes.present {
         outln!(
-            "  {name:<4} @ {} = {:016x}  pfn {:x}  flags {}",
+            "  {name:<4} @ {space}{} = {:016x}  pfn {:x}  flags {}",
             ui::addr(address),
             raw,
             attributes.pfn,
@@ -945,7 +947,7 @@ fn print_pte_entry(level: &PteLevel) {
         );
     } else {
         outln!(
-            "  {name:<4} @ {} = {:016x}  software/transition/prototype PTE",
+            "  {name:<4} @ {space}{} = {:016x}  software/transition/prototype PTE",
             ui::addr(address),
             raw
         );
@@ -959,7 +961,7 @@ fn print_vtop(detail: &VtopDetail) {
         ui::addr(detail.dtb)
     );
     for level in &detail.levels {
-        print_pte_entry(level);
+        print_pte_entry(level, if detail.physical_walk { "phys " } else { "" });
     }
     match detail.physical {
         Some(physical) => outln!("  physical  {}", ui::addr(physical)),

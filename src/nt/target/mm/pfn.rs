@@ -205,7 +205,7 @@ impl Target {
             event,
             used_entry_count,
             page_color: page_color.map_or_else(
-                || DiagnosticValue::unavailable("PageColor"),
+                || DiagnosticValue::unavailable("_MMPFN of this build has no PageColor"),
                 DiagnosticValue::Available,
             ),
             pte_frame,

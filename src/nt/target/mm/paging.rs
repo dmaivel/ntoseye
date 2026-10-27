@@ -170,6 +170,7 @@ impl Target {
                 address,
                 dtb,
                 levels,
+                physical_walk: false,
                 physical,
                 large,
                 transition: physical.is_some() && walk_transition,
@@ -192,6 +193,7 @@ impl Target {
                         .entry_attributes(step.entry, step.level, address),
                 })
                 .collect(),
+            physical_walk: true,
             physical: translation.map(|value| value.address),
             large: translation.is_some_and(|value| value.large),
             transition: translation.is_some_and(|value| value.residency == Residency::Transition),

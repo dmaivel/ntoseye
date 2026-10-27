@@ -28,6 +28,10 @@ Keeping this file:
 - `!poolfind` finds every allocated block on segment-heap pool pages, where it missed about one in eight (20 of 155 processes for `!poolfind Proc`).
 - `!pool` on a segment-heap page no longer lists the page's own header as a free first block, and sizes free gaps to the next block, not 0x10 short of it.
 - `!zombies` also scans big-pool allocations, so it no longer leaves out processes such as System from its live count.
+- `!thread` and `!process <process> 7` show each thread's `Win32Thread`, where they showed `-` for every thread.
+- `!vad` names the file of every file-backed mapped view and image, as `!ca` does, where its File column was empty for all but the loader's modules, and decodes the no-access, no-cache, guard and write-combine protections, where it showed `prot:24`.
+- `!process 0 0` and `!session` show System, Registry, smss and Secure System in no session, where they counted them in session 0.
+- `!vtop <dtb> <address>` marks the table entries its walk read as physical addresses; `!pfn` no longer repeats a field's name as the reason it is unavailable; `!devstack` keeps its columns lined up with long driver names; and `!acl <address> 1` names well-known SIDs, as `!sd <address> 1` does.
 
 ## Unreleased
 

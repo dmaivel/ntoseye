@@ -1730,7 +1730,7 @@ impl Target {
         ThreadDetail {
             thread,
             vcpu,
-            win32_thread: read(&ethread, "Win32Thread").map(VirtAddr),
+            win32_thread: read(&kthread, "Win32Thread").map(VirtAddr),
             user_time: read(&kthread, "UserTime").or_else(|| read(&ethread, "UserTime")),
             kernel_time: read(&kthread, "KernelTime").or_else(|| read(&ethread, "KernelTime")),
             wait_time: read(&kthread, "WaitTime"),

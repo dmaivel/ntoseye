@@ -118,7 +118,8 @@ pub struct ObjectSecurity {
 /// A session and its processes.
 #[record]
 pub struct Session {
-    /// `None` for processes whose session is unknown.
+    /// `None` for processes outside every session (System, Registry, smss)
+    /// and those whose session is unknown.
     pub id: Option<u64>,
     /// The processes in the session.
     pub processes: Vec<ProcessInfo>,
@@ -682,19 +683,23 @@ impl Target {
     }
 
     /// Resolve one process's session ID from its session space, falling back
-    /// to the primary token's `SessionId`.
+    /// to the primary token's `SessionId` when the session space can't be
+    /// read. A NULL `Session` is a process outside every session (System,
+    /// Registry, smss), whose token still says 0.
     pub fn process_session_id(&self, eprocess: VirtAddr) -> Option<u32> {
         let kernel_dtb = self.kernel_dtb();
         let types = self.guest().ok()?.ntoskrnl.types_in(kernel_dtb);
         let eprocess = types.struct_at("_EPROCESS", eprocess).ok()?;
-        if let Some(session) = eprocess
-            .read_pointer("Session")
-            .ok()
-            .filter(|address| !address.is_zero())
-            && let Ok(session) = types.struct_at("_MM_SESSION_SPACE", session)
-            && let Ok(id) = session.read_field::<u32>("SessionId")
-        {
-            return Some(id);
+        if let Ok(session) = eprocess.read_pointer("Session") {
+            if session.is_zero() {
+                return None;
+            }
+            if let Ok(id) = types
+                .struct_at("_MM_SESSION_SPACE", session)
+                .and_then(|session| session.read_field::<u32>("SessionId"))
+            {
+                return Some(id);
+            }
         }
 
         let token = eprocess
@@ -765,7 +770,8 @@ impl Target {
     /// select one session.  `Some(-1)`/`Some(-2)` selects the current session,
     /// `Some(-4)` selects all sessions, and non-negative values select an ID;
     /// unknown session IDs remain valid empty results.  Session IDs first use
-    /// `_EPROCESS.Session`/`_MM_SESSION_SPACE` and fall back to `_TOKEN.SessionId`.
+    /// `_EPROCESS.Session`/`_MM_SESSION_SPACE` and fall back to `_TOKEN.SessionId`;
+    /// processes with no session space group under `None`.
     pub fn sessions(&self, session: Option<i64>) -> Result<Sessions> {
         let (processes, truncated) = self.collect_sessions()?;
         let selected_session = match session {

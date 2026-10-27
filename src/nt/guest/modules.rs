@@ -14,7 +14,7 @@ use crate::{
     nt::{
         layout::{StructRef, Types},
         pe::read_pe_version_info,
-        target::{ListCursor, ListTermination, links_back_to},
+        target::{ListCursor, ListTermination, fast_ref_address, links_back_to},
     },
 };
 use std::collections::HashSet;
@@ -364,9 +364,21 @@ impl Guest {
             })
         };
         let node = find_vad_starting_at(root, base.0 >> 12, read_node)?;
+        let path = self.vad_file_path(info.dtb, node - vad_node)?;
+        let name = path.rsplit(['\\', '/']).next()?;
+        (!name.is_empty()).then(|| name.to_string())
+    }
+
+    /// The path of the file a section-backed VAD maps, as `!ca` names it: the
+    /// VAD's subsection leads to the section's control area, whose
+    /// `FilePointer` is the file object. `None` for pagefile-backed sections.
+    /// Only `_MMVAD`s have a `Subsection`; the caller checks the VAD is not
+    /// private.
+    pub fn vad_file_path(&self, dtb: Dtb, vad: VirtAddr) -> Option<String> {
+        let types = self.ntoskrnl.types_in(dtb);
         let nonzero = |address: VirtAddr| (!address.is_zero()).then_some(address);
         let subsection = types
-            .struct_at("_MMVAD", node - vad_node)
+            .struct_at("_MMVAD", vad)
             .ok()?
             .read_pointer("Subsection")
             .ok()
@@ -377,18 +389,19 @@ impl Guest {
             .read_pointer("ControlArea")
             .ok()
             .and_then(nonzero)?;
-        // `FilePointer` is an `_EX_FAST_REF`, a reference count in its low bits.
-        let control_area = types.struct_at("_CONTROL_AREA", control_area).ok()?;
-        let file_object =
-            link(control_area.addr() + control_area.layout().field_offset("FilePointer").ok()?)
-                .and_then(nonzero)?;
+        let file_object = types
+            .struct_at("_CONTROL_AREA", control_area)
+            .ok()?
+            .read_uint("FilePointer")
+            .ok()
+            .map(fast_ref_address)
+            .and_then(nonzero)?;
         let path = types
             .struct_at("_FILE_OBJECT", file_object)
             .ok()?
             .unicode_string("FileName")
             .ok()?;
-        let name = path.rsplit(['\\', '/']).next()?;
-        (!name.is_empty()).then(|| name.to_string())
+        (!path.is_empty()).then_some(path)
     }
 
     /// The 32-bit loader list of a WOW64 process. `_PEB_LDR_DATA32` and

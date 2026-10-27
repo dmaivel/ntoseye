@@ -157,8 +157,17 @@ fn print_devnode_tree(nodes: &[DevNodeSummary], truncated: bool) {
 }
 
 fn print_device_stack(stack: &DeviceStackDetail) {
+    // The driver column widens to the longest name so the columns after it
+    // stay aligned.
+    let driver_width = stack
+        .entries
+        .iter()
+        .map(|entry| entry.driver_name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(18);
     outln!(
-        "  {:<18} {:<18} {:<18}{}",
+        "  {:<18} {:<driver_width$} {:<18}{}",
         "!DevObj",
         "!DrvObj",
         "!DevExt",
@@ -167,7 +176,7 @@ fn print_device_stack(stack: &DeviceStackDetail) {
     for entry in &stack.entries {
         let marker = if entry.is_argument { ">" } else { " " };
         outln!(
-            "{} {:<18} {:<18} {:<18}{}",
+            "{} {:<18} {:<driver_width$} {:<18}{}",
             marker,
             ui::addr(entry.device_object.0),
             entry.driver_name,

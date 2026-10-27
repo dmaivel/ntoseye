@@ -278,9 +278,10 @@ fn address_arg(
 /// dump captured, followed by a summary by usage, type, state, and
 /// protection; -summary shows only the summary. With an address, it shows
 /// the region that holds it. Usage comes from the dump's modules, its
-/// threads' stacks and TEBs, the PEB, and the heaps in the PEB's
-/// ProcessHeaps array; it is <unknown> for any other region. A dump without
-/// a memory-info list shows the memory ranges it captured instead.
+/// threads' stacks and TEBs, the PEB, and the heaps that !heap lists, with
+/// all of their segments and large blocks; it is <unknown> for any other
+/// region. A dump without a memory-info list shows the memory ranges it
+/// captured instead.
 #[command(
     names = ["!address", "address"],
     category = "memory and disassembly",
@@ -411,19 +412,23 @@ pub fn format_region_size(size: u64) -> String {
 }
 
 pub fn vad_protection_label(protection: Option<VadProtection>) -> String {
-    let label = match protection {
-        Some(VadProtection::NoAccess) => "none",
-        Some(VadProtection::ReadOnly) => "r",
-        Some(VadProtection::Execute) => "x",
-        Some(VadProtection::ExecuteRead) => "x/r",
-        Some(VadProtection::ReadWrite) => "rw",
-        Some(VadProtection::WriteCopy) => "cow",
-        Some(VadProtection::ExecuteReadWrite) => "x/rw",
-        Some(VadProtection::ExecuteWriteCopy) => "x/cow",
-        Some(VadProtection::Unknown(value)) => return format!("prot:{value}"),
-        None => "-",
+    let Some(protection) = protection else {
+        return "-".to_string();
     };
-    label.to_string()
+    let raw = protection.raw();
+    const ACCESS: [&str; 8] = ["none", "r", "x", "x/r", "rw", "cow", "x/rw", "x/cow"];
+    // Any value without access bits is no access (`MmProtectToValue`),
+    // including the 0x18 the memory manager uses for no-access VADs.
+    if raw & 7 == 0 {
+        return "none".to_string();
+    }
+    let modifier = match raw & 0x18 {
+        0 => "",
+        0x08 => "+nocache",
+        0x10 => "+guard",
+        _ => "+wc",
+    };
+    format!("{}{modifier}", ACCESS[(raw & 7) as usize])
 }
 
 pub fn vad_type_label(region: &MemoryRegionInfo) -> String {
@@ -888,6 +893,21 @@ mod tests {
             spec.usage,
             "!address <address>\n!address [-summary] [address]"
         );
+    }
+
+    /// The 5-bit MM protection decodes like `MmProtectToValue`: no access
+    /// bits is no access whatever the modifier bits (0x18 is what no-access
+    /// VADs carry), and the modifier bits otherwise add to the access.
+    #[test]
+    fn vad_protection_decodes_modifier_bits() {
+        let label = |raw| vad_protection_label(Some(VadProtection::from_raw(raw)));
+        assert_eq!(label(0x18), "none");
+        assert_eq!(label(0x08), "none");
+        assert_eq!(label(0x04), "rw");
+        assert_eq!(label(0x0c), "rw+nocache");
+        assert_eq!(label(0x11), "r+guard");
+        assert_eq!(label(0x1c), "rw+wc");
+        assert_eq!(vad_protection_label(None), "-");
     }
 
     fn region(vad_type: u64, private_memory: bool) -> MemoryRegionInfo {
