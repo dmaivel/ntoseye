@@ -2,6 +2,7 @@
 // then a 40-byte per-API union.
 
 use std::io::{Read, Write};
+use std::ops::Range;
 
 use crate::backend::dbg_backend::ContinueDisposition;
 use crate::backend::kd::{
@@ -146,9 +147,11 @@ impl ManipulateHeader {
 
 fn recv_manipulate_reply(
     framing: &mut KdFraming<impl Read + Write>,
-    requested_processor: u16,
-    requested_api: u32,
+    request: &[u8; MANIPULATE_HEADER_SIZE],
+    echoed: Option<Range<usize>>,
 ) -> Result<(ManipulateHeader, [u8; MANIPULATE_HEADER_SIZE], Vec<u8>)> {
+    let requested_processor = read_u16(request, 6);
+    let requested_api = read_u32(request, 0);
     loop {
         let pkt = framing.recv_data()?;
         match pkt.packet_type {
@@ -156,8 +159,14 @@ fn recv_manipulate_reply(
                 let parsed = ManipulateHeader::decode(&pkt.payload)?;
                 // A reply to another request is stale: one the target sent a
                 // debugger that went away before taking it, and sends again
-                // to the next. The reply to this request still follows.
-                if parsed.api_number != requested_api {
+                // to the next. The reply to this request still follows. The
+                // target answers in the request it received, so a reply to
+                // the same API is another request's when the parameters it
+                // echoes (`echoed`) are not this request's.
+                let other_request = echoed
+                    .clone()
+                    .is_some_and(|range| pkt.payload.get(range.clone()) != request.get(range));
+                if parsed.api_number != requested_api || other_request {
                     kd_trace!(
                         "kd: dropping a stale reply to api {:#x} while awaiting {:#x}",
                         parsed.api_number,
@@ -216,13 +225,23 @@ fn send_manipulate(
     header: &[u8; MANIPULATE_HEADER_SIZE],
     data: &[u8],
 ) -> Result<(ManipulateHeader, [u8; MANIPULATE_HEADER_SIZE], Vec<u8>)> {
-    let requested_processor = read_u16(header, 6);
-    let requested_api = read_u32(header, 0);
+    send_manipulate_echoing(framing, header, data, None)
+}
+
+/// [`send_manipulate`] for a request whose reply carries back the header
+/// bytes in `echoed` as the request set them, which tell its reply from a
+/// stale one to an earlier request of the same API.
+fn send_manipulate_echoing(
+    framing: &mut KdFraming<impl Read + Write>,
+    header: &[u8; MANIPULATE_HEADER_SIZE],
+    data: &[u8],
+    echoed: Option<Range<usize>>,
+) -> Result<(ManipulateHeader, [u8; MANIPULATE_HEADER_SIZE], Vec<u8>)> {
     let mut payload = Vec::with_capacity(MANIPULATE_HEADER_SIZE + data.len());
     payload.extend_from_slice(header);
     payload.extend_from_slice(data);
     framing.send_data(PACKET_TYPE_KD_STATE_MANIPULATE, &payload)?;
-    recv_manipulate_reply(framing, requested_processor, requested_api)
+    recv_manipulate_reply(framing, header, echoed)
 }
 
 fn check_status(header: &ManipulateHeader, api: u32) -> Result<()> {
@@ -599,7 +618,9 @@ fn read_memory<T: Read + Write>(
     write_u64(&mut header, UNION_OFFSET, addr);
     write_u32(&mut header, UNION_OFFSET + 8, len);
     write_u32(&mut header, UNION_OFFSET + 12, caching);
-    let (parsed, reply_header, data) = send_manipulate(framing, &header, &[])?;
+    // The reply keeps `TargetBaseAddress` and `TransferCount`.
+    let (parsed, reply_header, data) =
+        send_manipulate_echoing(framing, &header, &[], Some(UNION_OFFSET..UNION_OFFSET + 12))?;
     check_status(&parsed, api)?;
     let actual = read_u32(&reply_header, UNION_OFFSET + 12);
     if actual > len || data.len() != actual as usize || (len != 0 && actual == 0) {
@@ -727,8 +748,8 @@ pub fn recv_write_breakpoint_reply<T: Read + Write>(
     framing: &mut KdFraming<T>,
     processor: u16,
 ) -> Result<u32> {
-    let (parsed, reply_header, _) =
-        recv_manipulate_reply(framing, processor, DBGKD_WRITE_BREAKPOINT)?;
+    let request = make_header(DBGKD_WRITE_BREAKPOINT, processor);
+    let (parsed, reply_header, _) = recv_manipulate_reply(framing, &request, None)?;
     check_status(&parsed, DBGKD_WRITE_BREAKPOINT)?;
     Ok(read_u32(&reply_header, UNION_OFFSET + 8))
 }
@@ -796,7 +817,7 @@ mod tests {
     use std::io::{Cursor, Read, Write};
 
     use crate::arch::amd64;
-    use crate::backend::kd::framing::{KdFraming, PACKET_TYPE_KD_ACKNOWLEDGE};
+    use crate::backend::kd::framing::{KdFraming, PACKET_TYPE_KD_ACKNOWLEDGE, data_packet};
 
     #[test]
     fn continuation_disposition_selects_distinct_kd_wire_status() {
@@ -1099,6 +1120,36 @@ mod tests {
         assert_eq!(transferred, context.len());
         assert_eq!(cursor, outbound.len());
     }
+    /// A target that reconnects sends again the reply to the last request a
+    /// debugger that went away made: a read of the same API but of another
+    /// address and length. It is dropped, and the read takes the reply to
+    /// its own request, which follows.
+    #[test]
+    fn a_stale_read_reply_for_another_address_is_dropped() {
+        let reply_to = |address: u64, data: &[u8]| {
+            let mut union_body = [0u8; 16];
+            write_u64(&mut union_body, 0, address);
+            write_u32(&mut union_body, 8, data.len() as u32);
+            write_u32(&mut union_body, 12, data.len() as u32);
+            build_reply(DBGKD_READ_VIRTUAL_MEMORY, 0, &union_body, data)
+        };
+        let mut stream = ack_then_reply(
+            (INITIAL_PACKET_ID | SYNC_PACKET_ID) & !SYNC_PACKET_ID,
+            INITIAL_PACKET_ID,
+            &reply_to(0xffff_f800_7483_0400, &[0x11; 0x400]),
+        );
+        stream.extend(data_packet(
+            PACKET_TYPE_KD_STATE_MANIPULATE,
+            INITIAL_PACKET_ID ^ 1,
+            &reply_to(0xffff_f800_7483_0200, &[0x22; 0x200]),
+        ));
+        let mut framing = KdFraming::new(Loopback::new(stream));
+
+        let actual = read_virtual_memory(&mut framing, 0, 0xffff_f800_7483_0200, 0x200).unwrap();
+
+        assert_eq!(actual, [0x22; 0x200]);
+    }
+
     #[test]
     fn physical_memory_read_validates_and_returns_reply_data() {
         let data = [0xde, 0xad, 0xbe, 0xef];

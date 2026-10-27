@@ -479,8 +479,11 @@ fn pump_absorbs_rebreak_after_continue_and_reports_real_stop() {
             }
             api::DBGKD_READ_VIRTUAL_MEMORY => {
                 // The absorbed re-break sits on a break-in `int3`, which
-                // the pump confirms before stepping the PC past it.
+                // the pump confirms before stepping the PC past it. The
+                // reply keeps the request's address and length, as
+                // Windows' does.
                 let mut union = [0u8; 16];
+                union[..12].copy_from_slice(&request[16..28]);
                 union[12..16].copy_from_slice(&1u32.to_le_bytes());
                 let mut reply = manipulate_reply_payload(api_number, 0, &union);
                 reply.push(0xcc);
