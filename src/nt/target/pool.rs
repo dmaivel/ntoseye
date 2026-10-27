@@ -6,11 +6,14 @@ use ntoseye_macros::record;
 
 use crate::base::error::{Error, Result};
 use crate::base::memory::{MemoryOps, PAGE_SIZE};
-use crate::base::types::{MAX_PROCESSORS, VirtAddr};
+use crate::base::types::{MAX_PROCESSORS, PAGE_SHIFT, VirtAddr};
 use crate::nt::layout::{FieldInfo, ParsedType, TypeInfo, le_uint};
 use crate::nt::symbols::format_symbol_with_offset;
 use crate::nt::target::Target;
-use crate::nt::target::mm::{PoolBlockState, find_mi_state_fields};
+use crate::nt::target::heap::{
+    LfhSubsegment, RANGE_ALLOCATED, RANGE_FIRST, RANGE_SUBSEGMENT, RANGE_VS, lfh_geometry,
+};
+use crate::nt::target::mm::{PoolBlockState, PoolType, find_mi_state_fields};
 
 pub const POOL_ALIGN: u64 = 0x10;
 
@@ -29,6 +32,10 @@ pub struct PoolHeader {
     pub(crate) pool_type: u8,
     pub(crate) tag: u32,
     pub(crate) synthetic_free: bool,
+    /// On a page of a segment-heap LFH subsegment, whether the subsegment's
+    /// bitmap has the block busy. A freed LFH block keeps its header, so
+    /// only the bitmap tells it from an allocated one. `None` elsewhere.
+    pub lfh_busy: Option<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -60,6 +67,12 @@ pub struct PoolLayout {
     /// How a segment-heap kernel encodes its VS chunk headers; `None` on a
     /// kernel without the segment heap, or whose PDB lacks its types.
     vs_chunks: Option<VsChunkHeaders>,
+    /// What finds the LFH subsegment holding a page; `None` on a kernel
+    /// without the segment heap, or whose PDB lacks its types.
+    lfh: Option<LfhSubsegments>,
+    /// The `PagedPool` value of the PDB's `_POOL_TYPE`: the bit of a
+    /// header's `PoolType` that says paged (see [`header_pool_type`]).
+    pub paged_pool: Option<u8>,
 }
 
 /// What decodes the `_HEAP_VS_CHUNK_HEADER` that precedes each block the
@@ -128,6 +141,230 @@ fn vs_chunk_headers(debugger: &Target) -> Option<VsChunkHeaders> {
     })
 }
 
+/// A `_HEAP_SEG_CONTEXT`'s segment geometry: the segment holding a page
+/// starts at the page's address under `mask`, and from its unit
+/// `first_descriptor` on, a `_HEAP_PAGE_RANGE_DESCRIPTOR` of the segment's
+/// `_HEAP_PAGE_SEGMENT` describes each unit of `1 << unit_shift` bytes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SegmentGeometry {
+    mask: u64,
+    unit_shift: u32,
+    first_descriptor: u64,
+}
+
+/// What finds the segment-heap LFH subsegment that holds a pool page and
+/// decodes it: the segment geometries of the kernel's pool heaps, the
+/// PDB's layouts, and `nt!RtlpHpHeapGlobals.LfhKey`.
+struct LfhSubsegments {
+    segments: Vec<SegmentGeometry>,
+    /// `_HEAP_PAGE_RANGE_DESCRIPTOR`, where `_HEAP_PAGE_SEGMENT.DescArray`
+    /// begins, and how many descriptors it holds.
+    descriptor: Arc<TypeInfo>,
+    descriptors_offset: u64,
+    descriptor_count: u64,
+    /// `_HEAP_LFH_SUBSEGMENT` and its `_HEAP_LFH_SUBSEGMENT_ENCODED_OFFSETS`.
+    subsegment: Arc<TypeInfo>,
+    offsets: Arc<TypeInfo>,
+    lfh_key: u64,
+}
+
+impl LfhSubsegments {
+    /// The page range `[start, end)` holding `page` in `segment`, laid out
+    /// by `geometry` and described by `descriptors`, when the range is an
+    /// LFH subsegment's.
+    fn lfh_range(
+        &self,
+        geometry: &SegmentGeometry,
+        segment: u64,
+        descriptors: &[u8],
+        page: u64,
+    ) -> Option<(u64, u64)> {
+        let field = |unit: u64, name| {
+            let at = usize::try_from(unit.checked_mul(self.descriptor.size as u64)?).ok()?;
+            pool_field_from_buf(&self.descriptor, descriptors.get(at..)?, name)
+        };
+        let shift = geometry.unit_shift;
+        let unit = (page - segment).checked_shr(shift)?;
+        if unit < geometry.first_descriptor || unit >= self.descriptor_count {
+            return None;
+        }
+        // Only a range's first descriptor carries its flags and size; the
+        // others count back to it.
+        let head = if field(unit, "RangeFlags")? as u8 & RANGE_FIRST != 0 {
+            unit
+        } else {
+            unit.checked_sub(field(unit, "UnitOffset")?)?
+        };
+        let lfh = RANGE_ALLOCATED | RANGE_FIRST | RANGE_SUBSEGMENT;
+        if head < geometry.first_descriptor
+            || field(head, "RangeFlags")? as u8 & (lfh | RANGE_VS) != lfh
+        {
+            return None;
+        }
+        let start = segment.checked_add(head.checked_shl(shift)?)?;
+        let end = start.checked_add(field(head, "UnitSize")?.checked_shl(shift)?)?;
+        (page < end).then_some((start, end))
+    }
+
+    /// The LFH subsegment at `start`, whose page range ends at `end`, when
+    /// its header decodes to blocks that fit the range.
+    fn decode(
+        &self,
+        debugger: &Target,
+        layout: &PoolLayout,
+        start: VirtAddr,
+        end: u64,
+    ) -> Option<PoolLfhSubsegment> {
+        let memory = debugger.kernel_address_space();
+        let mut image = vec![0u8; self.subsegment.size];
+        memory.read_bytes(start, &mut image).ok()?;
+        let geometry = lfh_geometry(
+            &self.subsegment,
+            &self.offsets,
+            &image,
+            self.lfh_key,
+            start,
+            end - start.0,
+            POOL_ALIGN,
+        )?;
+        let field = |name| pool_field_from_buf(&self.subsegment, &image, name);
+        let free_count = field("FreeCount")?;
+        if geometry.block_size < layout.header_size
+            || free_count > geometry.blocks - geometry.withheld
+        {
+            return None;
+        }
+        let mut bitmap = vec![0u8; usize::try_from(geometry.words * geometry.word_size).ok()?];
+        memory
+            .read_bytes(start + geometry.bitmap_offset, &mut bitmap)
+            .ok()?;
+        let subsegment = PoolLfhSubsegment {
+            blocks: LfhSubsegment {
+                address: start,
+                block_size: geometry.block_size,
+                block_count: u32::try_from(geometry.blocks).ok()?,
+                free_count: u32::try_from(free_count).ok()?,
+                bucket: field("BucketRef").map(|bucket| bucket as u16),
+                first_block: start + geometry.first_offset,
+                bitmap: bitmap
+                    .chunks_exact(geometry.word_size as usize)
+                    .map(le_uint)
+                    .collect(),
+                blocks_per_word: u32::try_from(geometry.blocks_per_word).ok()?,
+                bit_stride: u32::try_from(geometry.bit_stride).ok()?,
+            },
+            withholds: geometry.withheld != 0,
+        };
+        // Those it withholds must be the blocks across a page boundary, or
+        // it does not lay its blocks out as read.
+        let crossing = (0..subsegment.blocks.block_count)
+            .filter(|&index| subsegment.withheld(index))
+            .count();
+        (crossing as u64 == geometry.withheld).then_some(subsegment)
+    }
+}
+
+/// An LFH subsegment of the pool, its `blocks` counting every block. One
+/// that withholds blocks (`WitheldBlockCount`) withholds those across a
+/// page boundary: its bitmap keeps them busy, but they are never handed
+/// out and hold no header, only what the page held before.
+pub struct PoolLfhSubsegment {
+    pub blocks: LfhSubsegment,
+    pub withholds: bool,
+}
+
+impl PoolLfhSubsegment {
+    /// Whether the subsegment withholds block `index`.
+    pub fn withheld(&self, index: u32) -> bool {
+        let start = self.blocks.block(index).0;
+        let last = start + self.blocks.block_size - 1;
+        self.withholds && start >> PAGE_SHIFT != last >> PAGE_SHIFT
+    }
+}
+
+/// The element count of an array field.
+fn array_count(field: &FieldInfo) -> Option<u64> {
+    match field.type_data {
+        ParsedType::Array(_, count) => Some(u64::from(count)),
+        _ => None,
+    }
+}
+
+/// The LFH subsegment decoding of a segment-heap kernel, from its PDB and
+/// its pool heaps, `nt!ExPoolState`'s, whose segment contexts give the
+/// geometries. The pool heaps of every node are configured alike, so the
+/// first node's serve.
+fn lfh_subsegments(debugger: &Target) -> Option<LfhSubsegments> {
+    let find = |name| {
+        debugger
+            .symbols
+            .find_type_across_modules(debugger.kernel_dtb(), name)
+    };
+    let memory = debugger.kernel_address_space();
+    let read = |address: VirtAddr, size: u64| {
+        let mut bytes = vec![0u8; usize::try_from(size).ok()?];
+        memory.read_bytes(address, &mut bytes).ok()?;
+        Some(bytes)
+    };
+    let globals = find("_RTLP_HP_HEAP_GLOBALS")?;
+    let globals_image = read(
+        kernel_symbol_address(debugger, "RtlpHpHeapGlobals").ok()?,
+        globals.size as u64,
+    )?;
+    let state = find("_EX_POOL_HEAP_MANAGER_STATE")?;
+    let node = find("_EX_HEAP_POOL_NODE")?;
+    let heap = find("_SEGMENT_HEAP")?;
+    let context = find("_HEAP_SEG_CONTEXT")?;
+    let heaps = node.field("Heaps").ok()?;
+    let pointer = usize::from(node.pointer_size);
+    let heaps = read(
+        kernel_symbol_address(debugger, "ExPoolState").ok()?
+            + state.field_offset("PoolNode").ok()?
+            + u64::from(heaps.offset),
+        array_count(heaps)? * pointer as u64,
+    )?;
+    let contexts = heap.field("SegContexts").ok()?;
+    let contexts_size = array_count(contexts)? * context.size as u64;
+    let mut segments = Vec::new();
+    for address in heaps
+        .chunks_exact(pointer)
+        .map(le_uint)
+        .filter(|&address| address != 0)
+    {
+        let Some(image) = read(
+            VirtAddr(address) + u64::from(contexts.offset),
+            contexts_size,
+        ) else {
+            continue;
+        };
+        for bytes in image.chunks_exact(context.size) {
+            let field = |name| pool_field_from_buf(&context, bytes, name);
+            let geometry = SegmentGeometry {
+                mask: field("SegmentMask")?,
+                unit_shift: u32::try_from(field("UnitShift")?).ok()?,
+                first_descriptor: field("FirstDescriptorIndex")?,
+            };
+            if !segments.contains(&geometry) {
+                segments.push(geometry);
+            }
+        }
+    }
+    if segments.is_empty() {
+        return None;
+    }
+    let page_segment = find("_HEAP_PAGE_SEGMENT")?;
+    let descriptors = page_segment.field("DescArray").ok()?;
+    Some(LfhSubsegments {
+        segments,
+        descriptor: find("_HEAP_PAGE_RANGE_DESCRIPTOR")?,
+        descriptors_offset: u64::from(descriptors.offset),
+        descriptor_count: array_count(descriptors)?,
+        offsets: find("_HEAP_LFH_SUBSEGMENT_ENCODED_OFFSETS")?,
+        subsegment: find("_HEAP_LFH_SUBSEGMENT")?,
+        lfh_key: pool_field_from_buf(&globals, &globals_image, "LfhKey")?,
+    })
+}
+
 pub fn pool_layout(debugger: &Target) -> Result<PoolLayout> {
     let pool_header = debugger
         .symbols
@@ -177,6 +414,12 @@ pub fn pool_layout(debugger: &Target) -> Result<PoolLayout> {
         big_pool_has_pool_type,
         big_pool_has_slush,
         vs_chunks: vs_chunk_headers(debugger),
+        lfh: lfh_subsegments(debugger),
+        paged_pool: debugger
+            .symbols
+            .find_enum_across_modules(debugger.kernel_dtb(), "_POOL_TYPE")
+            .and_then(|values| values.into_iter().find(|(name, _)| name == "PagedPool"))
+            .and_then(|(_, value)| u8::try_from(value).ok()),
     })
 }
 
@@ -856,13 +1099,28 @@ pub fn plausible_pool_tag(tag: u32) -> bool {
     tag == POOL_FREE_TAG || tag_looks_printable(tag)
 }
 
+/// A block's state: an LFH block's as its subsegment's bitmap has it; any
+/// other's from its header, free where the scan found none or the tag says
+/// `Free`, and allocated where the tag reads (unverified where it does not).
 pub fn pool_block_state(h: &PoolHeader) -> PoolBlockState {
-    if h.synthetic_free || h.tag == POOL_FREE_TAG {
-        PoolBlockState::Free
-    } else if tag_looks_printable(h.tag) {
-        PoolBlockState::Allocated
-    } else {
-        PoolBlockState::AllocatedUnverified
+    match h.lfh_busy {
+        Some(true) => PoolBlockState::Allocated,
+        Some(false) => PoolBlockState::Free,
+        None if h.synthetic_free || h.tag == POOL_FREE_TAG => PoolBlockState::Free,
+        None if tag_looks_printable(h.tag) => PoolBlockState::Allocated,
+        None => PoolBlockState::AllocatedUnverified,
+    }
+}
+
+/// The pool a block header's `PoolType` names. It holds the allocation's
+/// `POOL_TYPE` bits, of which `paged_pool` (`PagedPool`'s value) says
+/// paged: nonpaged blocks read 2 and paged ones 3. A classic pool clears a
+/// free block's to 0, which names neither.
+pub fn header_pool_type(pool_type: u8, paged_pool: u8) -> Option<PoolType> {
+    match pool_type {
+        0 => None,
+        _ if pool_type & paged_pool != 0 => Some(PoolType::Paged),
+        _ => Some(PoolType::NonPaged),
     }
 }
 
@@ -885,7 +1143,26 @@ pub fn parse_pool_header(
 
 /// The `_POOL_HEADER` at `header`, from `bytes` read there.
 fn pool_header_in(layout: &PoolLayout, header: VirtAddr, bytes: &[u8]) -> Option<PoolHeader> {
-    let (previous_size, block_units, pool_type, tag) = if layout.pool_header_uses_struct {
+    let (previous_size, block_units, pool_type, tag) = pool_header_fields(layout, bytes)?;
+    if block_units == 0 {
+        return None;
+    }
+    Some(PoolHeader {
+        header,
+        body: header + layout.header_size,
+        size: block_units as u64 * POOL_ALIGN,
+        previous_size: previous_size as u64 * POOL_ALIGN,
+        pool_type,
+        tag,
+        synthetic_free: false,
+        lfh_busy: None,
+    })
+}
+
+/// `PreviousSize` and `BlockSize` (in pool units), `PoolType`, and
+/// `PoolTag` of the `_POOL_HEADER` whose bytes begin `bytes`.
+fn pool_header_fields(layout: &PoolLayout, bytes: &[u8]) -> Option<(u8, u8, u8, u32)> {
+    Some(if layout.pool_header_uses_struct {
         let field = |name| pool_field_from_buf(&layout.pool_header, bytes, name);
         (
             field("PreviousSize")? as u8,
@@ -901,19 +1178,59 @@ fn pool_header_in(layout: &PoolLayout, header: VirtAddr, bytes: &[u8]) -> Option
             ((word0 >> 24) & 0xff) as u8,
             pool_tag_in(layout, bytes)?,
         )
-    };
-    if block_units == 0 {
+    })
+}
+
+/// Block `index` of the LFH subsegment `subsegment`, its header read from
+/// `bytes`, busy or free as the subsegment's bitmap has it; none for a
+/// block the subsegment withholds. Its size is the subsegment's: a block
+/// never allocated has no header to give one.
+fn lfh_block(
+    layout: &PoolLayout,
+    subsegment: &PoolLfhSubsegment,
+    index: u32,
+    bytes: &[u8],
+) -> Option<PoolHeader> {
+    if subsegment.withheld(index) {
         return None;
     }
+    let (previous_size, _, pool_type, tag) = pool_header_fields(layout, bytes)?;
+    let header = subsegment.blocks.block(index);
     Some(PoolHeader {
         header,
         body: header + layout.header_size,
-        size: block_units as u64 * POOL_ALIGN,
-        previous_size: previous_size as u64 * POOL_ALIGN,
+        size: subsegment.blocks.block_size,
+        previous_size: u64::from(previous_size) * POOL_ALIGN,
         pool_type,
         tag,
         synthetic_free: false,
+        lfh_busy: Some(subsegment.blocks.is_busy(index)),
     })
+}
+
+/// The blocks of the LFH subsegment `subsegment` whose headers lie in the
+/// pool page at `base`, read from its bytes `page`. The subsegment's own
+/// header and bitmap, before its first block, are no block.
+fn lfh_page_blocks(
+    layout: &PoolLayout,
+    subsegment: &PoolLfhSubsegment,
+    base: VirtAddr,
+    page: &[u8],
+) -> Vec<PoolHeader> {
+    let blocks = &subsegment.blocks;
+    let page_end = base.0 + page.len() as u64;
+    let first = base
+        .0
+        .saturating_sub(blocks.first_block.0)
+        .div_ceil(blocks.block_size) as u32;
+    (first..blocks.block_count)
+        .map(|index| (index, blocks.block(index)))
+        .take_while(|(_, header)| header.0 < page_end)
+        .filter_map(|(index, header)| {
+            let bytes = page.get(usize::try_from(header.0 - base.0).ok()?..)?;
+            lfh_block(layout, subsegment, index, bytes)
+        })
+        .collect()
 }
 
 /// The tag of the `_POOL_HEADER` whose bytes begin `bytes`.
@@ -1060,6 +1377,7 @@ pub fn pool_page_blocks(layout: &PoolLayout, base: VirtAddr, page: &[u8]) -> Vec
         pool_type: 0,
         tag: tag_at(header),
         synthetic_free: true,
+        lfh_busy: None,
     };
     let candidates = pool_header_candidates(layout, base, page);
     // On a segment-heap page, a block whose VS chunk header vouches for it
@@ -1196,12 +1514,122 @@ pub fn find_pool_block_index(blocks: &[PoolHeader], needle: &PoolHeader) -> Opti
         .position(|h| h.header == needle.header && h.size == needle.size)
 }
 
+/// Reads the blocks of pool pages: on a page of a segment-heap LFH
+/// subsegment, the subsegment's blocks, busy or free as its bitmap has
+/// them; elsewhere, what a scan of the page's headers finds
+/// ([`pool_page_blocks`]). It keeps the descriptors of the segment each
+/// geometry located last and the subsegment found last, so a scan in
+/// address order reads each once.
+pub struct PoolPageReader<'a> {
+    debugger: &'a Target,
+    layout: &'a PoolLayout,
+    /// Per segment geometry, the segment located last and its descriptors,
+    /// `None` where they did not read.
+    descriptors: Vec<Option<(u64, Option<Vec<u8>>)>>,
+    /// The page range `[start, end)` of the LFH subsegment found last, and
+    /// the subsegment.
+    subsegment: Option<(u64, u64, PoolLfhSubsegment)>,
+}
+
+impl<'a> PoolPageReader<'a> {
+    pub fn new(debugger: &'a Target, layout: &'a PoolLayout) -> Self {
+        Self {
+            debugger,
+            layout,
+            descriptors: vec![None; layout.lfh.as_ref().map_or(0, |lfh| lfh.segments.len())],
+            subsegment: None,
+        }
+    }
+
+    /// The blocks of the pool page at `base`, whose bytes are `page`.
+    pub fn page_blocks(&mut self, base: VirtAddr, page: &[u8]) -> Vec<PoolHeader> {
+        let layout = self.layout;
+        match self.lfh_subsegment(base) {
+            Some(subsegment) => lfh_page_blocks(layout, subsegment, base, page),
+            None => pool_page_blocks(layout, base, page),
+        }
+    }
+
+    /// The LFH subsegment whose page range holds `page`, as the range
+    /// descriptors of the segment holding it say.
+    pub fn lfh_subsegment(&mut self, page: VirtAddr) -> Option<&PoolLfhSubsegment> {
+        let layout = self.layout;
+        let debugger = self.debugger;
+        let lfh = layout.lfh.as_ref()?;
+        if !self
+            .subsegment
+            .as_ref()
+            .is_some_and(|(start, end, _)| (*start..*end).contains(&page.0))
+        {
+            let found = lfh
+                .segments
+                .iter()
+                .enumerate()
+                .find_map(|(index, geometry)| {
+                    let segment = page.0 & geometry.mask;
+                    let descriptors = self.descriptors(index, segment)?;
+                    let (start, end) = lfh.lfh_range(geometry, segment, descriptors, page.0)?;
+                    let subsegment = lfh.decode(debugger, layout, VirtAddr(start), end)?;
+                    Some((start, end, subsegment))
+                });
+            self.subsegment = Some(found?);
+        }
+        self.subsegment
+            .as_ref()
+            .map(|(_, _, subsegment)| subsegment)
+    }
+
+    /// The range descriptors of `segment`, located by geometry `index`.
+    fn descriptors(&mut self, index: usize, segment: u64) -> Option<&[u8]> {
+        let lfh = self.layout.lfh.as_ref()?;
+        let slot = self.descriptors.get_mut(index)?;
+        if !slot.as_ref().is_some_and(|(read, _)| *read == segment) {
+            let size = lfh.descriptor_count * lfh.descriptor.size as u64;
+            let mut bytes = vec![0u8; usize::try_from(size).ok()?];
+            let read = self
+                .debugger
+                .kernel_address_space()
+                .read_bytes(VirtAddr(segment) + lfh.descriptors_offset, &mut bytes)
+                .is_ok();
+            *slot = Some((segment, read.then_some(bytes)));
+        }
+        slot.as_ref()?.1.as_deref()
+    }
+}
+
 pub fn locate_pool_block_in_page(
     debugger: &Target,
     layout: &PoolLayout,
     target: VirtAddr,
 ) -> (Vec<PoolHeader>, Option<usize>, VirtAddr) {
     let base = VirtAddr(target.0 & !(POOL_PAGE_SIZE - 1));
+    let memory = debugger.kernel_address_space();
+    let mut reader = PoolPageReader::new(debugger, layout);
+    let mut page = vec![0u8; PAGE_SIZE];
+    if let Some(subsegment) = reader.lfh_subsegment(base)
+        && memory.read_bytes(base, &mut page).is_ok()
+    {
+        let mut blocks = lfh_page_blocks(layout, subsegment, base, &page);
+        // The block that began on the page before and runs into this one,
+        // unless the subsegment withholds it.
+        let lfh = &subsegment.blocks;
+        if let Some(offset) = base.0.checked_sub(lfh.first_block.0)
+            && offset % lfh.block_size != 0
+            && let Ok(index) = u32::try_from(offset / lfh.block_size)
+            && index < lfh.block_count
+        {
+            let mut header = vec![0u8; layout.header_size as usize];
+            if memory.read_bytes(lfh.block(index), &mut header).is_ok()
+                && let Some(block) = lfh_block(layout, subsegment, index, &header)
+            {
+                blocks.insert(0, block);
+            }
+        }
+        let index = blocks
+            .iter()
+            .position(|block| (block.header.0..block.header.0 + block.size).contains(&target.0));
+        return (blocks, index, base);
+    }
     let aligned = VirtAddr(target.0 & !(POOL_ALIGN - 1));
     let mut anchor = None;
     let mut addr = aligned;
@@ -1576,6 +2004,8 @@ mod tests {
                 header_size: 0x10,
                 heap_key,
             }),
+            lfh: None,
+            paged_pool: Some(1),
         }
     }
 
@@ -1630,6 +2060,62 @@ mod tests {
                 (0x180, 0x80, true),
                 (0x200, 0x60, false),
             ]
+        );
+    }
+
+    /// A page that begins an LFH subsegment: its header and bitmap, whose
+    /// counts can read as a header, are no block; the blocks run from the
+    /// first one, each busy or free as the bitmap says, though a freed one
+    /// keeps its header and tag. The block across the page end is the
+    /// subsegment's only where it withholds none.
+    #[test]
+    fn an_lfh_page_lists_the_subsegments_blocks_in_their_bitmap_state() {
+        let mut page = vec![0u8; POOL_PAGE_SIZE as usize];
+        put_header(&mut page, 0x20, 0xe0, 0, b"\0\0\0\x01");
+        let starts: Vec<u64> = (0..15).map(|index| 0x50 + index * 0x110).collect();
+        for &start in &starts {
+            put_header(&mut page, start as usize, 0x110, 3, b"CMSc");
+        }
+        let mut subsegment = PoolLfhSubsegment {
+            blocks: LfhSubsegment {
+                address: BASE,
+                block_size: 0x110,
+                block_count: 16,
+                free_count: 1,
+                bucket: None,
+                first_block: BASE + 0x50u64,
+                bitmap: vec![!(1 << 2)],
+                blocks_per_word: 64,
+                bit_stride: 1,
+            },
+            withholds: true,
+        };
+        let listed = |subsegment: &PoolLfhSubsegment| -> Vec<(u64, u64, PoolBlockState)> {
+            lfh_page_blocks(&layout(None), subsegment, BASE, &page)
+                .iter()
+                .map(|block| (block.header.0 - BASE.0, block.size, pool_block_state(block)))
+                .collect()
+        };
+        let expected: Vec<(u64, u64, PoolBlockState)> = starts
+            .iter()
+            .enumerate()
+            .map(|(index, &start)| {
+                let state = if index == 2 {
+                    PoolBlockState::Free
+                } else {
+                    PoolBlockState::Allocated
+                };
+                (start, 0x110, state)
+            })
+            .collect();
+        assert_eq!(listed(&subsegment), expected[..14]);
+        subsegment.withholds = false;
+        assert_eq!(listed(&subsegment), expected);
+        // The next page begins inside block 14; its first block is 15.
+        let next = lfh_page_blocks(&layout(None), &subsegment, BASE + POOL_PAGE_SIZE, &page);
+        assert_eq!(
+            next.first().map(|block| block.header),
+            Some(subsegment.blocks.block(15))
         );
     }
 }

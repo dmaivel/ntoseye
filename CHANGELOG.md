@@ -46,13 +46,15 @@ Keeping this file:
 - Kernel dumps written with `.dump` hold every processor's registers as NT sees them, where a processor stopped in the Windows hypervisor had the hypervisor's registers and the others had whatever their PRCB last held.
 - Pages a process maps through a prototype PTE read when Windows' L1TF mitigation swizzles the PTE, where they read as `??` and their image's unwind data as paged out, so stacks through them fell back to scanning.
 - `!pte` shows a zero PTE inside a mapped view as the view's page, not as unmapped, goes on to the PTE when its page table is in transition, and refuses an address that is not canonical.
+- `!poolfind` and `!pool` take a block's state on a segment-heap LFH pool page from its subsegment's bitmap, where they called freed blocks Allocated (775 for 560 mutants), no longer read the subsegment's header as a block hiding the first real one, and show paged-pool blocks as PagedPool.
+- `!heap` decodes segment-heap LFH subsegments on Windows 11 26200, where blocks above 4 GiB were placed at the wrong offset, and reads each build's busy bitmap as it lays it out, where 22631's busy counts were wrong.
 
 ## Unreleased
 
 ### Changed
 
 - `PteWalk`, the SDK's `!pte` result, lists the entries the walk read as `levels`, root first, as `VtopDetail` does, in place of its `pxe`, `ppe`, `pde` and `pte` fields.
-- `LfhSubsegment.bucket` is `None` for a subsegment that names no bucket, and `VtopDetail.physical_walk` says whether its entry addresses are physical (an explicit DTB) or in the self-map.
+- `LfhSubsegment.block_count` counts the blocks a subsegment withholds, and `LfhSubsegment.bit_stride` gives its bitmap's bits per block; `LfhSubsegment.bucket` is `None` for a subsegment that names no bucket, and `VtopDetail.physical_walk` says whether its entry addresses are physical (an explicit DTB) or in the self-map.
 
 ### Fixed
 

@@ -10331,18 +10331,28 @@ class LfhSubsegment(BaseRecord):
     """
     A segment-heap LFH subsegment (`_HEAP_LFH_SUBSEGMENT`).
     """
-    __match_args__: Final[tuple[Literal["address"], Literal["block_size"], Literal["block_count"], Literal["free_count"], Literal["bucket"], Literal["first_block"], Literal["bitmap"], Literal["blocks_per_word"]]]
+    __match_args__: Final[tuple[Literal["address"], Literal["block_size"], Literal["block_count"], Literal["free_count"], Literal["bucket"], Literal["first_block"], Literal["bitmap"], Literal["blocks_per_word"], Literal["bit_stride"]]]
     @property
     def address(self, /) -> int: ...
+    @property
+    def bit_stride(self, /) -> int:
+        """
+        1 where a word keeps only busy bits, 2 where each block's busy bit
+        has a second bit after it.
+        """
     @property
     def bitmap(self, /) -> list[int]:
         """
         The `BlockBitmap` words (a qword on x64, a dword on x86), each
-        holding `blocks_per_word` blocks: the low bit for a block is set
-        while the block is busy.
+        holding `blocks_per_word` blocks: block `i`'s bit `(i %
+        blocks_per_word) * bit_stride` is set while the block is busy.
         """
     @property
-    def block_count(self, /) -> int: ...
+    def block_count(self, /) -> int:
+        """
+        Every block, those the subsegment withholds (`WitheldBlockCount`)
+        with the rest (`BlockCount`).
+        """
     @property
     def block_size(self, /) -> int:
         """

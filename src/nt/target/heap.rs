@@ -11,7 +11,7 @@ use ntoseye_macros::record;
 use crate::backend::phys::PhysMem;
 use crate::base::error::{Error, Result};
 use crate::base::memory::{AddressSpace, MemoryOps};
-use crate::base::types::{Dtb, VirtAddr};
+use crate::base::types::{Dtb, PAGE_SHIFT, VirtAddr};
 use crate::nt::layout::{ParsedType, TypeInfo, le_uint};
 use crate::nt::target::{DiagnosticValue, ListCursor, ListTermination, Target};
 
@@ -37,10 +37,10 @@ const NT_ENTRY_LFH_BLOCK: u8 = 0x80;
 /// use keeps `ALLOCATED` on every descriptor, its head adds `FIRST`, and a
 /// head handed to a sub-allocator adds `SUBSEGMENT` (with `VS` for the
 /// variable-size one). A free range's head keeps only `FIRST`.
-const RANGE_ALLOCATED: u8 = 0x01;
-const RANGE_FIRST: u8 = 0x02;
-const RANGE_VS: u8 = 0x04;
-const RANGE_SUBSEGMENT: u8 = 0x08;
+pub const RANGE_ALLOCATED: u8 = 0x01;
+pub const RANGE_FIRST: u8 = 0x02;
+pub const RANGE_VS: u8 = 0x04;
+pub const RANGE_SUBSEGMENT: u8 = 0x08;
 
 const PAGE: u64 = 0x1000;
 /// Bound on entries decoded from one NT segment, VS subsegment, or LFH
@@ -1035,6 +1035,8 @@ pub struct LfhSubsegment {
     pub address: VirtAddr,
     /// Bytes per block.
     pub block_size: u64,
+    /// Every block, those the subsegment withholds (`WitheldBlockCount`)
+    /// with the rest (`BlockCount`).
     pub block_count: u32,
     pub free_count: u32,
     /// The LFH bucket of the subsegment. None while a subsegment without
@@ -1042,19 +1044,23 @@ pub struct LfhSubsegment {
     pub bucket: Option<u16>,
     pub first_block: VirtAddr,
     /// The `BlockBitmap` words (a qword on x64, a dword on x86), each
-    /// holding `blocks_per_word` blocks: the low bit for a block is set
-    /// while the block is busy.
+    /// holding `blocks_per_word` blocks: block `i`'s bit `(i %
+    /// blocks_per_word) * bit_stride` is set while the block is busy.
     #[record(hex)]
     pub bitmap: Vec<u64>,
     pub blocks_per_word: u32,
+    /// 1 where a word keeps only busy bits, 2 where each block's busy bit
+    /// has a second bit after it.
+    pub bit_stride: u32,
 }
 
 #[record]
 impl LfhSubsegment {
     pub fn is_busy(&self, index: u32) -> bool {
+        let bit = (index % self.blocks_per_word) * self.bit_stride;
         self.bitmap
             .get((index / self.blocks_per_word) as usize)
-            .is_some_and(|word| word >> (index % self.blocks_per_word) & 1 != 0)
+            .is_some_and(|word| word >> bit & 1 != 0)
     }
 
     #[record(getter)]
@@ -1316,31 +1322,31 @@ impl HeapReader<'_> {
     }
 
     /// Decode the LFH subsegment occupying a page range (see
-    /// [`lfh_block_offsets`] for its block geometry).
+    /// [`lfh_geometry`] for its block geometry).
     pub fn lfh_subsegment(&self, heap: &SegmentHeap, range: &PageRange) -> Result<LfhSubsegment> {
         let layout = self.layout("_HEAP_LFH_SUBSEGMENT")?;
+        let offsets = self.layout("_HEAP_LFH_SUBSEGMENT_ENCODED_OFFSETS")?;
         let image = self.read_struct(&layout, range.address)?;
-        let block_count = layout.read(&image, 0, "BlockCount")? as u32;
-        let encoded = layout.read(&image, 0, "BlockOffsets")? as u32;
-        let (block_size, first_offset) =
-            lfh_block_offsets(encoded, heap.encoding_keys.lfh_key, range.address);
-        let word_size = layout
-            .0
-            .fields
-            .get("BlockBitmap")
-            .and_then(|info| match &info.type_data {
-                ParsedType::Array(_, count) if *count > 0 => Some(info.size / u64::from(*count)),
-                _ => None,
-            })
-            .filter(|size| matches!(size, 4 | 8))
-            .ok_or_else(|| Error::FieldTypeMismatch("BlockBitmap".into(), "word array".into()))?
-            as usize;
-        let blocks_per_word = (word_size * 4) as u32;
-        let words = (block_count as usize).div_ceil(word_size * 4);
+        let geometry = lfh_geometry(
+            &layout.0,
+            &offsets.0,
+            &image,
+            heap.encoding_keys.lfh_key,
+            range.address,
+            range.units * range.unit_size,
+            heap.granule,
+        )
+        .ok_or_else(|| {
+            Error::DebugInfo(format!(
+                "LFH subsegment {} does not decode: its BlockOffsets gives blocks that do not fit it under either keying",
+                range.address
+            ))
+        })?;
+        let word_size = geometry.word_size as usize;
         let bitmap = self
             .read(
-                range.address + layout.offset("BlockBitmap")? as u64,
-                words * word_size,
+                range.address + geometry.bitmap_offset,
+                geometry.words as usize * word_size,
             )?
             .chunks_exact(word_size)
             .map(le_uint)
@@ -1352,13 +1358,14 @@ impl HeapReader<'_> {
         };
         Ok(LfhSubsegment {
             address: range.address,
-            block_size,
-            block_count,
+            block_size: geometry.block_size,
+            block_count: geometry.blocks as u32,
             free_count: layout.read(&image, 0, "FreeCount")? as u32,
             bucket,
-            first_block: range.address + first_offset,
+            first_block: range.address + geometry.first_offset,
             bitmap,
-            blocks_per_word,
+            blocks_per_word: geometry.blocks_per_word as u32,
+            bit_stride: geometry.bit_stride as u32,
         })
     }
 
@@ -2322,18 +2329,111 @@ impl Target {
     }
 }
 
-/// An LFH subsegment's block size and the offset of its first block, from
-/// its `BlockOffsets`: XORed with the LFH key and with the subsegment's
-/// address truncated to 32 bits and shifted down a page, as the heap does,
-/// not with its full page number.
-fn lfh_block_offsets(encoded: u32, lfh_key: u64, subsegment: VirtAddr) -> (u64, u64) {
-    let decoded = encoded ^ lfh_key as u32 ^ (subsegment.0 as u32 >> 12);
-    (u64::from(decoded & 0xFFFF), u64::from(decoded >> 16))
+/// Where an LFH subsegment keeps its blocks and their busy bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LfhGeometry {
+    pub block_size: u64,
+    /// From the subsegment's start.
+    pub first_offset: u64,
+    /// Every block: `BlockCount`, and the `WitheldBlockCount` blocks the
+    /// subsegment withholds, which take their places among the others.
+    pub blocks: u64,
+    pub withheld: u64,
+    /// Where `BlockBitmap` begins, the size of its words, and how many of
+    /// them hold the blocks: block `i`'s busy bit is bit
+    /// `(i % blocks_per_word) * bit_stride` of word `i / blocks_per_word`.
+    pub bitmap_offset: u64,
+    pub word_size: u64,
+    pub words: u64,
+    pub blocks_per_word: u64,
+    pub bit_stride: u64,
+}
+
+/// The geometry of the LFH subsegment at `subsegment`, `size` bytes long,
+/// whose header `image` is laid out as `layout` (`_HEAP_LFH_SUBSEGMENT`)
+/// and `offsets` (`_HEAP_LFH_SUBSEGMENT_ENCODED_OFFSETS`) and whose blocks
+/// align to `align`. None when its `BlockOffsets` decodes to no blocks that
+/// fit it.
+///
+/// `BlockOffsets` is XORed with the LFH key and with the subsegment's page
+/// number, which builds cut to 32 bits two ways: Windows 11 26200 (its
+/// ntdll and kernel) takes all of the page number, 22631's ntdll the low 32
+/// bits of the address shifted down a page. Below 4 GiB they agree; above,
+/// the one whose blocks fit the subsegment is its own.
+pub fn lfh_geometry(
+    layout: &TypeInfo,
+    offsets: &TypeInfo,
+    image: &[u8],
+    lfh_key: u64,
+    subsegment: VirtAddr,
+    size: u64,
+    align: u64,
+) -> Option<LfhGeometry> {
+    let read = |layout: &TypeInfo, bytes: &[u8], name: &str| {
+        let info = layout.field(name).ok()?;
+        let at = info.offset as usize;
+        let width = (info.size as usize).clamp(1, 8);
+        Some(info.decode(le_uint(bytes.get(at..at + width)?)))
+    };
+    let withheld = read(layout, image, "WitheldBlockCount").unwrap_or(0);
+    let blocks = read(layout, image, "BlockCount")?.checked_add(withheld)?;
+    let bitmap = layout.field("BlockBitmap").ok()?;
+    let word_size = match bitmap.type_data {
+        ParsedType::Array(_, count) if count > 0 => bitmap.size / u64::from(count),
+        _ => return None,
+    };
+    if !matches!(word_size, 4 | 8) {
+        return None;
+    }
+    let word_bits = word_size * 8;
+    // A header with `BitmapSearchWidth` keeps one busy bit per block, and
+    // a word holds as many blocks as that search reaches: all its bits (the
+    // 26200 kernel's) where it runs past half of them, else its low half
+    // (26200's ntdll; up to that many blocks, both read alike). A header
+    // without keeps two bits per block, the busy one first (22631's ntdll).
+    let (blocks_per_word, bit_stride) = match read(layout, image, "BitmapSearchWidth") {
+        Some(width) if width > word_bits / 2 => (word_bits, 1),
+        Some(_) => (word_bits / 2, 1),
+        None => (word_bits / 2, 2),
+    };
+    let words = blocks.div_ceil(blocks_per_word);
+    let bitmap_offset = u64::from(bitmap.offset);
+    let at = layout.field_offset("BlockOffsets").ok()? as usize;
+    let encoded = le_uint(image.get(at..at + offsets.size)?);
+    let pages = [
+        subsegment.0 >> PAGE_SHIFT,
+        u64::from(subsegment.0 as u32 >> PAGE_SHIFT),
+    ];
+    pages.into_iter().find_map(|page| {
+        let decoded = (encoded ^ lfh_key ^ page).to_le_bytes();
+        let decoded = decoded.get(..offsets.size)?;
+        let block_size = read(offsets, decoded, "BlockSize")?;
+        let first_offset = read(offsets, decoded, "FirstBlockOffset")?;
+        let end = blocks.checked_mul(block_size)?.checked_add(first_offset)?;
+        let fits = blocks > 0
+            && block_size >= align
+            && block_size % align == 0
+            && first_offset % align == 0
+            && first_offset >= bitmap_offset + words * word_size
+            && end <= size;
+        fits.then_some(LfhGeometry {
+            block_size,
+            first_offset,
+            blocks,
+            withheld,
+            bitmap_offset,
+            word_size,
+            words,
+            blocks_per_word,
+            bit_stride,
+        })
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nt::layout::FieldInfo;
 
     #[test]
     fn active_nt_heap_encoding_requires_its_layout_field() {
@@ -2379,20 +2479,168 @@ mod tests {
         assert_eq!(x86.user_size(), 0x28 - 0x14);
     }
 
-    /// Two subsegments of an ARM64 Windows 11 charmap's process heap: 83
-    /// blocks of 0x30 after 0x50 bytes of header and bitmap, and 248 of 0x10
-    /// after 0x80. The page number's bits above the low 32 of the address
-    /// take no part.
+    /// `_HEAP_LFH_SUBSEGMENT_ENCODED_OFFSETS`.
+    fn encoded_offsets() -> TypeInfo {
+        let ushort = |offset| FieldInfo {
+            offset,
+            size: 2,
+            type_data: ParsedType::Primitive("USHORT".into()),
+        };
+        TypeInfo {
+            name: "_HEAP_LFH_SUBSEGMENT_ENCODED_OFFSETS".into(),
+            size: 4,
+            fields: [
+                ("BlockSize".to_string(), ushort(0)),
+                ("FirstBlockOffset".to_string(), ushort(2)),
+            ]
+            .into_iter()
+            .collect(),
+            pointer_size: 8,
+        }
+    }
+
+    /// The fields of an x64 or ARM64 `_HEAP_LFH_SUBSEGMENT` the geometry
+    /// reads, `BitmapSearchWidth` (at 0x32, before a bitmap at 0x40) where
+    /// `search_width` is given as 26200 lays it out, else 22631's ntdll's
+    /// (a bitmap at 0x30), and a header holding `encoded`, `blocks`, and
+    /// `withheld`.
+    fn lfh_header(
+        search_width: Option<u8>,
+        encoded: u32,
+        blocks: u16,
+        withheld: u8,
+    ) -> (TypeInfo, Vec<u8>) {
+        let field = |offset, size, name: &str| FieldInfo {
+            offset,
+            size,
+            type_data: ParsedType::Primitive(name.into()),
+        };
+        let (withheld_at, bitmap_at) = if search_width.is_some() {
+            (0x25, 0x40)
+        } else {
+            (0x27, 0x30)
+        };
+        let mut fields = vec![
+            ("BlockCount", field(0x22, 2, "USHORT")),
+            ("WitheldBlockCount", field(withheld_at, 1, "UCHAR")),
+            ("BlockOffsets", field(0x28, 4, "ULONG")),
+            (
+                "BlockBitmap",
+                FieldInfo {
+                    offset: bitmap_at,
+                    size: 8,
+                    type_data: ParsedType::Array(
+                        Box::new(ParsedType::Primitive("ULONGLONG".into())),
+                        1,
+                    ),
+                },
+            ),
+        ];
+        let mut image = vec![0u8; bitmap_at as usize + 8];
+        image[0x22..0x24].copy_from_slice(&blocks.to_le_bytes());
+        image[withheld_at as usize] = withheld;
+        image[0x28..0x2c].copy_from_slice(&encoded.to_le_bytes());
+        if let Some(width) = search_width {
+            fields.push(("BitmapSearchWidth", field(0x32, 1, "UCHAR")));
+            image[0x32] = width;
+        }
+        let layout = TypeInfo {
+            name: "_HEAP_LFH_SUBSEGMENT".into(),
+            size: image.len(),
+            fields: fields
+                .into_iter()
+                .map(|(name, info)| (name.to_string(), info))
+                .collect(),
+            pointer_size: 8,
+        };
+        (layout, image)
+    }
+
+    fn geometry(
+        header: (TypeInfo, Vec<u8>),
+        key: u64,
+        subsegment: u64,
+        size: u64,
+    ) -> Option<LfhGeometry> {
+        let (layout, image) = header;
+        lfh_geometry(
+            &layout,
+            &encoded_offsets(),
+            &image,
+            key,
+            VirtAddr(subsegment),
+            size,
+            0x10,
+        )
+    }
+
+    /// Two subsegments of an ARM64 Windows 11 22631 charmap's process heap:
+    /// 83 blocks of 0x30 after 0x50 bytes of header and bitmap, and 248 of
+    /// 0x10 after 0x80. The page number's bits above the low 32 of the
+    /// address take no part, and each block keeps two bits.
     #[test]
     fn lfh_block_offsets_decode_with_the_truncated_page_number() {
         let key = 0x4055_f3e2_076d_0278;
         assert_eq!(
-            lfh_block_offsets(0x0731_bc5b, key, VirtAddr(0x250_cbe1_3000)),
-            (0x30, 0x50)
+            geometry(
+                lfh_header(None, 0x0731_bc5b, 83, 0),
+                key,
+                0x250_cbe1_3000,
+                0x1000
+            ),
+            Some(LfhGeometry {
+                block_size: 0x30,
+                first_offset: 0x50,
+                blocks: 83,
+                withheld: 0,
+                bitmap_offset: 0x30,
+                word_size: 8,
+                words: 3,
+                blocks_per_word: 32,
+                bit_stride: 2,
+            })
+        );
+        let second = geometry(
+            lfh_header(None, 0x07e1_bc71, 248, 0),
+            key,
+            0x250_cbe1_9000,
+            0x1000,
         );
         assert_eq!(
-            lfh_block_offsets(0x07e1_bc71, key, VirtAddr(0x250_cbe1_9000)),
-            (0x10, 0x80)
+            second.map(|geometry| (geometry.block_size, geometry.first_offset)),
+            Some((0x10, 0x80))
+        );
+    }
+
+    /// A Windows 11 26200 kernel pool subsegment, whose `BlockOffsets`
+    /// decodes only with all of the page number: 14 blocks of 0x110 from
+    /// 0x50.
+    #[test]
+    fn kernel_lfh_block_offsets_decode_with_the_whole_page_number() {
+        let header = lfh_header(Some(14), 0x8027_e5e2, 14, 0);
+        let geometry = geometry(header, 0xeaf9_43fb_5837_b63c, 0xffff_cd84_052c_e000, 0x1000);
+        assert_eq!(
+            geometry.map(|geometry| (geometry.block_size, geometry.first_offset)),
+            Some((0x110, 0x50))
+        );
+    }
+
+    /// An 8-page 26200 kernel subsegment: 163 blocks of 0xc0 from 0x70, and
+    /// 7 it withholds among them, a bit each, 64 to a word.
+    #[test]
+    fn kernel_lfh_bitmaps_hold_a_bit_per_block_withheld_ones_too() {
+        let header = lfh_header(Some(0x40), 0xb030_5350, 163, 7);
+        let geometry = geometry(header, 0xeaf9_43fb_5837_b63c, 0xffff_8e87_7e5a_c000, 0x8000);
+        assert_eq!(
+            geometry.map(|geometry| (
+                geometry.block_size,
+                geometry.first_offset,
+                geometry.blocks,
+                geometry.words,
+                geometry.blocks_per_word,
+                geometry.bit_stride
+            )),
+            Some((0xc0, 0x70, 170, 3, 64, 1))
         );
     }
 
@@ -2408,6 +2656,7 @@ mod tests {
             // Blocks 0 and 33 busy; the high halves are not block state.
             bitmap: vec![0xFFFF_FFFF_0000_0001, 0xFFFF_FFFF_0000_0002],
             blocks_per_word: 32,
+            bit_stride: 1,
         };
         assert!(subsegment.is_busy(0));
         assert!(!subsegment.is_busy(1));
@@ -2415,5 +2664,27 @@ mod tests {
         assert!(subsegment.is_busy(33));
         assert_eq!(subsegment.busy_count(), 2);
         assert_eq!(subsegment.block(33), VirtAddr(0x1060 + 33 * 0x30));
+    }
+
+    /// 22631's ntdll keeps two bits per block, the busy one first: the
+    /// 83-block subsegment above, with no block free.
+    #[test]
+    fn lfh_bitmaps_of_two_bits_per_block_read_the_first() {
+        let subsegment = LfhSubsegment {
+            address: VirtAddr(0x250_cbe1_3000),
+            block_size: 0x30,
+            block_count: 83,
+            free_count: 0,
+            bucket: Some(3),
+            first_block: VirtAddr(0x250_cbe1_3050),
+            bitmap: vec![
+                0x5777_5555_d775_5f5d,
+                0x5555_d55d_55f5_7df5,
+                0xffff_ffd5_d555_fd75,
+            ],
+            blocks_per_word: 32,
+            bit_stride: 2,
+        };
+        assert_eq!(subsegment.busy_count(), 83);
     }
 }
