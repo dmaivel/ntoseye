@@ -16,51 +16,53 @@ use crate::nt::layout::{FieldInfo, nested_layout_name};
 use crate::nt::symbols::{
     CodeFrame, ImageSource, LocalSourceState, ModuleListing, ModuleSymbolStatus, SourceLocation,
     SourcePath, Symbol, SymbolPath, glob_matches, parse_source_paths, parse_symbol_sources,
+    split_query_module,
 };
 use crate::nt::target::{ReloadScope, Target, UserVar};
 use crate::session::Session;
 use crate::session::typeview::TypeView;
 
-/// The first word; `x` ignores the words after it, as it always did.
+/// Every word: a symbol must match all the terms.
 #[grammar(usage = "[module!]<query>", complete = Symbol)]
-fn first_word(
+fn query_terms(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<String, ArgError> {
-    let first = cursor.word().ok_or(ArgError::Missing)?.into_owned();
-    cursor.rest();
-    Ok(first)
+    let query = cursor.rest();
+    if query.is_empty() {
+        return Err(ArgError::Missing);
+    }
+    Ok(query)
 }
 
 /// Search for symbols by fuzzy name match.
 ///
-/// `*` and `?` are glob characters. The operators are `^` prefix, `$`
-/// suffix, `'` exact match, and `!` negation. If you separate terms with
-/// spaces, a symbol must match all the terms.
+/// `module!` searches the modules whose names match it, which may use `*`
+/// and `?`. A query with `*` or `?` is a wildcard pattern. Otherwise each
+/// space-separated term must match, fuzzily or by its operator: `^` prefix,
+/// `$` suffix, `'` exact substring (quote such a term: `x "'Heap"`), `!`
+/// must not match.
 #[command(
     names = ["x"],
     category = "symbols, types, and expressions",
     kind = Query,
     python = none,
 )]
-fn x(state: &mut ReplState<'_>, #[arg(parse = first_word)] query: String) -> Result<()> {
+fn x(state: &mut ReplState<'_>, #[arg(parse = query_terms)] query: String) -> Result<()> {
     // bounded purely for terminal-output sanity (resolution
     // is O(1) now); a huge match set just floods the screen
     const X_LIMIT: usize = 4096;
     let query = query.as_str();
     let dtb = state.ctx.target.current_dtb();
-    // `module!query` scopes the search to one module; a bare query
-    // fuzzy-matches the cached merged index, whose names are already
+    // `module!query` scopes the search to the modules it names; a bare
+    // query fuzzy-matches the cached merged index, whose names are already
     // module-qualified.
-    let names: Vec<String> = match query.split_once('!') {
-        Some((module, q)) => state
+    let names: Vec<String> = match split_query_module(query) {
+        Some((module, terms)) => state
             .ctx
             .target
             .symbols
-            .search_symbols_in_module(dtb, module, q, X_LIMIT)
-            .into_iter()
-            .map(|name| format!("{module}!{name}"))
-            .collect(),
+            .search_symbols_in_modules(dtb, module, terms, X_LIMIT),
         None => {
             state.caches.refresh_loaded_symbols(&state.ctx.target);
             state.caches.symbols.read().unwrap().search(query, X_LIMIT)
@@ -139,8 +141,8 @@ fn ln(
     Ok(session.target.nearest_symbol(address))
 }
 
-/// `ln`: the symbol, or where the address is when its module has no
-/// symbols (WinDbg's `module+offset`).
+/// `ln`: the symbol, or where the address is when no symbol covers it
+/// (WinDbg's `module+offset`), noting a module whose symbols are not loaded.
 impl Render<VirtAddr> for Option<Symbol> {
     fn render(&self, repl: &mut ReplState<'_>, address: VirtAddr) {
         match self {
@@ -154,6 +156,16 @@ impl Render<VirtAddr> for Option<Symbol> {
             None => {
                 let dtb = repl.ctx.target.current_dtb();
                 match repl.ctx.target.format_code_address(dtb, address) {
+                    Some(label)
+                        if repl
+                            .ctx
+                            .target
+                            .symbols
+                            .find_module_for_address(dtb, address)
+                            .is_some() =>
+                    {
+                        outln!("{}  {}", ui::addr(address.0), ui::symbol(&label));
+                    }
                     Some(label) => {
                         outln!(
                             "{}  {}  {}",

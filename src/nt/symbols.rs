@@ -1648,7 +1648,7 @@ mod types;
 
 use cache::{ModuleIdentities, symbols_directory};
 use download::forget_nested_pdbs;
-pub use index::SymbolIndex;
+pub use index::{SymbolIndex, split_query_module};
 pub use inline::ProcedureInlines;
 
 #[cfg(test)]

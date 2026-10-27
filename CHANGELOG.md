@@ -16,6 +16,10 @@ Keeping this file:
 - `!heap -x` gave an NT-heap block's user size 0x10 bytes short.
 - `!heap` decodes segment-heap LFH subsegments: on Windows 11 22631 every one failed with `field 'BucketRef' not found`, and blocks of a subsegment above 4 GiB were placed at the wrong offset, so `!heap -x` could not find them.
 - `!address` and `!address -summary` count every segment and large block of a heap as Heap, not only its first region.
+- Inlined calls into code from another object file of the module show the function's name, `combase!WaitCoalesced [inline]`, where `k` showed `combase!inlinee_0x81300001`, and `dv` shows such locals' types, where it showed `type(0x81300003)`.
+- `dv` shows an `HRESULT` local's type, where it showed `__unknown_t`.
+- `ln` no longer says "no symbols loaded for this module" for an address in a module whose symbols are loaded but name nothing there.
+- `x` does what its help says: several terms must all match (`x ntdll!Rtl !Heap UserThr`), `!term` excludes, `^` and `$` anchor a term, and a module pattern searches every module it matches (`x kernel*!RaiseException`). It took only the first term, read `!term` as a module, and matched `^Rtl` and module patterns to nothing.
 
 ## Unreleased
 

@@ -1,7 +1,7 @@
 //! The fuzzy completion index over symbol and type names: sorted names with
 //! precomputed bare-name offsets and prefix keys, searched in parallel chunks.
 
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use rayon::slice::ParallelSlice;
@@ -62,7 +62,7 @@ impl SymbolIndex {
         if query.is_empty() || limit == 0 {
             return self.names.iter().take(limit).cloned().collect();
         }
-        let qualified_query = query.contains('!');
+        let qualified_query = split_query_module(query).is_some();
         if query
             .as_bytes()
             .iter()
@@ -80,7 +80,7 @@ impl SymbolIndex {
                 .collect();
         }
 
-        let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+        let pattern = search_pattern(query);
         let (range_start, range_end) = qualified_search_range(&self.names, query);
         let names = &self.names[range_start..range_end];
         let top = if plain_ascii_query(query) {
@@ -267,22 +267,41 @@ fn merge_top<'a>(
     left
 }
 
+/// The module `query` names and the query after it: `nt!Ke !Bug` is `nt`
+/// and `Ke !Bug`. Only the first term can name a module, and a term that
+/// starts with an operator names none (`!Bug` excludes `Bug`).
+pub fn split_query_module(query: &str) -> Option<(&str, &str)> {
+    let (module, rest) = query.split_once('!')?;
+    (!module.is_empty()
+        && !module.contains(char::is_whitespace)
+        && !module.starts_with(['^', '\'', '\\']))
+    .then_some((module, rest))
+}
+
+/// `query` as a smart-case pattern, except that its prefix (`^`) and suffix
+/// (`$`) terms ignore case: nucleo-matcher 0.3.1 compares a case-sensitive
+/// one with the whole name rather than its start or end, so `^Rtl` would
+/// match only a name that is exactly `Rtl`.
+fn search_pattern(query: &str) -> Pattern {
+    let mut pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    let folded = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+    for (atom, folded) in pattern.atoms.iter_mut().zip(folded.atoms) {
+        if matches!(atom.kind, AtomKind::Prefix | AtomKind::Postfix) {
+            *atom = folded;
+        }
+    }
+    pattern
+}
+
 /// Restrict a case-sensitive qualified query to one module's contiguous name
 /// range. Smart-case lowercase queries cannot use this range because matching
 /// module names with different casing would no longer be possible on the
 /// case-sensitive index ordering.
 fn qualified_search_range(names: &[String], query: &str) -> (usize, usize) {
-    let Some((module, _)) = query.split_once('!') else {
+    let Some((module, _)) = split_query_module(query) else {
         return (0, names.len());
     };
-    if module.is_empty()
-        || query.chars().any(char::is_whitespace)
-        || !query.chars().any(char::is_uppercase)
-        || module
-            .as_bytes()
-            .first()
-            .is_some_and(|byte| matches!(*byte, b'!' | b'^' | b'\'' | b'\\'))
-    {
+    if query.chars().any(char::is_whitespace) || !query.chars().any(char::is_uppercase) {
         return (0, names.len());
     }
 

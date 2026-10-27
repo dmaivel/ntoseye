@@ -302,7 +302,7 @@ pub fn primitive_size(name: &str) -> Option<u64> {
             1,
             &[
                 "char", "schar", "uchar", "int8", "uint8", "i8", "u8", "int8_t", "uint8_t", "bool",
-                "bool8", "boolean",
+                "bool8", "boolean", "char8_t",
             ],
         ),
         (
@@ -327,7 +327,7 @@ pub fn primitive_size(name: &str) -> Option<u64> {
             4,
             &[
                 "long", "ulong", "int", "uint", "int32", "uint32", "i32", "u32", "int32_t",
-                "uint32_t", "bool32", "char32_t", "float",
+                "uint32_t", "bool32", "char32_t", "float", "hresult",
             ],
         ),
         (

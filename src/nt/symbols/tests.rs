@@ -1226,6 +1226,73 @@ fn a_bare_module_qualifier_lists_that_module() {
     );
 }
 
+#[test]
+fn only_a_first_term_names_a_module() {
+    assert_eq!(split_query_module("nt!Ke !Bug"), Some(("nt", "Ke !Bug")));
+    assert_eq!(
+        split_query_module("kernel*!Raise"),
+        Some(("kernel*", "Raise"))
+    );
+    assert_eq!(split_query_module("Rtl !Heap"), None);
+    assert_eq!(split_query_module("!Heap"), None);
+    assert_eq!(split_query_module("^nt!Ke"), None);
+}
+
+#[test]
+fn operator_terms_match_the_bare_name() {
+    let index = SymbolIndex::from_names(vec![
+        "ntdll!RtlAllocateHeap".to_string(),
+        "ntdll!RtlUserThreadStart".to_string(),
+        "ntdll!RtlUserThreadStart$filt$0".to_string(),
+    ]);
+    let start = vec!["ntdll!RtlUserThreadStart".to_string()];
+    assert_eq!(index.search("Rtl !Heap !filt", 10), start);
+    assert_eq!(index.search("^RtlUser Start$", 10), start);
+    assert_eq!(index.search("^Heap", 10), Vec::<String>::new());
+}
+
+#[test]
+fn a_module_glob_searches_every_module_it_matches() {
+    let store = SymbolStore::new();
+    let dtb = 0x1000;
+    for (guid, name, base) in [
+        (1, "kernelbase.dll", 0x7ff0_0000_0000),
+        (2, "kernel32.dll", 0x7ff1_0000_0000),
+        (3, "ntdll.dll", 0x7ff2_0000_0000),
+    ] {
+        store.modules.insert(
+            (dtb, base),
+            LoadedModule {
+                name: name.to_string(),
+                short_name: ModuleInfo::derive_short_name(name),
+                guid,
+                base_address: VirtAddr(base),
+                size: 0x1000,
+                dtb,
+            },
+        );
+        store.index.insert(
+            guid,
+            SymbolIndex::from_names(vec!["RaiseException".to_string()]),
+        );
+    }
+
+    assert_eq!(
+        store.search_symbols_in_modules(dtb, "kernel*", "RaiseException", 10),
+        vec![
+            "kernel32!RaiseException".to_string(),
+            "kernelbase!RaiseException".to_string()
+        ]
+    );
+    assert_eq!(
+        store.search_symbols_in_modules(dtb, "*", "RaiseException", 2),
+        vec![
+            "kernel32!RaiseException".to_string(),
+            "kernelbase!RaiseException".to_string()
+        ]
+    );
+}
+
 /// Where `tests/fixtures/inline_frames.pdb` is loaded: the PDB of a Rust
 /// driver (`tests/fixtures/inline_frames`) whose `DriverEntry` (RVA 0x1000,
 /// 0x59 bytes) inlines `accumulate`, which inlines `scale` twice, each of

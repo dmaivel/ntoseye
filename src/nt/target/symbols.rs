@@ -20,7 +20,7 @@ use crate::{
         symbols::{
             CodeFrame, InlineFrame, LocalVariableLocation, ProcedureLocal, SourceLineExtent,
             SourceLocation, Symbol, SymbolCandidate, SymbolIndex, SymbolStore,
-            format_symbol_with_offset, glob_matches,
+            format_symbol_with_offset, glob_matches, split_query_module,
         },
         unwind::frame_base_for_register_values,
     },
@@ -346,16 +346,14 @@ impl Target {
     }
 
     /// Fuzzy-search the active symbol index and resolve only unambiguous
-    /// module/address identities. `module!query` restricts the search.
+    /// module/address identities. `module!query` restricts the search to the
+    /// modules `module` names.
     pub fn search_symbols(&self, query: &str, limit: usize) -> Vec<SymbolSearchMatch> {
         let dtb = self.current_dtb();
-        let names: Vec<String> = match query.split_once('!') {
+        let names: Vec<String> = match split_query_module(query) {
             Some((module, query)) => self
                 .symbols
-                .search_symbols_in_module(dtb, module, query, limit)
-                .into_iter()
-                .map(|name| format!("{module}!{name}"))
-                .collect(),
+                .search_symbols_in_modules(dtb, module, query, limit),
             None => self.current_symbol_index().search(query, limit),
         };
         self.symbol_matches(names)

@@ -18,6 +18,7 @@ use crate::nt::breakpoints::{
 use crate::nt::expr::Expr;
 use crate::nt::guest::vm_exits::ExitFilter;
 use crate::nt::guest::{ModuleSymbolLoadReport, hypercalls};
+use crate::nt::symbols::split_query_module;
 use crate::session::exception_policy::ExceptionPolicyMode;
 use crate::session::{ModuleTrap, Session, TrapSite};
 
@@ -170,14 +171,11 @@ impl Session {
     ) -> Result<PatternBreakpoints> {
         self.require_software_breakpoints()?;
         let dtb = self.target.current_dtb();
-        let names: Vec<String> = match pattern.split_once('!') {
+        let names: Vec<String> = match split_query_module(pattern) {
             Some((module, query)) => self
                 .target
                 .symbols
-                .search_symbols_in_module(dtb, module, query, limit)
-                .into_iter()
-                .map(|name| format!("{module}!{name}"))
-                .collect(),
+                .search_symbols_in_modules(dtb, module, query, limit),
             None => self.target.current_symbol_index().search(pattern, limit),
         };
         let mut ids = Vec::new();

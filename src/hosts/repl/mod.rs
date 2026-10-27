@@ -48,7 +48,7 @@ use crate::hosts::python::embed;
 use crate::hosts::ui;
 use crate::nt::expr::NumberRadix;
 use crate::nt::guest::ModuleSymbolLoadReport;
-use crate::nt::symbols::ntoseye_home;
+use crate::nt::symbols::{ntoseye_home, split_query_module};
 #[cfg(all(unix, feature = "cli"))]
 use crate::nt::target::InterruptRequester;
 #[cfg(feature = "cli")]
@@ -475,16 +475,16 @@ impl ReplStore {
     }
 
     /// Module-qualified symbol names matching `query`, best first, from the
-    /// index symbol completion uses; `module!query` searches that module.
+    /// index symbol completion uses; `module!query` searches the modules
+    /// `module` names.
     pub fn search_symbols(&self, session: &Session, query: &str, limit: usize) -> Vec<String> {
-        if let Some((module, query)) = query.split_once('!') {
-            return self
-                .caches
-                .symbol_store
-                .search_symbols_in_module(session.target.current_dtb(), module, query, limit)
-                .into_iter()
-                .map(|name| format!("{module}!{name}"))
-                .collect();
+        if let Some((module, query)) = split_query_module(query) {
+            return self.caches.symbol_store.search_symbols_in_modules(
+                session.target.current_dtb(),
+                module,
+                query,
+                limit,
+            );
         }
         self.caches.refresh_loaded_symbols(&session.target);
         self.caches.symbols.read().unwrap().search(query, limit)

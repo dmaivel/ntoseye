@@ -197,6 +197,7 @@ impl SymbolStore {
 
                     pdb2::PrimitiveKind::Char
                     | pdb2::PrimitiveKind::RChar
+                    | pdb2::PrimitiveKind::Char8
                     | pdb2::PrimitiveKind::UChar
                     | pdb2::PrimitiveKind::I8
                     | pdb2::PrimitiveKind::U8
@@ -215,7 +216,8 @@ impl SymbolStore {
                     | pdb2::PrimitiveKind::U32
                     | pdb2::PrimitiveKind::Bool32
                     | pdb2::PrimitiveKind::F32
-                    | pdb2::PrimitiveKind::RChar32 => Ok(4),
+                    | pdb2::PrimitiveKind::RChar32
+                    | pdb2::PrimitiveKind::HRESULT => Ok(4),
 
                     pdb2::PrimitiveKind::Quad
                     | pdb2::PrimitiveKind::UQuad
@@ -223,7 +225,10 @@ impl SymbolStore {
                     | pdb2::PrimitiveKind::U64
                     | pdb2::PrimitiveKind::F64 => Ok(8),
 
-                    pdb2::PrimitiveKind::Octa | pdb2::PrimitiveKind::UOcta => Ok(16),
+                    pdb2::PrimitiveKind::Octa
+                    | pdb2::PrimitiveKind::UOcta
+                    | pdb2::PrimitiveKind::I128
+                    | pdb2::PrimitiveKind::U128 => Ok(16),
 
                     _ => Ok(0),
                 }
@@ -271,6 +276,7 @@ impl SymbolStore {
                     PrimitiveKind::Char | PrimitiveKind::I8 => "CHAR",
                     PrimitiveKind::UChar | PrimitiveKind::U8 => "UCHAR",
                     PrimitiveKind::RChar => "CHAR",
+                    PrimitiveKind::Char8 => "char8_t",
                     PrimitiveKind::WChar => "WCHAR",
                     PrimitiveKind::RChar16 => "char16_t",
                     PrimitiveKind::RChar32 => "char32_t",
@@ -282,11 +288,12 @@ impl SymbolStore {
                     PrimitiveKind::U32 => "UINT",
                     PrimitiveKind::Quad | PrimitiveKind::I64 => "LONGLONG",
                     PrimitiveKind::UQuad | PrimitiveKind::U64 => "ULONGLONG",
-                    PrimitiveKind::Octa => "INT128",
-                    PrimitiveKind::UOcta => "UINT128",
+                    PrimitiveKind::Octa | PrimitiveKind::I128 => "INT128",
+                    PrimitiveKind::UOcta | PrimitiveKind::U128 => "UINT128",
                     PrimitiveKind::F32 => "float",
                     PrimitiveKind::F64 => "double",
                     PrimitiveKind::Bool8 | PrimitiveKind::Bool32 => "bool",
+                    PrimitiveKind::HRESULT => "HRESULT",
                     _ => "__unknown_t",
                 };
                 let primitive = ParsedType::Primitive(name.to_string());
