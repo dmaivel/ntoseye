@@ -483,7 +483,12 @@ impl Render for MdlDetail {
 /// PteFailures, and from the bitmap, the number of free blocks and the largest
 /// free block. The command reads all of the bitmap, up to 2^27 bits, a limit
 /// that only a corrupt SizeOfBitMap exceeds. If the free count from the bitmap
-/// differs from the counter, the target made an allocation between the reads.
+/// differs from the counter, the target made an allocation between the reads
+/// or a processor holds PTEs in the allocator's cache; the free count comes
+/// from the bitmap. Where the counters cannot be true of the bitmap (a total
+/// beyond it, a free count below zero or above the total, as on Windows 11
+/// 22631 ARM64), the allocator's total and use are shown as unknown and left
+/// out of the summary, and `!vm` shows no system-PTE totals.
 /// All counts are in PTEs, and each bit of the system-view bitmap covers 16
 /// PTEs. The flags follow WinDbg. 0x1 lists each free block with its first PTE,
 /// the address that it maps, and its length, up to 256 free blocks for each
@@ -647,7 +652,16 @@ fn print_system_ptes(detail: &SystemPtesDetail, flags: u64) {
     outln!("System PTE Information");
     outln!("  total   {}", detail.total);
     outln!("  free    {}", detail.free);
-    outln!("  in use  {}", detail.total.saturating_sub(detail.free));
+    outln!("  in use  {}", detail.used());
+    if !detail.uncounted.is_empty() {
+        outln!(
+            "  {}",
+            ui::muted(&format!(
+                "(not counting {}, whose counters do not hold)",
+                detail.uncounted.join(", ")
+            ))
+        );
+    }
     let field = |label: &str, value: String| outln!("    {label:<18}  {value}");
     for pte_type in &detail.types {
         outln!();
@@ -661,7 +675,7 @@ fn print_system_ptes(detail: &SystemPtesDetail, flags: u64) {
             outln!("    unused (empty bitmap)");
             continue;
         }
-        let span = pte_type.bitmap_bits.saturating_mul(pte_type.ptes_per_bit);
+        let span = pte_type.span();
         if let Some(base) = pte_type.base_va {
             field(
                 "VA range",
@@ -673,20 +687,37 @@ fn print_system_ptes(detail: &SystemPtesDetail, flags: u64) {
             );
         }
         field("first PTE", ui::addr(pte_type.base_pte.0));
-        field("total", pte_type.total.to_string());
-        let free = pte_type.counted_free();
-        field("free", free.to_string());
-        field("in use", pte_type.total.saturating_sub(free).to_string());
+        let unknown = || "-".to_string();
+        let holds = pte_type.counters_hold();
+        field(
+            "total",
+            if holds {
+                pte_type.total.to_string()
+            } else {
+                unknown()
+            },
+        );
+        field("free", pte_type.counted_free().to_string());
+        field(
+            "in use",
+            pte_type
+                .used()
+                .map_or_else(unknown, |used| used.to_string()),
+        );
         field("failures", pte_type.failures.to_string());
         field(
             "bitmap",
             format!(
-                "{:#x} bits at {}, {} PTE{} per bit; {} PTEs reserved beyond the total",
+                "{:#x} bits at {}, {} PTE{} per bit{}",
                 pte_type.bitmap_bits,
                 ui::addr(pte_type.bitmap.0),
                 pte_type.ptes_per_bit,
                 if pte_type.ptes_per_bit == 1 { "" } else { "s" },
-                span.saturating_sub(pte_type.total)
+                if holds {
+                    format!("; {} PTEs reserved beyond the total", span - pte_type.total)
+                } else {
+                    String::new()
+                }
             ),
         );
         field("free blocks", pte_type.free_run_count.to_string());
@@ -729,17 +760,18 @@ fn print_system_ptes(detail: &SystemPtesDetail, flags: u64) {
                 pte_type.free_run_count - pte_type.free_runs.len() as u64
             );
         }
-        if pte_type.total > span {
+        // A counter that went below zero reads as its two's complement.
+        if !holds {
             outln!(
-                "    (TotalSystemPtes reads {} where the bitmap covers {} PTEs; in use counts from it)",
+                "    (TotalSystemPtes reads {} and TotalFreeSystemPtes {}, which the bitmap of {} PTEs, {} free, contradicts: the kernel's counters do not hold here, so the total and the PTEs in use are unknown)",
                 pte_type.total,
-                span
+                pte_type.free as i64,
+                span,
+                pte_type.bitmap_free
             );
-        }
-        if pte_type.bitmap_free != pte_type.free {
-            // A counter that went below zero reads as its two's complement.
+        } else if pte_type.bitmap_free != pte_type.free {
             outln!(
-                "    (TotalFreeSystemPtes reads {} where the bitmap counts {} free; the totals use the bitmap)",
+                "    (TotalFreeSystemPtes reads {} where the bitmap counts {} free; free counts from the bitmap)",
                 pte_type.free as i64,
                 pte_type.bitmap_free
             );

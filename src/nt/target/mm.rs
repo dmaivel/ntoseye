@@ -672,14 +672,16 @@ pub struct SystemPteTypeDetail {
     pub bitmap_bits: u64,
     /// `TotalSystemPtes`, the number of PTEs made available so far; the rest
     /// of the bitmap is reserved (its bits set) until the allocator expands.
+    /// Not always true: see [`Self::counters_hold`].
     pub total: u64,
-    /// `TotalFreeSystemPtes`.
+    /// `TotalFreeSystemPtes`, as read: one below zero reads as its two's
+    /// complement.
     pub free: u64,
     pub failures: u32,
     /// The free PTEs, counted from the clear bits of the bitmap, which the
     /// allocator hands out from. It differs from `free` when the target
-    /// allocated between the two reads, or where the counter does not hold:
-    /// Windows 11 22631 ARM64 keeps one below zero.
+    /// allocated between the two reads, by the PTEs a processor holds in
+    /// the allocator's `CachedPtes`, or where the counter does not hold.
     pub bitmap_free: u64,
     /// The bitmap bytes that could not be read, which count as allocated.
     pub unreadable_bitmap_bytes: u64,
@@ -697,14 +699,36 @@ pub struct SystemPteTypeDetail {
 
 #[record]
 impl SystemPteTypeDetail {
-    /// `total` minus `free`.
+    /// The PTEs in use, `total` minus the free ones
+    /// ([`Self::counted_free`]); `None` where the counters do not hold.
     #[record(getter)]
-    pub fn used(&self) -> u64 {
-        self.total.saturating_sub(self.free)
+    pub fn used(&self) -> Option<u64> {
+        self.counters_hold()
+            .then(|| self.total - self.counted_free())
+    }
+
+    /// Whether the kernel's `TotalSystemPtes` and `TotalFreeSystemPtes` can
+    /// be true of the bitmap: the total within the PTEs it covers, and
+    /// neither count of free PTEs below zero or above the total. Windows 11
+    /// 22631 ARM64 keeps its SystemPtes allocator's free count below zero
+    /// and its total at three times its bitmap, and its driver-image
+    /// allocator's free count far above its total; there the counters say
+    /// nothing about how many PTEs are in use.
+    #[record(getter)]
+    pub fn counters_hold(&self) -> bool {
+        self.total <= self.span()
+            && (self.free as i64) >= 0
+            && self.free <= self.total
+            && self.counted_free() <= self.total
     }
 }
 
 impl SystemPteTypeDetail {
+    /// The PTEs the bitmap covers.
+    pub fn span(&self) -> u64 {
+        self.bitmap_bits.saturating_mul(self.ptes_per_bit)
+    }
+
     /// The free PTEs: counted from the bitmap where it was read whole, else
     /// `TotalFreeSystemPtes`.
     pub fn counted_free(&self) -> u64 {
@@ -717,15 +741,18 @@ impl SystemPteTypeDetail {
 }
 
 /// Every system-PTE bitmap allocator in `MiState` (`!sysptes`). Counts
-/// are in PTEs.
+/// are in PTEs, of the allocators whose counters hold.
 #[record(impl)]
 #[derive(Debug, Clone)]
 pub struct SystemPtesDetail {
     pub types: Vec<SystemPteTypeDetail>,
     pub total: u64,
-    /// The free PTEs of every allocator: counted from its bitmap where the
-    /// bitmap was read whole, else its `TotalFreeSystemPtes`.
+    /// The free PTEs of those allocators: counted from each bitmap where it
+    /// was read whole, else its `TotalFreeSystemPtes`.
     pub free: u64,
+    /// The allocators left out of `total` and `free`, whose counters do not
+    /// hold ([`SystemPteTypeDetail::counters_hold`]).
+    pub uncounted: Vec<String>,
 }
 
 #[record]

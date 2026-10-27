@@ -206,10 +206,30 @@ impl Target {
             legacy_ptes
         } else {
             match self.system_ptes(false) {
-                Ok(ptes) => vec![
+                Ok(ptes) if ptes.uncounted.is_empty() => vec![
                     counter("total system PTEs", ptes.total, None),
                     counter("free system PTEs", ptes.free, None),
                 ],
+                // A sum without an allocator would pass for all of them.
+                Ok(ptes) => {
+                    let why = format!(
+                        "the kernel's counters for {} contradict {} bitmap (see !sysptes)",
+                        ptes.uncounted.join(", "),
+                        if ptes.uncounted.len() == 1 {
+                            "its"
+                        } else {
+                            "their"
+                        }
+                    );
+                    ["total system PTEs", "free system PTEs"]
+                        .into_iter()
+                        .map(|name| VmCounter {
+                            name: name.to_string(),
+                            value: unavailable_metric(&why),
+                            unit: None,
+                        })
+                        .collect()
+                }
                 Err(_) => legacy_ptes,
             }
         };

@@ -55,12 +55,14 @@ Keeping this file:
 - `!chkimg` skips a kernel image section Windows freed after boot and gave to other owners, such as INITKDBG on ARM64, where it counted the section as mismatches.
 - `ln` and symbolized addresses stop at the end of a symbol's section and of a private function, showing module+offset past them, where they named a function far beyond its end.
 - A register in an expression with a thread selected that runs on no processor says why it is unavailable, where it said the VM was running.
+- `!sysptes` and `!vm` no longer report system-PTE totals from counters their allocator's bitmap contradicts: on Windows 11 22631 ARM64 the kernel keeps SystemPtes' free count below zero and its total at three times what its bitmap covers, and the driver-image allocator's free count far above its total. Such an allocator's total and use show as unknown, with the reason, and are left out of the summary.
 
 ## Unreleased
 
 ### Changed
 
 - `PteWalk`, the SDK's `!pte` result, lists the entries the walk read as `levels`, root first, as `VtopDetail` does, in place of its `pxe`, `ppe`, `pde` and `pte` fields.
+- `SystemPteTypeDetail.used` is `None` where `SystemPteTypeDetail.counters_hold` is false, and `SystemPtesDetail.uncounted` names the allocators its totals leave out.
 - `LfhSubsegment.block_count` counts the blocks a subsegment withholds, and `LfhSubsegment.bit_stride` gives its bitmap's bits per block; `LfhSubsegment.bucket` is `None` for a subsegment that names no bucket, and `VtopDetail.physical_walk` says whether its entry addresses are physical (an explicit DTB) or in the self-map.
 
 ### Fixed

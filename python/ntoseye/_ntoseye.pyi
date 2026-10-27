@@ -9129,7 +9129,12 @@ class Inspect:
         PteFailures, and from the bitmap, the number of free blocks and the largest
         free block. The command reads all of the bitmap, up to 2^27 bits, a limit
         that only a corrupt SizeOfBitMap exceeds. If the free count from the bitmap
-        differs from the counter, the target made an allocation between the reads.
+        differs from the counter, the target made an allocation between the reads
+        or a processor holds PTEs in the allocator's cache; the free count comes
+        from the bitmap. Where the counters cannot be true of the bitmap (a total
+        beyond it, a free count below zero or above the total, as on Windows 11
+        22631 ARM64), the allocator's total and use are shown as unknown and left
+        out of the summary, and `!vm` shows no system-PTE totals.
         All counts are in PTEs, and each bit of the system-view bitmap covers 16
         PTEs. The flags follow WinDbg. 0x1 lists each free block with its first PTE,
         the address that it maps, and its length, up to 256 free blocks for each
@@ -18674,8 +18679,19 @@ class SystemPteTypeDetail(BaseRecord):
         """
         The free PTEs, counted from the clear bits of the bitmap, which the
         allocator hands out from. It differs from `free` when the target
-        allocated between the two reads, or where the counter does not hold:
-        Windows 11 22631 ARM64 keeps one below zero.
+        allocated between the two reads, by the PTEs a processor holds in
+        the allocator's `CachedPtes`, or where the counter does not hold.
+        """
+    @property
+    def counters_hold(self, /) -> bool:
+        """
+        Whether the kernel's `TotalSystemPtes` and `TotalFreeSystemPtes` can
+        be true of the bitmap: the total within the PTEs it covers, and
+        neither count of free PTEs below zero or above the total. Windows 11
+        22631 ARM64 keeps its SystemPtes allocator's free count below zero
+        and its total at three times its bitmap, and its driver-image
+        allocator's free count far above its total; there the counters say
+        nothing about how many PTEs are in use.
         """
     @property
     def failures(self, /) -> int: ...
@@ -18684,7 +18700,8 @@ class SystemPteTypeDetail(BaseRecord):
     @property
     def free(self, /) -> int:
         """
-        `TotalFreeSystemPtes`.
+        `TotalFreeSystemPtes`, as read: one below zero reads as its two's
+        complement.
         """
     @property
     def free_run_count(self, /) -> int: ...
@@ -18712,6 +18729,7 @@ class SystemPteTypeDetail(BaseRecord):
         """
         `TotalSystemPtes`, the number of PTEs made available so far; the rest
         of the bitmap is reserved (its bits set) until the allocator expands.
+        Not always true: see `counters_hold`.
         """
     @property
     def tracking(self, /) -> bool:
@@ -18730,9 +18748,10 @@ class SystemPteTypeDetail(BaseRecord):
         `SizeOfBitMap`), which no count includes.
         """
     @property
-    def used(self, /) -> int:
+    def used(self, /) -> int |None:
         """
-        `total` minus `free`.
+        The PTEs in use, `total` minus the free ones
+        (`counted_free`); `None` where the counters do not hold.
         """
     @property
     def va_type(self, /) -> str |None:
@@ -18744,19 +18763,25 @@ class SystemPteTypeDetail(BaseRecord):
 class SystemPtesDetail(BaseRecord):
     """
     Every system-PTE bitmap allocator in `MiState` (`!sysptes`). Counts
-    are in PTEs.
+    are in PTEs, of the allocators whose counters hold.
     """
-    __match_args__: Final[tuple[Literal["types"], Literal["total"], Literal["free"]]]
+    __match_args__: Final[tuple[Literal["types"], Literal["total"], Literal["free"], Literal["uncounted"]]]
     @property
     def free(self, /) -> int:
         """
-        The free PTEs of every allocator: counted from its bitmap where the
-        bitmap was read whole, else its `TotalFreeSystemPtes`.
+        The free PTEs of those allocators: counted from each bitmap where it
+        was read whole, else its `TotalFreeSystemPtes`.
         """
     @property
     def total(self, /) -> int: ...
     @property
     def types(self, /) -> list[SystemPteTypeDetail]: ...
+    @property
+    def uncounted(self, /) -> list[str]:
+        """
+        The allocators left out of `total` and `free`, whose counters do not
+        hold (`counters_hold`).
+        """
     @property
     def used(self, /) -> int:
         """

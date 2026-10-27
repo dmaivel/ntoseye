@@ -203,6 +203,7 @@ impl Target {
             types: Vec::with_capacity(allocators.len()),
             total: 0,
             free: 0,
+            uncounted: Vec::new(),
         };
         for (name, address) in allocators {
             let pte_type = types.struct_at(PTE_TYPE, address)?.prefetch();
@@ -286,8 +287,12 @@ impl Target {
                 free_runs_truncated: list_free_runs && runs.truncated,
                 tracking,
             };
-            detail.total = detail.total.saturating_add(total);
-            detail.free = detail.free.saturating_add(allocator.counted_free());
+            if allocator.counters_hold() {
+                detail.total = detail.total.saturating_add(total);
+                detail.free = detail.free.saturating_add(allocator.counted_free());
+            } else {
+                detail.uncounted.push(allocator.name.clone());
+            }
             detail.types.push(allocator);
         }
         Ok(detail)
