@@ -350,7 +350,6 @@ fn for_each_frame(
             state.ctx.target.arch(),
             &trace,
             FOR_EACH_FRAME_LIMIT,
-            0,
             crate::hosts::repl::disasm::StackColumns::default(),
             selected,
         );

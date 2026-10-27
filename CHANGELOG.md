@@ -20,6 +20,11 @@ Keeping this file:
 - `dv` shows an `HRESULT` local's type, where it showed `__unknown_t`.
 - `ln` no longer says "no symbols loaded for this module" for an address in a module whose symbols are loaded but name nothing there.
 - `x` does what its help says: several terms must all match (`x ntdll!Rtl !Heap UserThr`), `!term` excludes, `^` and `$` anchor a term, and a module pattern searches every module it matches (`x kernel*!RaiseException`). It took only the first term, read `!term` as a module, and matched `^Rtl` and module patterns to nothing.
+- `.frame N` selects the frame `k` numbers N: it read N in hex, so `.frame 10` selected frame 16.
+- `k` after `.frame N` lists the same stack with frame N marked, where on a user-mode dump it walked again from that frame and made up inline frames and source lines.
+- `.frame`, `.ecxr`, `.cxr` and `!for_each_frame` show a frame with no symbol as module+offset, as `k` does, not as a bare address.
+- `~*k` keeps the context `.ecxr` or `.frame` selected, and `~` takes `k`'s variants and arguments (`~*kv`, `~0k 3`).
+- `.fnent` and `uf` decode JIT-compiled code from a dump's dynamic function tables, as the stack walk does, where they said the address was in no module.
 
 ## Unreleased
 

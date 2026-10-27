@@ -11,6 +11,7 @@ use crate::arch::arm64::unwind::{
     FP, LR, RUNTIME_FUNCTION_SIZE, Resume, UnwindData, call_return_address, describe_arm64_unwind,
     function_length, runtime_function_at, strip_pac,
 };
+use crate::arch::unwind::UnwindBytes;
 use crate::{
     arch::{Arch, arm64::VOLATILE_REGISTERS},
     base::{
@@ -101,7 +102,18 @@ pub fn describe_arm64_function_entry(
         Arm64Lookup::Missing => return EntryLookup::Leaf,
         Arm64Lookup::Unreadable => return EntryLookup::Holed,
     };
-    let Some(unwind) = describe_arm64_unwind(image, function.unwind_data, base, &symbol) else {
+    describe_arm64_entry(image, base, function, symbol)
+}
+
+/// `function` and its unwind data, read from `code`: the image or the
+/// memory above a dynamic function table's `base`.
+pub fn describe_arm64_entry(
+    code: &impl UnwindBytes,
+    base: u64,
+    function: Arm64Function,
+    symbol: impl Fn(u64) -> String,
+) -> EntryLookup {
+    let Some(unwind) = describe_arm64_unwind(code, function.unwind_data, base, &symbol) else {
         return EntryLookup::Holed;
     };
     EntryLookup::Found {

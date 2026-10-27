@@ -13,12 +13,13 @@ use crate::base::ntstatus::ntstatus_name;
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError, virtual_memory};
 use crate::hosts::repl::*;
+use crate::nt::expr::{Expr, NumberRadix};
 use crate::nt::target::{MemoryKind, SavedThreadRegisters, SelectedFrame, lookup_register};
 use crate::nt::trapframe::{KtrapFrame, read_ktrap_frame_at_or_current, trap_frame_rip_symbol};
 use crate::nt::unwind::{
     FrameSource, FunctionEntry, RecoveredStackTrace, StackTrace, UNKNOWN_CONTEXT,
-    build_stacktrace_with_register_values, build_thread_stacktrace, halted_in_windows_hypervisor,
-    resolve_thread_trace_context, saved_vtls, try_format_symbol,
+    build_thread_stacktrace, halted_in_windows_hypervisor, resolve_thread_trace_context,
+    saved_vtls, try_format_symbol,
 };
 use crate::session::effects::{Effects, Writes};
 use crate::session::{ExceptionRecord, Session};
@@ -96,7 +97,8 @@ fn selection_name(frame: &SelectedFrame) -> String {
 
 /// Select or show a stack frame.
 ///
-/// N is a zero-based frame number that counts inline frames, as k does. /r
+/// N is a zero-based frame number that counts inline frames, as k does, and
+/// is decimal as k prints it, whatever the radix. /r
 /// also shows the recovered registers of the frame. When you select an inline
 /// frame, dv, ls, lsa, and local names in expressions use the function that
 /// the compiler inlined there, and the registers are those of the frame that
@@ -170,7 +172,12 @@ fn frame_request(
         match word.as_ref() {
             "/r" | "-r" => request.show_registers = true,
             value if request.index.is_none() => {
-                let parsed = cx.eval(value)?;
+                // `k` numbers frames in decimal, so `.frame` reads the
+                // number it prints in decimal whatever the radix; `0x`
+                // still names a hex number.
+                let parsed =
+                    Expr::eval_with_radix(value, &cx.state.ctx.target, NumberRadix::Decimal)
+                        .map_err(|error| ArgError::Message(error.to_string()))?;
                 request.index = Some(usize::try_from(parsed.0).unwrap_or(usize::MAX));
             }
             _ => return Err(ArgError::Missing),
@@ -765,7 +772,8 @@ fn registers(
 /// contains it and shows the addresses of that frame. The inline frame has
 /// the name of the inlined function and shows the source line in that
 /// function, and its caller shows the line of the call. Frame numbers include
-/// inline frames. In kf output, the column after the frame number is the
+/// inline frames, in decimal. After .frame, k lists the same stack and marks
+/// the selected frame with *. In kf output, the column after the frame number is the
 /// stack memory between the frame and the physical frame before it, in hex.
 /// This column is blank for the first frame, for inline frames, and where the
 /// walk moves to a different stack.
@@ -797,41 +805,23 @@ fn stack(
         };
         print_stacktrace_data_with(state.ctx.target.arch(), &trace, frame_limit, false, columns);
         if name.eq_ignore_ascii_case("kp") {
-            state.print_stack_parameters(&trace, 0)?;
+            state.print_stack_parameters(&trace)?;
         }
         return Ok(());
     }
 
-    let trace = if let Some(selected) = state
-        .ctx
-        .target
-        .selected_frame
-        .as_ref()
-        .filter(|selected| selected.thread.is_some())
-    {
-        // A frame of a parked thread's walk: its frames from there on are
-        // that walk's, not a new walk from the frame's registers.
-        let skip = selected.index;
-        match state
-            .ctx
-            .recovered_backtrace(skip.saturating_add(frame_limit))
-        {
-            Ok((mut trace, _, _)) => {
-                trace.frames.drain(..skip.min(trace.frames.len()));
-                trace
-            }
+    let trace = if state.ctx.target.selected_frame.is_some() {
+        // A selected frame's stack is the walk it came from, with the frame
+        // marked, not a new walk from the frame's registers: those hold a
+        // return address, which a walk would take for an exact pc and
+        // resolve to the wrong line and inline frames.
+        match state.ctx.recovered_backtrace(frame_limit) {
+            Ok((trace, _, _)) => trace,
             Err(error) => {
                 error!("{error}");
                 return Ok(());
             }
         }
-    } else if let Some(selected) = state.ctx.target.selected_frame.as_ref() {
-        build_stacktrace_with_register_values(
-            &state.ctx.target,
-            &state.ctx.register_map,
-            &selected.registers,
-            frame_limit,
-        )
     } else {
         if let Err(e) = state
             .ctx
@@ -873,14 +863,12 @@ fn stack(
             frame_limit,
         )
     };
-    let offset = state
+    let selected = state
         .ctx
         .target
         .selected_frame
         .as_ref()
-        .map(|frame| frame.index)
-        .unwrap_or(0);
-    let selected = state.ctx.target.selected_frame.as_ref().map(|_| offset);
+        .map(|frame| frame.index);
     if !trace.frames.is_empty() {
         print_stack_header(columns);
     }
@@ -888,7 +876,6 @@ fn stack(
         state.ctx.target.arch(),
         &trace,
         frame_limit,
-        offset,
         columns,
         selected,
     );
@@ -903,7 +890,7 @@ fn stack(
             .collect(),
         truncated: trace.truncated,
     };
-    state.print_stack_parameters(&plain, offset)?;
+    state.print_stack_parameters(&plain)?;
 
     Ok(())
 }
@@ -1057,7 +1044,13 @@ impl ReplState<'_> {
         let (symbol, location, inline) = match target.inline_frame(frame.code) {
             Some(inline) => (Some(inline.symbol), inline.location, true),
             None => (
-                target.closest_symbol_current_context(VirtAddr(frame.ip)),
+                // Outside every symbol, `k` still names the module and offset.
+                target
+                    .closest_symbol_current_context(VirtAddr(frame.ip))
+                    .or_else(|| {
+                        let dtb = frame.dtb.unwrap_or_else(|| target.current_dtb());
+                        target.format_code_address(dtb, VirtAddr(frame.ip))
+                    }),
                 target.frame_source_location(frame.code),
                 false,
             ),
@@ -1107,7 +1100,7 @@ impl ReplState<'_> {
             .find(|address| looks_like_kernel_pointer(self.ctx.target.arch(), *address))
     }
 
-    fn print_stack_parameters(&self, trace: &StackTrace, frame_offset: usize) -> Result<()> {
+    fn print_stack_parameters(&self, trace: &StackTrace) -> Result<()> {
         let mut printed_header = false;
         // Whether any frame is in a procedure private symbols describe:
         // without one, public symbols record no parameters to locate.
@@ -1129,7 +1122,7 @@ impl ReplState<'_> {
                 let location = parameter.location.describe();
                 outln!(
                     "  {:02}  {:<24} {:<20} {}",
-                    index + frame_offset,
+                    index,
                     parameter.name,
                     parameter.type_name,
                     location
@@ -1295,20 +1288,18 @@ pub fn print_indexed_stacktrace(
     arch: Arch,
     trace: &RecoveredStackTrace,
     display_limit: usize,
-    frame_offset: usize,
     columns: StackColumns,
     selected_index: Option<usize>,
 ) {
     let mut previous_sp = None;
     for (index, recovered) in trace.frames.iter().take(display_limit).enumerate() {
         let frame = &recovered.frame;
-        let global_index = frame_offset + index;
         if index > 0
             && let Some(label) = crossing(arch, &trace.frames[index - 1].frame, frame)
         {
             outln!("{}", crossing_line(label, 4));
         }
-        let marker = if selected_index == Some(global_index) {
+        let marker = if selected_index == Some(index) {
             "*"
         } else {
             " "
@@ -1345,7 +1336,7 @@ pub fn print_indexed_stacktrace(
         outln!(
             "{}{:02} {}{}  {}{}{}",
             marker,
-            global_index,
+            index,
             frame_size,
             ui::addr(frame.sp),
             ui::addr(frame.ip),

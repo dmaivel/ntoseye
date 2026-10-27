@@ -18,7 +18,7 @@ use crate::nt::target::cpu::{
     CpuInfo, CpuTriageFallback, DescriptorRegister, Gdt, GdtDescriptor, Idt, IdtGate, Irql, Pcr,
     Prcb, Processor, SpecialRegistersArea, msr_kind, msr_name, parse_msr_name,
 };
-use crate::nt::target::{DiagnosticValue, ServedVp, Target};
+use crate::nt::target::{DiagnosticValue, SelectedFrame, ServedVp, Target};
 use crate::session::Session;
 use crate::session::{UserThreadSummary, VcpuInfo};
 
@@ -1086,24 +1086,19 @@ impl ReplState<'_> {
                 };
             (selector, &body[digits..])
         };
-        let mut actions = suffix.chars();
-        let action = actions.next().unwrap_or('s');
-        if !matches!(action, 's' | 'k' | 'r') {
-            error!("invalid processor action '{}'; expected s, k, or r", action);
-            return Ok(Flow::Continue);
-        }
-        // WinDbg accepts a whole command after the selector (`~*kb`, `~0kv`).
-        // Only the three single-letter actions are implemented, so anything
-        // trailing must be reported: silently running `~*k` for a pasted
-        // `~*kb` answers a question the user did not ask.
-        let trailing = actions.as_str();
-        if !trailing.is_empty() {
-            error!(
-                "unsupported processor command '{}{}'; expected ~, ~N[s|k|r], or ~*k",
-                action, trailing
-            );
-            return Ok(Flow::Continue);
-        }
+        let suffix = suffix.trim();
+        let command = match suffix {
+            "" | "s" => None,
+            _ => match tilde_command(suffix) {
+                Some(command) => Some(command),
+                None => {
+                    error!(
+                        "unsupported processor command '{suffix}'; expected ~N or ~*, then s, a k command, or r"
+                    );
+                    return Ok(Flow::Continue);
+                }
+            },
+        };
         let ids = match self.ctx.backend.thread_list() {
             Ok(ids) => ids,
             Err(error) => {
@@ -1140,7 +1135,7 @@ impl ReplState<'_> {
             return Ok(Flow::Continue);
         }
         let original = self.ctx.current_thread.clone();
-        if action == 's' {
+        let Some(command) = command else {
             let id = selected[0].clone();
             if let Err(error) = self.ctx.set_current_thread(&id) {
                 error!("failed to switch processor: {}", error);
@@ -1149,11 +1144,12 @@ impl ReplState<'_> {
                 outln!("switched to {}", ui::thread(&id));
             }
             return Ok(Flow::Continue);
-        }
+        };
 
         // Several processors' records are told apart by a line naming each,
         // as `~*k` on a user dump names each thread.
         let several = selected.len() > 1;
+        let selection = self.ctx.target.selected_frame.clone();
         for (index, id) in selected.into_iter().enumerate() {
             if several {
                 if index > 0 {
@@ -1166,16 +1162,26 @@ impl ReplState<'_> {
                 continue;
             }
             self.caches.refresh_symbol_context(&self.ctx.target);
-            if let Err(error) = self.dispatch_line(if action == 'k' { "k" } else { "r" }) {
+            if let Err(error) = self.dispatch_line(command) {
                 error!("{} command failed: {}", ui::thread(&id), error);
             }
         }
-        if let Err(error) = self.ctx.set_current_thread(&original) {
-            error!("failed to restore {}: {}", ui::thread(&original), error);
-        } else {
-            self.caches.refresh_symbol_context(&self.ctx.target);
-        }
+        self.restore_thread_and_selection(&original, selection);
         Ok(Flow::Continue)
+    }
+
+    /// Return to `original` and the frame or context (`.frame`, `.ecxr`)
+    /// selected on it before `~` ran a command on other threads, since
+    /// switching threads drops a selection.
+    fn restore_thread_and_selection(&mut self, original: &str, selection: Option<SelectedFrame>) {
+        if let Err(error) = self.ctx.set_current_thread(original) {
+            error!("failed to restore {}: {error}", ui::thread(original));
+            return;
+        }
+        if let Some(selection) = selection {
+            self.ctx.select_frame(selection);
+        }
+        self.caches.refresh_symbol_context(&self.ctx.target);
     }
 
     /// `~` on a user-mode minidump, over its captured threads as WinDbg's
@@ -1183,7 +1189,7 @@ impl ReplState<'_> {
     /// current thread), `~#` (the exception's), and `~*` name threads, which
     /// are listed, or with `s` selected, with `k` or `r` shown.
     fn cmd_tilde_user_dump(&mut self, body: &str, line: &str) {
-        const USAGE: &str = "expected ~, ~N, ~~[tid], ~., ~#, or ~*, then s, k, or r";
+        const USAGE: &str = "expected ~, ~N, ~~[tid], ~., ~#, or ~*, then s, a k command, or r";
         let Some(threads) = self.ctx.user_threads() else {
             return;
         };
@@ -1257,8 +1263,13 @@ impl ReplState<'_> {
                     Err(error) => error!("failed to switch thread: {error}"),
                 }
             }
-            action @ ("k" | "r") => {
+            suffix => {
+                let Some(command) = tilde_command(suffix) else {
+                    error!("unsupported thread command '{suffix}'; {USAGE}");
+                    return;
+                };
                 let original = self.ctx.current_thread.clone();
+                let selection = self.ctx.target.selected_frame.clone();
                 for (index, thread) in selected.iter().enumerate() {
                     if selected.len() > 1 {
                         if index > 0 {
@@ -1274,19 +1285,26 @@ impl ReplState<'_> {
                         continue;
                     }
                     self.caches.refresh_symbol_context(&self.ctx.target);
-                    if let Err(error) = self.dispatch_line(action) {
+                    if let Err(error) = self.dispatch_line(command) {
                         error!("thread {} command failed: {error}", thread.id);
                     }
                 }
-                if let Err(error) = self.ctx.set_current_thread(&original) {
-                    error!("failed to restore thread {original}: {error}");
-                } else {
-                    self.caches.refresh_symbol_context(&self.ctx.target);
-                }
+                self.restore_thread_and_selection(&original, selection);
             }
-            other => error!("unsupported thread command '{other}'; {USAGE}"),
         }
     }
+}
+
+/// The command `~` runs on each thread it names: one of the `k` family or
+/// `r`, with its arguments (`~*kv`, `~0k 3`, `~*r rip`), as WinDbg runs the
+/// command after a thread selector. `None` for any other command, which `~`
+/// does not run.
+fn tilde_command(suffix: &str) -> Option<&str> {
+    let name = suffix.split_whitespace().next()?;
+    ["k", "kb", "kf", "kn", "kp", "kv", "r"]
+        .iter()
+        .any(|known| name.eq_ignore_ascii_case(known))
+        .then_some(suffix)
 }
 
 /// List the processors and where each is.
@@ -1510,4 +1528,19 @@ fn served_vp_lines(served: &ServedVp, col: usize) -> String {
         }
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tilde_command;
+
+    #[test]
+    fn tilde_runs_the_k_family_and_r_with_their_arguments() {
+        for suffix in ["k", "kv", "kb", "KP", "k 3", "kf 2", "r", "r rip"] {
+            assert_eq!(tilde_command(suffix), Some(suffix), "{suffix}");
+        }
+        for suffix in ["kd", "x", "ks", "rr", "u @pc"] {
+            assert_eq!(tilde_command(suffix), None, "{suffix}");
+        }
+    }
 }

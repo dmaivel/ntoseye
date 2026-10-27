@@ -633,19 +633,35 @@ pub fn describe_function_entry(
         Resolve::Leaf => return EntryLookup::Leaf,
         Resolve::Holed => return EntryLookup::Holed,
     };
+    describe_entry_chain(
+        image,
+        base_address,
+        RUNTIME_FUNCTION {
+            BeginAddress: begin,
+            EndAddress: end,
+            UnwindData: unwind_data,
+        },
+        symbol,
+    )
+}
+
+/// `function` and its chained parents, their unwind data read from `code`,
+/// the image or the memory above a dynamic function table's `base_address`.
+pub fn describe_entry_chain(
+    code: &impl UnwindBytes,
+    base_address: u64,
+    function: RUNTIME_FUNCTION,
+    symbol: impl Fn(u64) -> String,
+) -> EntryLookup {
     let mut entries = Vec::new();
     let mut incomplete = None;
-    let mut next = Some(RUNTIME_FUNCTION {
-        BeginAddress: begin,
-        EndAddress: end,
-        UnwindData: unwind_data,
-    });
+    let mut next = Some(function);
     while let Some(function) = next.take() {
         if entries.len() > MAX_CHAIN_DEPTH {
             incomplete = Some(format!("chain not followed past {MAX_CHAIN_DEPTH} parents"));
             break;
         }
-        let described = describe_unwind_info(image, function.UnwindData, base_address, &symbol);
+        let described = describe_unwind_info(code, function.UnwindData, base_address, &symbol);
         if described.is_none() {
             incomplete = Some(format!(
                 "unwind info at RVA {:#x} is unreadable",

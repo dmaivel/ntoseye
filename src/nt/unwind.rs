@@ -4,7 +4,10 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use ntoseye_macros::record;
-use pelite::pe64::{Pe, PeView, image::IMAGE_DIRECTORY_ENTRY_EXCEPTION};
+use pelite::pe64::{
+    Pe, PeView,
+    image::{IMAGE_DIRECTORY_ENTRY_EXCEPTION, RUNTIME_FUNCTION},
+};
 
 use crate::arch::{Arch, RegisterMap};
 use crate::{
@@ -998,7 +1001,9 @@ fn runtime_functions(
 /// PE exception metadata is the authoritative function boundary for `uf`: it
 /// remains correct when public symbols are sparse and avoids disassembling into
 /// the next function. A paged-out `.pdata` or `.xdata` range is retried against
-/// the matched on-disk image through the stack unwinder's image cache.
+/// the matched on-disk image through the stack unwinder's image cache. Code no
+/// module holds, such as JIT-compiled code, is looked up in the user dump's
+/// dynamic function tables, as the unwinder does.
 pub fn function_range(
     debugger: &Target,
     trace: &ThreadTraceContext,
@@ -1035,7 +1040,14 @@ pub fn function_range(
     }
 
     let mut tracer = StackTracer::new(debugger, trace);
-    let base = tracer.module_containing(address)?.info.base_address.0;
+    let Some(module) = tracer.module_containing(address) else {
+        let (base, function) = tracer.dynamic_function(address)?;
+        return Some((
+            base + u64::from(function.begin),
+            base + u64::from(function.end),
+        ));
+    };
+    let base = module.info.base_address.0;
     let machine = tracer.code_machine_at(address);
     let (image, layout) = tracer.module_code(address)?;
     if let Some(found) = range(&image, layout.as_deref(), base, address, machine) {
@@ -1053,17 +1065,66 @@ pub fn function_range(
 /// The function-table entry covering `address` and its unwind data
 /// (`.fnent`): AMD64's with its chained parents, or ARM64's packed or
 /// `.xdata` form. Paged-out `.pdata` or `.xdata` is read from the matched
-/// on-disk image, as the unwinder does.
+/// on-disk image, as the unwinder does, and code no module holds from the
+/// user dump's dynamic function tables.
 pub fn function_entry(
     debugger: &Target,
     trace: &ThreadTraceContext,
     address: u64,
 ) -> Result<FunctionEntry> {
     let mut tracer = StackTracer::new(debugger, trace);
+    let symbol = |address| format_symbol(debugger, trace, address);
     let Some(module) = tracer.module_containing(address) else {
-        return Err(Error::DebugInfo(format!(
-            "{address:#x} is not in a loaded module"
-        )));
+        let Some((base, function)) = tracer.dynamic_function(address) else {
+            return Err(Error::DebugInfo(format!(
+                "{address:#x} is neither in a loaded module nor in a dynamic function table"
+            )));
+        };
+        // A dynamic table's unwind data lies in process memory above its base.
+        let machine = tracer.code_machine_at(address);
+        let code = amd64::DynamicCode {
+            memory: &tracer.memory,
+            base,
+        };
+        let found = if machine == CodeMachine::Arm64 {
+            arm64::describe_arm64_entry(
+                &code,
+                base,
+                arm64::Arm64Function {
+                    begin: function.begin,
+                    end: function.end,
+                    unwind_data: function.unwind_data,
+                },
+                symbol,
+            )
+        } else {
+            amd64::describe_entry_chain(
+                &code,
+                base,
+                RUNTIME_FUNCTION {
+                    BeginAddress: function.begin,
+                    EndAddress: function.end,
+                    UnwindData: function.unwind_data,
+                },
+                symbol,
+            )
+        };
+        return match found {
+            amd64::EntryLookup::Found {
+                entries,
+                incomplete,
+            } => Ok(FunctionEntry {
+                module: "a dynamic function table".to_string(),
+                image_base: base,
+                entries,
+                incomplete,
+            }),
+            amd64::EntryLookup::Leaf | amd64::EntryLookup::Holed => {
+                Err(Error::DebugInfo(format!(
+                    "the unwind data of the dynamic function at {address:#x} is unreadable"
+                )))
+            }
+        };
     };
     let (base, module) = (module.info.base_address.0, module.info.short_name.clone());
     let machine = tracer.code_machine_at(address);
@@ -1072,7 +1133,6 @@ pub fn function_entry(
             "{address:#x} is x86 code, which has no function table"
         )));
     }
-    let symbol = |address| format_symbol(debugger, trace, address);
     let lookup = |tracer: &StackTracer<'_>| {
         let (image, layout) = tracer.module_code(address)?;
         let layout = layout.as_deref();
