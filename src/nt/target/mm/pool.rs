@@ -14,11 +14,12 @@ use crate::base::types::VirtAddr;
 use crate::nt::symbols::glob_matches;
 use crate::nt::target::Target;
 use crate::nt::target::pool::{
-    BigPoolEntry, NONPAGED_POOL, PAGED_POOL, POOL_ALIGN, POOL_PAGE_SIZE, PoolHeader,
-    PoolPageReader, PoolUsageRow, annotate_near_symbol, big_pool_layout, classify_pool_region,
-    collect_pool_usage, find_big_pool, header_pool_type, locate_pool_block_in_page,
-    pool_block_state, pool_header_candidates, pool_layout, pool_range, scan_big_pool_entries,
-    scan_present_pool_pages, segment_heap_hint, tag_looks_printable, tag_string,
+    BigPoolEntry, HeaderPoolEncoding, NONPAGED_POOL, PAGED_POOL, POOL_ALIGN, POOL_PAGE_SIZE,
+    PoolHeader, PoolPageReader, PoolUsageRow, annotate_near_symbol, big_pool_layout,
+    classify_pool_region, collect_pool_usage, find_big_pool, header_pool_type,
+    locate_pool_block_in_page, pool_block_state, pool_header_candidates, pool_layout, pool_range,
+    scan_big_pool_entries, scan_present_pool_pages, segment_heap_hint, tag_looks_printable,
+    tag_string,
 };
 
 const MAX_POOLFIND_RESULTS: usize = 1024;
@@ -139,7 +140,7 @@ impl Target {
             &candidates,
             page,
             paged,
-            layout.paged_pool,
+            layout.header_pool,
         );
         Ok(PoolValidationDetail {
             address,
@@ -233,8 +234,8 @@ impl Target {
                             allocated: pool_block_state(&block) != PoolBlockState::Free,
                             state: pool_block_state(&block),
                             pool_type: layout
-                                .paged_pool
-                                .and_then(|paged| header_pool_type(block.pool_type, paged)),
+                                .header_pool
+                                .and_then(|encoding| header_pool_type(block.pool_type, encoding)),
                             table_entry: None,
                             index: None,
                         });
@@ -371,15 +372,15 @@ fn sort_usage_rows(rows: &mut [PoolUsageRow], sort: PoolUsageSort) {
 /// The first inconsistency among the blocks of the `layout` pool page at
 /// `page`: `blocks` is [`PoolPageReader::page_blocks`]'s reading of it and `candidates`
 /// [`pool_header_candidates`]'s; `paged` says which pool the page's range
-/// belongs to, when known, and `paged_pool` which header `PoolType` bit
-/// says paged.
+/// belongs to, when known, and `header_pool` how a header's `PoolType`
+/// names its pool.
 fn first_pool_problem(
     layout: PoolPageLayout,
     blocks: &[PoolHeader],
     candidates: &[PoolHeader],
     page: VirtAddr,
     paged: Option<bool>,
-    paged_pool: Option<u8>,
+    header_pool: Option<HeaderPoolEncoding>,
 ) -> Option<PoolProblem> {
     let page_end = page.0 + POOL_PAGE_SIZE;
     let problem = |header: VirtAddr, message: String| Some(PoolProblem { header, message });
@@ -403,7 +404,7 @@ fn first_pool_problem(
             && !block.synthetic_free
             && let Some(paged) = paged
             && let Some(pool) =
-                paged_pool.and_then(|paged_pool| header_pool_type(block.pool_type, paged_pool))
+                header_pool.and_then(|encoding| header_pool_type(block.pool_type, encoding))
         {
             let type_paged = pool == PoolType::Paged;
             if type_paged != paged {
@@ -603,21 +604,29 @@ mod tests {
         candidates: &[PoolHeader],
         paged: Option<bool>,
     ) -> Option<u64> {
-        first_pool_problem(
-            layout,
-            blocks,
-            candidates,
-            PAGE,
-            paged,
-            Some(PAGED_POOL_BIT),
-        )
-        .map(|problem| problem.header.0 - PAGE.0)
+        problem_in(TYPE_ITSELF, layout, blocks, candidates, paged)
+    }
+
+    fn problem_in(
+        encoding: HeaderPoolEncoding,
+        layout: PoolPageLayout,
+        blocks: &[PoolHeader],
+        candidates: &[PoolHeader],
+        paged: Option<bool>,
+    ) -> Option<u64> {
+        first_pool_problem(layout, blocks, candidates, PAGE, paged, Some(encoding))
+            .map(|problem| problem.header.0 - PAGE.0)
     }
 
     const CHAINED: PoolPageLayout = PoolPageLayout::Chained;
-    /// `_POOL_TYPE`'s `PagedPool`.
-    const PAGED_POOL_BIT: u8 = 1;
-    /// What a header's `PoolType` reads for a nonpaged and a paged block.
+    /// Headers holding the `POOL_TYPE` itself (Vista on), whose
+    /// `PagedPool` is 1.
+    const TYPE_ITSELF: HeaderPoolEncoding = HeaderPoolEncoding {
+        paged_pool: 1,
+        plus_one: false,
+    };
+    /// What a header's `PoolType` reads there for a nonpaged and a paged
+    /// block.
     const NONPAGED: u8 = 2;
     const PAGED: u8 = 3;
 
@@ -677,6 +686,31 @@ mod tests {
         ];
         assert_eq!(problem_at(CHAINED, &blocks, &blocks, Some(true)), Some(0));
         assert_eq!(problem_at(CHAINED, &blocks, &blocks, Some(false)), None);
+    }
+
+    /// Windows Server 2003's headers hold the type plus one, with 4 set
+    /// while allocated: a nonpaged block reads 5, which read as the type
+    /// itself would say paged, and a paged one 6.
+    #[test]
+    fn server_2003_headers_hold_the_pool_type_plus_one() {
+        let plus_one = HeaderPoolEncoding {
+            paged_pool: 1,
+            plus_one: true,
+        };
+        let nonpaged = [header(0, 0x100, 0, 5), header(0x100, 0xf00, 0x100, 5)];
+        assert_eq!(
+            problem_in(plus_one, CHAINED, &nonpaged, &nonpaged, Some(false)),
+            None
+        );
+        assert_eq!(
+            problem_in(plus_one, CHAINED, &nonpaged, &nonpaged, Some(true)),
+            Some(0)
+        );
+        let paged = [header(0, 0x100, 0, 6), header(0x100, 0xf00, 0x100, 6)];
+        assert_eq!(
+            problem_in(plus_one, CHAINED, &paged, &paged, Some(true)),
+            None
+        );
     }
 
     #[test]

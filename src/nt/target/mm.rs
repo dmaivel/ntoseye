@@ -154,9 +154,9 @@ impl CacheAttribute {
     }
 }
 
-/// A decoded `_MMPFN` record (`!pfn`). A member the layout lacks is decoded
-/// from the record's raw bits at its known offset, so only `page_color`,
-/// which has no such fallback, can be unavailable. Union members that the
+/// A decoded `_MMPFN` record (`!pfn`), each member read where the build's
+/// PDB layout puts it; only `page_color`, which some builds lack, can be
+/// unavailable. Union members that the
 /// page state does not use are `None`: the list links when the page is not
 /// on a list, `share_count` and `ws_index` when the page is not active, and
 /// `event` when the page is not in transition.

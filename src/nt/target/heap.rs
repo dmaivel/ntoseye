@@ -528,9 +528,14 @@ impl NtEntry {
     /// The number of bytes that the caller requested: the block size minus
     /// the unused bytes, which ntdll counts with the header's overhead in
     /// them (an x64 header's first qword holds the previous block's data, so
-    /// only its second is overhead).
+    /// only its second is overhead). A free block was requested by no one
+    /// and its header counts no unused bytes, so its size is the space after
+    /// the header.
     #[record(getter)]
     pub fn user_size(&self) -> u64 {
+        if !self.busy() {
+            return self.size.saturating_sub(self.granule);
+        }
         self.size
             .saturating_sub(u64::from(self.unused_bytes & !NT_ENTRY_LFH_BLOCK))
     }
@@ -2477,6 +2482,18 @@ mod tests {
         assert_eq!(x86.size, 0x28);
         assert_eq!(x86.user(), VirtAddr(0x1190748));
         assert_eq!(x86.user_size(), 0x28 - 0x14);
+    }
+
+    /// A free block's header records no unused bytes (Windows 7's
+    /// `UnusedBytes` is 0 in a free 0x20e0-byte block), so the space a
+    /// caller could use is what follows the header, not the whole block.
+    #[test]
+    fn a_free_nt_entry_leaves_its_header_out_of_the_user_size() {
+        let plain = [0x0eu8, 0x02, 0x00, 0x0c, 0x05, 0x00, 0x00, 0x00];
+        let entry = decode_nt_entry(VirtAddr(0x1190740), u64::from_le_bytes(plain), None, 16);
+        assert_eq!(entry.size, 0x20e0);
+        assert!(!entry.busy());
+        assert_eq!(entry.user_size(), 0x20e0 - 0x10);
     }
 
     /// `_HEAP_LFH_SUBSEGMENT_ENCODED_OFFSETS`.

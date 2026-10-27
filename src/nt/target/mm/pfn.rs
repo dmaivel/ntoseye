@@ -6,30 +6,22 @@ use super::{CacheAttribute, PageLocation, PfnDetail, PfnSelector, nested_type_na
 use crate::base::error::{Error, Result};
 use crate::base::memory::{MemoryOps, PAGE_SIZE};
 use crate::base::types::VirtAddr;
-use crate::nt::layout::{TypeInfo, le_uint};
+use crate::nt::layout::TypeInfo;
 use crate::nt::target::pool::{
     pool_field_from_buf, read_kernel_global_ptr, read_kernel_global_u64,
 };
 use crate::nt::target::{DiagnosticValue, Target};
 
-const MMPFN_U1_OFFSET: usize = 0;
-const MMPFN_PTE_ADDRESS_OFFSET: usize = 8;
-const MMPFN_ORIGINAL_PTE_OFFSET: usize = 16;
-const MMPFN_U2_OFFSET: usize = 24;
-const MMPFN_U3_OFFSET: usize = 32;
-const MMPFN_U4_OFFSET: usize = 40;
-const MMPFNENTRY1_FLAGS_OFFSET: usize = 2;
-const MMPFNENTRY3_FLAGS_OFFSET: usize = 3;
-const MMPTE_SOFTWARE_OFFSET: usize = 0;
-
 impl Target {
-    /// Decode an `_MMPFN` selected by PFN or physical address. The record and PFN
-    /// database metadata are required; `pte_address`, `original_pte`, the derived
-    /// `used_entry_count`/`page_color`/`pte_frame`, and flag fields carry an
-    /// unavailable reason when their PDB leaf or fallback bytes cannot be decoded.
+    /// Decode an `_MMPFN` selected by PFN or physical address. Each member is
+    /// found by name in the build's PDB layout, because the flags moved
+    /// between builds (Windows Server 2003 packs `PageLocation` and
+    /// `CacheAttribute` into a 16-bit `u3.e1` beside `PageColor`, later
+    /// builds into a byte of their own), so a record whose layout lacks a
+    /// member every build has is an error rather than a guess at its bits.
     /// Union-specific `flink`/`blink`/node links, `share_count`, `ws_index`, and
     /// `event` are absent when the record's page-location union does not select
-    /// that view.
+    /// that view; `page_color` is unavailable on builds without one.
     pub fn inspect_pfn(&self, selector: PfnSelector) -> Result<PfnDetail> {
         let pfn = selector.pfn();
         if let Ok(highest) = read_kernel_global_u64(self, "MmHighestPhysicalPage")
@@ -66,128 +58,44 @@ impl Target {
         let memory = self.kernel_address_space();
         let mut buf = vec![0u8; ti.size];
         memory.read_bytes(record, &mut buf)?;
+        let leaf = |member: Option<&str>, field: &str| {
+            scalar_from_pfn_member(self, &ti, &buf, member, field)
+        };
+        let required = |member: Option<&str>, field: &str| {
+            leaf(member, field).ok_or_else(|| Error::FieldNotFound(format!("_MMPFN.{field}")))
+        };
         let pte = pool_field_from_buf(&ti, &buf, "PteAddress")
-            .or_else(|| pool_field_from_buf(&ti, &buf, "PteLong"))
-            .unwrap_or_else(|| member_raw(&ti, &buf, "PteAddress", MMPFN_PTE_ADDRESS_OFFSET));
+            .ok_or_else(|| Error::FieldNotFound("_MMPFN.PteAddress".to_string()))?;
         let original_pte = pool_field_from_buf(&ti, &buf, "OriginalPte")
-            .unwrap_or_else(|| member_raw(&ti, &buf, "OriginalPte", MMPFN_ORIGINAL_PTE_OFFSET));
-        let u1_raw = member_raw(&ti, &buf, "u1", MMPFN_U1_OFFSET);
-        let u2_raw = member_raw(&ti, &buf, "u2", MMPFN_U2_OFFSET);
-        let u3_raw = member_raw(&ti, &buf, "u3", MMPFN_U3_OFFSET);
-        let u4_raw = member_raw(&ti, &buf, "u4", MMPFN_U4_OFFSET);
-        let e1_raw = (u3_raw >> 16) as u8;
-        let e3_raw = (u3_raw >> 24) as u8;
-        let reference_count = scalar_from_pfn_member(self, &ti, &buf, "u3", "ReferenceCount")
-            .or_else(|| pool_field_from_buf(&ti, &buf, "ReferenceCount"))
-            .unwrap_or(u3_raw & 0xffff);
-        let page_location = pool_field_from_buf(&ti, &buf, "PageLocation")
-            .or_else(|| {
-                scalar_from_named_type(
-                    self,
-                    "_MMPFNENTRY1",
-                    &u3_raw.to_le_bytes(),
-                    MMPFNENTRY1_FLAGS_OFFSET,
-                    "PageLocation",
-                )
-            })
-            .unwrap_or(u64::from(e1_raw & 0x7));
-        let modified = pool_field_from_buf(&ti, &buf, "Modified")
-            .or_else(|| {
-                scalar_from_named_type(
-                    self,
-                    "_MMPFNENTRY1",
-                    &u3_raw.to_le_bytes(),
-                    MMPFNENTRY1_FLAGS_OFFSET,
-                    "Modified",
-                )
-            })
-            .map(|value| value != 0)
-            .unwrap_or(e1_raw & 0x10 != 0);
-        let cache_attribute = pool_field_from_buf(&ti, &buf, "CacheAttribute")
-            .or_else(|| {
-                scalar_from_named_type(
-                    self,
-                    "_MMPFNENTRY1",
-                    &u3_raw.to_le_bytes(),
-                    MMPFNENTRY1_FLAGS_OFFSET,
-                    "CacheAttribute",
-                )
-            })
-            .unwrap_or(u64::from((e1_raw >> 6) & 0x3));
-        let priority = pool_field_from_buf(&ti, &buf, "Priority")
-            .or_else(|| {
-                scalar_from_named_type(
-                    self,
-                    "_MMPFNENTRY3",
-                    &u3_raw.to_le_bytes(),
-                    MMPFNENTRY3_FLAGS_OFFSET,
-                    "Priority",
-                )
-            })
-            .unwrap_or(u64::from(e3_raw & 0x7));
+            .ok_or_else(|| Error::FieldNotFound("_MMPFN.OriginalPte".to_string()))?;
+        let reference_count = required(Some("u3"), "ReferenceCount")?;
+        let page_location = required(Some("u3"), "PageLocation")?;
+        let modified = required(Some("u3"), "Modified")? != 0;
+        let cache_attribute = required(Some("u3"), "CacheAttribute")?;
+        // Priority is in u4 on Windows Server 2003 and in u3 on later builds.
+        let priority = required(None, "Priority")?;
+        let pte_frame = required(Some("u4"), "PteFrame")?;
+        // Windows Server 2003 keeps the count in the record itself; later
+        // builds keep it in the original PTE's software format.
+        let used_entry_count = pool_field_from_buf(&ti, &buf, "UsedPageTableEntries")
+            .map_or_else(|| required(Some("OriginalPte"), "UsedPageTableEntries"), Ok)?;
+        let page_color = leaf(None, "PageColor");
         let active_page = page_location == 6;
         let transition_page = page_location == 7;
         let list_page = !active_page && !transition_page;
-        let share_count = if active_page || transition_page {
-            scalar_from_pfn_member(self, &ti, &buf, "u2", "ShareCount")
-                .or_else(|| pool_field_from_buf(&ti, &buf, "ShareCount"))
-                .or(Some(u2_raw & ((1u64 << 62) - 1)))
-        } else {
-            None
-        };
-        let blink = if list_page {
-            scalar_from_pfn_member(self, &ti, &buf, "u2", "Blink")
-                .or(Some(u2_raw & ((1u64 << 40) - 1)))
-        } else {
-            None
-        };
-        let node_blink_low = if list_page {
-            scalar_from_pfn_member(self, &ti, &buf, "u2", "NodeBlinkLow")
-                .or(Some((u2_raw >> 40) & ((1u64 << 19) - 1)))
-        } else {
-            None
-        };
-        let flink = if list_page {
-            scalar_from_pfn_member(self, &ti, &buf, "u1", "Flink")
-                .or(Some(u1_raw & ((1u64 << 40) - 1)))
-        } else {
-            None
-        };
-        let node_flink_low = if list_page {
-            scalar_from_pfn_member(self, &ti, &buf, "u1", "NodeFlinkLow")
-        } else {
-            None
-        };
-        let ws_index = if active_page {
-            scalar_from_pfn_member(self, &ti, &buf, "u1", "WsIndex")
-        } else {
-            None
-        };
-        let event = if transition_page {
-            scalar_from_pfn_member(self, &ti, &buf, "u1", "Event")
-        } else {
-            None
-        };
-        let pte_frame = scalar_from_pfn_member(self, &ti, &buf, "u4", "PteFrame")
-            .unwrap_or(u4_raw & ((1u64 << 40) - 1));
-        let page_color = scalar_from_pfn_member(self, &ti, &buf, "u4", "PageColor").or_else(|| {
-            scalar_from_named_type(
-                self,
-                "_MMPFNENTRY1",
-                &u3_raw.to_le_bytes(),
-                MMPFNENTRY1_FLAGS_OFFSET,
-                "PageColor",
-            )
-        });
-        let used_entry_count = scalar_from_named_type(
-            self,
-            "_MMPTE_SOFTWARE",
-            &original_pte.to_le_bytes(),
-            MMPTE_SOFTWARE_OFFSET,
-            "UsedPageTableEntries",
-        )
-        .or_else(|| scalar_from_pfn_member(self, &ti, &buf, "OriginalPte", "UsedPageTableEntries"))
-        .unwrap_or((original_pte >> 12) & 0x3ff);
+        let share_count = (active_page || transition_page)
+            .then(|| leaf(Some("u2"), "ShareCount"))
+            .flatten();
+        let blink = list_page.then(|| leaf(Some("u2"), "Blink")).flatten();
+        let node_blink_low = list_page
+            .then(|| leaf(Some("u2"), "NodeBlinkLow"))
+            .flatten();
+        let flink = list_page.then(|| leaf(Some("u1"), "Flink")).flatten();
+        let node_flink_low = list_page
+            .then(|| leaf(Some("u1"), "NodeFlinkLow"))
+            .flatten();
+        let ws_index = active_page.then(|| leaf(Some("u1"), "WsIndex")).flatten();
+        let event = transition_page.then(|| leaf(Some("u1"), "Event")).flatten();
         Ok(PfnDetail {
             selector,
             pfn,
@@ -219,26 +127,6 @@ impl Target {
             priority: priority as u8,
         })
     }
-}
-
-fn member_raw(ti: &TypeInfo, buf: &[u8], member: &str, fallback_offset: usize) -> u64 {
-    let (offset, size) = ti
-        .fields
-        .get(member)
-        .map(|field| {
-            (
-                field.offset as usize,
-                usize::try_from(field.size)
-                    .ok()
-                    .filter(|size| *size != 0)
-                    .unwrap_or(8)
-                    .clamp(1, 8),
-            )
-        })
-        .unwrap_or((fallback_offset, 8));
-    buf.get(offset..offset.saturating_add(size))
-        .map(le_uint)
-        .unwrap_or(0)
 }
 
 fn scalar_from_type_tree(
@@ -292,14 +180,17 @@ fn scalar_from_type_tree(
     None
 }
 
+/// The leaf `field` of an `_MMPFN` in `buf`: looked for in `member` first,
+/// where a name the record repeats elsewhere (`Flink` is also a page-table
+/// link of the original PTE) must be read, or anywhere in the record.
 fn scalar_from_pfn_member(
     target: &Target,
     pfn_ti: &TypeInfo,
     buf: &[u8],
-    member: &str,
+    member: Option<&str>,
     field: &str,
 ) -> Option<u64> {
-    if let Some(member_info) = pfn_ti.fields.get(member) {
+    if let Some(member_info) = member.and_then(|member| pfn_ti.fields.get(member)) {
         if let Some(nested_name) = nested_type_name(&member_info.type_data)
             && let Some(nested_ti) = target
                 .symbols
@@ -322,18 +213,4 @@ fn scalar_from_pfn_member(
     }
     let mut visited = HashSet::new();
     scalar_from_type_tree(target, pfn_ti, buf, 0, field, 0, &mut visited)
-}
-
-fn scalar_from_named_type(
-    target: &Target,
-    name: &str,
-    buf: &[u8],
-    offset: usize,
-    field: &str,
-) -> Option<u64> {
-    let ti = target
-        .symbols
-        .find_type_across_modules(target.kernel_dtb(), name)?;
-    let mut visited = HashSet::new();
-    scalar_from_type_tree(target, &ti, buf, offset, field, 0, &mut visited)
 }

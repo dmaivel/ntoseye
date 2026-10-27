@@ -446,10 +446,14 @@ fn chkimg_module(
 /// the DIR64/HIGHLOW relocations, and skips discardable and paged-out
 /// sections. The command counts known kernel self-patches separately:
 /// import optimization, retpoline, KiPatchSelf retargets, and the addresses
-/// of the kernel VA regions that the kernel moves at boot. With -nospec, the
-/// command does not show this breakdown and reports the self-patches as
-/// ordinary mismatches. -d prints byte diffs, up to a limit, and -v prints
-/// the results for each section.
+/// of the kernel VA regions that the kernel moves at boot, and, by the
+/// image's data directories and the kernel's symbols, the import address
+/// table the loader fills, nt!KiServiceTable, which the kernel packs at
+/// boot, and the instructions at its patch labels (SwapContext_PatchXSave)
+/// that it rewrites for the processor. With -nospec, the command does not
+/// show this breakdown and reports the self-patches as ordinary mismatches.
+/// -d prints byte diffs, up to a limit, and -v prints the results for each
+/// section.
 #[command(
     names = ["!chkimg", "chkimg"],
     category = "analysis",
@@ -559,24 +563,25 @@ fn print_process_parameters(
     }
     outln!("  ProcessParameters {}", ui::addr(address.0));
     match detail {
-        DiagnosticValue::Available(parameters) => print_fields(
-            4,
-            &[
+        DiagnosticValue::Available(parameters) => {
+            let mut rows = vec![
                 ("CommandLine", text_cell(&parameters.command_line)),
                 ("ImagePathName", text_cell(&parameters.image_path_name)),
                 ("CurrentDirectory", text_cell(&parameters.current_directory)),
                 ("DllPath", text_cell(&parameters.dll_path)),
                 ("WindowTitle", text_cell(&parameters.window_title)),
                 ("Environment", pointer_cell(&parameters.environment)),
-                (
-                    "EnvironmentSize",
-                    read(&parameters.environment_size, |size| format!("{size:#x}")),
-                ),
+            ];
+            if let Some(size) = &parameters.environment_size {
+                rows.push(("EnvironmentSize", read(size, |size| format!("{size:#x}"))));
+            }
+            rows.extend([
                 ("DesktopInfo", text_cell(&parameters.desktop_info)),
                 ("ShellInfo", text_cell(&parameters.shell_info)),
                 ("RuntimeData", text_cell(&parameters.runtime_data)),
-            ],
-        ),
+            ]);
+            print_fields(4, &rows);
+        }
         DiagnosticValue::Unavailable(error) => {
             outln!("    {}", ui::muted(&format!("layout unavailable: {error}")));
         }
@@ -666,8 +671,10 @@ fn print_peb(detail: &Peb) {
         ("OSBuildNumber", number(&detail.os_build_number)),
         ("SessionId", number(&detail.session_id)),
         ("NumberOfProcessors", number(&detail.number_of_processors)),
-        ("ApiSetMap", pointer_cell(&detail.api_set_map)),
     ]);
+    if let Some(api_set_map) = &detail.api_set_map {
+        rows.push(("ApiSetMap", pointer_cell(api_set_map)));
+    }
     print_fields(2, &rows);
     print_process_parameters(
         &detail.process_parameters,

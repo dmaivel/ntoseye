@@ -818,12 +818,8 @@ fn print_vm(detail: &VmDetail) {
     );
     outln!("  nonpaged pool maximum  {maximum}");
     notes.print("  ");
-    if detail.pool.fields.is_empty() {
-        outln!(
-            "  {}",
-            ui::muted("MiState has no pool fields this build locates")
-        );
-    } else {
+    // Builds before Windows 10 have no `MiState` to list.
+    if !detail.pool.fields.is_empty() {
         outln!("  MiState pool fields");
         print_vm_counters(&detail.pool.fields, "    ");
     }

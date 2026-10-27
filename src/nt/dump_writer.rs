@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use ntoseye_macros::record;
 
 use crate::arch::{Arch, RegisterMap};
+use crate::backend::dbg_backend::processor_index_from_backend_thread_id;
 use crate::base::bytes::{write_u32, write_u64};
 use crate::base::error::{Error, Result};
 use crate::base::memory::{MemoryOps, PAGE_SIZE};
@@ -136,6 +137,26 @@ pub struct ProcessorContext {
     /// The guest-physical pieces of the saved context, in order, each its
     /// address and length; together they are a `CONTEXT` long.
     pub saved_at: Vec<(PhysAddr, u64)>,
+}
+
+/// The backend threads that run the kernel's processors, and the processor
+/// count a dump records. A VM's stub lists every vCPU it has, and the
+/// kernel may use fewer (Windows 7 on 2 of 8), so the count is the
+/// kernel's own (`KeNumberProcessors`) and only its processors' threads are
+/// kept; without it, every thread the backend lists.
+pub fn kernel_processors(vcpus: Vec<String>, kernel_count: Option<u16>) -> (Vec<String>, u32) {
+    let Some(count) = kernel_count else {
+        let count = vcpus.len().clamp(1, usize::from(MAX_PROCESSORS)) as u32;
+        return (vcpus, count);
+    };
+    let count = count.clamp(1, MAX_PROCESSORS);
+    let vcpus = vcpus
+        .into_iter()
+        .filter(|vcpu| {
+            processor_index_from_backend_thread_id(vcpu).is_some_and(|index| index < count)
+        })
+        .collect();
+    (vcpus, u32::from(count))
 }
 
 /// Metadata needed to build the fixed `_DUMP_HEADER64` prefix. The writer
@@ -758,6 +779,20 @@ mod tests {
     use std::cell::Cell;
     use std::fs;
     use std::path::{Path, PathBuf};
+
+    /// A gdb stub lists all 8 of a VM's vCPUs where Windows 7 runs on 2: the
+    /// dump records the kernel's 2 processors and writes contexts for those
+    /// alone, where a reader would list 6 more with no context.
+    #[test]
+    fn a_dump_records_the_kernels_processors_not_the_vms() {
+        let vcpus: Vec<String> = (1..=8).map(|tid| format!("p1.{tid:x}")).collect();
+        assert_eq!(
+            kernel_processors(vcpus.clone(), Some(2)),
+            (vec!["p1.1".to_string(), "p1.2".to_string()], 2)
+        );
+        // Without the kernel's count, every vCPU the backend lists.
+        assert_eq!(kernel_processors(vcpus.clone(), None), (vcpus, 8));
+    }
 
     #[test]
     fn a_stub_register_file_becomes_a_context_by_register_name() {

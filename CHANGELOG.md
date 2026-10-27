@@ -23,6 +23,7 @@ Keeping this file:
 
 ### Changed
 
+- `ProcessDetail.vad_count` gives the number of VADs, `Peb.api_set_map` and `ProcessParameters.environment_size` are `None` on a build without the field, and `!chkimg`'s `SelfPatchKind` and `ImageSelfPatchCounts` have the import address table, service table and processor patch site kinds.
 - `PteWalk`, the SDK's `!pte` result, lists the entries the walk read as `levels`, root first, as `VtopDetail` does, in place of its `pxe`, `ppe`, `pde` and `pte` fields.
 - `SystemPteTypeDetail.used` is `None` where `SystemPteTypeDetail.counters_hold` is false, and `SystemPtesDetail.uncounted` names the allocators its totals leave out.
 - `LfhSubsegment.block_count` counts the blocks a subsegment withholds, and `LfhSubsegment.bit_stride` gives its bitmap's bits per block; `LfhSubsegment.bucket` is `None` for a subsegment that names no bucket, and `VtopDetail.physical_walk` says whether its entry addresses are physical (an explicit DTB) or in the self-map.
@@ -62,7 +63,7 @@ Keeping this file:
 - On a minidump that holds no ntdll data, `!cs` reports that the critical-section list cannot be read, where it listed none, and `!chkimg` says the code is not in the dump and nothing was compared, where it said the section was paged out and found 0 mismatches.
 - On a dump, `status` no longer suggests an execute breakpoint or `t` for a page that is not in memory, and `dt` lists a flags word before the bitfields it holds.
 - On a minidump that holds no module memory (MiniDumpNormal), `u`, `uf`, `db`, `!dh` and `!lmi` read a module's code and headers from its image file, relocated to where it was loaded, as the Windows debugger does, where they said the address was not in the dump; `!chkimg` still compares only what the dump holds.
-- Kernel dumps written with `.dump` hold every processor's registers as NT sees them, where a processor stopped in the Windows hypervisor had the hypervisor's registers and the others had whatever their PRCB last held.
+- Kernel dumps written with `.dump` hold every processor's registers as NT sees them, where a processor stopped in the Windows hypervisor had the hypervisor's registers and the others had whatever their PRCB last held, and list the processors the kernel runs, not every vCPU of the VM.
 - Pages a process maps through a prototype PTE read when Windows' L1TF mitigation swizzles the PTE, where they read as `??` and their image's unwind data as paged out, so stacks through them fell back to scanning.
 - `!pte` shows a zero PTE inside a mapped view as the view's page, not as unmapped, goes on to the PTE when its page table is in transition, and refuses an address that is not canonical.
 - `!poolfind` and `!pool` take a block's state on a segment-heap LFH pool page from its subsegment's bitmap, where they called freed blocks Allocated (775 for 560 mutants), no longer read the subsegment's header as a block hiding the first real one, and show paged-pool blocks as PagedPool.
@@ -77,6 +78,11 @@ Keeping this file:
 - `!sysptes` and `!vm` no longer report system-PTE totals from counters their allocator's bitmap contradicts: on Windows 11 22631 ARM64 the kernel keeps SystemPtes' free count below zero and its total at three times what its bitmap covers, and the driver-image allocator's free count far above its total. Such an allocator's total and use show as unknown, with the reason, and are left out of the summary.
 - On ARM64 over KD, `r` on a processor other than the one that stopped the target shows that processor's own `x18` (its KPCR, or its thread's TEB) and `ttbr0` (its thread's process), where it showed the stopping processor's, and `~` labelled every processor with the stopping one's process; `esr` and `far` are read at every stop, not only after a step.
 - A KD attach made right after another debugger session ended no longer fails with "invalid virtual-memory read … received 1024 bytes … for request 512": a read of memory, a system register or control space takes only the reply to its own request, and passes over the target's stale reply to the last session's.
+- `!chkimg` sets aside what Windows changes in its kernel at boot: the import address table the loader fills, `nt!KiServiceTable`, which the kernel packs into offsets, and the `*_Patch*` sites it rewrites for the processor, so Windows 7, 8.1, Vista and XP x64 report 0 genuine mismatches, where they reported 1,400 to 2,100.
+- `!pfn` reads every `_MMPFN` field where the build's PDB puts it, so XP x64's page location, cache attribute and color decode correctly, where they decoded with a newer layout.
+- `!vm` on Windows 8.1 and older reads the system-PTE counts the build keeps (XP x64 showed 868605598094041 free PTEs), lists each paging file's size and use, and leaves out the counters a build lacks instead of listing them as not found.
+- `!process <process> 7` shows `VadRoot`'s root VAD and the number of VADs on Windows 7, Vista and XP x64, and quota usage on Vista and XP x64, where they showed `-`; `!peb` leaves out fields the build lacks instead of listing them as unavailable.
+- `!heap -x` gives a free block's user size without its header, and `!vad` names large-page section, physical and rotate views, where it showed `vad:7`.
 
 ## v0.52.0 (2026-10-25)
 

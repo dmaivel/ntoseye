@@ -499,8 +499,12 @@ fn print_ps(processes: &[ProcessInfo]) {
 fn print_process_detail(detail: &ProcessDetail) {
     let size =
         |value: Option<u64>| value.map_or_else(|| "-".to_string(), |value| format!("{value:#x}"));
+    let vad_root = match detail.vad_count {
+        Some(count) => format!("{} Vads {count}", display_pointer(detail.vad_root)),
+        None => display_pointer(detail.vad_root),
+    };
     let rows = [
-        ("VadRoot", display_pointer(detail.vad_root)),
+        ("VadRoot", vad_root),
         ("Token", display_pointer(detail.token)),
         ("Wow64Peb", display_pointer(detail.process.wow64_peb)),
         (

@@ -15,12 +15,12 @@ use crate::backend::phys::PhysMem;
 use crate::base::bytes::{utf16le_lossy, utf16le_nul_terminated};
 use crate::base::error::Result;
 use crate::base::memory::{AddressSpace, MemoryOps, PAGE_SIZE};
-use crate::base::types::{MAX_PROCESSORS, PhysAddr, VirtAddr};
+use crate::base::types::{PhysAddr, VirtAddr};
 use crate::nt::bugchecks::current_bugcheck;
-use crate::nt::cpu_state::prcb_context_address;
+use crate::nt::cpu_state::{prcb_context_address, processor_count};
 use crate::nt::dump_writer::{
-    DumpException, DumpMetadata, ProcessorContext, context_from_named_registers, nt_context,
-    physical_runs,
+    DumpException, DumpMetadata, ProcessorContext, context_from_named_registers, kernel_processors,
+    nt_context, physical_runs,
 };
 use crate::nt::guest::{ModuleInfo, ProcessInfo};
 use crate::nt::kuser_shared::KuserSharedData;
@@ -186,9 +186,11 @@ fn processor_contexts(
 /// the processors' NT contexts, processor count, physical runs, kernel
 /// globals, and the bugcheck/exception of the last stop when there is one.
 pub fn collect_dump_metadata(session: &mut Session) -> Result<DumpMetadata> {
-    let vcpus = session.backend.thread_list().unwrap_or_default();
+    let (vcpus, processor_count) = kernel_processors(
+        session.backend.thread_list().unwrap_or_default(),
+        processor_count(&session.target).ok(),
+    );
     let (context, processors) = processor_contexts(session, &vcpus)?;
-    let processor_count = vcpus.len().clamp(1, usize::from(MAX_PROCESSORS)) as u32;
     let runs = physical_runs(&session.target)?;
     let major_version = WINDOWS_MAJOR_VERSION;
     let minor_version = read_kernel_build_number(&session.target);

@@ -7959,7 +7959,7 @@ class ImageByteDiff(BaseRecord):
         The byte in the cached image.
         """
     @property
-    def kind(self, /) -> Literal["import_optimization", "retpoline", "ki_patch_self", "region_rebase"] |None:
+    def kind(self, /) -> Literal["import_optimization", "retpoline", "ki_patch_self", "region_rebase", "import_address_table", "service_table", "patch_site"] |None:
         """
         The self-patch kind of the byte. `None` for a genuine mismatch.
         """
@@ -8150,13 +8150,24 @@ class ImageSelfPatchCounts(BaseRecord):
     The number of bytes that ntoseye identifies as known kernel self-patches,
     by kind.
     """
-    __match_args__: Final[tuple[Literal["import_optimization"], Literal["retpoline"], Literal["ki_patch_self"], Literal["region_rebase"]]]
+    __match_args__: Final[tuple[Literal["import_optimization"], Literal["retpoline"], Literal["ki_patch_self"], Literal["region_rebase"], Literal["import_address_table"], Literal["service_table"], Literal["patch_site"]]]
+    @property
+    def import_address_table(self, /) -> int:
+        """
+        Import address table entries the loader filled.
+        """
     @property
     def import_optimization(self, /) -> int: ...
     @property
     def ki_patch_self(self, /) -> int:
         """
         `KiPatchSelf` / JMP thunks.
+        """
+    @property
+    def patch_site(self, /) -> int:
+        """
+        Instructions at the kernel's patch labels, rewritten for the
+        processor.
         """
     @property
     def region_rebase(self, /) -> int:
@@ -8166,6 +8177,11 @@ class ImageSelfPatchCounts(BaseRecord):
         """
     @property
     def retpoline(self, /) -> int: ...
+    @property
+    def service_table(self, /) -> int:
+        """
+        `KiServiceTable` entries the kernel packed.
+        """
     @property
     def total(self, /) -> int:
         """
@@ -8190,7 +8206,7 @@ class ImageSelfPatchRange(BaseRecord):
         The function that contains the patch, if a symbol covers it.
         """
     @property
-    def kind(self, /) -> Literal["import_optimization", "retpoline", "ki_patch_self", "region_rebase"]: ...
+    def kind(self, /) -> Literal["import_optimization", "retpoline", "ki_patch_self", "region_rebase", "import_address_table", "service_table", "patch_site"]: ...
     @property
     def size(self, /) -> int:
         """
@@ -11276,10 +11292,14 @@ class Module:
         the DIR64/HIGHLOW relocations, and skips discardable and paged-out
         sections. The command counts known kernel self-patches separately:
         import optimization, retpoline, KiPatchSelf retargets, and the addresses
-        of the kernel VA regions that the kernel moves at boot. With -nospec, the
-        command does not show this breakdown and reports the self-patches as
-        ordinary mismatches. -d prints byte diffs, up to a limit, and -v prints
-        the results for each section.
+        of the kernel VA regions that the kernel moves at boot, and, by the
+        image's data directories and the kernel's symbols, the import address
+        table the loader fills, nt!KiServiceTable, which the kernel packs at
+        boot, and the instructions at its patch labels (SwapContext_PatchXSave)
+        that it rewrites for the processor. With -nospec, the command does not
+        show this breakdown and reports the self-patches as ordinary mismatches.
+        -d prints byte diffs, up to a limit, and -v prints the results for each
+        section.
         """
     @property
     def checksum(self, /) -> int |None: ...
@@ -12748,7 +12768,9 @@ class NtEntry(BaseRecord):
         The number of bytes that the caller requested: the block size minus
         the unused bytes, which ntdll counts with the header's overhead in
         them (an x64 header's first qword holds the previous block's data, so
-        only its second is overhead).
+        only its second is overhead). A free block was requested by no one
+        and its header counts no unused bytes, so its size is the space after
+        the header.
         """
 
 @final
@@ -13800,9 +13822,10 @@ class Peb(BaseRecord):
     @property
     def address(self, /) -> int: ...
     @property
-    def api_set_map(self, /) -> Diagnostic[int]:
+    def api_set_map(self, /) -> Diagnostic[int] |None:
         """
-        The API set schema.
+        The API set schema; `None` on builds without API sets (before
+        Windows 7).
         """
     @property
     def being_debugged(self, /) -> Diagnostic[int]:
@@ -13920,9 +13943,9 @@ class Peb32(BaseRecord):
 @final
 class PfnDetail(BaseRecord):
     """
-    A decoded `_MMPFN` record (`!pfn`). A member the layout lacks is decoded
-    from the record's raw bits at its known offset, so only `page_color`,
-    which has no such fallback, can be unavailable. Union members that the
+    A decoded `_MMPFN` record (`!pfn`), each member read where the build's
+    PDB layout puts it; only `page_color`, which some builds lack, can be
+    unavailable. Union members that the
     page state does not use are `None`: the list links when the page is not
     on a list, `share_count` and `ws_index` when the page is not active, and
     `event` when the page is not in transition.
@@ -15358,7 +15381,7 @@ class ProcessDetail(BaseRecord):
     `_EPROCESS` fields. Each field is `None` when this build's layout lacks
     it or its read failed.
     """
-    __match_args__: Final[tuple[Literal["info"], Literal["session_id"], Literal["peb"], Literal["parent_pid"], Literal["directory_table_base"], Literal["object_table"], Literal["handle_count"], Literal["vad_root"], Literal["token"], Literal["create_time"], Literal["user_time"], Literal["kernel_time"], Literal["quota_paged_pool"], Literal["quota_nonpaged_pool"], Literal["working_set_size"], Literal["commit_charge"], Literal["peak_virtual_size"], Literal["private_page_count"], Literal["debug_port"], Literal["job"]]]
+    __match_args__: Final[tuple[Literal["info"], Literal["session_id"], Literal["peb"], Literal["parent_pid"], Literal["directory_table_base"], Literal["object_table"], Literal["handle_count"], Literal["vad_root"], Literal["vad_count"], Literal["token"], Literal["create_time"], Literal["user_time"], Literal["kernel_time"], Literal["quota_paged_pool"], Literal["quota_nonpaged_pool"], Literal["working_set_size"], Literal["commit_charge"], Literal["peak_virtual_size"], Literal["private_page_count"], Literal["debug_port"], Literal["job"]]]
     @property
     def commit_charge(self, /) -> int |None: ...
     @property
@@ -15402,7 +15425,15 @@ class ProcessDetail(BaseRecord):
     @property
     def user_time(self, /) -> int |None: ...
     @property
-    def vad_root(self, /) -> int |None: ...
+    def vad_count(self, /) -> int |None:
+        """
+        The number of VADs, where the build counts them.
+        """
+    @property
+    def vad_root(self, /) -> int |None:
+        """
+        The root VAD.
+        """
     @property
     def working_set_size(self, /) -> int |None: ...
 
@@ -15494,9 +15525,10 @@ class ProcessParameters(BaseRecord):
         The environment block's address.
         """
     @property
-    def environment_size(self, /) -> Diagnostic[int]:
+    def environment_size(self, /) -> Diagnostic[int] |None:
         """
-        The environment block's size in bytes.
+        The environment block's size in bytes; `None` on builds whose
+        parameters do not record it (Windows Server 2003).
         """
     @property
     def image_path_name(self, /) -> Diagnostic[str]:

@@ -371,24 +371,25 @@ impl Guest {
 
     /// The path of the file a section-backed VAD maps, as `!ca` names it: the
     /// VAD's subsection leads to the section's control area, whose
-    /// `FilePointer` is the file object. `None` for pagefile-backed sections.
-    /// Only `_MMVAD`s have a `Subsection`; the caller checks the VAD is not
-    /// private.
+    /// `FilePointer` is the file object. Windows Server 2003's `_MMVAD` has
+    /// no `Subsection` and points at the control area itself. `None` for
+    /// pagefile-backed sections. Only `_MMVAD`s have either; the caller
+    /// checks the VAD is not private.
     pub fn vad_file_path(&self, dtb: Dtb, vad: VirtAddr) -> Option<String> {
         let types = self.ntoskrnl.types_in(dtb);
         let nonzero = |address: VirtAddr| (!address.is_zero()).then_some(address);
-        let subsection = types
-            .struct_at("_MMVAD", vad)
-            .ok()?
-            .read_pointer("Subsection")
-            .ok()
-            .and_then(nonzero)?;
-        let control_area = types
-            .struct_at("_SUBSECTION", subsection)
-            .ok()?
-            .read_pointer("ControlArea")
-            .ok()
-            .and_then(nonzero)?;
+        let vad = types.struct_at("_MMVAD", vad).ok()?;
+        let control_area = if vad.layout().fields.contains_key("Subsection") {
+            let subsection = vad.read_pointer("Subsection").ok().and_then(nonzero)?;
+            types
+                .struct_at("_SUBSECTION", subsection)
+                .ok()?
+                .read_pointer("ControlArea")
+        } else {
+            vad.read_pointer("ControlArea")
+        }
+        .ok()
+        .and_then(nonzero)?;
         let file_object = types
             .struct_at("_CONTROL_AREA", control_area)
             .ok()?

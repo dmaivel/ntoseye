@@ -436,6 +436,11 @@ pub fn vad_type_label(region: &MemoryRegionInfo) -> String {
         Some(VadType::ImageMap) => "image".to_string(),
         Some(_) if region.private_memory == Some(true) => "private".to_string(),
         Some(VadType::None) if region.private_memory == Some(false) => "mapped".to_string(),
+        // The other kinds of view, by name; Vista maps a large-page section
+        // with a VadLargePageSection VAD.
+        Some(VadType::LargePageSection) => "mapped-large".to_string(),
+        Some(VadType::DevicePhysicalMemory) => "physical".to_string(),
+        Some(VadType::RotatePhysical) => "rotate".to_string(),
         Some(vad_type) => format!("vad:{}", vad_type.raw()),
         None => "vad".to_string(),
     }
@@ -929,6 +934,8 @@ mod tests {
         assert_eq!(vad_type_label(&region(2, false)), "image");
         assert_eq!(vad_type_label(&region(0, false)), "mapped");
         assert_eq!(vad_type_label(&region(3, true)), "private");
+        // Vista's large-page section view, named rather than numbered.
+        assert_eq!(vad_type_label(&region(7, false)), "mapped-large");
         assert_eq!(vad_type_label(&region(3, false)), "vad:3");
     }
 }

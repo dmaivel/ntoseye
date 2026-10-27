@@ -11,6 +11,7 @@ use crate::base::memory::{AddressSpace, MemoryOps};
 use crate::base::types::{MAX_PROCESSORS, PhysAddr, VirtAddr};
 use crate::nt::cpu_state::{kpcr_for_processor, kprcb_for_processor, processor_count};
 use crate::nt::guest::ProcessInfo;
+use crate::nt::guest::vad::{vad_root_offset, vad_tree_link};
 use crate::nt::kuser_shared::KuserSharedData;
 use crate::nt::layout::{ParsedType, StructRef, TypeInfo, Types};
 use crate::nt::symbols::glob_matches;
@@ -658,7 +659,10 @@ pub struct ProcessDetail {
     pub directory_table_base: Option<u64>,
     pub object_table: Option<VirtAddr>,
     pub handle_count: Option<u64>,
+    /// The root VAD.
     pub vad_root: Option<VirtAddr>,
+    /// The number of VADs, where the build counts them.
+    pub vad_count: Option<u64>,
     pub token: Option<VirtAddr>,
     /// `CreateTime` as a FILETIME.
     pub create_time: Option<u64>,
@@ -702,8 +706,9 @@ impl ThreadDetail {
     }
 }
 
-/// The integer at the first readable path below `root`. Every segment but
-/// the last names an embedded struct, or a pointer to one, to step into.
+/// The integer at the first readable path below `root`, a bitfield's own
+/// bits. Every segment but the last names an embedded struct, or a pointer
+/// to one, to step into.
 fn read_first_uint(root: &StructRef<'_>, paths: &[&[&str]]) -> Option<u64> {
     fn enter<'a>(parent: &StructRef<'a>, name: &str) -> Option<StructRef<'a>> {
         parent.embedded(name).or_else(|_| parent.follow(name)).ok()
@@ -711,13 +716,13 @@ fn read_first_uint(root: &StructRef<'_>, paths: &[&[&str]]) -> Option<u64> {
     paths.iter().find_map(|path| {
         let (field, parents) = path.split_last()?;
         let Some((first, rest)) = parents.split_first() else {
-            return root.read_uint(field).ok();
+            return root.read_bits(field).ok();
         };
         let mut current = enter(root, first)?;
         for parent in rest {
             current = enter(&current, parent)?;
         }
-        current.read_uint(field).ok()
+        current.read_bits(field).ok()
     })
 }
 
@@ -1649,6 +1654,7 @@ impl Target {
                 object_table: None,
                 handle_count: None,
                 vad_root: None,
+                vad_count: None,
                 token: None,
                 create_time: None,
                 user_time: None,
@@ -1667,6 +1673,13 @@ impl Target {
         let pointer = |name: &str| field(&[&[name]]).map(VirtAddr);
         // Newer builds keep the counters in `Vm.Instance`.
         let vm = |name: &str| field(&[&["Vm", name], &["Vm", "Instance", name], &[name]]);
+        // Windows 7 counts quota in `ProcessQuotaUsage`, earlier builds in
+        // `QuotaUsage`, both arrays indexed by PS_QUOTA_TYPE: nonpaged pool,
+        // then paged pool.
+        let quota_usage = |index: usize| {
+            read_uint_element(&eprocess, "ProcessQuotaUsage", index)
+                .or_else(|| read_uint_element(&eprocess, "QuotaUsage", index))
+        };
 
         let object_table = pointer("ObjectTable");
         let free_lists = self.guest().ok().and_then(|guest| {
@@ -1697,23 +1710,30 @@ impl Target {
                 }),
             object_table,
             handle_count,
-            vad_root: field(&[&["VadRoot", "Root"], &["VadRoot"]]).map(VirtAddr),
+            vad_root: vad_root_offset(types, eprocess.layout())
+                .and_then(|offset| {
+                    self.kernel_address_space()
+                        .read_pointer(process.eprocess + offset)
+                })
+                .ok()
+                .map(|link| vad_tree_link(link.0)),
+            // Windows 8.1's `_RTL_AVL_TREE` keeps no count, the
+            // `_MM_AVL_TABLE` before it does.
+            vad_count: field(&[&["VadRoot", "NumberGenericTableElements"], &["VadCount"]]),
             token: field(&[&["Token"]]).map(fast_ref_address),
             create_time: field(&[&["CreateTime"]]),
             user_time: field(&[&["Pcb", "UserTime"], &["UserTime"]]),
             kernel_time: field(&[&["Pcb", "KernelTime"], &["KernelTime"]]),
-            // `ProcessQuotaUsage` is indexed by PS_QUOTA_TYPE: nonpaged
-            // pool, then paged pool.
             quota_paged_pool: field(&[
                 &["QuotaUsage", "PagedPool"],
                 &["QuotaUsage", "PagedPoolUsage"],
             ])
-            .or_else(|| read_uint_element(&eprocess, "ProcessQuotaUsage", 1)),
+            .or_else(|| quota_usage(1)),
             quota_nonpaged_pool: field(&[
                 &["QuotaUsage", "NonPagedPool"],
                 &["QuotaUsage", "NonPagedPoolUsage"],
             ])
-            .or_else(|| read_uint_element(&eprocess, "ProcessQuotaUsage", 0)),
+            .or_else(|| quota_usage(0)),
             working_set_size: vm("WorkingSetSize"),
             commit_charge: vm("PagefileUsage").or_else(|| vm("CommitCharge")),
             peak_virtual_size: vm("PeakVirtualSize"),

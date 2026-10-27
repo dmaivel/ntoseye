@@ -70,9 +70,23 @@ pub struct PoolLayout {
     /// What finds the LFH subsegment holding a page; `None` on a kernel
     /// without the segment heap, or whose PDB lacks its types.
     lfh: Option<LfhSubsegments>,
-    /// The `PagedPool` value of the PDB's `_POOL_TYPE`: the bit of a
-    /// header's `PoolType` that says paged (see [`header_pool_type`]).
-    pub paged_pool: Option<u8>,
+    /// How a block header's `PoolType` names its pool (see
+    /// [`header_pool_type`]); `None` when the PDB has no `_POOL_TYPE`.
+    pub header_pool: Option<HeaderPoolEncoding>,
+}
+
+/// How a build's block headers encode the pool in `PoolType`: the
+/// allocation's `POOL_TYPE`, of which `paged_pool` (`PagedPool`'s value in
+/// the PDB's `_POOL_TYPE`) is the bit that says paged, with a bit set while
+/// the block is allocated. Vista on keep the type itself (nonpaged blocks
+/// read 2, paged 3); Windows Server 2003 keeps the type plus one (5 and 6).
+/// The PDBs lay out `_POOL_HEADER` and `_POOL_TYPE` alike, and differ in
+/// the big-page table: from Vista each entry records its pool type too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeaderPoolEncoding {
+    pub paged_pool: u8,
+    /// Whether the header holds the `POOL_TYPE` plus one.
+    pub plus_one: bool,
 }
 
 /// What decodes the `_HEAP_VS_CHUNK_HEADER` that precedes each block the
@@ -404,6 +418,7 @@ pub fn pool_layout(debugger: &Target) -> Result<PoolLayout> {
         ),
         None => (false, false, false),
     };
+    let plus_one = big_pool_type.is_some() && !big_pool_has_pool_type;
     Ok(PoolLayout {
         header_size: pool_header.size as u64,
         pool_header,
@@ -415,11 +430,15 @@ pub fn pool_layout(debugger: &Target) -> Result<PoolLayout> {
         big_pool_has_slush,
         vs_chunks: vs_chunk_headers(debugger),
         lfh: lfh_subsegments(debugger),
-        paged_pool: debugger
+        header_pool: debugger
             .symbols
             .find_enum_across_modules(debugger.kernel_dtb(), "_POOL_TYPE")
             .and_then(|values| values.into_iter().find(|(name, _)| name == "PagedPool"))
-            .and_then(|(_, value)| u8::try_from(value).ok()),
+            .and_then(|(_, value)| u8::try_from(value).ok())
+            .map(|paged_pool| HeaderPoolEncoding {
+                paged_pool,
+                plus_one,
+            }),
     })
 }
 
@@ -1112,16 +1131,20 @@ pub fn pool_block_state(h: &PoolHeader) -> PoolBlockState {
     }
 }
 
-/// The pool a block header's `PoolType` names. It holds the allocation's
-/// `POOL_TYPE` bits, of which `paged_pool` (`PagedPool`'s value) says
-/// paged: nonpaged blocks read 2 and paged ones 3. A classic pool clears a
-/// free block's to 0, which names neither.
-pub fn header_pool_type(pool_type: u8, paged_pool: u8) -> Option<PoolType> {
-    match pool_type {
-        0 => None,
-        _ if pool_type & paged_pool != 0 => Some(PoolType::Paged),
-        _ => Some(PoolType::NonPaged),
-    }
+/// The pool a block header's `PoolType` names, as `encoding` says the
+/// build encodes it. A classic pool clears a free block's to 0, which names
+/// neither.
+pub fn header_pool_type(pool_type: u8, encoding: HeaderPoolEncoding) -> Option<PoolType> {
+    let allocation_type = match pool_type {
+        0 => return None,
+        _ if encoding.plus_one => pool_type - 1,
+        _ => pool_type,
+    };
+    Some(if allocation_type & encoding.paged_pool != 0 {
+        PoolType::Paged
+    } else {
+        PoolType::NonPaged
+    })
 }
 
 /// Largest `_POOL_HEADER` [`parse_pool_header`] reads (16 bytes on x64).
@@ -2005,7 +2028,10 @@ mod tests {
                 heap_key,
             }),
             lfh: None,
-            paged_pool: Some(1),
+            header_pool: Some(HeaderPoolEncoding {
+                paged_pool: 1,
+                plus_one: false,
+            }),
         }
     }
 

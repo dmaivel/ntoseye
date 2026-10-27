@@ -11,11 +11,11 @@ use crate::backend::debugger_data::{
     DebuggerDataBlock, MetadataSource, MetadataValue, read_counter_from_getter,
 };
 use crate::base::error::{Error, Result};
-use crate::base::memory::PAGE_SIZE;
+use crate::base::memory::{MemoryOps, PAGE_SIZE};
 use crate::base::types::VirtAddr;
 use crate::nt::guest::ProcessInfo;
 use crate::nt::layout::{ParsedType, TypeInfo};
-use crate::nt::target::pool::{read_kernel_global_u32, read_kernel_global_u64};
+use crate::nt::target::pool::read_kernel_global_u64;
 use crate::nt::target::{DiagnosticMetric, DiagnosticValue, Target};
 
 const DEFAULT_MEMORY_PROCESS_LIMIT: usize = 64;
@@ -50,16 +50,16 @@ fn counter(name: &str, value: u64, unit: Option<VmUnit>) -> VmCounter {
     }
 }
 
-fn is_available(counter: &VmCounter) -> bool {
-    matches!(counter.value.value, DiagnosticValue::Available(_))
-}
-
-fn named_counter(target: &Target, name: &str, unit: Option<VmUnit>) -> VmCounter {
-    VmCounter {
-        name: name.to_string(),
-        value: global_metric(target, name),
-        unit,
-    }
+/// Counters called `names` that could not be read, for `error`.
+fn unavailable_counters(names: &[&str], error: impl std::fmt::Display) -> Vec<VmCounter> {
+    names
+        .iter()
+        .map(|name| VmCounter {
+            name: name.to_string(),
+            value: unavailable_metric(&error),
+            unit: None,
+        })
+        .collect()
 }
 
 fn mi_state_pool_field_unit(name: &str) -> VmUnit {
@@ -187,25 +187,11 @@ impl Target {
             paged_pool_pages: self.paged_pool_pages(),
             fields: pool_fields,
         };
-        let legacy_ptes: Vec<VmCounter> = [
-            ("MmTotalSystemPtes", "total system PTEs"),
-            ("MmTotalFreeSystemPtes", "free system PTEs"),
-            ("MmTotalNonPagedPoolPtes", "nonpaged pool PTEs"),
-            ("MmAvailableSystemPtes", "available system PTEs"),
-        ]
-        .into_iter()
-        .map(|(symbol, name)| {
-            let mut counter = named_counter(self, symbol, None);
-            counter.name = name.to_string();
-            counter
-        })
-        .collect();
         // Windows 10 allocates system PTEs from bitmaps, as `!sysptes` reads
-        // them, and keeps none of these globals.
-        let counters = if legacy_ptes.iter().any(is_available) {
-            legacy_ptes
-        } else {
-            match self.system_ptes(false) {
+        // them, and keeps no counters.
+        let counters = match self.counted_system_ptes() {
+            Some(counters) => counters,
+            None => match self.system_ptes(false) {
                 Ok(ptes) if ptes.uncounted.is_empty() => vec![
                     counter("total system PTEs", ptes.total, None),
                     counter("free system PTEs", ptes.free, None),
@@ -221,51 +207,17 @@ impl Target {
                             "their"
                         }
                     );
-                    ["total system PTEs", "free system PTEs"]
-                        .into_iter()
-                        .map(|name| VmCounter {
-                            name: name.to_string(),
-                            value: unavailable_metric(&why),
-                            unit: None,
-                        })
-                        .collect()
+                    unavailable_counters(&["total system PTEs", "free system PTEs"], why)
                 }
-                Err(_) => legacy_ptes,
-            }
+                Err(error) => {
+                    unavailable_counters(&["total system PTEs", "free system PTEs"], error)
+                }
+            },
         };
         let pte = VmPteDetail { counters };
-        // A ULONG, where the others are page counts.
-        let paging_file_count = VmCounter {
-            name: "number of paging files".into(),
-            value: match read_kernel_global_u32(self, "MmNumberOfPagingFiles") {
-                Ok(value) => available_metric(value.into()),
-                Err(error) => unavailable_metric(error),
-            },
-            unit: None,
-        };
-        let legacy_page_files: Vec<VmCounter> = std::iter::once(paging_file_count)
-            .chain(
-                [
-                    (
-                        "MmTotalPagesForPagingFile",
-                        "pages for paging file",
-                        Some(VmUnit::Pages),
-                    ),
-                    ("MmFreePages", "free paging pages", Some(VmUnit::Pages)),
-                ]
-                .into_iter()
-                .map(|(symbol, name, unit)| {
-                    let mut counter = named_counter(self, symbol, unit);
-                    counter.name = name.to_string();
-                    counter
-                }),
-            )
-            .collect();
-        let page_files = if legacy_page_files.iter().any(is_available) {
-            legacy_page_files
-        } else {
-            self.partition_paging_files().unwrap_or(legacy_page_files)
-        };
+        let page_files = self
+            .paging_files()
+            .unwrap_or_else(|error| unavailable_counters(&["number of paging files"], error));
         Ok(VmDetail {
             system,
             pool,
@@ -275,30 +227,98 @@ impl Target {
         })
     }
 
-    /// The paging files of the system partition (`MiSystemPartition.Vp`,
-    /// Windows 10 on): how many, and each one's size, limits, use, free
-    /// space and peak use, in pages. Its use is what Windows reports as the
-    /// file's current usage.
-    fn partition_paging_files(&self) -> Result<Vec<VmCounter>> {
+    /// The system PTE counts of the builds that keep them, `None` on one
+    /// that keeps neither: Vista through 8.1 count in `MiSystemPteInfo`,
+    /// Windows Server 2003 in `MmTotalSystemPtes` and in
+    /// `MmTotalFreeSystemPtes`, a ULONG for each MMSYSTEM_PTE_POOL_TYPE of
+    /// which `SystemPteSpace` is the system PTEs'.
+    fn counted_system_ptes(&self) -> Option<Vec<VmCounter>> {
+        let kernel = &self.guest().ok()?.ntoskrnl;
+        let names = ["total system PTEs", "free system PTEs"];
+        if let Ok(info) = kernel.symbol("MiSystemPteInfo") {
+            let read = || -> Result<Vec<VmCounter>> {
+                let info = kernel
+                    .types()
+                    .struct_at("_MI_SYSTEM_PTE_TYPE", info.address())?;
+                Ok(vec![
+                    counter(names[0], info.read_uint("TotalSystemPtes")?, None),
+                    counter(names[1], info.read_uint("TotalFreeSystemPtes")?, None),
+                ])
+            };
+            return Some(read().unwrap_or_else(|error| unavailable_counters(&names, error)));
+        }
+        let total = kernel.symbol("MmTotalSystemPtes").ok()?;
+        let free = kernel.symbol("MmTotalFreeSystemPtes").ok()?;
+        let read = || -> Result<Vec<VmCounter>> {
+            let index = self
+                .symbols
+                .find_enum_across_modules(self.kernel_dtb(), "_MMSYSTEM_PTE_POOL_TYPE")
+                .and_then(|values| {
+                    values
+                        .into_iter()
+                        .find(|(name, _)| name == "SystemPteSpace")
+                })
+                .and_then(|(_, value)| u64::try_from(value).ok())
+                .ok_or_else(|| {
+                    Error::DebugInfo("no SystemPteSpace in _MMSYSTEM_PTE_POOL_TYPE".into())
+                })?;
+            let memory = self.kernel_address_space();
+            let free = memory.read::<u32>(free.address() + index * 4)?;
+            Ok(vec![
+                counter(names[0], total.read::<u32>()?.into(), None),
+                counter(names[1], free.into(), None),
+            ])
+        };
+        Some(read().unwrap_or_else(|error| unavailable_counters(&names, error)))
+    }
+
+    /// The paging files: how many, and each one's size, limits, use, free
+    /// space and peak use, in pages. Their use is what Windows reports as
+    /// a file's current usage. Before Windows 10 the kernel keeps them in
+    /// `MmPagingFile`, `MmNumberOfPagingFiles` of them; from Windows 10 in
+    /// the system partition, `MiSystemPartition.Vp`.
+    fn paging_files(&self) -> Result<Vec<VmCounter>> {
         let kernel = &self.guest()?.ntoskrnl;
         let types = kernel.types();
-        let partition = types.struct_at(
-            "_MI_PARTITION",
-            kernel.symbol("MiSystemPartition")?.address(),
-        )?;
-        let visible = partition.embedded("Vp")?;
-        let count = visible.read_uint("NumberOfPagingFiles")?;
-        let mut counters = vec![counter("number of paging files", count, None)];
-        let slots_field = visible.layout().field("PagingFile")?;
-        let ParsedType::Array(_, capacity) = slots_field.type_data else {
-            return Err(Error::FieldTypeMismatch(
-                "PagingFile".to_string(),
-                "array".to_string(),
-            ));
+        let (count, slots, capacity) = match kernel.symbol("MmPagingFile") {
+            Ok(slots) => {
+                let count = kernel.symbol("MmNumberOfPagingFiles")?.read::<u32>()?;
+                // The array has a slot for each number `PageFileNumber`
+                // can hold.
+                let number = types.layout("_MMPAGING_FILE")?;
+                let ParsedType::Bitfield { len, .. } = number.field("PageFileNumber")?.type_data
+                else {
+                    return Err(Error::FieldTypeMismatch(
+                        "PageFileNumber".to_string(),
+                        "bitfield".to_string(),
+                    ));
+                };
+                (u64::from(count), slots.address(), 1u64 << len)
+            }
+            Err(_) => {
+                let partition = types.struct_at(
+                    "_MI_PARTITION",
+                    kernel.symbol("MiSystemPartition")?.address(),
+                )?;
+                let visible = partition.embedded("Vp")?;
+                let count = visible.read_uint("NumberOfPagingFiles")?;
+                let slots_field = visible.layout().field("PagingFile")?;
+                let ParsedType::Array(_, capacity) = slots_field.type_data else {
+                    return Err(Error::FieldTypeMismatch(
+                        "PagingFile".to_string(),
+                        "array".to_string(),
+                    ));
+                };
+                (
+                    count,
+                    visible.addr() + slots_field.offset as u64,
+                    u64::from(capacity),
+                )
+            }
         };
-        let slots = visible.addr() + slots_field.offset as u64;
+        let mut counters = vec![counter("number of paging files", count, None)];
         let memory = self.kernel_address_space();
-        for index in 0..count.min(u64::from(capacity)) {
+        for index in 0..count.min(capacity) {
             let pointer = memory.read_pointer(slots + 8 * index)?;
             if pointer.is_zero() {
                 continue;
