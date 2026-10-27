@@ -295,7 +295,9 @@ pub fn read_machine_specific_register<T: Read + Write>(
 ) -> Result<u64> {
     let mut header = make_header(DBGKD_READ_MACHINE_SPECIFIC_REGISTER, processor);
     write_u32(&mut header, UNION_OFFSET, register);
-    let (parsed, reply_header, _) = send_manipulate(framing, &header, &[])?;
+    // The reply keeps `Msr`.
+    let (parsed, reply_header, _) =
+        send_manipulate_echoing(framing, &header, &[], Some(UNION_OFFSET..UNION_OFFSET + 4))?;
     check_status(&parsed, DBGKD_READ_MACHINE_SPECIFIC_REGISTER)?;
     let low = read_u32(&reply_header, UNION_OFFSET + 4) as u64;
     let high = read_u32(&reply_header, UNION_OFFSET + 8) as u64;
@@ -685,7 +687,9 @@ pub fn read_control_space<T: Read + Write>(
     let mut header = make_header(DBGKD_READ_CONTROL_SPACE, processor);
     write_u64(&mut header, UNION_OFFSET, base);
     write_u32(&mut header, UNION_OFFSET + 8, len);
-    let (parsed, _, data) = send_manipulate(framing, &header, &[])?;
+    // The reply keeps `TargetBaseAddress` and `TransferCount`.
+    let (parsed, _, data) =
+        send_manipulate_echoing(framing, &header, &[], Some(UNION_OFFSET..UNION_OFFSET + 12))?;
     check_status(&parsed, DBGKD_READ_CONTROL_SPACE)?;
     if data.len() < len as usize {
         return Err(Error::Kd(format!(
@@ -1207,7 +1211,11 @@ mod tests {
     #[test]
     fn read_control_space_returns_reply_data() {
         let special_bytes: Vec<u8> = (0..168u32).map(|i| (255 - (i & 0xff)) as u8).collect();
-        let reply = build_reply(DBGKD_READ_CONTROL_SPACE, 1, &[], &special_bytes);
+        let mut union_body = [0u8; 16];
+        write_u64(&mut union_body, 0, 2);
+        write_u32(&mut union_body, 8, special_bytes.len() as u32);
+        write_u32(&mut union_body, 12, special_bytes.len() as u32);
+        let reply = build_reply(DBGKD_READ_CONTROL_SPACE, 1, &union_body, &special_bytes);
         let stream = ack_then_reply(
             (INITIAL_PACKET_ID | SYNC_PACKET_ID) & !SYNC_PACKET_ID,
             INITIAL_PACKET_ID,

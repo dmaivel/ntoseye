@@ -75,7 +75,7 @@ Keeping this file:
 - A register in an expression with a thread selected that runs on no processor says why it is unavailable, where it said the VM was running.
 - `!sysptes` and `!vm` no longer report system-PTE totals from counters their allocator's bitmap contradicts: on Windows 11 22631 ARM64 the kernel keeps SystemPtes' free count below zero and its total at three times what its bitmap covers, and the driver-image allocator's free count far above its total. Such an allocator's total and use show as unknown, with the reason, and are left out of the summary.
 - On ARM64 over KD, `r` on a processor other than the one that stopped the target shows that processor's own `x18` (its KPCR, or its thread's TEB) and `ttbr0` (its thread's process), where it showed the stopping processor's, and `~` labelled every processor with the stopping one's process; `esr` and `far` are read at every stop, not only after a step.
-- A KD attach made right after another debugger session ended no longer fails with "invalid virtual-memory read … received 1024 bytes … for request 512": a memory read takes only the reply to its own address and length, and passes over the target's stale reply to the last session's read.
+- A KD attach made right after another debugger session ended no longer fails with "invalid virtual-memory read … received 1024 bytes … for request 512": a read of memory, a system register or control space takes only the reply to its own request, and passes over the target's stale reply to the last session's.
 
 ## v0.52.0 (2026-10-25)
 

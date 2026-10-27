@@ -213,8 +213,8 @@ fn serve_manipulate(mut kernel: UnixStream, script: Vec<(u32, u32, Vec<u8>)>) ->
                 u32::from_le_bytes(request[0..4].try_into().unwrap()),
                 api_number
             );
-            let mut reply = vec![0u8; api::MANIPULATE_HEADER_SIZE];
-            reply[0..4].copy_from_slice(&api_number.to_le_bytes());
+            // Windows answers in the request it received.
+            let mut reply = request[..api::MANIPULATE_HEADER_SIZE].to_vec();
             reply[8..12].copy_from_slice(&status.to_le_bytes());
             reply[UNION + 12..UNION + 16].copy_from_slice(&(data.len() as u32).to_le_bytes());
             reply.extend_from_slice(&data);
