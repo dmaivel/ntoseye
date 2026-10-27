@@ -569,6 +569,11 @@ pub trait DebugBackend {
     /// elsewhere.
     fn set_thread_layout(&mut self, _path: Option<ThreadLayout>) {}
 
+    /// Provide the number of processors the kernel reports, for a backend
+    /// that has no list of its own but can still select one to inspect (the
+    /// memory backend). No-op elsewhere.
+    fn set_processor_count(&mut self, _count: u16) {}
+
     fn read_registers(&mut self) -> Result<Vec<u8>>;
     fn write_registers(&mut self, data: &[u8]) -> Result<()>;
 

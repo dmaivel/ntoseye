@@ -260,6 +260,9 @@ impl Session {
             // this root, and the old boot's is gone.
             backend.set_kernel_dtb(target.kernel_dtb());
             backend.set_thread_layout(crate::nt::cpu_state::thread_layout(target));
+            if let Ok(count) = crate::nt::cpu_state::processor_count(target) {
+                backend.set_processor_count(count);
+            }
             // A reboot may have turned the Windows hypervisor on or off.
             backend.set_windows_hypervisor(target.windows_hypervisor_running());
             let debugger_data_hint = backend.target_debugger_data_hint().ok().flatten();

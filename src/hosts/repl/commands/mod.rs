@@ -381,7 +381,20 @@ impl ReplState<'_> {
         // selector glued on, so it never matches a registered name; a bare
         // `~` is the listing, which is.
         if line.trim_start().starts_with('~') && line.trim() != "~" {
-            if let Some(spec) = command_registry().get("~")
+            // Selecting a processor (`~1s`) where the backend never halts
+            // (the memory backend) picks whose PRCB state later commands
+            // read, which needs no halt; anything else `~` runs does.
+            let body = line.trim().trim_start_matches('~');
+            let digits = body.trim_end_matches('s');
+            let selection = !digits.is_empty()
+                && digits.bytes().all(|byte| byte.is_ascii_digit())
+                && body.len() <= digits.len() + 1;
+            let never_halts = self.ctx.backend.is_running()
+                && !self.ctx.backend.capabilities().iter().any(|entry| {
+                    entry.capability == DebugCapability::ExecutionControl && entry.supported
+                });
+            if !(selection && never_halts)
+                && let Some(spec) = command_registry().get("~")
                 && let Some(flow) = self.admit(spec, "~")?
             {
                 return Ok(flow);

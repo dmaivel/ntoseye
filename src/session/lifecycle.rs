@@ -382,21 +382,31 @@ impl Session {
         // hand the resolved kernel root to the backend so it can fill it.
         backend.set_kernel_dtb(target.kernel_dtb());
         backend.set_thread_layout(crate::nt::cpu_state::thread_layout(&target));
+        if let Ok(count) = crate::nt::cpu_state::processor_count(&target) {
+            backend.set_processor_count(count);
+        }
         backend.set_windows_hypervisor(target.windows_hypervisor_running());
         let register_map = backend.register_map().clone();
 
         // Seed the selected thread from the backend when it exposes register
-        // context; otherwise default to the first processor.
+        // context; otherwise the first processor it lists.
         let has_register_context = backend
             .capabilities()
             .iter()
             .any(|c| c.capability == DebugCapability::ReadRegisters && c.supported);
+        let first_listed = |backend: &mut Box<dyn DebugBackend>| {
+            backend
+                .thread_list()
+                .ok()
+                .and_then(|ids| ids.into_iter().next())
+                .unwrap_or_else(|| "1".to_string())
+        };
         let current_thread = if has_register_context {
             backend
                 .stopped_thread_id()
-                .unwrap_or_else(|_| "1".to_string())
+                .unwrap_or_else(|_| first_listed(&mut backend))
         } else {
-            "1".to_string()
+            first_listed(&mut backend)
         };
 
         static NEXT_SESSION_ID: AtomicUsize = AtomicUsize::new(1);

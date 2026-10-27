@@ -19,6 +19,7 @@ Keeping this file:
 
 - `!handle <handle> f` on a user-mode minidump shows the object information the dump records: a thread's or process's IDs, TEB or PEB, priority and exit status, an event's, mutant's or semaphore's state, and a section's size. The SDK has it as `UserHandle.object_info`.
 - `dx` and `dt` show a global or static variable of a module whose PDB is private (your own driver's, or a virtio driver's) with its type: `dx balloon!GUID_DEVINTERFACE_BALLOON` reads the GUID's fields, where they asked for a cast. Public PDBs, such as Windows', still record no types for their variables.
+- On the `memory` backend, `~N` and `~Ns` select processor N, so `!idt`, `!gdt`, `!pcr` and the commands that read a processor's PRCB inspect it, as on a halted target; its registers stay unavailable.
 
 ### Changed
 
