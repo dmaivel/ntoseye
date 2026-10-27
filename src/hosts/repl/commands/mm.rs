@@ -1248,7 +1248,8 @@ fn print_pte_walk(result: &PteWalk, invalid_pte_mask: u64) {
     );
     let mut builder = Builder::default();
     let row_strings: Vec<String> = result
-        .levels()
+        .levels
+        .iter()
         .map(|level| pte_level_cell(level, invalid_pte_mask))
         .collect();
     builder.push_record(row_strings);

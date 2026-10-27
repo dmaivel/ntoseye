@@ -15486,7 +15486,7 @@ class PteWalk(BaseRecord):
     The page-table entries that map an address, read through NT's self-map
     (`!pte`).
     """
-    __match_args__: Final[tuple[Literal["address"], Literal["dtb"], Literal["pxe"], Literal["ppe"], Literal["pde"], Literal["pte"], Literal["non_resident"]]]
+    __match_args__: Final[tuple[Literal["address"], Literal["dtb"], Literal["levels"], Literal["non_resident"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -15496,24 +15496,18 @@ class PteWalk(BaseRecord):
         when attached, else the kernel), so callers know what was walked.
         """
     @property
+    def levels(self, /) -> list[PteLevel]:
+        """
+        The entries read, root first: each below the root only when the one
+        above it points at a table.
+        """
+    @property
     def non_resident(self, /) -> NonResident |None:
         """
         Where the page is when it is not in memory, and whether reads still
         get it (from the memory-compression store); `None` when it is in
         memory.
         """
-    @property
-    def pde(self, /) -> PteLevel |None: ...
-    @property
-    def ppe(self, /) -> PteLevel |None:
-        """
-        The levels below the PXE, each present only when the one above it
-        points at a table.
-        """
-    @property
-    def pte(self, /) -> PteLevel |None: ...
-    @property
-    def pxe(self, /) -> PteLevel: ...
 
 @final
 class PtovDetail(BaseRecord):

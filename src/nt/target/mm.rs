@@ -24,6 +24,7 @@ mod vad;
 mod vm;
 mod vprot;
 
+pub use paging::PteSelfMap;
 pub use vprot::{
     MEM_COMMIT, MEM_FREE, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE, MEM_RESERVE, memory_state_name,
     memory_type_name, page_protection, page_protection_name,
@@ -1101,28 +1102,12 @@ pub struct PteWalk {
     /// when attached, else the kernel), so callers know what was walked.
     #[record(hex)]
     pub dtb: Dtb,
-    pub pxe: PteLevel,
-    /// The levels below the PXE, each present only when the one above it
-    /// points at a table.
-    pub ppe: Option<PteLevel>,
-    pub pde: Option<PteLevel>,
-    pub pte: Option<PteLevel>,
+    /// The entries read, root first: each below the root only when the one
+    /// above it points at a table.
+    pub levels: Vec<PteLevel>,
     /// Where the page is when it is not in memory, and whether reads still
     /// get it (from the memory-compression store); `None` when it is in
     /// memory.
     pub non_resident: Option<NonResident>,
 }
 
-impl PteWalk {
-    /// The levels reached, top down.
-    pub fn levels(&self) -> impl Iterator<Item = &PteLevel> {
-        [
-            Some(&self.pxe),
-            self.ppe.as_ref(),
-            self.pde.as_ref(),
-            self.pte.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-    }
-}

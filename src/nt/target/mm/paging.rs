@@ -4,34 +4,71 @@
 use std::collections::HashSet;
 
 use super::{PteLevel, PteWalk, PtovDetail, PtovMapping, VtopDetail};
-use crate::arch::{Arch, TableEntry};
+use crate::arch::{Arch, Paging, TableEntry};
 use crate::base::error::{Error, Result};
 use crate::base::memory::{AddressSpace, DTB_IDENTITY, MemoryOps, PAGE_SIZE, Residency};
-use crate::base::types::{Dtb, PFN_MASK, PageTableEntry, PageTableLevel, VirtAddr};
+use crate::base::types::{Dtb, PAGE_SHIFT, PFN_MASK, PageTableEntry, PageTableLevel, VirtAddr};
 use crate::nt::target::Target;
 
 const MAX_PTOV_TABLE_PAGES: usize = 65_536;
 const MAX_PTOV_RESULTS: usize = 32;
 
-/// NT's page-table self-map: the bases of its PTE, PDE, PPE, and PXE arrays.
+/// Bytes in a page-table entry, as [`Paging::levels`] has them.
+const ENTRY_SIZE: u64 = 8;
+
+/// NT's page-table self-map: one array of entries per level the
+/// architecture's tables have, each array the entries of all the tables at
+/// that level, mapped through the root's recursive slot. `MmPteBase` heads
+/// the last level's; each level's array is the entries of the one below.
 #[derive(Debug, Clone, Copy)]
 pub struct PteSelfMap {
-    pte: u64,
-    pde: u64,
-    ppe: u64,
-    pxe: u64,
+    levels: &'static [PageTableLevel],
+    /// Each level's array, in the order of `levels`.
+    bases: [u64; PageTableLevel::ALL.len()],
+    /// The address bits the levels index.
+    index_mask: u64,
 }
 
 impl PteSelfMap {
-    /// Where the PXE, PPE, PDE, and PTE of `address` sit in the self-map.
-    pub fn entries(&self, address: u64) -> [VirtAddr; 4] {
-        let index = address & 0xFFFF_FFFF_FFFF;
-        [
-            VirtAddr(self.pxe + (index >> 39 << 3)),
-            VirtAddr(self.ppe + (index >> 30 << 3)),
-            VirtAddr(self.pde + (index >> 21 << 3)),
-            VirtAddr(self.pte + (index >> 12 << 3)),
-        ]
+    /// The self-map `pte_base` (`MmPteBase`) heads for `paging`'s tables.
+    pub fn new(pte_base: u64, paging: &dyn Paging) -> Self {
+        let levels = paging.levels();
+        // A table indexes 9 bits above its level's shift (512 entries).
+        let index_mask = (1u64 << (levels[0].shift() + 9)) - 1;
+        let mut bases = [0; PageTableLevel::ALL.len()];
+        let mut base = pte_base;
+        for slot in bases[..levels.len()].iter_mut().rev() {
+            *slot = base;
+            // The array above maps this one's pages: their entries in the
+            // last level's array.
+            base = pte_base + ((base & index_mask) >> PAGE_SHIFT) * ENTRY_SIZE;
+        }
+        Self {
+            levels,
+            bases,
+            index_mask,
+        }
+    }
+
+    /// Where the entries mapping `address` sit in the self-map, root first.
+    pub fn entries(
+        &self,
+        address: u64,
+    ) -> impl DoubleEndedIterator<Item = (PageTableLevel, VirtAddr)> + '_ {
+        let index = address & self.index_mask;
+        self.levels.iter().zip(self.bases).map(move |(&level, base)| {
+            (
+                level,
+                VirtAddr(base + (index >> level.shift()) * ENTRY_SIZE),
+            )
+        })
+    }
+
+    /// The first address of the self-map and its length: the last level's
+    /// array, which holds the others.
+    pub fn extent(&self) -> (u64, u64) {
+        let pte_base = self.bases[self.levels.len() - 1];
+        (pte_base, ((self.index_mask + 1) >> PAGE_SHIFT) * ENTRY_SIZE)
     }
 }
 
@@ -123,13 +160,12 @@ impl Target {
         {
             let translation = self.address_space(dtb).virt_to_phys(address)?;
             let physical = translation.map(|translation| translation.address);
-            let walk_transition = walk
-                .pte
-                .as_ref()
-                .is_some_and(|level| PageTableEntry(level.value).is_transition());
-            let large_entry = walk.levels().any(|level| level.attributes.large_page);
+            let walk_transition = walk.levels.last().is_some_and(|level| {
+                level.level == PageTableLevel::Pte && PageTableEntry(level.value).is_transition()
+            });
+            let large_entry = walk.levels.iter().any(|level| level.attributes.large_page);
             let large = physical.is_some() && large_entry;
-            let levels = walk.levels().cloned().collect();
+            let levels = walk.levels;
             return Ok(VtopDetail {
                 address,
                 dtb,
@@ -225,12 +261,8 @@ impl Target {
 
     /// The self-map the kernel's PTE base heads.
     pub fn pte_self_map(&self) -> Result<PteSelfMap> {
-        let pte = self.guest()?.ntoskrnl.pte_base()?;
-        let pte = pte.0;
-        let pde = pte + (pte >> 9 & 0x7F_FFFF_FFFF);
-        let ppe = pde + (pde >> 9 & 0x3FFF_FFFF);
-        let pxe = ppe + (ppe >> 9 & 0x1F_FFFF);
-        Ok(PteSelfMap { pte, pde, ppe, pxe })
+        let pte_base = self.guest()?.ntoskrnl.pte_base()?;
+        Ok(PteSelfMap::new(pte_base.0, self.arch().paging()))
     }
 
     /// The page-table entries mapping `address`, read through NT's
@@ -255,45 +287,28 @@ impl Target {
         // read through `dtb` for both halves; through the kernel's root it
         // would show the kernel's (empty) user half.
         let memory = AddressSpace::for_arch(&self.phys, dtb, dtb, self.arch());
-        let [pxe_address, ppe_address, pde_address, pte_address] =
-            self.pte_self_map()?.entries(address.0);
-
-        let arch = self.arch();
-        let read_level = |level: PageTableLevel, at: VirtAddr| -> Result<PteLevel> {
+        let paging = self.arch().paging();
+        let mut levels = Vec::new();
+        for (level, at) in self.pte_self_map()?.entries(address.0) {
             let value: PageTableEntry = memory.read(at)?;
-            Ok(PteLevel {
+            let attributes = paging.entry_attributes(value, level, address);
+            // The walk ends at an entry that maps (a large page) or maps
+            // nothing: the self-map has no table below it to read.
+            let ends = attributes.large_page || !attributes.present;
+            levels.push(PteLevel {
                 level,
                 address: at,
                 value: value.0,
-                attributes: arch.paging().entry_attributes(value, level, address),
-            })
-        };
-        // The walk ends at an entry that maps (a large page) or maps nothing:
-        // the self-map has no table below it to read.
-        let ends = |level: &PteLevel| level.attributes.large_page || !level.attributes.present;
-
-        let pxe = read_level(PageTableLevel::Pxe, pxe_address)?;
-        let ppe = if ends(&pxe) {
-            None
-        } else {
-            Some(read_level(PageTableLevel::Ppe, ppe_address)?)
-        };
-        let pde = match &ppe {
-            Some(ppe) if !ends(ppe) => Some(read_level(PageTableLevel::Pde, pde_address)?),
-            _ => None,
-        };
-        let pte = match &pde {
-            Some(pde) if !ends(pde) => Some(read_level(PageTableLevel::Pte, pte_address)?),
-            _ => None,
-        };
-
+                attributes,
+            });
+            if ends {
+                break;
+            }
+        }
         Ok(PteWalk {
             address,
             dtb,
-            pxe,
-            ppe,
-            pde,
-            pte,
+            levels,
             non_resident: self.non_resident(dtb, address),
         })
     }
@@ -358,4 +373,31 @@ fn scan_ptov_table(
         }
     }
     visited.remove(&table);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Windows 7's fixed x64 self-map, whose bases and entries are well known.
+    #[test]
+    fn self_map_entries_are_the_recursive_slots_of_each_level() {
+        let map = PteSelfMap::new(0xFFFF_F680_0000_0000, Arch::Amd64.paging());
+        let entries: Vec<_> = map.entries(0xFFFF_F800_0123_4567).collect();
+        assert_eq!(
+            entries,
+            [
+                (PageTableLevel::Pxe, VirtAddr(0xFFFF_F6FB_7DBE_DF80)),
+                (PageTableLevel::Ppe, VirtAddr(0xFFFF_F6FB_7DBF_0000)),
+                (PageTableLevel::Pde, VirtAddr(0xFFFF_F6FB_7E00_0048)),
+                (PageTableLevel::Pte, VirtAddr(0xFFFF_F6FC_0000_91A0)),
+            ]
+        );
+        // A user address indexes from the bottom of each array.
+        assert_eq!(
+            map.entries(0x1000).next(),
+            Some((PageTableLevel::Pxe, VirtAddr(0xFFFF_F6FB_7DBE_D000)))
+        );
+        assert_eq!(map.extent(), (0xFFFF_F680_0000_0000, 1 << 39));
+    }
 }

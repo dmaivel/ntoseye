@@ -37,9 +37,6 @@ const PAGE_WRITECOMBINE: u32 = 0x400;
 /// The MM protection a software PTE of a decommitted page carries
 /// (`MM_DECOMMIT`: guard with no access).
 const MM_DECOMMIT: u64 = 0x10;
-const PTE_TABLE_SPAN: u64 = 1 << 21;
-const PDE_TABLE_SPAN: u64 = 1 << 30;
-const PPE_TABLE_SPAN: u64 = 1 << 39;
 /// Page-table steps one region scan may take; each covers a page, or a
 /// whole table's span when the table above it is absent. Past it the region
 /// size is a lower bound.
@@ -265,24 +262,22 @@ impl PageWalk<'_> {
     /// in the page file makes the page an `Err`.
     fn state_at(&mut self, va: u64) -> Result<(PageState, u64)> {
         let span_end = |span: u64| (va | (span - 1)).saturating_add(1);
-        let [pxe, ppe, pde, pte] = self.self_map.entries(va);
-        let mut entry = 0;
-        for (address, span) in [
-            (pxe, PPE_TABLE_SPAN),
-            (ppe, PDE_TABLE_SPAN),
-            (pde, PTE_TABLE_SPAN),
-        ] {
+        let mut entries = self.self_map.entries(va);
+        let Some((_, pte)) = entries.next_back() else {
+            return self.untouched(va, va.saturating_add(PAGE_SIZE as u64));
+        };
+        // The tables above the PTE's, each entry mapping `1 << shift` bytes.
+        let (mut entry, mut span) = (0, PAGE_SIZE as u64);
+        for (level, address) in entries {
             entry = self.memory.read(address)?;
+            span = 1 << level.shift();
             if entry == 0 {
                 return self.untouched(va, span_end(span));
             }
         }
         // The PDE: valid and large, it maps the whole span.
         if self.format.maps_large_page(entry) {
-            return Ok((
-                Some(self.format.valid_protection(entry)),
-                span_end(PTE_TABLE_SPAN),
-            ));
+            return Ok((Some(self.format.valid_protection(entry)), span_end(span)));
         }
         let table = pte.0 & !(PAGE_SIZE as u64 - 1);
         if self.table.as_ref().is_none_or(|(at, _)| *at != table) {

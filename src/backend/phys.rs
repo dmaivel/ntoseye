@@ -30,9 +30,10 @@ pub struct PhysMem {
     /// The first bit of a software PTE's page-file number, set when a kernel
     /// is found (see [`Self::set_page_file_low`]).
     page_file_low: AtomicU32,
-    /// The guest kernel's `MmPteBase`, 0 until a kernel is found (see
-    /// [`Self::set_pte_self_map`]).
+    /// The guest kernel's `MmPteBase` and the self-map's length, 0 until
+    /// a kernel is found (see [`Self::set_pte_self_map`]).
     pte_self_map: AtomicU64,
+    pte_self_map_len: AtomicU64,
     /// The guest kernel's mapped-view lookup, set when a kernel is found (see
     /// [`Self::set_section_views`]).
     section_views: Mutex<Option<Arc<SectionViews>>>,
@@ -281,6 +282,7 @@ impl PhysMem {
             invalid_pte_mask: AtomicU64::new(0),
             page_file_low: AtomicU32::new(PAGE_FILE_LOW),
             pte_self_map: AtomicU64::new(0),
+            pte_self_map_len: AtomicU64::new(0),
             section_views: Mutex::new(None),
             compressed_pages: StoreSlot::new(),
             store_pages: Mutex::default(),
@@ -415,13 +417,14 @@ impl PhysMem {
     /// is kernel space that maps whichever root it is read through, so a
     /// target's virtual-memory API, which reads kernel space through its own
     /// current root, cannot serve it for another root.
-    pub fn set_pte_self_map(&self, pte_base: u64) {
+    pub fn set_pte_self_map(&self, pte_base: u64, len: u64) {
+        self.pte_self_map_len.store(len, Ordering::Release);
         self.pte_self_map.store(pte_base, Ordering::Release);
     }
 
     fn in_pte_self_map(&self, addr: VirtAddr) -> bool {
         let base = self.pte_self_map.load(Ordering::Acquire);
-        base != 0 && addr.0.wrapping_sub(base) < 1 << 39
+        base != 0 && addr.0.wrapping_sub(base) < self.pte_self_map_len.load(Ordering::Acquire)
     }
 
     /// Record the guest kernel's mapped-view lookup for this boot, or `None`

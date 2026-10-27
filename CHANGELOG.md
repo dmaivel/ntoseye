@@ -13,6 +13,12 @@ Keeping this file:
 - To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes, under the tag as the release title.
 -->
 
+## Unreleased
+
+### Changed
+
+- `PteWalk`, the SDK's `!pte` result, lists the entries the walk read as `levels`, root first, as `VtopDetail` does, in place of its `pxe`, `ppe`, `pde` and `pte` fields.
+
 ## v0.52.0 (2026-10-25)
 
 Support for 64-bit Windows 7, 8.1, Vista and XP ([platform support](https://ntoseye.com/#platform-support)), reads of memory Windows compressed into its memory-compression store (on x64 and ARM64), scripted runs with `-c` and `--batch`, UI improvements and many bug fixes. Stops and `u` now show where the code goes: the instructions around the stop in its function, jump and call targets by name, the jumps between them drawn as arrows, and whether the next one is taken; a bugcheck stop shows the registers the faulting instruction ran with, and its stack starts at the frame that faulted.

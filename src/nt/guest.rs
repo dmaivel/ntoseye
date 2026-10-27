@@ -15,6 +15,7 @@ use crate::{
         pe::{self, PeImage, headers::CodeView},
         symbols::{ImageFetch, SymbolStore},
         target::ListTermination,
+        target::mm::PteSelfMap,
         target::object::DriverObjectInfo,
     },
 };
@@ -376,7 +377,8 @@ impl Guest {
                 compressed_pages(&mut kernel, &mut layout, interrupt)
             }));
         if let Ok(pte_base) = ntoskrnl.pte_base() {
-            ntoskrnl.phys.set_pte_self_map(pte_base.0);
+            let (base, len) = PteSelfMap::new(pte_base.0, arch.paging()).extent();
+            ntoskrnl.phys.set_pte_self_map(base, len);
         }
         Self {
             kernel_transition_code: OnceLock::new(),
