@@ -276,7 +276,10 @@ fn object_info_fields(info: &HandleObjectInfo) -> Vec<(&'static str, String)> {
             let mut fields = vec![
                 ("mutex", state.to_string()),
                 ("count", mutant.current_count.to_string()),
-                ("abandoned", if mutant.abandoned { "yes" } else { "no" }.to_string()),
+                (
+                    "abandoned",
+                    if mutant.abandoned { "yes" } else { "no" }.to_string(),
+                ),
             ];
             if let (Some(process), Some(thread)) = (mutant.owner_process_id, mutant.owner_thread_id)
                 && (process, thread) != (0, 0)

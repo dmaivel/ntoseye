@@ -899,8 +899,8 @@ impl ReplState<'_> {
                 } else if let Ok(ExprValue::Raw {
                     address: Some(address),
                     ..
-                }) = Expr::parse(&parsed.type_name)
-                    .and_then(|expr| expr.evaluate(&self.ctx.target))
+                }) =
+                    Expr::parse(&parsed.type_name).and_then(|expr| expr.evaluate(&self.ctx.target))
                 {
                     error!("{}", untyped_symbol_message(&parsed.type_name, address));
                 } else {

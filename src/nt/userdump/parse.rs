@@ -1222,11 +1222,8 @@ fn parse_handle_data(data: &[u8], stream: &[u8], notes: &mut Vec<String>) -> Vec
         let object_info = if entry_size as usize
             >= size_of::<RawHandleDescriptor>() + size_of::<RawHandleObjectRvas>()
         {
-            read_at::<RawHandleObjectRvas>(
-                stream,
-                offset + size_of::<RawHandleDescriptor>() as u64,
-            )
-            .and_then(|rvas| handle_object_info(data, rvas.object_info_rva, handle, notes))
+            read_at::<RawHandleObjectRvas>(stream, offset + size_of::<RawHandleDescriptor>() as u64)
+                .and_then(|rvas| handle_object_info(data, rvas.object_info_rva, handle, notes))
         } else {
             None
         };
@@ -1273,21 +1270,27 @@ fn handle_object_info(
             break;
         };
         let decoded = match kind {
-            MINI_THREAD_INFORMATION_1 => read_at::<RawThreadBasicInformation>(bytes, 0).map(|raw| {
-                HandleObjectInfo::Thread(HandleThreadInfo {
-                    exit_status: raw.exit_status,
-                    teb: raw.teb_base_address,
-                    process_id: raw.unique_process,
-                    thread_id: raw.unique_thread,
-                    affinity: raw.affinity_mask,
-                    priority: raw.priority,
-                    base_priority: raw.base_priority,
+            MINI_THREAD_INFORMATION_1 => {
+                read_at::<RawThreadBasicInformation>(bytes, 0).map(|raw| {
+                    HandleObjectInfo::Thread(HandleThreadInfo {
+                        exit_status: raw.exit_status,
+                        teb: raw.teb_base_address,
+                        process_id: raw.unique_process,
+                        thread_id: raw.unique_thread,
+                        affinity: raw.affinity_mask,
+                        priority: raw.priority,
+                        base_priority: raw.base_priority,
+                    })
                 })
-            }),
+            }
             // The second form is `PROCESS_EXTENDED_BASIC_INFORMATION`: its
             // size, then the basic information.
             MINI_PROCESS_INFORMATION_1 | MINI_PROCESS_INFORMATION_2 => {
-                let at = if kind == MINI_PROCESS_INFORMATION_2 { 8 } else { 0 };
+                let at = if kind == MINI_PROCESS_INFORMATION_2 {
+                    8
+                } else {
+                    0
+                };
                 read_at::<RawProcessBasicInformation>(bytes, at).map(|raw| {
                     HandleObjectInfo::Process(HandleProcessInfo {
                         exit_status: raw.exit_status,
@@ -1345,12 +1348,14 @@ fn handle_object_info(
                     })
                 })
             }
-            MINI_SEMAPHORE_INFORMATION_1 => read_at::<[i32; 2]>(bytes, 0).map(|[current, maximum]| {
-                HandleObjectInfo::Semaphore(HandleSemaphoreInfo {
-                    current_count: current,
-                    maximum_count: maximum,
+            MINI_SEMAPHORE_INFORMATION_1 => {
+                read_at::<[i32; 2]>(bytes, 0).map(|[current, maximum]| {
+                    HandleObjectInfo::Semaphore(HandleSemaphoreInfo {
+                        current_count: current,
+                        maximum_count: maximum,
+                    })
                 })
-            }),
+            }
             _ => Some(HandleObjectInfo::Other(HandleOtherInfo { kind, size })),
         };
         match decoded {

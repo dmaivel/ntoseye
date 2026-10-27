@@ -1085,4 +1085,3 @@ pub struct PteWalk {
     /// memory.
     pub non_resident: Option<NonResident>,
 }
-
