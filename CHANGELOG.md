@@ -13,7 +13,10 @@ Keeping this file:
 
 - `!handle <handle> f` on a user-mode minidump shows the object information the dump records: a thread's or process's IDs, TEB or PEB, priority and exit status, an event's, mutant's or semaphore's state, and a section's size. The SDK has it as `UserHandle.object_info`.
 
-### Changed", "### Fixed" and "### Removed", in that order, leaving out empty groups. A fix to something not yet released is no "Fixed" line; amend the line that added it. A change that breaks scripts starts with "**Breaking:**" and comes first in its group.
+### Changed", "### Fixed" and "
+- `lm v` and `vertarget` give the PDB age the image names its PDB by, as symbol stores file it, where they gave the age the PDB file itself records, which can be higher.
+
+### Removed", in that order, leaving out empty groups. A fix to something not yet released is no "Fixed" line; amend the line that added it. A change that breaks scripts starts with "**Breaking:**" and comes first in its group.
 - A release with a theme opens with one or two sentences before the groups, saying what users can now do. A release without one goes straight to the groups.
 - Say what users can now do, or what went wrong and no longer does, not how. Name commands and SDK APIs in backticks as users type them.
 - Link only with absolute https://ntoseye.com/... URLs. The same text is shown in the GitHub release, in this file on GitHub, and on the docs site, which each resolve a relative link differently.

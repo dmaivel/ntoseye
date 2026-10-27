@@ -461,6 +461,7 @@ impl SymbolStore {
     }
 
     pub fn ensure_pdb_loaded(&self, expected: PdbIdentity, path: &Path) -> Result<()> {
+        self.image_ages.entry(expected.guid).or_insert(expected.age);
         if let Some(age) = self.pdb_ages.get(&expected.guid) {
             let validation = expected
                 .matches(PdbIdentity {

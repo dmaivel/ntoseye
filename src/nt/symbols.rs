@@ -195,6 +195,10 @@ pub struct SymbolStore {
 
     mmaps: DashMap<u128, Arc<Mmap>>,
     pdb_ages: DashMap<u128, u32>,
+    /// GUID -> the age the image's CodeView record names its PDB by, which
+    /// a symbol store files the PDB under. The PDB's own (`pdb_ages`) can be
+    /// higher: a later link may update a PDB the image still matches.
+    image_ages: DashMap<u128, u32>,
     /// GUID -> the local PDB file it was loaded from.
     pdb_paths: DashMap<u128, PathBuf>,
     /// GUID -> pointer width of the PDB's target machine (see
@@ -980,6 +984,7 @@ impl SymbolStore {
             pdbs: DashMap::new(),
             mmaps: DashMap::new(),
             pdb_ages: DashMap::new(),
+            image_ages: DashMap::new(),
             pdb_paths: DashMap::new(),
             pdb_pointer_sizes: DashMap::new(),
             index_build_results: DashMap::new(),
@@ -1454,6 +1459,7 @@ impl SymbolStore {
             }
             self.mmaps.remove(&guid);
             self.pdb_ages.remove(&guid);
+            self.image_ages.remove(&guid);
             self.pdb_paths.remove(&guid);
             self.index_build_results.remove(&guid);
             self.index.remove(&guid);
@@ -1564,9 +1570,14 @@ impl SymbolStore {
         }
     }
 
+    /// The identity the module's image names its PDB by: the GUID and the
+    /// image's age, as a symbol store files it.
     pub fn module_pdb_identity(&self, dtb: Dtb, base_address: VirtAddr) -> Option<PdbIdentity> {
         let module = self.modules.get(&Self::module_key(dtb, base_address))?;
-        let age = *self.pdb_ages.get(&module.guid)?;
+        let age = match self.image_ages.get(&module.guid) {
+            Some(age) => *age,
+            None => *self.pdb_ages.get(&module.guid)?,
+        };
         Some(PdbIdentity {
             guid: module.guid,
             age,
