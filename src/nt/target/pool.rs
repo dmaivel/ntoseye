@@ -57,6 +57,75 @@ pub struct PoolLayout {
     pub(crate) big_pool_uses_struct: bool,
     pub(crate) big_pool_has_pool_type: bool,
     pub(crate) big_pool_has_slush: bool,
+    /// How a segment-heap kernel encodes its VS chunk headers; `None` on a
+    /// kernel without the segment heap, or whose PDB lacks its types.
+    vs_chunks: Option<VsChunkHeaders>,
+}
+
+/// What decodes the `_HEAP_VS_CHUNK_HEADER` that precedes each block the
+/// segment heap's variable-size allocator hands out. Its `Sizes` are stored
+/// XORed with `nt!RtlpHpHeapGlobals.HeapKey` and the header's own address,
+/// so to a scan its bytes are random, and can read as a `_POOL_HEADER` whose
+/// block covers the real one behind it. Decoded, it says where the real
+/// block is.
+struct VsChunkHeaders {
+    /// `_HEAP_VS_CHUNK_HEADER_SIZE`, the layout of the decoded `Sizes`.
+    sizes: Arc<TypeInfo>,
+    /// Where `Sizes` sits in the chunk header.
+    sizes_offset: u64,
+    /// The size of the chunk header, which is also the unit of the chunk's
+    /// size.
+    header_size: u64,
+    heap_key: u64,
+}
+
+impl VsChunkHeaders {
+    /// Whether the chunk header at `chunk`, whose bytes begin `bytes`, is an
+    /// allocated chunk's that holds exactly the pool block `block` after it.
+    fn holds(&self, chunk: VirtAddr, bytes: &[u8], block: &PoolHeader) -> bool {
+        let at = self.sizes_offset as usize;
+        let Some(encoded) = bytes
+            .get(at..at + self.sizes.size)
+            .filter(|encoded| encoded.len() <= 8)
+        else {
+            return false;
+        };
+        let decoded = (le_uint(encoded) ^ self.heap_key ^ chunk.0).to_le_bytes();
+        let field = |name| pool_field_from_buf(&self.sizes, &decoded[..encoded.len()], name);
+        field("Allocated").is_some_and(|allocated| allocated != 0)
+            && field("UnsafeSize").is_some_and(|units| {
+                units.checked_mul(self.header_size) == block.size.checked_add(self.header_size)
+            })
+    }
+}
+
+/// The segment heap's VS chunk header encoding, from the kernel's PDB and
+/// `nt!RtlpHpHeapGlobals`.
+fn vs_chunk_headers(debugger: &Target) -> Option<VsChunkHeaders> {
+    let find = |name| {
+        debugger
+            .symbols
+            .find_type_across_modules(debugger.kernel_dtb(), name)
+    };
+    let globals = find("_RTLP_HP_HEAP_GLOBALS")?;
+    let chunk = find("_HEAP_VS_CHUNK_HEADER")?;
+    let sizes = find("_HEAP_VS_CHUNK_HEADER_SIZE")?;
+    let key = globals.field("HeapKey").ok()?;
+    let mut bytes = [0u8; 8];
+    let bytes = bytes.get_mut(..key.size as usize)?;
+    debugger
+        .kernel_address_space()
+        .read_bytes(
+            kernel_symbol_address(debugger, "RtlpHpHeapGlobals").ok()? + u64::from(key.offset),
+            bytes,
+        )
+        .ok()?;
+    Some(VsChunkHeaders {
+        sizes_offset: chunk.field_offset("Sizes").ok()?,
+        header_size: chunk.size as u64,
+        heap_key: le_uint(bytes),
+        sizes,
+    })
 }
 
 pub fn pool_layout(debugger: &Target) -> Result<PoolLayout> {
@@ -107,6 +176,7 @@ pub fn pool_layout(debugger: &Target) -> Result<PoolLayout> {
         big_pool_uses_struct,
         big_pool_has_pool_type,
         big_pool_has_slush,
+        vs_chunks: vs_chunk_headers(debugger),
     })
 }
 
@@ -992,6 +1062,35 @@ pub fn pool_page_blocks(layout: &PoolLayout, base: VirtAddr, page: &[u8]) -> Vec
         synthetic_free: true,
     };
     let candidates = pool_header_candidates(layout, base, page);
+    // On a segment-heap page, a block whose VS chunk header vouches for it
+    // is real, and a candidate that runs into its chunk (the chunk header
+    // itself, for one) is data that reads as a header.
+    let chunks: Vec<(u64, VirtAddr, u64)> = layout
+        .vs_chunks
+        .as_ref()
+        .map(|vs| {
+            candidates
+                .iter()
+                .filter_map(|h| {
+                    let chunk = h.header.0.checked_sub(vs.header_size)?;
+                    let bytes = page.get(usize::try_from(chunk.checked_sub(base.0)?).ok()?..)?;
+                    vs.holds(VirtAddr(chunk), bytes, h).then_some((
+                        chunk,
+                        h.header,
+                        h.header.0 + h.size,
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let candidates: Vec<PoolHeader> = candidates
+        .into_iter()
+        .filter(|h| {
+            chunks.iter().all(|&(start, header, end)| {
+                h.header == header || h.header.0 + h.size <= start || h.header.0 >= end
+            })
+        })
+        .collect();
     let mut blocks = Vec::new();
     let mut cursor = base;
     for (i, h) in candidates.iter().copied().enumerate() {
@@ -1008,21 +1107,17 @@ pub fn pool_page_blocks(layout: &PoolLayout, base: VirtAddr, page: &[u8]) -> Vec
             && let Some(next) = candidates.get(i + 1)
             && next.header.0 > h.header.0.saturating_add(POOL_ALIGN)
         {
-            let free_size = next
-                .header
-                .0
-                .saturating_sub(h.header.0.saturating_add(POOL_ALIGN));
-            blocks.push(gap_free_block(h.header, free_size));
-            cursor = VirtAddr(h.header.0.saturating_add(free_size));
+            blocks.push(gap_free_block(h.header, next.header.0 - h.header.0));
+            cursor = next.header;
         } else {
-            if h.header > cursor {
-                let free_size = h
-                    .header
-                    .0
-                    .saturating_sub(cursor.0.saturating_add(POOL_ALIGN));
-                if free_size >= POOL_ALIGN * 2 {
-                    blocks.push(gap_free_block(cursor, free_size));
-                }
+            // A gap between two blocks is free. One narrower than three
+            // units is a segment-heap chunk header and slack before the
+            // next block. What precedes the first block is no block of the
+            // page: a subsegment's header, or the tail of a block that
+            // began on the page before.
+            let gap = h.header.0 - cursor.0;
+            if !blocks.is_empty() && gap >= POOL_ALIGN * 3 {
+                blocks.push(gap_free_block(cursor, gap));
             }
             blocks.push(h);
             cursor = VirtAddr(h.header.0.saturating_add(h.size));
@@ -1425,7 +1520,7 @@ pub fn annotate_near_symbol(debugger: &Target, addr: VirtAddr) -> Option<String>
 
 #[cfg(test)]
 mod tests {
-    use super::{tag_looks_printable, tag_string};
+    use super::*;
 
     /// Windows 7 sets the protected bit in an object's tag: 'Proc' is
     /// stored 0xe36f7250, and still reads, and passes, as Proc.
@@ -1434,5 +1529,107 @@ mod tests {
         assert_eq!(tag_string(0xe36f_7250), "Proc");
         assert!(tag_looks_printable(0xe36f_7250));
         assert!(!tag_looks_printable(0x8000_0001));
+    }
+
+    const BASE: VirtAddr = VirtAddr(0xffff_d00c_db19_4000);
+
+    /// An x64 `_POOL_HEADER`, read by its fixed offsets, and, given a heap
+    /// key, the segment heap's VS chunk header.
+    fn layout(heap_key: Option<u64>) -> PoolLayout {
+        let ulong_bits = |offset, pos, len| FieldInfo {
+            offset,
+            size: 4,
+            type_data: ParsedType::Bitfield {
+                underlying: Box::new(ParsedType::Primitive("ULONG".into())),
+                pos,
+                len,
+            },
+        };
+        let sizes = TypeInfo {
+            name: "_HEAP_VS_CHUNK_HEADER_SIZE".into(),
+            size: 8,
+            fields: [
+                ("UnsafeSize".to_string(), ulong_bits(0, 16, 16)),
+                ("Allocated".to_string(), ulong_bits(4, 16, 8)),
+            ]
+            .into_iter()
+            .collect(),
+            pointer_size: 8,
+        };
+        PoolLayout {
+            pool_header: Arc::new(TypeInfo {
+                name: "_POOL_HEADER".into(),
+                size: 0x10,
+                fields: Default::default(),
+                pointer_size: 8,
+            }),
+            header_size: 0x10,
+            pool_tag_offset: 4,
+            pool_header_uses_struct: false,
+            big_pool_type: None,
+            big_pool_uses_struct: false,
+            big_pool_has_pool_type: false,
+            big_pool_has_slush: false,
+            vs_chunks: heap_key.map(|heap_key| VsChunkHeaders {
+                sizes: Arc::new(sizes),
+                sizes_offset: 0,
+                header_size: 0x10,
+                heap_key,
+            }),
+        }
+    }
+
+    fn put_header(page: &mut [u8], offset: usize, size: u64, pool_type: u8, tag: &[u8; 4]) {
+        page[offset..offset + 4].copy_from_slice(&[0, 0, (size / POOL_ALIGN) as u8, pool_type]);
+        page[offset + 4..offset + 8].copy_from_slice(tag);
+    }
+
+    fn blocks(layout: &PoolLayout, page: &[u8]) -> Vec<(u64, u64, bool)> {
+        pool_page_blocks(layout, BASE, page)
+            .iter()
+            .map(|block| (block.header.0 - BASE.0, block.size, block.synthetic_free))
+            .collect()
+    }
+
+    /// Each block of a VS subsegment follows its chunk header, whose encoded
+    /// bytes here read as a header (protected tag `+mPk`) whose block covers
+    /// the real one, as does UTF-16 text before it. Decoded, the chunk
+    /// header vouches for the real block, and neither covers it.
+    #[test]
+    fn a_vs_chunk_header_vouches_for_its_block() {
+        let mut page = vec![0u8; POOL_PAGE_SIZE as usize];
+        page[0x20..0x28].copy_from_slice(&[0, 0, 0x53, 0, b'y', 0, b's', 0]);
+        let chunk = 0xb0;
+        let encoded = [0xbc, 0x9a, 0x51, 0x1a, b'+', b'm', b'P', 0xeb];
+        page[chunk..chunk + 8].copy_from_slice(&encoded);
+        put_header(&mut page, 0xc0, 0xe00, 2, b"Proc");
+        // UnsafeSize 0xe1 units (the chunk header and the block), Allocated.
+        let sizes = 0xe1 << 16 | 1 << 48;
+        let key = u64::from_le_bytes(encoded) ^ sizes ^ (BASE.0 + chunk as u64);
+        assert_eq!(blocks(&layout(Some(key)), &page), [(0xc0, 0xe00, false)]);
+        // A chunk header one unit short of the block vouches for nothing.
+        assert_eq!(
+            blocks(&layout(Some(key ^ 1 << 16)), &page),
+            [(0x20, 0x530, false)]
+        );
+    }
+
+    /// The space between two blocks is a free block reaching the next
+    /// header; what precedes the first (an LFH subsegment's header) is none.
+    #[test]
+    fn gaps_between_blocks_are_free_and_reach_the_next_header() {
+        let mut page = vec![0u8; POOL_PAGE_SIZE as usize];
+        for offset in [0xc0, 0x120, 0x200] {
+            put_header(&mut page, offset, 0x60, 3, b"NtFd");
+        }
+        assert_eq!(
+            blocks(&layout(None), &page),
+            [
+                (0xc0, 0x60, false),
+                (0x120, 0x60, false),
+                (0x180, 0x80, true),
+                (0x200, 0x60, false),
+            ]
+        );
     }
 }

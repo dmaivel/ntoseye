@@ -6,6 +6,9 @@
 //! Each 16-byte step past the pool header is tried as the object header: it
 //! is the one whose decoded `TypeIndex` is the Process (or Thread) type's and
 //! whose body starts with that dispatcher-object type.
+//! One too big for a small-pool block (the System process's, for one) is a
+//! big-pool allocation instead, with no pool header: the big-page table
+//! names its tag, and the steps start at the allocation.
 
 use std::ops::ControlFlow;
 
@@ -16,7 +19,8 @@ use crate::base::types::VirtAddr;
 use crate::nt::layout::StructRef;
 use crate::nt::target::Target;
 use crate::nt::target::pool::{
-    NONPAGED_POOL, pool_header_tags, pool_layout, pool_range, scan_present_pool_pages,
+    NONPAGED_POOL, pool_header_tags, pool_layout, pool_range, scan_big_pool_entries,
+    scan_present_pool_pages,
 };
 use ntoseye_macros::record;
 
@@ -260,46 +264,63 @@ impl Target {
             interrupted: false,
             truncated: false,
         };
-        let scan = scan_present_pool_pages(self, region_start, region_end, |page_va, page| {
-            for (offset, tag) in pool_header_tags(&layout, page) {
-                let start = page_va + offset + layout.header_size;
-                match (tag & 0x7fff_ffff, query.process_type, query.thread_type) {
-                    (PROCESS_TAG, Some(object_type), _) => {
-                        let Some((header, counts)) =
-                            query.find(&memory, start, object_type, PROCESS_OBJECT)
-                        else {
-                            continue;
-                        };
+        // Take the allocation tagged `tag` whose object area starts at
+        // `start`; true once a result list is full.
+        let mut visit = |tag: u32, start: VirtAddr| {
+            match (tag & 0x7fff_ffff, query.process_type, query.thread_type) {
+                (PROCESS_TAG, Some(object_type), _) => {
+                    if let Some((header, counts)) =
+                        query.find(&memory, start, object_type, PROCESS_OBJECT)
+                    {
                         match self.zombie_process(header + query.body_offset, counts) {
                             Ok(Some(zombie)) => detail.processes.push(zombie),
                             Ok(None) => detail.live_processes += 1,
                             Err(_) => {}
                         }
                     }
-                    (THREAD_TAG, _, Some(object_type)) => {
-                        let Some((header, counts)) =
-                            query.find(&memory, start, object_type, THREAD_OBJECT)
-                        else {
-                            continue;
-                        };
+                }
+                (THREAD_TAG, _, Some(object_type)) => {
+                    if let Some((header, counts)) =
+                        query.find(&memory, start, object_type, THREAD_OBJECT)
+                    {
                         match self.zombie_thread(header + query.body_offset, counts) {
                             Ok(Some(zombie)) => detail.threads.push(zombie),
                             Ok(None) => detail.live_threads += 1,
                             Err(_) => {}
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
-            if detail.processes.len() >= MAX_ZOMBIES || detail.threads.len() >= MAX_ZOMBIES {
+            detail.processes.len() >= MAX_ZOMBIES || detail.threads.len() >= MAX_ZOMBIES
+        };
+        let mut full = false;
+        let scan = scan_present_pool_pages(self, region_start, region_end, |page_va, page| {
+            for (offset, tag) in pool_header_tags(&layout, page) {
+                full |= visit(tag, page_va + offset + layout.header_size);
+            }
+            if full {
                 ControlFlow::Break(())
             } else {
                 ControlFlow::Continue(())
             }
         })?;
+        if !full && !self.interrupted() {
+            scan_big_pool_entries(
+                self,
+                layout.big_pool_type.as_deref(),
+                layout.big_pool_uses_struct,
+                layout.big_pool_has_pool_type,
+                layout.big_pool_has_slush,
+                |entry| {
+                    full = visit(entry.tag, entry.va);
+                    full
+                },
+            );
+        }
         detail.scanned_pages = scan.pages;
         detail.interrupted = self.interrupted();
-        detail.truncated = scan.stopped_at.is_some() && !detail.interrupted;
+        detail.truncated = full;
         Ok(detail)
     }
 

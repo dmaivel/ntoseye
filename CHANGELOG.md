@@ -25,6 +25,9 @@ Keeping this file:
 - `.frame`, `.ecxr`, `.cxr` and `!for_each_frame` show a frame with no symbol as module+offset, as `k` does, not as a bare address.
 - `~*k` keeps the context `.ecxr` or `.frame` selected, and `~` takes `k`'s variants and arguments (`~*kv`, `~0k 3`).
 - `.fnent` and `uf` decode JIT-compiled code from a dump's dynamic function tables, as the stack walk does, where they said the address was in no module.
+- `!poolfind` finds every allocated block on segment-heap pool pages, where it missed about one in eight (20 of 155 processes for `!poolfind Proc`).
+- `!pool` on a segment-heap page no longer lists the page's own header as a free first block, and sizes free gaps to the next block, not 0x10 short of it.
+- `!zombies` also scans big-pool allocations, so it no longer leaves out processes such as System from its live count.
 
 ## Unreleased
 
