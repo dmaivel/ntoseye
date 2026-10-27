@@ -158,7 +158,9 @@ impl Session {
     /// Read guest virtual memory in the inspection address space
     /// ([`Target::current_dtb`](crate::nt::target::Target::current_dtb)) with our
     /// own breakpoint patch bytes masked back to the original code, so every
-    /// host (REPL, MCP, SDK) sees the same bytes the guest would run.
+    /// host (REPL, MCP, SDK) sees the same bytes the guest would run. What a
+    /// user-mode minidump did not capture of a module's image is read from
+    /// its image file ([`Target::read_image_backed`](crate::nt::target::Target::read_image_backed)).
     pub fn read_masked(&self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
         self.read_masked_in(self.target.current_dtb(), addr, buf)
     }
@@ -191,22 +193,32 @@ impl Session {
     /// [`Self::read_masked`] in the address space `dtb` rather than the
     /// inspection one, for values that belong to a particular stack frame.
     pub fn read_masked_in(&self, dtb: Dtb, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
-        self.target.address_space(dtb).read_bytes(addr, buf)?;
-        if self.target.symbols.is_secure_root(dtb) {
-            return Ok(());
-        }
-        self.mask_code(addr, buf, dtb);
+        self.target.read_image_backed(dtb, addr, buf)?;
+        self.mask_breakpoints(dtb, addr, buf);
         Ok(())
+    }
+
+    /// Put the code this session's breakpoints replaced back into `buf`, read
+    /// at `addr` in `dtb`'s address space ([`Self::mask_code`]), except in a
+    /// VTL1 address space.
+    fn mask_breakpoints(&self, dtb: Dtb, addr: VirtAddr, buf: &mut [u8]) {
+        if !self.target.symbols.is_secure_root(dtb) {
+            self.mask_code(addr, buf, dtb);
+        }
     }
 
     /// Compare `module`'s executable sections against its cached image
     /// (`!chkimg`), with this session's own breakpoints (and the bugcheck
-    /// trap) masked back to the code they replaced.
+    /// trap) masked back to the code they replaced. The code is what the
+    /// target holds, never the image file a dump's hole would be read from
+    /// for display, which would compare the file with itself.
     pub fn check_image(&self, module: &str, include_diffs: bool) -> Result<ImageCheck> {
         let dtb = self.target.process_dtb();
         self.target
             .check_image(module, include_diffs, &|address, buf| {
-                self.read_masked_in(dtb, address, buf)
+                self.target.address_space(dtb).read_bytes(address, buf)?;
+                self.mask_breakpoints(dtb, address, buf);
+                Ok(())
             })
     }
 

@@ -42,6 +42,7 @@ Keeping this file:
 - `dx` and `dt` on a symbol with no type, such as `nt!KeNumberProcessors`, say so and show the cast that reads it, where `dx` printed the symbol's address as a negative number.
 - On a minidump that holds no ntdll data, `!cs` reports that the critical-section list cannot be read, where it listed none, and `!chkimg` says the code is not in the dump and nothing was compared, where it said the section was paged out and found 0 mismatches.
 - On a dump, `status` no longer suggests an execute breakpoint or `t` for a page that is not in memory, and `dt` lists a flags word before the bitfields it holds.
+- On a minidump that holds no module memory (MiniDumpNormal), `u`, `uf`, `db`, `!dh` and `!lmi` read a module's code and headers from its image file, relocated to where it was loaded, as the Windows debugger does, where they said the address was not in the dump; `!chkimg` still compares only what the dump holds.
 
 ## Unreleased
 

@@ -367,9 +367,10 @@ impl Target {
     }
 
     /// The image mapped at `base` in `dtb`'s address space and its decoded
-    /// headers.
+    /// headers, what a user-mode minidump did not capture of it read from
+    /// its image file ([`Self::image_backed_pe_image`]).
     fn decoded_image(&self, dtb: Dtb, base: VirtAddr) -> Result<(PeImage, PeHeaders)> {
-        let image = self.mapped_pe_image(dtb, base).map_err(|error| {
+        let image = self.image_backed_pe_image(dtb, base).map_err(|error| {
             Error::DebugInfo(format!("cannot read PE headers at {:#x}: {error}", base.0))
         })?;
         let headers = decode_headers(image.headers()).map_err(|error| {

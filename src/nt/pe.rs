@@ -12,11 +12,14 @@ use crate::base::{
 use ntoseye_macros::record;
 use pelite::{
     PeFile, PeView, Wrap,
-    image::{IMAGE_DIRECTORY_ENTRY_EXPORT, IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG},
+    image::{
+        IMAGE_DIRECTORY_ENTRY_BASERELOC, IMAGE_DIRECTORY_ENTRY_EXPORT, IMAGE_DIRECTORY_ENTRY_IAT,
+        IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG, IMAGE_SCN_MEM_WRITE,
+    },
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, hash_map::Entry};
-use std::ops::{Deref, DerefMut};
+use std::ops::{Deref, DerefMut, Range};
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
@@ -230,6 +233,139 @@ impl PeImage {
         .ok()
         .flatten()
     }
+
+    /// Fill `buf` with the bytes at `rva` of this image, an image file
+    /// ([`read_pe_image_from_file`]), as the loader maps it at `base`:
+    /// relocated there, with the header's `ImageBase` rewritten to say so.
+    /// Only bytes that loading leaves as the file has them are read: the
+    /// headers and the sections the image does not write, less what the
+    /// loader fills in ([`Self::loader_written`]). Returns how many leading
+    /// bytes of `buf` were filled; fewer than its length means the next byte
+    /// is not one of them.
+    pub fn read_loaded(&self, base: u64, rva: usize, buf: &mut [u8]) -> usize {
+        let Ok(view) = PeView::from_bytes(self.headers()) else {
+            return 0;
+        };
+        let length = self.loaded_as_file(&view, rva).min(buf.len());
+        if length == 0 {
+            return 0;
+        }
+        // An address the loader relocates may start up to seven bytes before
+        // the range or end up to seven after it, and is relocated whole.
+        let start = rva.saturating_sub(7);
+        let end = (rva + length + 7).min(self.size);
+        let Some(window) = self.read(start, end - start) else {
+            return 0;
+        };
+        let mut window = window.into_owned();
+        let delta = base.wrapping_sub(image_base(&view));
+        if delta != 0
+            && let Some(directory) = view.data_directory().get(IMAGE_DIRECTORY_ENTRY_BASERELOC)
+            && let Some(relocations) =
+                self.read(directory.VirtualAddress as usize, directory.Size as usize)
+        {
+            apply_base_relocations(&relocations, delta, start as u32, &mut window);
+        }
+        if let Some(field) = image_base_field(self.headers()) {
+            let value = base.to_le_bytes();
+            for (at, byte) in field.zip(value) {
+                if let Some(slot) = at.checked_sub(start).and_then(|at| window.get_mut(at)) {
+                    *slot = byte;
+                }
+            }
+        }
+        buf[..length].copy_from_slice(&window[rva - start..rva - start + length]);
+        length
+    }
+
+    /// How many bytes from `rva` on loading leaves as this image file has
+    /// them (see [`Self::read_loaded`]); 0 when the byte at `rva` is not one.
+    /// A writable section holds what the process wrote, not the file's
+    /// values. A section is mapped to the next multiple of the section
+    /// alignment, its bytes past the file's zero.
+    fn loaded_as_file(&self, view: &PeView<'_>, rva: usize) -> usize {
+        let (size_of_headers, alignment) = match view.optional_header() {
+            Wrap::T32(header) => (header.SizeOfHeaders, header.SectionAlignment),
+            Wrap::T64(header) => (header.SizeOfHeaders, header.SectionAlignment),
+        };
+        let mapped_end = |end: u32| end.next_multiple_of(alignment.max(1)) as usize;
+        let end = if rva < mapped_end(size_of_headers) {
+            mapped_end(size_of_headers)
+        } else {
+            let section = view.section_headers().iter().find_map(|section| {
+                let start = section.VirtualAddress as usize;
+                let end = mapped_end(
+                    section
+                        .VirtualAddress
+                        .saturating_add(section.VirtualSize.max(section.SizeOfRawData)),
+                );
+                (start..end)
+                    .contains(&rva)
+                    .then_some((section.Characteristics, end))
+            });
+            match section {
+                Some((characteristics, end)) if characteristics & IMAGE_SCN_MEM_WRITE == 0 => end,
+                _ => return 0,
+            }
+        };
+        let mut end = end.min(self.size);
+        for written in self.loader_written(view) {
+            if written.contains(&rva) {
+                return 0;
+            }
+            if written.start > rva {
+                end = end.min(written.start);
+            }
+        }
+        end.saturating_sub(rva)
+    }
+
+    /// The RVA ranges of this image file that the loader writes in sections
+    /// the image does not: the import address table, which it binds, and
+    /// the function pointers its load config names for the control-flow
+    /// guard checks and dispatches, which it points at the system's.
+    fn loader_written(&self, view: &PeView<'_>) -> Vec<Range<usize>> {
+        let directory = |index: usize| {
+            view.data_directory()
+                .get(index)
+                .filter(|directory| directory.VirtualAddress != 0 && directory.Size != 0)
+                .map(|directory| {
+                    let start = directory.VirtualAddress as usize;
+                    start..start + directory.Size as usize
+                })
+        };
+        let mut written: Vec<Range<usize>> =
+            directory(IMAGE_DIRECTORY_ENTRY_IAT).into_iter().collect();
+        let Some(config) = directory(IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG) else {
+            return written;
+        };
+        let (fields, width) = match view.optional_header() {
+            Wrap::T64(_) => (LOAD_CONFIG_LOADER_POINTERS, 8),
+            Wrap::T32(_) => (LOAD_CONFIG32_LOADER_POINTERS, 4),
+        };
+        let read = |at: usize, width: usize| {
+            let bytes = self.read(at, width)?;
+            let mut value = [0u8; 8];
+            value[..width].copy_from_slice(&bytes);
+            Some(u64::from_le_bytes(value))
+        };
+        let Some(size) = read(config.start, 4) else {
+            return written;
+        };
+        let base = image_base(view);
+        for field in fields {
+            if (size as usize) < field + width {
+                continue;
+            }
+            let slot = read(config.start + field, width)
+                .filter(|slot| *slot != 0)
+                .and_then(|slot| slot.checked_sub(base));
+            if let Some(slot) = slot.and_then(|slot| usize::try_from(slot).ok()) {
+                written.push(slot..slot + width);
+            }
+        }
+        written
+    }
 }
 
 impl LazyImage {
@@ -312,6 +448,15 @@ pub fn image_base(view: &PeView<'_>) -> u64 {
 const LOAD_CONFIG_CHPE_METADATA: usize = 0xc8;
 /// The same pointer in `IMAGE_LOAD_CONFIG_DIRECTORY32`, 4 bytes wide.
 const LOAD_CONFIG32_CHPE_METADATA: usize = 0x7c;
+/// The `IMAGE_LOAD_CONFIG_DIRECTORY64` fields that hold the address of a
+/// function pointer the loader fills: `GuardCFCheckFunctionPointer`,
+/// `GuardCFDispatchFunctionPointer`, `GuardRFFailureRoutineFunctionPointer`,
+/// `GuardRFVerifyStackPointerFunctionPointer`, the three XFG check and
+/// dispatch pointers, and `GuardMemcpyFunctionPointer`.
+const LOAD_CONFIG_LOADER_POINTERS: [usize; 8] =
+    [0x70, 0x78, 0xd8, 0xe8, 0x118, 0x120, 0x128, 0x138];
+/// The same fields in `IMAGE_LOAD_CONFIG_DIRECTORY32`, 4 bytes wide.
+const LOAD_CONFIG32_LOADER_POINTERS: [usize; 8] = [0x48, 0x4c, 0x84, 0x90, 0xac, 0xb0, 0xb4, 0xbc];
 /// More range entries than any image has; bounds a corrupt count.
 const MAX_CODE_RANGES: u32 = 1 << 16;
 /// `IMAGE_ARM64EC_METADATA` through `ExtraRFETable` (+0x40) and
@@ -844,24 +989,81 @@ pub fn executable_ranges<'a>(view: &impl pelite::pe64::Pe<'a>) -> Vec<(u32, u32)
 /// except in `OptionalHeader.ImageBase`, which the loader rewrites to the
 /// address it relocated the image to.
 pub fn headers_match_relocated(disk: &[u8], mapped: &[u8]) -> bool {
-    if disk.len() != mapped.len() || disk.len() < 0x40 {
+    if disk.len() != mapped.len() {
         return false;
     }
-    let e_lfanew = u32::from_le_bytes(disk[0x3c..0x40].try_into().unwrap()) as usize;
-    let optional = e_lfanew + 24;
-    let Some(magic) = disk.get(optional..optional + 2) else {
+    let Some(image_base) = image_base_field(disk) else {
         return false;
     };
-    let image_base = match u16::from_le_bytes([magic[0], magic[1]]) {
-        0x20b => optional + 24..optional + 32,
-        0x10b => optional + 28..optional + 32,
-        _ => return false,
-    };
-    if image_base.end > disk.len() {
-        return false;
-    }
     disk[..image_base.start] == mapped[..image_base.start]
         && disk[image_base.end..] == mapped[image_base.end..]
+}
+
+/// Where `OptionalHeader.ImageBase` lies in `headers`: eight bytes in a
+/// PE32+ header, four in a PE32 one.
+fn image_base_field(headers: &[u8]) -> Option<Range<usize>> {
+    let optional = (get_u32(headers, 0x3c)? as usize).checked_add(24)?;
+    let field = match get_u16(headers, optional)? {
+        0x20b => optional + 24..optional + 32,
+        0x10b => optional + 28..optional + 32,
+        _ => return None,
+    };
+    (field.end <= headers.len()).then_some(field)
+}
+
+/// `IMAGE_REL_BASED_HIGHLOW`: a 32-bit address.
+const IMAGE_REL_BASED_HIGHLOW: u16 = 3;
+/// `IMAGE_REL_BASED_DIR64`: a 64-bit address.
+const IMAGE_REL_BASED_DIR64: u16 = 10;
+
+/// Apply `relocations`, an image's base relocation directory, to `window`,
+/// the image's bytes at `rva`, for the image loaded `delta` (wrapping) above
+/// its preferred base. An address not wholly inside the window is left as
+/// it is; a caller that needs one across the window's edge widens the
+/// window.
+pub fn apply_base_relocations(relocations: &[u8], delta: u64, rva: u32, window: &mut [u8]) {
+    let start = u64::from(rva);
+    let end = start + window.len() as u64;
+    let mut cursor = 0;
+    while let (Some(page), Some(block_size)) = (
+        get_u32(relocations, cursor),
+        get_u32(relocations, cursor + 4),
+    ) {
+        let block_size = block_size as usize;
+        if block_size < 8 || block_size > relocations.len() - cursor {
+            break;
+        }
+        // A block's entries are offsets into its page, and an address at the
+        // page's last offset runs on past the page.
+        let page = u64::from(page);
+        if page < end && page + PAGE_SIZE as u64 + 8 > start {
+            for entry in relocations[cursor + 8..cursor + block_size]
+                .as_chunks::<2>()
+                .0
+            {
+                let entry = u16::from_le_bytes(*entry);
+                let width = match entry >> 12 {
+                    IMAGE_REL_BASED_DIR64 => 8,
+                    IMAGE_REL_BASED_HIGHLOW => 4,
+                    _ => continue,
+                };
+                let at = page + u64::from(entry & 0xfff);
+                if at < start || at + width > end {
+                    continue;
+                }
+                let offset = (at - start) as usize;
+                let field = &mut window[offset..offset + width as usize];
+                if width == 8 {
+                    let value = u64::from_le_bytes(field.try_into().unwrap());
+                    field.copy_from_slice(&value.wrapping_add(delta).to_le_bytes());
+                } else {
+                    let value = u32::from_le_bytes(field.try_into().unwrap());
+                    field.copy_from_slice(&value.wrapping_add(delta as u32).to_le_bytes());
+                }
+            }
+        }
+        cursor += block_size;
+    }
 }
 
 /// Build a complete (hole-free) `PeImage` from an on-disk PE file by mapping its
@@ -937,8 +1139,8 @@ pub fn image_file_identity(path: &Path, data: &[u8]) -> Result<(String, u32, u32
 #[cfg(test)]
 mod tests {
     use super::{
-        IMAGE_BLOCK, ModuleExportInfo, PE_HEADER_PROBE, PeImage, read_code_layout,
-        read_image_c_string, read_pe_exports, read_pe_header_page, read_pe_image,
+        IMAGE_BLOCK, ModuleExportInfo, PE_HEADER_PROBE, PeImage, apply_base_relocations,
+        read_code_layout, read_image_c_string, read_pe_exports, read_pe_header_page, read_pe_image,
     };
     use crate::base::error::{Error, Result};
     use crate::base::memory::{AddressSpace, DTB_IDENTITY, MemoryOps};
@@ -1173,6 +1375,75 @@ mod tests {
             layout_of(&plain, BASE).machine_at(0x1000),
             CodeMachine::Arm64
         );
+    }
+
+    /// An image file reads as the loader maps it away from its preferred
+    /// base: every address its relocation directory names moves with the
+    /// image, one cut by the read's start too, and its header's `ImageBase`
+    /// says where it was loaded. A section reads to its aligned end. The
+    /// import address table and a guard dispatch pointer, which the loader
+    /// fills, and a writable section, which the process changes, are not
+    /// read from the file.
+    #[test]
+    fn an_image_file_reads_relocated_to_where_it_was_loaded() {
+        const PREFERRED: u64 = 0x1_4000_0000;
+        const BASE: u64 = 0x7ff6_1230_0000;
+        let (optional, directories, text, rdata) = (0x98usize, 0x108usize, 0x188, 0x1b0usize);
+        let mut image = synthetic_image();
+        image[optional + 24..optional + 32].copy_from_slice(&PREFERRED.to_le_bytes());
+        image[text + 8..text + 12].copy_from_slice(&0xe00u32.to_le_bytes());
+        image[text + 16..text + 20].copy_from_slice(&0xe00u32.to_le_bytes());
+        image[0x1010..0x1018].copy_from_slice(&(PREFERRED + 0x1234).to_le_bytes());
+        image[0x1020..0x1028].copy_from_slice(&(PREFERRED + 0x5678).to_le_bytes());
+        // A load config whose `GuardCFDispatchFunctionPointer` is at 0x1900.
+        image[0x1400..0x1404].copy_from_slice(&0x80u32.to_le_bytes());
+        image[0x1478..0x1480].copy_from_slice(&(PREFERRED + 0x1900).to_le_bytes());
+        // One block for the `.text` page, at the start of `.rdata`.
+        let block = [0x1000u32.to_le_bytes(), 12u32.to_le_bytes()].concat();
+        image[0x2000..0x2008].copy_from_slice(&block);
+        image[0x2008..0x200a].copy_from_slice(&0xa010u16.to_le_bytes());
+        image[0x200a..0x200c].copy_from_slice(&0xa020u16.to_le_bytes());
+        let directory = |index: usize| directories + 8 * index;
+        image[directory(5)..directory(5) + 8]
+            .copy_from_slice(&[0x2000u32.to_le_bytes(), 12u32.to_le_bytes()].concat());
+        image[directory(12)..directory(12) + 8]
+            .copy_from_slice(&[0x1800u32.to_le_bytes(), 0x10u32.to_le_bytes()].concat());
+        image[directory(10)..directory(10) + 8]
+            .copy_from_slice(&[0x1400u32.to_le_bytes(), 0x80u32.to_le_bytes()].concat());
+        image[rdata + 36..rdata + 40].copy_from_slice(&0xc000_0040u32.to_le_bytes());
+        let file = PeImage::complete(image);
+        let read = |base: u64, rva: usize, len: usize| {
+            let mut buf = vec![0u8; len];
+            let read = file.read_loaded(base, rva, &mut buf);
+            buf.truncate(read);
+            buf
+        };
+
+        let code = read(BASE, 0x1010, 0x18);
+        assert_eq!(code[..8], (BASE + 0x1234).to_le_bytes());
+        assert_eq!(code[8..0x10], [0xcc; 8]);
+        assert_eq!(code[0x10..], (BASE + 0x5678).to_le_bytes());
+        assert_eq!(read(BASE, 0x1014, 4), (BASE + 0x1234).to_le_bytes()[4..]);
+        assert_eq!(
+            read(PREFERRED, 0x1010, 8),
+            (PREFERRED + 0x1234).to_le_bytes()
+        );
+        assert_eq!(read(BASE, optional + 24, 8), BASE.to_le_bytes());
+        // The read stops at the import address table, the guard pointer, and
+        // the writable `.rdata`.
+        assert_eq!(read(BASE, 0x17f8, 0x20), [0xcc; 8]);
+        assert!(read(BASE, 0x1800, 8).is_empty());
+        assert_eq!(read(BASE, 0x18f8, 0x20), [0xcc; 8]);
+        assert_eq!(read(BASE, 0x1908, 8), [0xcc; 8]);
+        assert_eq!(read(BASE, 0x1ff8, 0x10), [0xcc; 8]);
+
+        // A 32-bit image's addresses move by the delta's low half.
+        let block = [0x1000u32.to_le_bytes(), 10u32.to_le_bytes()].concat();
+        let relocations = [&block[..], &0x3004u16.to_le_bytes()].concat();
+        let mut window = [0u8; 8];
+        window[4..].copy_from_slice(&0x0040_1000u32.to_le_bytes());
+        apply_base_relocations(&relocations, 0x10_0000, 0x1000, &mut window);
+        assert_eq!(window[4..], 0x0050_1000u32.to_le_bytes());
     }
 
     /// Opening an image costs the header probe; a lookup fetches the one

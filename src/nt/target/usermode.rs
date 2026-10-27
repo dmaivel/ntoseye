@@ -11,7 +11,8 @@ use crate::nt::guest::{
     walk_loader_list, walk_loader_list32,
 };
 use crate::nt::layout::{StructRef, Types};
-use crate::nt::pe::{image_base, read_pe_header_page, size_of_image};
+use crate::nt::pe::{apply_base_relocations, image_base, read_pe_header_page, size_of_image};
+use crate::nt::target::mm::PfnSelector;
 use crate::nt::target::{DiagnosticValue, ListTermination, Target, TargetKind};
 use iced_x86::{Code, Decoder, DecoderOptions};
 use ntoseye_macros::record;
@@ -25,8 +26,6 @@ pub mod runaway;
 const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
 const IMAGE_SCN_MEM_DISCARDABLE: u32 = 0x0200_0000;
 const IMAGE_DIRECTORY_ENTRY_BASERELOC: usize = 5;
-const IMAGE_REL_BASED_HIGHLOW: u16 = 3;
-const IMAGE_REL_BASED_DIR64: u16 = 10;
 const MAX_REPORT_RANGES: usize = 64;
 const MAX_BYTE_DIFFS: usize = 4096;
 const SECTION_READ_CHUNK: usize = 0x1000;
@@ -1866,7 +1865,7 @@ fn apply_relocations(
     sections: &mut [CheckSection],
 ) {
     let preferred_base = image_base(view);
-    let delta = actual_base.wrapping_sub(preferred_base) as i64;
+    let delta = actual_base.wrapping_sub(preferred_base);
     if delta == 0 {
         return;
     }
@@ -1891,61 +1890,18 @@ fn apply_relocations(
                 .flatten()
         })
     };
-    let Some(mut cursor) = rva_to_raw(directory.VirtualAddress) else {
+    let Some(start) = rva_to_raw(directory.VirtualAddress) else {
         return;
     };
-    let end = cursor
+    let end = start
         .checked_add(directory.Size as usize)
         .unwrap_or(image.len())
         .min(image.len());
-    while cursor + 8 <= end {
-        let page = u32::from_le_bytes(image[cursor..cursor + 4].try_into().unwrap());
-        let block_size =
-            u32::from_le_bytes(image[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
-        if block_size < 8 || block_size > end - cursor {
-            break;
-        }
-        let count = (block_size - 8) / 2;
-        for index in 0..count {
-            let offset = cursor + 8 + index * 2;
-            let entry = u16::from_le_bytes(image[offset..offset + 2].try_into().unwrap());
-            let kind = entry >> 12;
-            let rva = page.saturating_add(u32::from(entry & 0x0fff));
-            let (width, apply) = match kind {
-                IMAGE_REL_BASED_DIR64 => (8usize, true),
-                IMAGE_REL_BASED_HIGHLOW => (4usize, true),
-                _ => (0usize, false),
-            };
-            if !apply {
-                continue;
-            }
-            for section in sections.iter_mut() {
-                let Some(offset) = rva
-                    .checked_sub(section.rva)
-                    .and_then(|offset| usize::try_from(offset).ok())
-                else {
-                    continue;
-                };
-                if offset + width > section.expected.len() {
-                    continue;
-                }
-                if width == 8 {
-                    let value = u64::from_le_bytes(
-                        section.expected[offset..offset + 8].try_into().unwrap(),
-                    );
-                    section.expected[offset..offset + 8]
-                        .copy_from_slice(&value.wrapping_add_signed(delta).to_le_bytes());
-                } else {
-                    let value = u32::from_le_bytes(
-                        section.expected[offset..offset + 4].try_into().unwrap(),
-                    );
-                    section.expected[offset..offset + 4]
-                        .copy_from_slice(&value.wrapping_add(delta as u32).to_le_bytes());
-                }
-                break;
-            }
-        }
-        cursor += block_size;
+    let Some(relocations) = image.get(start..end) else {
+        return;
+    };
+    for section in sections {
+        apply_base_relocations(relocations, delta, section.rva, &mut section.expected);
     }
 }
 

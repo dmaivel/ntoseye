@@ -16,8 +16,9 @@ use crate::{
         types::{Dtb, PhysAddr, VirtAddr},
     },
     nt::{
-        guest::EvmcsState,
+        guest::{EvmcsState, ModuleInfo},
         layout::{StructRef, TypeInfo, Types},
+        symbols::{ImageFetch, SymbolStore},
     },
 };
 
@@ -38,6 +39,96 @@ pub enum SearchSpace {
 pub const MAX_SEARCH_MATCHES: usize = 4096;
 /// Bytes read per step of a search.
 const SEARCH_CHUNK: usize = 1 << 20;
+
+/// Read `buf` at `address` with `read`, filling each hole a user-mode
+/// minidump leaves ([`Error::NotCaptured`]) inside one of `modules`' images
+/// from the module's image file, relocated to where the module was loaded
+/// ([`PeImage::read_loaded`](crate::nt::pe::PeImage::read_loaded)). A
+/// MiniDumpNormal dump captures no module memory, and the file has the
+/// code and read-only data the process had. The file is the one the
+/// module's `TimeDateStamp` and `SizeOfImage` name, downloaded if need be,
+/// as the stack walk downloads it for the module's unwind data. A byte
+/// neither the dump nor a file has fails the read as the dump's hole did.
+pub fn read_filling_from_image_files(
+    symbols: &SymbolStore,
+    modules: &[ModuleInfo],
+    read: impl Fn(VirtAddr, &mut [u8]) -> Result<()>,
+    address: VirtAddr,
+    buf: &mut [u8],
+) -> Result<()> {
+    let mut done = 0;
+    loop {
+        let (missing, resumes) = match read(address + done as u64, &mut buf[done..]) {
+            Ok(()) => return Ok(()),
+            Err(Error::NotCaptured { address, resumes }) => (address, resumes),
+            Err(error) => return Err(error),
+        };
+        let hole = (missing.0 - address.0) as usize;
+        let hole_end = resumes.map_or(buf.len(), |resumes| {
+            (resumes.0.saturating_sub(address.0) as usize).min(buf.len())
+        });
+        let filled = match buf.get_mut(hole..hole_end) {
+            Some(hole) if !hole.is_empty() => {
+                fill_from_image_files(symbols, modules, missing, hole)
+            }
+            _ => 0,
+        };
+        if hole + filled < hole_end || hole_end <= hole {
+            return Err(Error::NotCaptured {
+                address: missing + filled as u64,
+                resumes,
+            });
+        }
+        if hole_end == buf.len() {
+            return Ok(());
+        }
+        done = hole_end;
+    }
+}
+
+/// Fill `buf`, memory at `address` that a dump did not capture, from the
+/// image files of the `modules` it lies in (see
+/// [`read_filling_from_image_files`]); returns how many leading bytes were
+/// filled.
+fn fill_from_image_files(
+    symbols: &SymbolStore,
+    modules: &[ModuleInfo],
+    address: VirtAddr,
+    buf: &mut [u8],
+) -> usize {
+    let mut filled = 0;
+    while filled < buf.len() {
+        let at = address + filled as u64;
+        let Some(module) = modules.iter().find(|module| module.contains_address(at)) else {
+            break;
+        };
+        let Some(file) = module.time_date_stamp.and_then(|time_date_stamp| {
+            symbols
+                .module_image_on_disk(
+                    &module.name,
+                    time_date_stamp,
+                    module.size,
+                    ImageFetch::Download,
+                )
+                .ok()
+        }) else {
+            break;
+        };
+        let end = buf
+            .len()
+            .min(filled + (module.end_address().0 - at.0) as usize);
+        let read = file.read_loaded(
+            module.base_address.0,
+            (at.0 - module.base_address.0) as usize,
+            &mut buf[filled..end],
+        );
+        filled += read;
+        if filled < end {
+            break;
+        }
+    }
+    filled
+}
 
 /// Which memory an operation addresses: the virtual address space of the
 /// session's context, or guest-physical memory. The REPL names it by the
@@ -245,6 +336,24 @@ impl Target {
     /// from any space; on AMD64 one CR3 covers both halves.
     pub fn address_space(&self, dtb: Dtb) -> AddressSpace<'_, PhysMem> {
         AddressSpace::for_arch(&self.phys, dtb, self.kernel_dtb(), self.arch())
+    }
+
+    /// Read `buf` at `address` in `dtb`'s address space for display, as
+    /// WinDbg does: what a user-mode minidump did not capture of a loaded
+    /// module's image is read from the module's image file (see
+    /// [`read_filling_from_image_files`]). Captured bytes always win, so a
+    /// full dump reads as [`Self::address_space`] does. Not for comparing
+    /// memory with the file (`!chkimg`), which must see only what the dump
+    /// holds.
+    pub fn read_image_backed(&self, dtb: Dtb, address: VirtAddr, buf: &mut [u8]) -> Result<()> {
+        let memory = self.address_space(dtb);
+        read_filling_from_image_files(
+            &self.symbols,
+            self.user_modules().unwrap_or_default(),
+            |address, buf| memory.read_bytes(address, buf),
+            address,
+            buf,
+        )
     }
 
     /// Why the page at `address`, in the address space rooted at `dtb`, is
