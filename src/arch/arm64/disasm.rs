@@ -243,7 +243,7 @@ fn decode_rows(
         // The x64 path gets semantic tokens from iced's formatter; bad64 has
         // no formatter callback, but exposes typed operands, so classify those
         // into the same palette while reproducing the decoder's Display text
-        // exactly (spaces live inside token text, so `asm()` is unchanged).
+        // (spaces live inside token text, so `asm()` is unchanged).
         let tokens = row_tokens(&instruction);
 
         let comment = pcrel_comment(&instruction, resolve);
@@ -260,7 +260,7 @@ fn decode_rows(
 
 /// Build the semantic token stream for a decoded AArch64 instruction:
 /// mnemonic plus one classified token group per operand, reproducing bad64's
-/// Display text exactly.
+/// Display text but for negative immediates (see [`operand_tokens`]).
 fn row_tokens(instruction: &bad64::Instruction) -> Vec<AsmToken> {
     let text = instruction.to_string();
     let mut tokens = Vec::new();
@@ -463,12 +463,13 @@ fn shift_tokens(shift: &bad64::Shift, t: &mut Tokens) {
 
 /// Classify one bad64 [`Operand`] into semantic tokens, the AArch64 analog
 /// of the x64 `TokenSink`. Each branch mirrors bad64's `Display` formatting
-/// for that variant, so the joined tokens are byte-identical to its output.
+/// for that variant, so the joined tokens are byte-identical to its output,
+/// except that a negative immediate reads as one (see [`immediate_text`]).
 fn operand_tokens(op: &bad64::Operand) -> Vec<AsmToken> {
     let mut t = Tokens::new();
     match op {
         bad64::Operand::Imm32 { imm, shift } | bad64::Operand::Imm64 { imm, shift } => {
-            t.push(&format!("#{imm}"), AsmKind::Number);
+            t.push(&immediate_text(*imm), AsmKind::Number);
             if let Some(shift) = shift {
                 t.push(",", AsmKind::Punctuation);
                 t.space();
@@ -520,7 +521,7 @@ fn operand_tokens(op: &bad64::Operand) -> Vec<AsmToken> {
             t.push(&reg.to_string(), AsmKind::Register);
             t.push(",", AsmKind::Punctuation);
             t.space();
-            t.push(&format!("#{imm}"), AsmKind::Number);
+            t.push(&immediate_text(*imm), AsmKind::Number);
             t.push("]", AsmKind::Punctuation);
             t.push("!", AsmKind::Punctuation);
         }
@@ -530,7 +531,7 @@ fn operand_tokens(op: &bad64::Operand) -> Vec<AsmToken> {
             t.push("]", AsmKind::Punctuation);
             t.push(",", AsmKind::Punctuation);
             t.space();
-            t.push(&format!("#{imm}"), AsmKind::Number);
+            t.push(&immediate_text(*imm), AsmKind::Number);
         }
         bad64::Operand::MemPostIdxReg(regs) => {
             t.push("[", AsmKind::Punctuation);
@@ -568,7 +569,7 @@ fn operand_tokens(op: &bad64::Operand) -> Vec<AsmToken> {
             if !matches!(offset, bad64::Imm::Signed(0) | bad64::Imm::Unsigned(0)) {
                 t.push(",", AsmKind::Punctuation);
                 t.space();
-                t.push(&format!("#{offset}"), AsmKind::Number);
+                t.push(&immediate_text(*offset), AsmKind::Number);
                 if *mul_vl {
                     t.push(",", AsmKind::Punctuation);
                     t.space();
@@ -586,7 +587,7 @@ fn operand_tokens(op: &bad64::Operand) -> Vec<AsmToken> {
             t.push(&reg.to_string(), AsmKind::Register);
             t.push(",", AsmKind::Punctuation);
             t.space();
-            t.push(&format!("#{imm}"), AsmKind::Number);
+            t.push(&immediate_text(*imm), AsmKind::Number);
             t.push("]", AsmKind::Punctuation);
         }
         bad64::Operand::IndexedElement { regs, arrspec, imm } => {
@@ -596,7 +597,7 @@ fn operand_tokens(op: &bad64::Operand) -> Vec<AsmToken> {
             if !matches!(imm, bad64::Imm::Signed(0) | bad64::Imm::Unsigned(0)) {
                 t.push(",", AsmKind::Punctuation);
                 t.space();
-                t.push(&format!("#{imm}"), AsmKind::Number);
+                t.push(&immediate_text(*imm), AsmKind::Number);
             }
             t.push("]", AsmKind::Punctuation);
         }
@@ -613,6 +614,16 @@ fn operand_tokens(op: &bad64::Operand) -> Vec<AsmToken> {
         }
     }
     t.into_vec()
+}
+
+/// An immediate operand, `#0x10` or `#-0x40`. bad64's `Display` prints a
+/// signed immediate as hex of its 64-bit two's complement, so a negative
+/// offset such as a pre-indexed `stp`'s would read `#0xffffffffffffffc0`.
+fn immediate_text(imm: bad64::Imm) -> String {
+    match imm {
+        bad64::Imm::Signed(value) if value < 0 => format!("#-{:#x}", value.unsigned_abs()),
+        imm => format!("#{imm}"),
+    }
 }
 
 /// Symbol comment for an AArch64 PC-relative target. bad64 represents branch
@@ -640,6 +651,33 @@ mod tests {
 
     #[test]
     fn arm64_rows_reproduce_bad64_display() {
+        // bad64's text with each negative immediate (but a branch target's,
+        // an address) written as one, as `operand_tokens` writes it.
+        let expected = |ins: &bad64::Instruction| {
+            let mut text = ins.to_string();
+            for op in ins.operands() {
+                let imm = match *op {
+                    bad64::Operand::Imm32 { imm, .. }
+                    | bad64::Operand::Imm64 { imm, .. }
+                    | bad64::Operand::MemPreIdx { imm, .. }
+                    | bad64::Operand::MemPostIdxImm { imm, .. }
+                    | bad64::Operand::AccumArray { imm, .. }
+                    | bad64::Operand::IndexedElement { imm, .. } => imm,
+                    bad64::Operand::MemOffset { offset, .. } => offset,
+                    _ => continue,
+                };
+                if let bad64::Imm::Signed(value) = imm
+                    && value < 0
+                {
+                    text = text.replacen(
+                        &format!("#{value:#x}"),
+                        &format!("#-{:#x}", value.unsigned_abs()),
+                        1,
+                    );
+                }
+            }
+            text
+        };
         let mut checked = 0;
 
         let real = [
@@ -655,9 +693,15 @@ mod tests {
         for (i, word) in real.iter().enumerate() {
             let ins = decode(*word, 0x1000 + 4 * i as u64).expect("real instruction");
             let joined: String = row_tokens(&ins).iter().map(|t| t.text.as_str()).collect();
-            assert_eq!(joined, ins.to_string(), "text drift for {word:#010x}");
+            assert_eq!(joined, expected(&ins), "text drift for {word:#010x}");
             checked += 1;
         }
+        let ins = decode(0xa9bd7bfd, 0x1000).unwrap();
+        let joined: String = row_tokens(&ins).iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(joined, "stp fp, lr, [sp, #-0x30]!");
+        let ins = decode(0xf85f83a0, 0x1000).unwrap(); // ldur x0, [fp, #-8]
+        let joined: String = row_tokens(&ins).iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(joined, "ldur x0, [fp, #-0x8]");
 
         let mut state = 0x9e37_79b9_7f4a_7c15u64;
         for i in 0..65536u64 {
@@ -669,7 +713,7 @@ mod tests {
                 continue;
             };
             let joined: String = row_tokens(&ins).iter().map(|t| t.text.as_str()).collect();
-            assert_eq!(joined, ins.to_string(), "text drift for word {word:#010x}");
+            assert_eq!(joined, expected(&ins), "text drift for word {word:#010x}");
             checked += 1;
             if checked >= 500 {
                 break;

@@ -48,6 +48,9 @@ Keeping this file:
 - `!pte` shows a zero PTE inside a mapped view as the view's page, not as unmapped, goes on to the PTE when its page table is in transition, and refuses an address that is not canonical.
 - `!poolfind` and `!pool` take a block's state on a segment-heap LFH pool page from its subsegment's bitmap, where they called freed blocks Allocated (775 for 560 mutants), no longer read the subsegment's header as a block hiding the first real one, and show paged-pool blocks as PagedPool.
 - `!heap` decodes segment-heap LFH subsegments on Windows 11 26200, where blocks above 4 GiB were placed at the wrong offset, and reads each build's busy bitmap as it lays it out, where 22631's busy counts were wrong.
+- ARM64 stacks of processors stopped in an interrupt unwind through `nt!KxSwitchStackAndPlayInterrupt` to the interrupted thread, where they fell back to scanning.
+- The stack scan lists only addresses a call instruction precedes, where any code address on the stack passed.
+- `u` shows a negative ARM64 pre-index offset as `#-0x40`, where it showed a 64-bit value.
 
 ## Unreleased
 

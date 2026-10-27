@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
 
 use ntoseye_macros::record;
@@ -240,6 +240,9 @@ struct StackTracer<'a> {
     stack_pages: RefCell<HashMap<u64, Option<StackPage>>>,
     /// The kernel object, whose image is shared across traces.
     kernel: Option<&'a Image>,
+    /// Each processor's stacks (see `processor_stacks` in `tracer`), read
+    /// the first time an unwind moves sp down.
+    processor_stacks: Option<Vec<Vec<RangeInclusive<u64>>>>,
 }
 
 /// A stack page a trace read. A user-mode minidump may hold only part of a
@@ -1119,11 +1122,9 @@ pub fn function_entry(
                 entries,
                 incomplete,
             }),
-            amd64::EntryLookup::Leaf | amd64::EntryLookup::Holed => {
-                Err(Error::DebugInfo(format!(
-                    "the unwind data of the dynamic function at {address:#x} is unreadable"
-                )))
-            }
+            amd64::EntryLookup::Leaf | amd64::EntryLookup::Holed => Err(Error::DebugInfo(format!(
+                "the unwind data of the dynamic function at {address:#x} is unreadable"
+            ))),
         };
     };
     let (base, module) = (module.info.base_address.0, module.info.short_name.clone());
@@ -1680,6 +1681,10 @@ mod tests {
             put(header + 36, &characteristics.to_le_bytes());
         }
         put(0x1000, &[0xcc; 0x1000]);
+        // The `call FRAMED` that `RETURN_ADDRESS` follows.
+        let call = CALLER as usize + 0x10 - 5;
+        put(call, &[0xe8]);
+        put(call + 1, &(FRAMED as i32 - (call as i32 + 5)).to_le_bytes());
         for (index, (begin, unwind_info)) in [(FRAMED, 0x2100u32), (CALLER, 0x2110)]
             .into_iter()
             .enumerate()
@@ -1805,6 +1810,33 @@ mod tests {
             [
                 (FRAMED_RIP, FrameSource::Current),
                 (RETURN_ADDRESS, FrameSource::Scan)
+            ]
+        );
+    }
+
+    /// A scan skips a code address no call precedes: a function pointer or
+    /// a value that lands in code is no return address.
+    #[test]
+    fn a_scan_skips_code_no_call_precedes() {
+        let session = frame_pointer_session_with(&[
+            (8, IMAGE + u64::from(CALLER) + 0x20),
+            (0x18, RETURN_ADDRESS),
+        ]);
+        let seed = registers(&[("rip", FRAMED_RIP), ("rsp", FRAMED_RSP)]);
+
+        let trace =
+            build_stacktrace_with_register_values(&session.target, &session.register_map, &seed, 8);
+
+        let frames: Vec<_> = trace
+            .frames
+            .iter()
+            .map(|frame| (frame.frame.ip, frame.frame.sp, frame.frame.source))
+            .collect();
+        assert_eq!(
+            frames,
+            [
+                (FRAMED_RIP, FRAMED_RSP, FrameSource::Current),
+                (RETURN_ADDRESS, FRAMED_RBP + 0x18, FrameSource::Scan)
             ]
         );
     }

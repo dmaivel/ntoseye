@@ -34,8 +34,9 @@ pub(super) fn build_recovered_stacktrace_seeded(
         tracer.frame_base_for(&context),
     ));
 
-    // RSP normally advances every step. A trap/interrupt frame can switch to a
-    // different stack, so the hard frame cap remains the final corruption guard.
+    // RSP normally advances every step. A trap/interrupt frame or a function
+    // that switches stacks can move it to a different stack, so the hard
+    // frame cap remains the final corruption guard.
     let mut reached_end = false;
     for _ in 0..MAX_UNWIND_FRAMES {
         if raw.len() >= limit {
@@ -89,18 +90,25 @@ pub(super) fn build_recovered_stacktrace_seeded(
             break;
         }
         // A return that pops its address always climbs the stack; a leaf
-        // returning through a link register leaves sp where it was.
+        // returning through a link register leaves sp where it was. Only a
+        // move to another of the processor's stacks goes down.
         let stack_regressed = if debugger.arch().return_pops_address() {
             context.sp <= previous_rsp
         } else {
             context.sp < previous_rsp
         };
         if !stack_switch && stack_regressed {
+            if !tracer.switched_stacks(previous_rsp, context.sp) {
+                unwind_trace!(
+                    "unwind: sp went from {previous_rsp:#x} back to {:#x} -> scan",
+                    context.sp
+                );
+                break;
+            }
             unwind_trace!(
-                "unwind: sp went from {previous_rsp:#x} back to {:#x} -> scan",
+                "unwind: sp moved from {previous_rsp:#x} to another of the processor's stacks at {:#x}",
                 context.sp
             );
-            break;
         }
         seen.insert(context.pc);
         raw.push((context.clone(), source, tracer.frame_base_for(&context)));
