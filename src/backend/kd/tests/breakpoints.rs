@@ -162,3 +162,35 @@ fn pending_write_breakpoint_blocks_unrelated_kd_requests() {
         .expect_err("other KD requests should be rejected while install is pending");
     assert!(err.to_string().contains("retry the same bp command"));
 }
+
+/// A table this session filled itself is not blamed on an earlier session:
+/// only clearing some of its own breakpoints frees an entry.
+#[test]
+fn a_table_full_of_this_sessions_breakpoints_says_so() {
+    let (kernel, host) = UnixStream::pair().unwrap();
+    let mut backend = kd_backend_with_framing(host);
+    backend.link.halt();
+    backend.exit_prepared = true;
+    for handle in 1..=KD_BREAKPOINT_TABLE_SIZE {
+        backend
+            .bp_handles
+            .insert(0xfffff80000001000 + u64::from(handle) * 0x10, handle);
+    }
+    let worker = serve_breakpoints(
+        kernel,
+        vec![(api::DBGKD_WRITE_BREAKPOINT, STATUS_UNSUCCESSFUL, 0)],
+    );
+
+    let error = backend.set_breakpoint(0xfffff80000009000).unwrap_err();
+
+    assert!(
+        matches!(&error, Error::BreakpointTableFull(message) if message.contains("clear some")),
+        "unexpected error: {error}"
+    );
+    drop(backend);
+    assert_eq!(
+        worker.join().unwrap().len(),
+        1,
+        "no stranded handle to release"
+    );
+}

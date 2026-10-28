@@ -83,6 +83,8 @@ impl Session {
         self.parked_stop = None;
         self.set_current_stop(None);
         self.target.breakpoint_stop = None;
+        // A step executes the target too, which ends a `.process` context.
+        self.target.end_process_context_on_run();
         self.backend.set_current_thread(&self.current_thread)?;
         let mut stepped = match self.step_over_site_at_pc()? {
             Some(stepped) => stepped,
@@ -130,6 +132,7 @@ impl Session {
         self.refresh_context_for_current_thread();
         let rip = self.current_rip();
         self.set_current_stop(Some(ContinueOutcome::Step { rip }));
+        self.record_step_event(rip);
         // Under VBS the vCPU steps alone; an interrupt taken first can leave
         // it in the Windows hypervisor, waiting on the vCPUs held meanwhile.
         // Nothing can be stepped from there.
@@ -455,8 +458,10 @@ impl Session {
         at(ip - step)
     }
 
-    /// Step until `stop` accepts the instruction about to execute, into or
-    /// over calls per `mode`: the SDK's `step(until=)` and `step_over(until=)`.
+    /// Execute the current instruction, then step until `stop` accepts the
+    /// instruction about to execute, into or over calls per `mode`: the
+    /// SDK's `step(until=)` and `step_over(until=)`. The current instruction
+    /// is never the match, as in WinDbg, so repeating a walk moves on.
     /// Returns the `Step` there; a breakpoint, exception, or other stop met on
     /// the way is returned as is. An interrupt request ([`Target::interrupt`]),
     /// or the host's `cancel` ends the walk where it is (see
@@ -477,7 +482,7 @@ impl Session {
         stop: impl Fn(u64, ControlFlow) -> bool,
     ) -> Result<ContinueOutcome> {
         self.pending_walk = None;
-        self.walk_until(mode, limit, cancel, stop)
+        self.walk_until(mode, limit, cancel, true, stop)
     }
 
     /// Go on with a [`Self::step_until`] walk another stop ended, after the
@@ -516,7 +521,8 @@ impl Session {
                 }
             }
         }
-        self.walk_until(mode, limit, cancel, stop)
+        // The walk has not tested where it goes on yet.
+        self.walk_until(mode, limit, cancel, false, stop)
     }
 
     /// End a walk that an interrupt request or its timeout cut short, halted
@@ -540,6 +546,7 @@ impl Session {
         mode: StepMode,
         limit: usize,
         cancel: &Cancel<'_>,
+        execute_first: bool,
         stop: impl Fn(u64, ControlFlow) -> bool,
     ) -> Result<ContinueOutcome> {
         self.require_target_view("an instruction walk")?;
@@ -549,12 +556,12 @@ impl Session {
         let run_cancel = cancel.with_behavior(CancelBehavior::Halt);
         let walked = windows_thread_on_backend_thread(&self.target, &self.current_thread)
             .map(|thread| ThreadScope::new(&thread));
-        for _ in 0..limit {
+        for walked_count in 0..limit {
             if self.target.interrupt.swap(false, Ordering::SeqCst) {
                 return Ok(self.cut_walk_short());
             }
             let (state, registers, bytes) = self.read_control()?;
-            if stop(state.ip, state.flow) {
+            if (walked_count > 0 || !execute_first) && stop(state.ip, state.flow) {
                 let outcome = ContinueOutcome::Step { rip: state.ip };
                 self.note_stop(&outcome);
                 return Ok(outcome);

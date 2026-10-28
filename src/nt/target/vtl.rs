@@ -740,6 +740,7 @@ impl Target {
     /// [`Self::load_secure_kernel_symbols`].
     pub fn enter_secure_scope(&mut self, root: Dtb) {
         self.detach();
+        self.clear_current_windows_thread_context();
         self.secure_root = Some(root);
     }
 

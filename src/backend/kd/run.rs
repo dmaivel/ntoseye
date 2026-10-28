@@ -99,6 +99,7 @@ impl KdBackend {
         if stop.target_reloaded {
             kd_trace!("kd: target reload detected; clearing target-owned breakpoint state");
             self.bp_handles.clear();
+            self.dropped_bp_addresses.clear();
             self.managed_bp_addresses.clear();
             self.breakin_addresses.clear();
             self.retired_bp_addresses.clear();
@@ -134,6 +135,7 @@ impl KdBackend {
         self.last_stop_processor = stop.processor;
         self.last_exception_code = stop.exception_code;
         self.last_rip = stop.program_counter;
+        self.drop_report_window(stop.program_counter);
         self.registers
             .stopped(stop.processor, stop.control_report.clone());
         self.stop_was_managed_breakpoint = managed_breakpoint_stop;
@@ -306,7 +308,6 @@ impl KdBackend {
 
     pub(super) fn resume_with(&mut self, disposition: ContinueDisposition) -> Result<()> {
         let resume_processor = self.last_stop_processor;
-        self.switch_report_pcs.clear();
         self.skip_hardcoded_breakpoint(resume_processor)?;
         // The pump absorbs the re-break a stale break-in byte causes right
         // after resume; it needs to know where we resumed from and which
@@ -354,7 +355,6 @@ impl KdBackend {
                  step; select it with ~{owner}s, or resume with g"
             )));
         }
-        self.switch_report_pcs.clear();
         // A raw int3 stop still points at the int3; resuming from there would
         // only execute it again and report the same stop.
         self.skip_hardcoded_breakpoint(owner)?;
@@ -464,9 +464,26 @@ impl KdBackend {
                 stop.processor
             )));
         }
-        self.switch_report_pcs.push(stop.program_counter);
+        self.drop_report_window(stop.program_counter);
         self.registers.stopped(processor, stop.control_report);
         Ok(())
+    }
+
+    /// `KdpReportExceptionStateChange` calls `KdpDeleteBreakpointRange` over
+    /// the `DBGKD_MAXSTREAM` bytes it reports from `pc`, freeing the handle
+    /// of every entry there before the report is on the wire.
+    fn drop_report_window(&mut self, pc: u64) {
+        let window = pc..pc.saturating_add(api::DBGKD_MAXSTREAM);
+        let dropped: Vec<u64> = self
+            .bp_handles
+            .keys()
+            .copied()
+            .filter(|addr| window.contains(addr))
+            .collect();
+        for addr in dropped {
+            self.bp_handles.remove(&addr);
+            self.dropped_bp_addresses.insert(addr);
+        }
     }
 
     pub(super) fn break_in(&mut self) -> Result<StopEvent> {

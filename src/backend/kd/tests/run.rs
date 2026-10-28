@@ -474,3 +474,35 @@ fn a_switched_step_reports_the_sites_its_extra_reports_dropped() {
     drop(backend);
     worker.join().unwrap();
 }
+
+/// A stop frees the handles of the sites its report deleted, and the next
+/// install is handed one of them; lifting a dropped site by its old handle
+/// would delete that new entry instead (a breakpoint set at a module-load
+/// stop was lost when the load trap was lifted on resume).
+#[test]
+fn lifting_a_site_a_stop_dropped_leaves_the_entry_that_reused_its_handle() {
+    const TRAP: u64 = 0xffff_f800_0000_1000;
+    const NEW: u64 = 0xffff_f800_0000_7000;
+    let (kernel, host) = UnixStream::pair().unwrap();
+    let worker = serve_breakpoints(
+        kernel,
+        vec![(api::DBGKD_WRITE_BREAKPOINT, api::STATUS_SUCCESS, 1)],
+    );
+    let mut backend = kd_backend_with_framing(host);
+    backend.link.halt();
+    backend.exit_prepared = true;
+    backend.bp_handles.insert(TRAP, 1);
+    backend.managed_bp_addresses.insert(TRAP);
+    let stop = parse_state_change(&processor_report(0, STATUS_BREAKPOINT, TRAP, 0x400)).unwrap();
+    backend.record_stop(&stop);
+
+    backend.set_breakpoint(NEW).unwrap();
+    assert_eq!(backend.sites_dropped_by_stop(), vec![TRAP]);
+    backend.remove_breakpoint(TRAP).unwrap();
+
+    assert_eq!(backend.bp_handles.get(&NEW), Some(&1));
+    assert!(backend.sites_dropped_by_stop().is_empty());
+    drop(backend);
+    let requests = worker.join().unwrap();
+    assert_eq!(requests, vec![(api::DBGKD_WRITE_BREAKPOINT, NEW)]);
+}

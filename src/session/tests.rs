@@ -1872,6 +1872,23 @@ fn a_step_whose_handler_returns_once_the_others_run_completes() {
     );
 }
 
+/// A walk started on an instruction that matches executes it first, as
+/// WinDbg's `pc` on a call does, so repeating the walk moves on.
+#[test]
+fn a_walk_started_on_a_match_executes_it_first() {
+    let mut backend = MockBackend {
+        one_vcpu: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1000);
+    let mut session = stepping_session(&[0x90; 0x40], backend);
+
+    let outcome = session
+        .step_until(StepMode::Into, 16, &Cancel::NEVER, |ip, _| ip != 0x1001)
+        .unwrap();
+    assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1002 }));
+}
+
 /// Stepping on from a diverted step steps the handler's wait, which no held
 /// vCPU ends: a step loop stops where the step landed instead of stepping
 /// that wait to its limit.
@@ -2091,20 +2108,20 @@ fn a_resumed_walk_finishes_the_run_it_was_waiting_on() {
 
     session.pending_walk = pending(vec![(VirtAddr(0x1030), None)]);
     let outcome = session
-        .step_until(StepMode::Over, 16, &Cancel::NEVER, |ip, _| ip == 0x1010)
+        .step_until(StepMode::Over, 16, &Cancel::NEVER, |ip, _| ip == 0x1011)
         .unwrap();
-    assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1010 }));
+    assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1011 }));
     assert!(session.pending_walk.is_none());
 
     session
         .breakpoints
-        .insert_for_test(1, VirtAddr(0x1010), true, None);
+        .insert_for_test(1, VirtAddr(0x1011), true, None);
     session.current_thread = "p01.02".into();
     session.pending_walk = pending(Vec::new());
     let outcome = session
-        .resume_step_until(StepMode::Over, 16, &Cancel::NEVER, |ip, _| ip == 0x1011)
+        .resume_step_until(StepMode::Over, 16, &Cancel::NEVER, |ip, _| ip == 0x1012)
         .unwrap();
-    assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1011 }));
+    assert!(matches!(outcome, ContinueOutcome::Step { rip: 0x1012 }));
     assert_eq!(session.current_thread, "p01.01");
 }
 
@@ -4308,4 +4325,31 @@ fn a_run_to_handed_back_running_leaves_its_site_armed() {
         .unwrap();
     assert!(matches!(outcome, RunOutcome::Running));
     assert_eq!(session.breakpoints.list().len(), 1);
+}
+
+/// A stop's report takes the module traps in its window out of the
+/// target's table too; resuming plants them again, or their events stop.
+#[test]
+fn resuming_replants_the_module_traps_a_stop_dropped() {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        ..MockBackend::default()
+    }
+    .target_managed_sites();
+    backend.dropped_sites = vec![LOAD_TRAP];
+    let sites = Arc::clone(&backend.site_writes);
+    let mut session = session_with_mock(backend);
+    session.module_traps = vec![
+        module_trap(ModuleEvent::Load, LOAD_TRAP),
+        module_trap(ModuleEvent::Unload, UNLOAD_TRAP),
+    ];
+    for event in [ModuleEvent::Load, ModuleEvent::Unload] {
+        session
+            .exception_policies
+            .set_module_event(event, None, ExceptionPolicyMode::Break, None);
+    }
+
+    session.arm_traps();
+
+    assert_eq!(*sites.lock(), [(LOAD_TRAP, true)]);
 }

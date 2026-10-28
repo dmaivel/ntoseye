@@ -16,6 +16,7 @@ use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError, Current, FromArg};
 use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::bugchecks::looks_like_kernel_pointer;
+use crate::nt::expr::Expr;
 use crate::nt::target::sched::ThreadDetail;
 use crate::nt::target::{ThreadInfo, kthread_state_name, wait_reason_name};
 use crate::nt::unwind::ThreadStackSource;
@@ -46,7 +47,10 @@ fn wait_reason_label(thread: &ThreadInfo) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-fn thread_matches_filter(thread: &ThreadInfo, filter: &str) -> bool {
+/// Whether `thread` matches a `threads` filter: its process's name, or its
+/// PID, TID or ETHREAD written out, or `number`, the filter read as a number
+/// literal (`0n6996`, `0x1b54`, or a bare number in the session radix).
+fn thread_matches_filter(thread: &ThreadInfo, filter: &str, number: Option<u64>) -> bool {
     let filter_lower = filter.to_ascii_lowercase();
     thread
         .process_name
@@ -60,6 +64,9 @@ fn thread_matches_filter(thread: &ThreadInfo, filter: &str) -> bool {
             .is_some_and(|tid| tid.to_string() == filter || format!("{:#x}", tid) == filter_lower)
         || format!("{:#x}", thread.ethread.0) == filter_lower
         || format!("{:x}", thread.ethread.0) == filter_lower.trim_start_matches("0x")
+        || number.is_some_and(|number| {
+            thread.pid == Some(number) || thread.tid == Some(number) || thread.ethread.0 == number
+        })
 }
 
 /// `!thread`'s text for one thread, as `!process` lists threads too.
@@ -438,12 +445,19 @@ impl Render<Option<String>> for WindowsThreads {
         // Unfiltered, the attached process's; `*`, every thread.
         let attached = repl.ctx.target.attached_process().cloned();
         let scope = attached.as_ref().filter(|_| filter.is_none());
+        let number =
+            filter
+                .as_deref()
+                .and_then(|filter| match Expr::parse_with_radix(filter, repl.radix) {
+                    Ok(Expr::Literal(number)) => Some(number.0),
+                    _ => None,
+                });
         let threads: Vec<&ThreadInfo> = self
             .threads
             .iter()
             .filter(|thread| match (filter.as_deref(), scope) {
                 (Some("*"), _) | (None, None) => true,
-                (Some(filter), _) => thread_matches_filter(thread, filter),
+                (Some(filter), _) => thread_matches_filter(thread, filter, number),
                 (None, Some(process)) => thread.eprocess == Some(process.eprocess),
             })
             .collect();

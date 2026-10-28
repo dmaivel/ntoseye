@@ -224,8 +224,9 @@ fn process_context_selector(
 /// In this debugger, `/i` is the same as attach: it also selects a thread
 /// of the process, one a processor runs if there is one, else its first, so
 /// `!teb`, `!gle`, and `k` show that thread. `/p` and `/r` select the same
-/// non-invasive context, keeping the current thread. With no argument, the
-/// command prints the current process context.
+/// non-invasive context, keeping the current thread, which lasts until the
+/// target executes again, as in WinDbg. With no argument, the command prints
+/// the current process context.
 #[command(
     names = [".process"],
     category = "processes and modules",
@@ -249,11 +250,14 @@ fn process_context(
         }
     };
     state.leave_vtl1();
-    let report = state
-        .ctx
-        .target
-        .attach_process_info(process.clone())
-        .map_err(|error| Error::DebugInfo(format!("failed to select process context: {error}")))?;
+    // Only `/i` keeps the process past the next execution, as `attach` does.
+    let target = &mut state.ctx.target;
+    let report = if invasive {
+        target.attach_process_info(process.clone())
+    } else {
+        target.set_process_context(process.clone())
+    }
+    .map_err(|error| Error::DebugInfo(format!("failed to select process context: {error}")))?;
     state.caches.refresh_symbol_context(&state.ctx.target);
     state.clear_selected_frame();
     outln!(
@@ -393,6 +397,8 @@ fn context(state: &mut ReplState<'_>, #[arg(complete = Expression)] dtb: String)
     state.leave_vtl1();
     if state.ctx.target.attached_process().is_some() {
         state.ctx.target.detach();
+        // The root named is the context now, not the selected thread's.
+        state.ctx.target.clear_current_windows_thread_context();
     }
     state.clear_selected_frame();
     state.ctx.target.set_context_dtb_override(dtb.0);

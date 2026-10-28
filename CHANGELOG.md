@@ -89,6 +89,11 @@ Keeping this file:
 - DAP: `disassemble` decodes up to unreadable memory, where it failed for the whole request, and no longer returns rows shifted from the instruction offsets asked for. A kernel crash dump refuses `next` and `stepOut` up front and withdraws writes and breakpoints, as a user-mode minidump does; exception filters on a dump stay unverified and leave the `sx` settings alone; a `dump` argument that is not a string is rejected.
 - GDB server: a user-mode minidump publishes its modules as libraries and in the memory map with its main image as the program, where it named `ntoskrnl.exe` and listed none; its target description no longer lists control registers the dump does not hold; and an access violation stops with SIGSEGV on the faulting thread, not SIGTRAP.
 - A kernel-dump processor with no captured context has its registers unavailable in `r`, `~`, the GDB server and DAP, where they read as zeros.
+- A breakpoint set over KD at a module-load stop hits, where lifting the load trap on resume deleted it (the stop had freed the trap's KD handle and the new breakpoint took it), and `gu` there returns; the load and bugcheck traps a stop takes out are planted again, so later `sxe ld:` stops still fire.
+- `.process` without `/i` lasts until the target runs, as in WinDbg, where it outlived `g` and read through the page tables of a process that had since exited; a kept context whose process exits ends with a warning. After `.process 0`, `$teb`, `$thread`, `$proc` and `$peb` resolve without `.thread`, and the MCP trailer names the stopped thread's process, not System, on an idle processor.
+- `pc`, `tc`, `ph`, `th`, `pt`, `tt`, `pa` and `ta` execute the current instruction before looking for a match, so repeating one moves on, where it stayed put; the SDK's `step(until=)` and `step_over(until=)` likewise.
+- `.lastevent` reports a single step; breakpoint conditions can name `$tid`, `$thread` and `$proc`; `sxe -c "<commands>"` works without `-f` and the event breaks; `threads 0n<pid>` matches as `threads <pid>` does; and `x` finds a DLL's symbols at its load stop.
+- A full KD breakpoint table gives one message that says when this session's own breakpoints fill it, where `bm` printed one per symbol blaming a previous session.
 
 ## v0.52.0 (2026-10-25)
 

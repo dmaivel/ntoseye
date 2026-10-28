@@ -196,6 +196,11 @@ impl Session {
             match self.add_symbol_breakpoint(canonical, config.clone()) {
                 Ok(id) => ids.push(id),
                 Err(Error::NotCode { .. }) => {}
+                // Every later match would fail the same way.
+                Err(error @ Error::BreakpointTableFull(_)) => {
+                    errors.push(error);
+                    break;
+                }
                 Err(error) => errors.push(error),
             }
         }
@@ -230,9 +235,40 @@ impl Session {
     /// reboot, and the guest runs only after a resume, so that is where
     /// whether the module traps are wanted is decided.
     pub fn arm_traps(&mut self) {
+        self.rearm_dropped_traps();
         self.arm_bugcheck_trap();
         self.sync_module_traps();
         self.note_breakin_site();
+    }
+
+    /// Plant again the traps a stop's report took out of the target's table
+    /// (see [`crate::backend::dbg_backend::DebugBackend::sites_dropped_by_stop`]),
+    /// as [`BreakpointManager::refresh_enabled`] does the manager's
+    /// breakpoints: otherwise their events stop being reported.
+    fn rearm_dropped_traps(&mut self) {
+        let dropped = self.backend.sites_dropped_by_stop();
+        if dropped.is_empty() {
+            return;
+        }
+        let module_sites = self.module_traps.iter().map(|trap| &trap.site);
+        let sites: Vec<TrapSite> = self
+            .bugcheck_trap
+            .iter()
+            .chain(module_sites)
+            .filter(|trap| dropped.contains(&trap.address.0))
+            .cloned()
+            .collect();
+        for trap in sites {
+            let original = (!trap.original.is_empty()).then_some(trap.original.as_slice());
+            if let Err(error) =
+                plant_target_site(self.backend.as_mut(), &self.target, trap.address, original)
+            {
+                self.notices.push(Notice::warning(format!(
+                    "failed to re-arm the trap at {:#x} its stop dropped: {error}",
+                    trap.address.0
+                )));
+            }
+        }
     }
 
     /// Name the kernel's break-in site to the backend (see

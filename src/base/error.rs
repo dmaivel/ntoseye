@@ -64,6 +64,11 @@ pub enum Error {
     )]
     HardwareBreakpointRefused { address: u64, response: String },
 
+    /// The target's breakpoint table has no entry left: every later install
+    /// fails the same way until one is freed, so a batch stops at the first.
+    #[error("breakpoint: {0}")]
+    BreakpointTableFull(String),
+
     /// A code breakpoint refused because its address is not code: a
     /// non-executable page or section.
     #[error("breakpoint: refusing breakpoint at {address:#x}: {reason}")]

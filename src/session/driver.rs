@@ -92,7 +92,9 @@ impl Motion {
     }
 }
 
-/// Where a [`Motion::Walk`] ends: the instruction about to run.
+/// Where a [`Motion::Walk`] ends: the instruction about to run. The walk
+/// executes the current instruction first, so one started on a match moves
+/// past it, as WinDbg's `pc`, `ph` and `pt` do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalkUntil {
     /// The instruction at this address.

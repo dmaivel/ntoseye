@@ -5464,8 +5464,8 @@ class Exceptions:
         alias (`av`, `bpe`, ...), and return its policy.
         
         `mode` is `break` (the default), `second_chance`, `notify` or `ignore`.
-        `command` runs at the stop, which needs an explicit `disposition`: break,
-        or continue the exception as handled or not handled. For a module load
+        `command` runs at the event; `disposition` then breaks, or continues the
+        exception as handled or not handled, and defaults to what `mode` does. For a module load
         or unload filter, use `set_module_event`.
         """
     def set_module_event(self, /, event: Literal["ld", "ud"], module: str |None = None, *, mode: Literal["break", "second_chance", "notify", "ignore"] |None = None, command: str |None = None) -> ModuleEventPolicy:

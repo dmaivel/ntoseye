@@ -116,6 +116,9 @@ pub struct Target {
     /// scope. Its `dtb` roots the process address space; see
     /// [`Self::process_dtb`].
     process: Option<ProcessInfo>,
+    /// The attached process is a `.process` context, which WinDbg keeps
+    /// only until the target executes again; `attach` keeps its own.
+    process_until_run: bool,
     /// Secure-kernel or trustlet root selected for read-only inspection.
     secure_root: Option<Dtb>,
     /// `.effmach`: the instruction set code is disassembled as, whatever the
@@ -192,6 +195,7 @@ pub struct Target {
 /// one operation in a scope of its own and put the user's selection back.
 pub struct TargetSelection {
     process: Option<ProcessInfo>,
+    process_until_run: bool,
     secure_root: Option<Dtb>,
     context_dtb_override: Option<Dtb>,
     selected_frame: Option<SelectedFrame>,

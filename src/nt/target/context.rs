@@ -180,10 +180,10 @@ impl Target {
             };
 
         self.process = Some(process_info);
+        self.process_until_run = false;
         self.secure_root = None;
         self.selected_frame = None;
         self.clear_context_dtb_override();
-        self.clear_current_windows_thread_context();
         Ok(AttachReport {
             name,
             symbol_report,
@@ -191,12 +191,52 @@ impl Target {
         })
     }
 
+    /// [`Self::attach_process_info`] for as long as the target stays
+    /// halted: `.process` without `/i`, whose context WinDbg documents as
+    /// lasting only until the target executes again (see
+    /// [`Self::end_process_context_on_run`]).
+    pub fn set_process_context(&mut self, process_info: ProcessInfo) -> Result<AttachReport> {
+        let report = self.attach_process_info(process_info)?;
+        self.process_until_run = true;
+        Ok(report)
+    }
+
+    /// End a [`Self::set_process_context`] context: the target is about to
+    /// execute. Returns the process whose context ended.
+    pub fn end_process_context_on_run(&mut self) -> Option<ProcessInfo> {
+        if !self.process_until_run {
+            return None;
+        }
+        self.process_until_run = false;
+        self.process.take()
+    }
+
+    /// End the attached process's context once the process has left the
+    /// active process list: its `EPROCESS` and page tables are freed, and
+    /// reads through them return whatever reuses the memory. Returns the
+    /// process whose context ended.
+    pub fn end_exited_process_context(&mut self) -> Option<ProcessInfo> {
+        let attached = self.process.as_ref()?;
+        let processes = self.guest.as_ref()?.enumerate_processes().ok()?;
+        if processes
+            .iter()
+            .any(|process| process.eprocess == attached.eprocess && process.pid == attached.pid)
+        {
+            return None;
+        }
+        self.process_until_run = false;
+        self.process.take()
+    }
+
+    /// Leave the process context for the kernel's. The selected Windows
+    /// thread stays: it is the thread's own process that `$proc`, `$teb` and
+    /// `$peb` name again.
     pub fn detach(&mut self) {
         self.secure_root = None;
         self.selected_frame = None;
         self.clear_context_dtb_override();
-        self.clear_current_windows_thread_context();
         self.process = None;
+        self.process_until_run = false;
     }
 
     /// Set the attached process aside, so inspection follows the selected
@@ -214,6 +254,7 @@ impl Target {
     /// kernel-symbol reads need only the page tables.
     pub fn enter_process_scope(&mut self, info: ProcessInfo) {
         self.detach();
+        self.clear_current_windows_thread_context();
         self.process = Some(info);
     }
 
@@ -222,6 +263,7 @@ impl Target {
     pub fn take_selection(&mut self) -> TargetSelection {
         TargetSelection {
             process: self.process.take(),
+            process_until_run: std::mem::take(&mut self.process_until_run),
             secure_root: self.secure_root.take(),
             context_dtb_override: self.context_dtb_override.take(),
             selected_frame: self.selected_frame.take(),
@@ -233,6 +275,7 @@ impl Target {
     /// Put back a scope taken with [`Self::take_selection`].
     pub fn restore_selection(&mut self, selection: TargetSelection) {
         self.process = selection.process;
+        self.process_until_run = selection.process_until_run;
         self.secure_root = selection.secure_root;
         self.context_dtb_override = selection.context_dtb_override;
         self.selected_frame = selection.selected_frame;
@@ -373,15 +416,23 @@ impl Target {
     /// first: at a stop that is almost always the answer and costs one
     /// EPROCESS read, where the fallback walks the process list.
     pub fn process_for_cr3(&self, cr3_masked: u64) -> Option<ProcessInfo> {
+        self.process_for_thread_cr3(cr3_masked, self.windows_thread_selection.as_ref())
+    }
+
+    /// [`Self::process_for_cr3`], checking `thread`'s owner first. The
+    /// owner is the only answer for a root two processes share: the Idle
+    /// process runs on the System process's.
+    pub fn process_for_thread_cr3(
+        &self,
+        cr3_masked: u64,
+        thread: Option<&ThreadInfo>,
+    ) -> Option<ProcessInfo> {
         if self.recognize_secure_root(cr3_masked) {
             return None;
         }
         let guest = self.guest.as_ref()?;
         let mask = self.arch().dtb_page_mask();
-        if let Some(eprocess) = self
-            .windows_thread_selection
-            .as_ref()
-            .and_then(|thread| thread.eprocess)
+        if let Some(eprocess) = thread.and_then(|thread| thread.eprocess)
             && let Ok(process) = guest.process_at(eprocess)
             && (process.dtb & mask) == cr3_masked
         {

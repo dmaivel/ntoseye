@@ -145,6 +145,7 @@ impl KdBackend {
                 );
                 self.pending_write_breakpoint = None;
                 self.bp_handles.insert(pending.addr, handle);
+                self.dropped_bp_addresses.remove(&pending.addr);
                 self.managed_bp_addresses.insert(pending.addr);
                 Ok(true)
             }
@@ -181,7 +182,7 @@ impl KdBackend {
     fn write_breakpoint_after_reclaim(&mut self, addr: u64, processor: u16) -> Result<u32> {
         let reclaimed = self.reclaim_stranded_breakpoints(processor);
         if reclaimed == 0 {
-            return Err(Self::breakpoint_table_error(addr));
+            return Err(self.breakpoint_table_error(addr));
         }
         self.notices.extend(reclaimed_breakpoints_notice(reclaimed));
         match with_framing_read_timeout_raw(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
@@ -191,7 +192,7 @@ impl KdBackend {
             Err(Error::KdStatus { ntstatus, api })
                 if ntstatus == STATUS_UNSUCCESSFUL && api == api::DBGKD_WRITE_BREAKPOINT =>
             {
-                Err(Self::breakpoint_table_error(addr))
+                Err(self.breakpoint_table_error(addr))
             }
             Err(error) => Err(error),
         }
@@ -210,12 +211,23 @@ impl KdBackend {
 
     /// Name the cause the raw NTSTATUS hides. WinDbg reports this as
     /// `Win32 error 0n998`, "invalid access to memory location", which sends
-    /// people hunting a memory-access problem that does not exist.
-    fn breakpoint_table_error(addr: u64) -> Error {
-        Error::Kd(format!(
+    /// people hunting a memory-access problem that does not exist. Every
+    /// entry may hold this session's own sites, which only clearing some
+    /// frees; otherwise the rest are strays an earlier session left where
+    /// the target cannot restore them.
+    fn breakpoint_table_error(&self, addr: u64) -> Error {
+        let owned = self.bp_handles.len();
+        let cause = if owned >= KD_BREAKPOINT_TABLE_SIZE as usize {
+            "this session's breakpoints and traps hold them all; clear some with bc".to_string()
+        } else {
+            format!(
+                "this session holds {owned}, and an earlier session stranded the rest in pages \
+                 the target can no longer write back, which only clear when the guest reboots"
+            )
+        };
+        Error::BreakpointTableFull(format!(
             "target refused a breakpoint at {addr:#x}: all {KD_BREAKPOINT_TABLE_SIZE} entries in \
-             its breakpoint table are taken; entries an earlier session stranded in a page the \
-             target can no longer write back only clear when the guest reboots"
+             its breakpoint table are taken; {cause}"
         ))
     }
 
@@ -250,11 +262,20 @@ impl KdBackend {
         };
         kd_trace!("kd: write_breakpoint: {addr:#x} -> handle {handle}");
         self.bp_handles.insert(addr, handle);
+        self.dropped_bp_addresses.remove(&addr);
         self.managed_bp_addresses.insert(addr);
         Ok(())
     }
 
     pub(super) fn uninstall_breakpoint(&mut self, addr: u64) -> Result<()> {
+        // A report already deleted the entry and wrote the byte back; its
+        // handle may name someone else's entry by now.
+        if self.dropped_bp_addresses.remove(&addr) {
+            kd_trace!("kd: breakpoint at {addr:#x} was dropped by a report; nothing to restore");
+            self.managed_bp_addresses.remove(&addr);
+            self.retired_bp_addresses.insert(addr);
+            return Ok(());
+        }
         let handle = *self
             .bp_handles
             .get(&addr)

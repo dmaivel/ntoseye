@@ -45,6 +45,28 @@ impl Session {
         self.last_event = Some(LastEvent::new(event.clone()));
     }
 
+    /// Record a finished single step at `rip` as the last event, as WinDbg's
+    /// `.lastevent` reports one. Most ways a step runs (past a site, without
+    /// the trap flag) see no stop of their own, so the event is made here.
+    pub fn record_step_event(&mut self, rip: u64) {
+        self.record_stop_event(&StopEvent {
+            thread_id: Some(self.current_thread.clone()),
+            exception_code: Some(STATUS_SINGLE_STEP),
+            first_chance: None,
+            exception_address: None,
+            program_counter: Some(rip),
+            watchpoint_address: None,
+            is_bugcheck: false,
+            bugcheck: None,
+            target_reloaded: false,
+            target_kernel_base_hint: None,
+            modules_changed: false,
+            module_event: None,
+            assisted_breakin: false,
+            break_in: false,
+        });
+    }
+
     fn record_visible_stop(&mut self, resolution: &StopResolution) {
         let event = match resolution {
             StopResolution::Breakpoint { event, .. }
@@ -61,6 +83,12 @@ impl Session {
         // A stop installs the halted vCPU's register context. Leaving a
         // secure root in place would render that stop through VTL1 tables.
         self.target.leave_secure_scope();
+        if let Some(process) = self.target.end_exited_process_context() {
+            self.notices.push(Notice::warning(format!(
+                "{} (PID {}) has exited; its process context ended",
+                process.name, process.pid
+            )));
+        }
         // Every host inspects the thread the stop landed on: `!thread`,
         // `.thread` and `$thread` read this selection, and resuming cleared it.
         refresh_windows_thread_context_for_backend_thread(&mut self.target, &self.current_thread);
@@ -204,14 +232,18 @@ impl Session {
     pub fn stopped_context(&mut self) -> (Option<ProcessInfo>, Option<ThreadInfo>) {
         let mask = self.target.arch().dtb_page_mask();
         let dtb_register = self.target.arch().dtb_register();
+        let stopped_thread = windows_thread_on_backend_thread(&self.target, &self.current_thread);
+        // The stopped thread's owner, whichever thread the user selected.
         let stopped_process = self
             .backend
             .read_registers()
             .ok()
             .and_then(|regs| self.register_map.read_u64(dtb_register, &regs).ok())
             .filter(|cr3| !self.target.recognize_secure_root(*cr3))
-            .and_then(|cr3| self.target.process_for_cr3(cr3 & mask));
-        let stopped_thread = windows_thread_on_backend_thread(&self.target, &self.current_thread);
+            .and_then(|cr3| {
+                self.target
+                    .process_for_thread_cr3(cr3 & mask, stopped_thread.as_ref())
+            });
         (stopped_process, stopped_thread)
     }
 
@@ -893,11 +925,41 @@ impl Session {
         };
         if kind == ModuleEvent::Load
             && let Some(process) = process
-                .and_then(|process| self.deferred_process_for_module(process, &module.short_name))
         {
-            self.arm_deferred_in_user_module(&process, &mut module);
+            if let Some(waiting) = self.deferred_process_for_module(process, &module.short_name) {
+                self.arm_deferred_in_user_module(&waiting, &mut module);
+            } else if self.module_event_stops(kind, &module.name)
+                && let Some(mapping) = self.image_process(process)
+                && let Some(failure) = self.load_user_module_symbols(&mapping, &mut module)
+            {
+                // The stop is where `x` and `ln` look for the image's
+                // symbols, and the loader lists do not name it yet.
+                self.notices.push(Notice::warning(format!(
+                    "{} loaded in {} (PID {}), but its symbols did not ({failure})",
+                    module.name, mapping.name, mapping.pid
+                )));
+            }
         }
         self.module_event_to_surface(kind, module)
+    }
+
+    /// Whether the `sx* ld`/`sx* ud` filters stop at `kind` of the image
+    /// `name` (see [`Self::module_event_to_surface`]).
+    fn module_event_stops(&self, kind: ModuleEvent, name: &str) -> bool {
+        self.exception_policies
+            .module_event_policy(kind, name)
+            .is_some_and(|policy| policy.mode == ExceptionPolicyMode::Break)
+    }
+
+    /// The process a user-mode image report names.
+    fn image_process(&self, process: ImageProcess) -> Option<ProcessInfo> {
+        self.target
+            .guest
+            .as_ref()?
+            .enumerate_processes()
+            .ok()?
+            .into_iter()
+            .find(|candidate| process.names(candidate))
     }
 
     /// The process `process` names, when a deferred breakpoint scoped to it
@@ -940,11 +1002,31 @@ impl Session {
             .find(|candidate| waiting.contains(&candidate.pid) && process.names(candidate))
     }
 
-    /// Load the symbols of `module`, just mapped into `process`, and arm the
-    /// deferred breakpoints they resolve. The stopped processor's registers
-    /// are read first: whether the target can owe a site in a page not yet
-    /// faulted in depends on which address space it stopped in.
+    /// Load the symbols of `module`, just mapped into `process` (see
+    /// [`Self::load_user_module_symbols`]), and arm the deferred breakpoints
+    /// they resolve.
     fn arm_deferred_in_user_module(&mut self, process: &ProcessInfo, module: &mut ModuleInfo) {
+        if let Some(failure) = self.load_user_module_symbols(process, module) {
+            self.notices.push(Notice::warning(format!(
+                "{} loaded in {} (PID {}), but its symbols did not ({failure}); the breakpoints \
+                 waiting on it stay deferred",
+                module.name, process.name, process.pid
+            )));
+            return;
+        }
+        self.reconcile_deferred_breakpoints();
+    }
+
+    /// Load the symbols of `module`, just mapped into `process`, saying why
+    /// they did not load. Its header gives its bitness first: a WOW64 ntdll
+    /// is `ntdll32`. The stopped processor's registers are read too: whether
+    /// the target can owe a site in a page not yet faulted in depends on
+    /// which address space it stopped in.
+    fn load_user_module_symbols(
+        &mut self,
+        process: &ProcessInfo,
+        module: &mut ModuleInfo,
+    ) -> Option<String> {
         let registers = self.backend.read_registers();
         update_target_context_from_registers(&mut self.target, &self.register_map, registers);
         let memory = self.target.address_space(process.dtb);
@@ -955,7 +1037,7 @@ impl Session {
         if module.is_32bit && module.short_name == "ntdll" {
             module.short_name.push_str("32");
         }
-        let failure = match self
+        match self
             .target
             .load_mapped_module_symbols(process.dtb, module.clone())
         {
@@ -981,16 +1063,7 @@ impl Session {
             ),
             Ok(_) => None,
             Err(error) => Some(error.to_string()),
-        };
-        if let Some(failure) = failure {
-            self.notices.push(Notice::warning(format!(
-                "{} loaded in {} (PID {}), but its symbols did not ({failure}); the breakpoints \
-                 waiting on it stay deferred",
-                module.name, process.name, process.pid
-            )));
-            return;
         }
-        self.reconcile_deferred_breakpoints();
     }
 }
 

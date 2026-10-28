@@ -64,6 +64,14 @@ impl Session {
                 }
                 // A false condition is absorbed. Evaluation errors fail safe:
                 // surface the stop and carry the error to every host.
+                // A condition may name the stopped thread (`$tid`, `$proc`),
+                // which the stop selects only once it surfaces.
+                if bp.condition_expr.is_some() {
+                    refresh_windows_thread_context_for_backend_thread(
+                        &mut self.target,
+                        &self.current_thread,
+                    );
+                }
                 let condition_error =
                     match evaluate_hit_condition(&mut self.target, &bp, caller.as_ref()) {
                         Ok(false) => {
@@ -612,6 +620,10 @@ pub fn resolve_watchpoint_stop(
         return Ok(WatchpointStopAction::Declined);
     }
 
+    // A condition may name the stopped thread, as at a breakpoint's hit.
+    if breakpoint.condition_expr.is_some() {
+        refresh_windows_thread_context_for_backend_thread(target, current_thread);
+    }
     let condition_error = match evaluate_hit_condition(target, &breakpoint, caller.as_ref()) {
         Ok(false) => {
             declined("condition false");

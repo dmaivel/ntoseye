@@ -325,13 +325,16 @@ pub struct KdBackend {
     last_stop_processor: u16,
     last_exception_code: u32,
     last_rip: u64,
-    /// The PCs of the extra reports the last step's processor switch put on
-    /// the wire (see `single_step`). Each deleted the breakpoint-table
-    /// entries in its window, as the stop's own report does; see
-    /// [`DebugBackend::sites_dropped_by_stop`].
-    switch_report_pcs: Vec<u64>,
     reconnect_assist_after_continue: Option<Duration>,
     bp_handles: HashMap<u64, u32>,
+    /// Our sites a report deleted from the target's table (see
+    /// [`DebugBackend::sites_dropped_by_stop`]), moved out of `bp_handles`
+    /// as the report arrives: the target frees their handles at once and
+    /// hands them to the next install, so restoring one by its old handle
+    /// would delete whichever entry took it over. A step on another
+    /// processor puts two more reports on the wire, and they count too.
+    /// An address leaves the set when it is installed or removed again.
+    dropped_bp_addresses: HashSet<u64>,
     managed_bp_addresses: HashSet<u64>,
     /// Where break-ins land: the connect's stop, when it was one, and the
     /// kernel's break-in site once the host names it
@@ -748,15 +751,7 @@ impl DebugBackend for KdBackend {
     /// A step on another processor puts two more reports on the wire, and
     /// their windows count too.
     fn sites_dropped_by_stop(&self) -> Vec<u64> {
-        let windows: Vec<_> = std::iter::once(self.last_rip)
-            .chain(self.switch_report_pcs.iter().copied())
-            .map(|pc| pc..pc.saturating_add(api::DBGKD_MAXSTREAM))
-            .collect();
-        self.bp_handles
-            .keys()
-            .copied()
-            .filter(|addr| windows.iter().any(|window| window.contains(addr)))
-            .collect()
+        self.dropped_bp_addresses.iter().copied().collect()
     }
 
     fn note_target_rediscovery_pending(&mut self) {

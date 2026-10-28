@@ -224,6 +224,7 @@ impl Target {
             guest,
             debugger_data: None,
             process: None,
+            process_until_run: false,
             secure_root: None,
             effmach: None,
             triage_modules_cache,
