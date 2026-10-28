@@ -209,14 +209,13 @@ impl Breakpoints {
             require_halted(session, "breakpoints.add")?;
             let dtb = BreakpointManager::resolution_dtb(&session.target, config.scope.as_ref());
             if hardware {
-                let address = target.resolve(session, dtb)?;
+                let address = session
+                    .resolve_in_breakpoint_scope(config.scope.as_ref(), |context| {
+                        target.resolve(context)
+                    })
+                    .map_err(err)?;
                 let id = session
-                    .set_hardware_breakpoint(
-                        VirtAddr(address),
-                        HwBreakpointAccess::Execute,
-                        1,
-                        config,
-                    )
+                    .set_hardware_breakpoint(address, HwBreakpointAccess::Execute, 1, config)
                     .map_err(err)?;
                 return created(session, id);
             }
@@ -393,10 +392,13 @@ impl Breakpoints {
         )?;
         let bp = self.owner.with(py, |session| {
             require_halted(session, "breakpoints.watch")?;
-            let dtb = BreakpointManager::resolution_dtb(&session.target, config.scope.as_ref());
-            let address = target.resolve(session, dtb)?;
+            let address = session
+                .resolve_in_breakpoint_scope(config.scope.as_ref(), |context| {
+                    target.resolve(context)
+                })
+                .map_err(err)?;
             let id = session
-                .set_hardware_breakpoint(VirtAddr(address), access.into(), length, config)
+                .set_hardware_breakpoint(address, access.into(), length, config)
                 .map_err(err)?;
             created(session, id)
         })?;
@@ -563,6 +565,7 @@ impl Breakpoint {
         self.mutate(py, "breakpoint.pass_count", |session| {
             session
                 .breakpoints
+                .edit()
                 .set_pass_count(self.id, pass_count)
                 .map_err(err)
         })
@@ -573,6 +576,7 @@ impl Breakpoint {
         self.mutate(py, "breakpoint.one_shot", |session| {
             session
                 .breakpoints
+                .edit()
                 .set_one_shot(self.id, one_shot)
                 .map_err(err)
         })

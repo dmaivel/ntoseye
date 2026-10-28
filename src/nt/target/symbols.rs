@@ -206,9 +206,10 @@ impl Target {
         })
     }
 
-    /// Load symbols for one module (by short name, e.g. `user32`) or, with
-    /// `None`, every module of process `pid`, without changing the inspection
-    /// scope. A process-scoped breakpoint names the address space it wants;
+    /// Load symbols for the modules whose short name matches the glob
+    /// `module_short` (`user32`, `kernel*`) or, with `None`, every module of
+    /// process `pid`, without changing the inspection scope. A
+    /// process-scoped breakpoint names the address space it wants;
     /// the debugger can read that process's loader list and its PDBs itself
     /// rather than defer until someone runs `.process /p`. Modules already
     /// attempted are left alone. Returns whether any load was attempted.
@@ -228,7 +229,7 @@ impl Target {
             .process_modules(&info)?
             .into_iter()
             .filter(|module| {
-                module_short.is_none_or(|short| module.short_name.eq_ignore_ascii_case(short))
+                module_short.is_none_or(|short| glob_matches(short, &module.short_name, true))
             })
             .filter(|module| {
                 self.symbols

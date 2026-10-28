@@ -370,6 +370,7 @@ impl<'a> TypeView<'a> {
         }
         let mut bytes = [0u8; 8];
         self.session
+            .target
             .read_masked_in(self.dtb, address, &mut bytes[..size])
             .map_err(|error| error.to_string())?;
         Ok(le_uint(&bytes[..size]))
@@ -385,6 +386,7 @@ impl<'a> TypeView<'a> {
         }
         let mut bytes = vec![0u8; size];
         self.session
+            .target
             .read_masked_in(self.dtb, address, &mut bytes)
             .map_err(|error| error.to_string())?;
         Ok(bytes)

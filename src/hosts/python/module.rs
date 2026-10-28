@@ -157,12 +157,12 @@ impl Module {
         self.owner.with_in(py, &self.context(), |session| {
             let mut image = vec![0u8; size];
             if !zero_fill {
-                session.read_masked(base, &mut image).map_err(err)?;
+                session.target.read_masked(base, &mut image).map_err(err)?;
                 return Ok(image);
             }
             for (index, page) in image.chunks_mut(PAGE_SIZE).enumerate() {
                 let address = VirtAddr(base.0 + (index * PAGE_SIZE) as u64);
-                if session.read_masked(address, page).is_err() {
+                if session.target.read_masked(address, page).is_err() {
                     page.fill(0);
                 }
             }

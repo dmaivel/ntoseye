@@ -85,7 +85,7 @@ fn read_best_effort(
     range: &AddressRange,
 ) -> Result<(Vec<u8>, Vec<bool>)> {
     read_page_chunks(range.start, range.len(), |address, buf| match memory {
-        MemoryKind::Virtual => session.read_masked(address, buf),
+        MemoryKind::Virtual => session.target.read_masked(address, buf),
         MemoryKind::Physical => session.target.read_physical(address.0, buf),
     })
 }
@@ -473,7 +473,10 @@ fn print_symbol_values(session: &Session, rows: &[SymbolValueRow], item_size: us
     let returns = |value: u64| {
         let mut before = [0u8; 8];
         value.checked_sub(before.len() as u64).is_some_and(|from| {
-            session.read_masked(VirtAddr(from), &mut before).is_ok()
+            session
+                .target
+                .read_masked(VirtAddr(from), &mut before)
+                .is_ok()
                 && target
                     .code_machine(VirtAddr(value))
                     .instruction_set()
@@ -611,6 +614,7 @@ fn pointers(
                         } else {
                             let mut pointed = vec![0u8; item_size];
                             session
+                                .target
                                 .read_masked(VirtAddr(pointer), &mut pointed)
                                 .ok()
                                 .and_then(|()| le_value(&pointed))
@@ -1632,7 +1636,7 @@ fn writemem(
             return;
         }
         let mut bytes = vec![0u8; len];
-        if session.read_masked(address, &mut bytes).is_err() {
+        if session.target.read_masked(address, &mut bytes).is_err() {
             bytes.fill(0);
             unreadable += len;
         }

@@ -102,7 +102,7 @@ fn disassemble(
     // An instruction window may run past the end of the mapped image;
     // keep what is readable up to the first unreadable page.
     let mut bytes: Vec<u8> = vec![0u8; byte_len as usize];
-    if session.read_masked(address, &mut bytes).is_err() {
+    if session.target.read_masked(address, &mut bytes).is_err() {
         let page_end = address
             .0
             .checked_add(PAGE_SIZE as u64 - address.page_offset())
@@ -112,6 +112,7 @@ fn disassemble(
         // Not even the first page reads: say it is not resident, as the
         // stop's disassembly does, rather than call the address bad.
         session
+            .target
             .read_masked(address, &mut bytes)
             .map_err(|error| match error {
                 Error::BadVirtualAddress(_)

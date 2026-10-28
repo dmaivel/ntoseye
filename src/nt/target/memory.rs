@@ -173,7 +173,12 @@ pub enum ExpressionScope {
 /// The virtual memory expressions read: the inspection address space, or a
 /// hypercall caller's (see [`ExpressionScope`]).
 pub enum ExpressionMemory<'a> {
-    Context(AddressSpace<'a, PhysMem>),
+    /// The inspection address space, with the session's breakpoint
+    /// instructions masked as [`Target::read_masked`] masks them:
+    /// `by(nt!NtClose)` is the code under a breakpoint there, as `db` shows
+    /// it, so `eb nt!NtClose by(nt!NtClose)` writes back what the breakpoint
+    /// displaced rather than the breakpoint.
+    Context(&'a Target),
     HypercallCaller(&'a Target, Option<EvmcsState>),
 }
 
@@ -190,7 +195,7 @@ fn caller_state(state: Option<&EvmcsState>) -> Result<&EvmcsState> {
 impl MemoryOps<VirtAddr> for ExpressionMemory<'_> {
     fn read_bytes(&self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
         match self {
-            Self::Context(memory) => memory.read_bytes(addr, buf),
+            Self::Context(target) => target.read_masked_held(target.current_dtb(), addr, buf),
             Self::HypercallCaller(target, state) => {
                 target.read_guest_partition(caller_state(state.as_ref())?, true, addr.0, buf)
             }
@@ -199,7 +204,7 @@ impl MemoryOps<VirtAddr> for ExpressionMemory<'_> {
 
     fn write_bytes(&self, addr: VirtAddr, buf: &[u8]) -> Result<()> {
         match self {
-            Self::Context(memory) => memory.write_bytes(addr, buf),
+            Self::Context(target) => target.context_memory().write_bytes(addr, buf),
             Self::HypercallCaller(..) => Err(Error::Hypervisor(
                 "a hypercall caller's memory is read-only".to_string(),
             )),
@@ -356,6 +361,49 @@ impl Target {
         )
     }
 
+    /// Read guest virtual memory in the inspection address space
+    /// ([`Self::current_dtb`]) with the session's breakpoint instructions
+    /// masked back to the original code, so every host (REPL, MCP, SDK)
+    /// sees the same bytes the guest would run. What a user-mode minidump
+    /// did not capture of a module's image is read from its image file
+    /// ([`Self::read_image_backed`]).
+    pub fn read_masked(&self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
+        self.read_masked_in(self.current_dtb(), addr, buf)
+    }
+
+    /// [`Self::read_masked`] in the address space `dtb` rather than the
+    /// inspection one, for values that belong to a particular stack frame.
+    pub fn read_masked_in(&self, dtb: Dtb, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
+        self.read_image_backed(dtb, addr, buf)?;
+        self.mask_breakpoints(dtb, addr, buf);
+        Ok(())
+    }
+
+    /// [`Self::read_masked_in`] of what the target holds alone, never a
+    /// minidump's image file: expressions, and `!chkimg`, which compares
+    /// memory with that file.
+    pub fn read_masked_held(&self, dtb: Dtb, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
+        self.address_space(dtb).read_bytes(addr, buf)?;
+        self.mask_breakpoints(dtb, addr, buf);
+        Ok(())
+    }
+
+    /// Put the code the session's breakpoints and traps displaced back into
+    /// `buf`, read at `start` in `dtb`'s address space
+    /// ([`CodeSites::mask`](crate::nt::breakpoints::CodeSites::mask)).
+    /// Without this a view shows the debugger's `int3` instead of the
+    /// guest's code.
+    pub fn mask_code(&self, start: VirtAddr, buf: &mut [u8], dtb: Dtb) {
+        self.code_sites.mask(self, start, buf, dtb);
+    }
+
+    /// [`Self::mask_code`], except in a VTL1 address space.
+    fn mask_breakpoints(&self, dtb: Dtb, addr: VirtAddr, buf: &mut [u8]) {
+        if !self.symbols.is_secure_root(dtb) {
+            self.mask_code(addr, buf, dtb);
+        }
+    }
+
     /// Why the page at `address`, in the address space rooted at `dtb`, is
     /// not in memory ([`AddressSpace::non_resident`]); `None` when it is, and
     /// for a VTL1 address space, which the page walk does not describe.
@@ -385,7 +433,7 @@ impl Target {
     /// inspection address space, or a hypercall caller's.
     pub fn expression_memory(&self) -> ExpressionMemory<'_> {
         match self.expression_scope {
-            ExpressionScope::Context => ExpressionMemory::Context(self.context_memory()),
+            ExpressionScope::Context => ExpressionMemory::Context(self),
             ExpressionScope::HypercallCaller(state) => {
                 ExpressionMemory::HypercallCaller(self, state)
             }

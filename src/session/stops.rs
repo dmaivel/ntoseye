@@ -380,14 +380,15 @@ impl Session {
             });
         }
         self.record_stop_event(&event);
-        match resolve_watchpoint_stop(
+        let action = resolve_watchpoint_stop(
             self.backend.as_mut(),
             &self.register_map,
-            &mut self.breakpoints,
+            &mut self.breakpoints.edit(),
             &mut self.target,
             &mut self.current_thread,
             &event,
-        )? {
+        )?;
+        match action {
             WatchpointStopAction::Hit {
                 breakpoint,
                 condition_error,
@@ -514,14 +515,15 @@ impl Session {
             return Ok(StopResolution::ModulesChanged);
         }
 
-        match resolve_watchpoint_stop(
+        let action = resolve_watchpoint_stop(
             self.backend.as_mut(),
             &self.register_map,
-            &mut self.breakpoints,
+            &mut self.breakpoints.edit(),
             &mut self.target,
             &mut self.current_thread,
             &event,
-        )? {
+        )?;
+        match action {
             WatchpointStopAction::Hit {
                 breakpoint,
                 condition_error,
@@ -854,6 +856,7 @@ impl Session {
         // A load may have resolved the last breakpoint waiting on one.
         self.arm_traps();
         self.breakpoints
+            .edit()
             .refresh_enabled(self.backend.as_mut(), &self.target)?;
         self.continue_backend(ContinueDisposition::Handled)?;
         Ok(StopResolution::ModulesChanged)

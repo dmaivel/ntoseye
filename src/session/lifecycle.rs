@@ -17,7 +17,7 @@ use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::notice::Notice;
 use crate::base::types::VirtAddr;
-use crate::nt::breakpoints::{BreakpointManager, SiteFrames, SiteJournal};
+use crate::nt::breakpoints::{BreakpointManager, Published, SiteFrames, SiteJournal};
 use crate::nt::bugchecks::plausible_bugcheck_code;
 use crate::nt::cpu_state;
 use crate::nt::dmp::{DmpBackend, DmpInfo};
@@ -413,18 +413,22 @@ impl Session {
         let reload_module_list_pending = target
             .startup_message_data()
             .is_ok_and(|startup| startup.loaded_module_list.is_zero());
+        let sites = &target.code_sites;
+        let breakpoints = Published::new(BreakpointManager::new(), Arc::clone(sites));
+        let bugcheck_trap = Published::new(None, Arc::clone(sites));
+        let module_traps = Published::new(Vec::new(), Arc::clone(sites));
         let mut session = Self {
             id: NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed),
             target,
             backend,
-            breakpoints: BreakpointManager::new(),
+            breakpoints,
             register_map,
             current_thread,
             exception_policies: ExceptionPolicyTable::default(),
             parked_windows_thread: None,
             reload_module_list_pending,
-            bugcheck_trap: None,
-            module_traps: Vec::new(),
+            bugcheck_trap,
+            module_traps,
             module_trap_interrupted: None,
             hold_declined_hits: false,
             reload_surface_pending: false,

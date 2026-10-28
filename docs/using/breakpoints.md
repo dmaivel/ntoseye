@@ -4,7 +4,7 @@ All breakpoint commands share one grammar, which follows WinDbg. A code breakpoi
 
 - `/1`: one-shot.
 - `/a`: set a {command}`bp` or {command}`bu` breakpoint without checking that an instruction starts at its address ([below](#where-a-code-breakpoint-can-go)). WinDbg has `/a` only on {command}`bm`, for locations that it would otherwise skip.
-- `/p <pid>`: process scope.
+- `/p <pid>`: process scope. The target is also evaluated in that process ([below](#scope-filters)).
 - `/t <ethread>`: thread scope.
 - `/c <processor>`: processor scope. WinDbg does not have this option.
 - `/w "<expr>"`: conditional shorthand.
@@ -69,6 +69,8 @@ A `ba e1` stop can occur before the instruction page fault, when there are no by
 ## Scope filters
 
 `/p` filters the hits that `ntoseye` reports and does not change how it installs the breakpoint. The target always manages kernel sites, and `ntoseye` patches user-space sites through the page tables of the selected process, so a breakpoint in a shared physical page can also trap other processes. `ntoseye` discards those hits, but each of them still causes debugger round trips.
+
+`/p` also names the process in which {command}`bp`, {command}`bu`, {command}`bm`, and {command}`ba` evaluate their address or pattern, as if you had run {command}`.process` `/p <pid>` first, and `ntoseye` loads the symbols of the modules that the address or pattern names in that process. For example, `ba e1 /p 4140 kernelbase!GetFileAttributesExW+0x60` resolves while the current process context is the System process, or while the target is stopped in the hypervisor. The current process context stays as it was. A kernel symbol resolves the same in every process.
 
 `/t` is the same kind of filter. It compares the Windows thread of the stop with the thread that you specify, and it takes the same values as {command}`!thread`: a thread ID, an ETHREAD, or a KTHREAD.
 
@@ -214,7 +216,7 @@ The scope is a filter on the host. `ntoseye` compares the process that trapped w
 3. It writes the byte back.
 4. It resumes the target.
 
-No view shows the injected byte. `ntoseye` hides a site in every read that reaches the frame that contains it, so each process that maps a shared page shows the original instruction. If a process has its own memory at the same address instead of the shared frame, `ntoseye` does not change reads of that memory. Only the debugger views hide the `int3`, and the guest still executes it.
+No view shows the injected byte, and no expression reads it: `by(nt!NtClose)`, `poi`, and a breakpoint condition read the original instruction, as {command}`db` shows it, so `eb nt!NtClose by(nt!NtClose)` writes back the code that is already there. `ntoseye` hides a site in every read that reaches the frame that contains it, so each process that maps a shared page shows the original instruction. If a process has its own memory at the same address instead of the shared frame, `ntoseye` does not change reads of that memory. Only the debugger's reads hide the `int3`, and the guest still executes it.
 
 ### The site journal
 

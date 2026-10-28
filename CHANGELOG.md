@@ -28,6 +28,7 @@ Keeping this file:
 - `SystemPteTypeDetail.used` is `None` where `SystemPteTypeDetail.counters_hold` is false, and `SystemPtesDetail.uncounted` names the allocators its totals leave out.
 - `LfhSubsegment.block_count` counts the blocks a subsegment withholds, and `LfhSubsegment.bit_stride` gives its bitmap's bits per block; `LfhSubsegment.bucket` is `None` for a subsegment that names no bucket, and `VtopDetail.physical_walk` says whether its entry addresses are physical (an explicit DTB) or in the self-map.
 - `sx` aliases follow WinDbg's event table: `cc` is Ctrl+C (0x40010005), where it named the C++ exception (`eh`); `asrt` is an assertion failure (0xC0000420); the breakpoint exception is `bpe`, where it was `bp`; and `bpec`, `ssec`, `cce`, `ch`, `hc`, `wkd`, `aph`, `dbce`, `vcpp`, `clr` and `clrn` are added.
+- `bp`, `ba` and `bm` with `/p <pid>` evaluate the address or pattern in that process, as after `.process /p` and without changing the current process context, so `ba e1 /p <pid> kernelbase!GetFileAttributesExW+0x60` works from a break-in in the System process or the hypervisor; the SDK's `breakpoints.add(hardware=True, process=...)` and `breakpoints.watch(..., process=...)` do the same.
 
 ### Fixed
 
@@ -111,6 +112,7 @@ Keeping this file:
 - `r` shows pseudo-registers (`r $proc`, `r $peb, rip`), as WinDbg does, where only `$t0`-`$t19` worked and the rest were "not found".
 - GDB server: a reply that takes longer than gdb's `remotetimeout` (a `monitor` command loading symbols) no longer drops the client: gdb's `-` for the late reply is ignored, as the protocol requires in no-acknowledgment mode, where gdbstub ended the session.
 - A run to an address handed back running (MCP `gu` or `p` over a call past `timeout_ms`, a DAP step) takes its temporary breakpoint out at the stop a later call collects, where it stayed in `bl` as a breakpoint on the thread and stopped it at that return again on every later `g`.
+- Expressions (`by`, `poi`, ...) and breakpoint conditions read the code under the session's own breakpoints and traps, as `db` shows it, on every host, where they read the `int3`: `eb nt!NtClose by(nt!NtClose)` with a breakpoint there wrote `cc` back as the original code, and `bc` then left it in the guest for good.
 
 ## v0.52.0 (2026-10-25)
 

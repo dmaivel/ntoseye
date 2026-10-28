@@ -1,11 +1,12 @@
 //! How a code breakpoint reaches the target: the target-owned and
 //! host-patched backends, the checks a site must pass before it is
-//! written, and masking the patched bytes back out of display reads.
+//! written, and publishing the planted sites for reads to mask back out.
 
 use pelite::{PeView, image::IMAGE_SCN_MEM_EXECUTE};
 
 use super::journal::{Restore, SiteMemory, site_window};
-use super::{BreakpointInfo, BreakpointManager, BreakpointScope};
+use super::sites::{CodeSites, PlantedSite, Publish};
+use super::{BreakpointInfo, BreakpointManager, BreakpointScope, same_address_space};
 use crate::arch::{Arch, Family};
 use crate::backend::dbg_backend::{DebugBackend, DebugCapability};
 use crate::backend::kd::trace_enabled;
@@ -37,7 +38,7 @@ use crate::nt::target::mm::PfnSelector;
 ///   [`Breakpoint::hardware`]; hits are identified by DR6, not by RIP, so
 ///   hardware breakpoints stay out of the int3-hit predicates.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct BreakpointPatch {
+pub struct BreakpointPatch {
     bytes: [u8; 4],
     len: u8,
 }
@@ -49,6 +50,16 @@ impl BreakpointPatch {
             bytes: [0; 4],
             len: len as u8,
         }
+    }
+
+    /// The displaced instruction `bytes`; `None` when there are none.
+    pub fn from_slice(bytes: &[u8]) -> Option<Self> {
+        if bytes.is_empty() || bytes.len() > 4 {
+            return None;
+        }
+        let mut patch = Self::new(bytes.len());
+        patch.as_mut_slice().copy_from_slice(bytes);
+        Some(patch)
     }
 
     #[cfg(test)]
@@ -653,62 +664,6 @@ impl BreakpointManager {
             .find(|module| module.contains_address(address))
     }
 
-    /// Overlay our breakpoints' original bytes onto a buffer read for display,
-    /// so no view ever shows the int3 we injected. `start` is the buffer's
-    /// guest VA and `cr3` the address space it was read from.
-    ///
-    /// A site is masked wherever the read reaches the frame the byte was
-    /// written into, since that is what decides whether our `int3` is what
-    /// the caller would otherwise see. One rule covers a kernel site under
-    /// every address space and a user site in a shared image page under every
-    /// process mapping it, while leaving a process that merely has its own
-    /// memory at the same address untouched.
-    pub fn mask_breakpoint_bytes(
-        &self,
-        debugger: &Target,
-        start: VirtAddr,
-        buf: &mut [u8],
-        cr3: u64,
-    ) {
-        let end = start.0.wrapping_add(buf.len() as u64);
-        for bp in self.planted_sites() {
-            if bp.address.0 < start.0 || bp.address.0 >= end {
-                continue;
-            }
-            if !Self::site_is_in_view(debugger, bp, cr3) {
-                continue;
-            }
-            let offset = (bp.address.0 - start.0) as usize;
-            let bytes = bp.backend.original_bytes();
-            if offset + bytes.len() <= buf.len() {
-                buf[offset..offset + bytes.len()].copy_from_slice(bytes);
-            }
-        }
-    }
-
-    /// Whether a read under `cr3` reaches the frame `bp` patched.
-    ///
-    /// Both sides are translated rather than remembered: a frame recorded at
-    /// install would go stale the moment the guest remapped the page, and the
-    /// translations are cached per halt anyway. Scope is the fallback for an
-    /// address space that cannot resolve the site at all, such as a
-    /// non-resident page or a dump carrying no page tables.
-    fn site_is_in_view(debugger: &Target, bp: &BreakpointInfo, cr3: u64) -> bool {
-        let owner = Self::site_dtb(debugger, bp);
-        let frame = |dtb| {
-            debugger
-                .address_space(dtb)
-                .virt_to_phys(bp.address)
-                .ok()
-                .flatten()
-                .map(|translation| translation.address & !(PAGE_SIZE as u64 - 1))
-        };
-        match (frame(owner), frame(cr3)) {
-            (Some(patched), Some(viewed)) => patched == viewed,
-            _ => bp.scope.matches_dtb(cr3, debugger.arch()),
-        }
-    }
-
     /// The address space `bp` was planted in.
     pub fn site_dtb(debugger: &Target, bp: &BreakpointInfo) -> Dtb {
         match &bp.scope {
@@ -740,7 +695,7 @@ impl BreakpointManager {
 
     /// The breakpoints whose planted instruction a write of `len` bytes at
     /// `start` in the address space `dtb` lands on: wherever a read there
-    /// would have them masked ([`Self::mask_breakpoint_bytes`]).
+    /// would have them masked ([`CodeSites::mask`]).
     pub fn sites_under_write(
         &self,
         debugger: &Target,
@@ -754,7 +709,7 @@ impl BreakpointManager {
             .filter(|bp| {
                 bp.address.0 < end
                     && start.0 < bp.address.0.saturating_add(site_len)
-                    && Self::site_is_in_view(debugger, bp, dtb)
+                    && site_in_view(debugger, bp.address, bp.scope.process_dtb(), dtb)
             })
             .map(|bp| bp.id)
             .collect()
@@ -792,6 +747,49 @@ impl BreakpointManager {
         self.breakpoints
             .values()
             .filter(|bp| bp.resolved && bp.enabled && bp.hardware.is_none())
+    }
+}
+
+impl Publish for BreakpointManager {
+    fn publish(&self, sites: &CodeSites) {
+        sites.publish_breakpoints(self.planted_sites().filter_map(|bp| {
+            Some(PlantedSite {
+                address: bp.address,
+                process: bp.scope.process_dtb(),
+                original: BreakpointPatch::from_slice(bp.backend.original_bytes())?,
+            })
+        }));
+    }
+}
+
+/// Whether a read under `cr3` reaches the frame of the site at `address`,
+/// planted in `process`'s address space (`None`: the kernel's).
+///
+/// A site is masked wherever the read reaches the frame the byte was
+/// written into, since that is what decides whether our `int3` is what the
+/// caller would otherwise see. One rule covers a kernel site under every
+/// address space and a user site in a shared image page under every process
+/// mapping it, while leaving a process that merely has its own memory at the
+/// same address untouched.
+///
+/// Both sides are translated rather than remembered: a frame recorded at
+/// install would go stale the moment the guest remapped the page, and the
+/// translations are cached per halt anyway. Scope is the fallback for an
+/// address space that cannot resolve the site at all, such as a
+/// non-resident page or a dump carrying no page tables.
+pub fn site_in_view(debugger: &Target, address: VirtAddr, process: Option<Dtb>, cr3: u64) -> bool {
+    let owner = process.unwrap_or_else(|| debugger.kernel_dtb());
+    let frame = |dtb| {
+        debugger
+            .address_space(dtb)
+            .virt_to_phys(address)
+            .ok()
+            .flatten()
+            .map(|translation| translation.address & !(PAGE_SIZE as u64 - 1))
+    };
+    match (frame(owner), frame(cr3)) {
+        (Some(patched), Some(viewed)) => patched == viewed,
+        _ => process.is_none_or(|process| same_address_space(process, cr3, debugger.arch())),
     }
 }
 
@@ -894,7 +892,7 @@ mod tests {
     use crate::base::types::VirtAddr;
     use crate::nt::breakpoints::test_backend::SlotRecorder;
     use crate::nt::breakpoints::{
-        BreakpointConfig, BreakpointManager, BreakpointScope, SiteJournal,
+        BreakpointConfig, BreakpointManager, BreakpointScope, CodeSites, Publish, SiteJournal,
     };
     use crate::session::session_over_memory;
 
@@ -1016,7 +1014,9 @@ mod tests {
         // Nothing was displaced while the page remained unreadable, so there
         // is no byte to mask into a view yet.
         let mut buffer = [0xccu8; 4];
-        manager.mask_breakpoint_bytes(
+        let sites = CodeSites::default();
+        manager.publish(&sites);
+        sites.mask(
             &session.target,
             address,
             &mut buffer,

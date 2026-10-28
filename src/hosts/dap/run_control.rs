@@ -354,7 +354,11 @@ impl Server {
         // Masked: an injected breakpoint byte reads as `int3`, i.e. as control
         // flow, and would defeat the fall-through proof.
         let mut bytes = vec![0u8; span];
-        if session.read_masked(VirtAddr(rip), &mut bytes).is_err() {
+        if session
+            .target
+            .read_masked(VirtAddr(rip), &mut bytes)
+            .is_err()
+        {
             return Ok(None);
         }
         let machine = session.target.executing_machine(VirtAddr(rip));

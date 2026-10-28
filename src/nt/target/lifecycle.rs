@@ -244,6 +244,7 @@ impl Target {
             notices,
             generation: Arc::new(AtomicU64::new(0)),
             site_journal: None,
+            code_sites: Arc::default(),
             #[cfg(test)]
             test_current_threads: None,
             #[cfg(test)]

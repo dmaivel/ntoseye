@@ -26,7 +26,10 @@ use crate::base::error::{Error, Result};
 use crate::base::notice::Notice;
 use crate::base::ntstatus::exception_code_name;
 use crate::base::types::VirtAddr;
-use crate::nt::breakpoints::{BreakpointInfo, BreakpointManager, StepFrame, ThreadScope};
+use crate::nt::breakpoints::{
+    BreakpointInfo, BreakpointManager, CodeSites, Publish, Published, StepFrame, ThreadScope,
+    TrapKind,
+};
 #[cfg(test)]
 use crate::nt::dmp::triage::{TriageBlock, make_triage_dump};
 use crate::nt::expr::NumberRadix;
@@ -698,6 +701,26 @@ pub struct ModuleTrap {
     pub user: bool,
 }
 
+impl Publish for Option<TrapSite> {
+    fn publish(&self, sites: &CodeSites) {
+        sites.publish_traps(
+            TrapKind::Bugcheck,
+            self.iter()
+                .map(|trap| (trap.address, trap.original.as_slice())),
+        );
+    }
+}
+
+impl Publish for Vec<ModuleTrap> {
+    fn publish(&self, sites: &CodeSites) {
+        sites.publish_traps(
+            TrapKind::Module,
+            self.iter()
+                .map(|trap| (trap.site.address, trap.site.original.as_slice())),
+        );
+    }
+}
+
 /// What [`Session::page_in`] observed once the target came back.
 #[derive(Debug, Clone, Copy)]
 pub struct PageInReport {
@@ -826,7 +849,9 @@ pub struct Session {
     id: usize,
     pub target: Target,
     pub backend: Box<dyn DebugBackend>,
-    pub breakpoints: BreakpointManager,
+    /// Published to the target's [`Target::code_sites`], which every read
+    /// masks, so it is changed through [`Published::edit`].
+    pub breakpoints: Published<BreakpointManager>,
     pub register_map: RegisterMap,
     pub current_thread: String,
     /// Per-exception-code stop policy (`sxe`/`sxd`/`sxn`/`sxi`). Session state
@@ -848,11 +873,11 @@ pub struct Session {
     /// The automatic `nt!KeBugCheckEx` breakpoint, once armed. Only backends
     /// that cannot report a bugcheck themselves get one; see
     /// [`Self::arm_bugcheck_trap`].
-    bugcheck_trap: Option<TrapSite>,
+    bugcheck_trap: Published<Option<TrapSite>>,
     /// The automatic breakpoints on the kernel functions that report module
     /// loads and unloads, while one is waited on. Only backends that report
     /// no module events themselves get them; see [`Self::sync_module_traps`].
-    module_traps: Vec<ModuleTrap>,
+    module_traps: Published<Vec<ModuleTrap>>,
     /// The event and stack pointer of a thread that took an interrupt on a
     /// module trap while being run past it, before executing it: its next
     /// hit on that event's trap is the same event, not a new one.

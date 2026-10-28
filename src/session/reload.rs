@@ -84,6 +84,7 @@ impl Session {
         }
         self.target.refresh_kernel_module_symbols()?;
         self.breakpoints
+            .edit()
             .resolve_symbolic(self.backend.as_mut(), &self.target)?;
         self.backend.note_target_rediscovery_complete();
         self.reload_module_list_pending = false;
@@ -139,8 +140,8 @@ impl Session {
             event.target_reloaded = true;
             // The reboot invalidates the sites: the kernel is re-based and
             // the target's breakpoints are gone. The next resume re-arms them.
-            self.bugcheck_trap = None;
-            self.module_traps.clear();
+            *self.bugcheck_trap.edit() = None;
+            self.module_traps.edit().clear();
             self.module_trap_interrupted = None;
             let TargetReloadOutcome {
                 report,
@@ -224,7 +225,7 @@ impl Session {
     fn perform_target_reload(&mut self, event_hint: Option<VirtAddr>) -> TargetReloadOutcome {
         let backend = self.backend.as_mut();
         let target = &mut self.target;
-        let breakpoints = &mut self.breakpoints;
+        let mut breakpoints = self.breakpoints.edit();
         // Target-specific numeric breakpoints and hardware slots cannot survive a
         // rebuild. Symbolic code breakpoints retain identity and become deferred.
         breakpoints.prepare_target_reload(backend);

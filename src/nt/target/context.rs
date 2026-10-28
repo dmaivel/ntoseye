@@ -283,6 +283,28 @@ impl Target {
         self.registers = selection.registers;
     }
 
+    /// Run `f` with `process`'s address space as the inspection scope, as
+    /// `.process /p` selects it but without loading every module's symbols,
+    /// then put the selection back, whatever `f` returned. A command that
+    /// names a process (`bp /p`) evaluates its address there, so the user
+    /// need not switch to the process and back around it.
+    pub fn in_process_scope<R>(&mut self, process: ProcessInfo, f: impl FnOnce(&Self) -> R) -> R {
+        let saved = (
+            self.process.replace(process),
+            self.secure_root.take(),
+            self.context_dtb_override.take(),
+            self.selected_frame.take(),
+        );
+        let result = f(self);
+        (
+            self.process,
+            self.secure_root,
+            self.context_dtb_override,
+            self.selected_frame,
+        ) = saved;
+        result
+    }
+
     /// Follow a register-derived root (a halted thread's CR3/TTBR0, or a
     /// context record's) for inspection. A root that cannot reach the kernel
     /// is a KVA-shadow user root; it is replaced by its process's full
@@ -655,9 +677,10 @@ impl Target {
 mod tests {
     use super::{decide_bitness, select_thread_process_dtb, thread_owner_matches};
     use crate::arch::Arch;
+    use crate::base::error::{Error, Result};
     use crate::base::memory::DTB_IDENTITY;
     use crate::base::types::CodeMachine;
-    use crate::base::types::VirtAddr;
+    use crate::base::types::{Dtb, VirtAddr};
     use crate::nt::guest::{ModuleInfo, ProcessInfo};
     use crate::nt::symbols::CodeFrame;
     use crate::nt::target::SelectedFrame;
@@ -765,6 +788,42 @@ mod tests {
         target.enter_secure_scope(0x5000);
         assert_eq!(target.current_dtb(), 0x5000);
         assert_eq!(target.register_value("rip"), None);
+    }
+
+    #[test]
+    fn a_process_scope_puts_the_selection_back() {
+        let mut session = session_over_memory(0x1000, &[0x90; 0x40]);
+        let target = &mut session.target;
+        let process = |pid, dtb| ProcessInfo {
+            pid,
+            name: format!("{pid}.exe"),
+            dtb,
+            eprocess: VirtAddr(0xffff800000004000 + pid),
+            wow64_peb: None,
+        };
+        target.enter_process_scope(process(42, 0x3000));
+        target.symbols.set_secure_roots(0x5000, [0x6000]);
+        target.set_context_dtb_override(0x6002);
+        assert_eq!(target.current_dtb(), 0x6000);
+        // `bp /p 8` evaluates in process 8 whatever the user selected, and
+        // a failed evaluation leaves that selection as it was.
+        let _: Result<Dtb> = target.in_process_scope(process(8, 0x8000), |scoped| {
+            assert_eq!(
+                scoped.attached_process().map(|process| process.pid),
+                Some(8)
+            );
+            assert_eq!(scoped.current_dtb(), 0x8000);
+            Err(Error::SymbolNotFound(
+                "kernelbase!GetFileAttributesExW".into(),
+            ))
+        });
+        assert_eq!(
+            target.attached_process().map(|process| process.pid),
+            Some(42)
+        );
+        assert_eq!(target.current_dtb(), 0x6000);
+        target.set_context_dtb_override(0x7000);
+        assert_eq!(target.current_dtb(), 0x3000);
     }
 
     #[test]

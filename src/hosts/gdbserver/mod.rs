@@ -637,6 +637,7 @@ mod tests {
         for &(id, address) in sites {
             session
                 .breakpoints
+                .edit()
                 .insert_for_test(id, VirtAddr(address), true, None);
         }
         (session, continues)

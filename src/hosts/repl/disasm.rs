@@ -423,7 +423,9 @@ pub fn disasm_context_rows(
         return Err(non_resident_note(rip, &error, runs));
     }
 
-    session.mask_code(VirtAddr(rip), &mut bytes, trace.active_dtb);
+    session
+        .target
+        .mask_code(VirtAddr(rip), &mut bytes, trace.active_dtb);
 
     let resolve = |target: u64| format_symbol(debugger, trace, target);
     Ok(decode_disasm_context(

@@ -1092,7 +1092,7 @@ impl ReplState<'_> {
         while let Some(current) = cursor.take_current() {
             let read_words = display_words.max(2);
             let width = read_words * pointer;
-            if let Err(error) = self.ctx.read_masked(current, &mut bytes[..width]) {
+            if let Err(error) = self.ctx.target.read_masked(current, &mut bytes[..width]) {
                 outln!("{}: <unavailable: {}>", ui::addr(current.0), error);
                 cursor.advance(Err(error.to_string()));
                 continue;

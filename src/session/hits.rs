@@ -59,7 +59,8 @@ impl Session {
                 // Count every scoped physical hit before pass-count and
                 // condition evaluation. A pass skip uses the same canonical
                 // step-over/resume path as a false condition.
-                if self.breakpoints.record_hit(bp.id)? == BreakpointHitDisposition::SkipPass {
+                if self.breakpoints.edit().record_hit(bp.id)? == BreakpointHitDisposition::SkipPass
+                {
                     return self.decline_hit();
                 }
                 // A false condition is absorbed. Evaluation errors fail safe:
@@ -85,6 +86,7 @@ impl Session {
                 // so they survive the next resume.
                 if let Err(error) = self
                     .breakpoints
+                    .edit()
                     .refresh_enabled(self.backend.as_mut(), &self.target)
                 {
                     self.notices.push(Notice::warning(format!(
@@ -92,7 +94,7 @@ impl Session {
                     )));
                 }
 
-                self.breakpoints.mark_one_shot_hit(bp.id)?;
+                self.breakpoints.edit().mark_one_shot_hit(bp.id)?;
                 Ok(BreakpointStopAction::Hit {
                     breakpoint: bp,
                     condition_error,
@@ -151,6 +153,7 @@ impl Session {
     fn step_over_and_resume(&mut self) -> Result<()> {
         self.step_over_site_at_pc()?;
         self.breakpoints
+            .edit()
             .refresh_enabled(self.backend.as_mut(), &self.target)?;
         self.continue_backend(ContinueDisposition::Handled)
     }
@@ -165,6 +168,7 @@ impl Session {
         }
         self.step_over_site_at_pc()?;
         self.breakpoints
+            .edit()
             .refresh_enabled(self.backend.as_mut(), &self.target)?;
         self.set_current_thread(stepping)
     }
@@ -180,7 +184,7 @@ impl Session {
         let rsp = self
             .register_map
             .read_u64(self.target.arch().sp_register(), &regs)?;
-        Ok(self.breakpoints.take_interrupted_hit(rip, rsp))
+        Ok(self.breakpoints.edit().take_interrupted_hit(rip, rsp))
     }
 }
 

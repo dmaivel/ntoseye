@@ -220,10 +220,12 @@ impl Session {
         }
         for id in self.breakpoints.one_shot_hit_ids() {
             self.breakpoints
+                .edit()
                 .remove(self.backend.as_mut(), &self.target, id)?;
         }
 
         self.breakpoints
+            .edit()
             .refresh_enabled(self.backend.as_mut(), &self.target)?;
         self.continue_backend(disposition)?;
         self.record_continuation_disposition(disposition);

@@ -1331,12 +1331,12 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool, startup: &Startup) -> Re
     // A failed removal remains managed and forces an explicitly halted exit;
     // resuming with an orphaned int3 would turn cleanup failure into a guest
     // crash after the debugger disconnects.
-    let breakpoint_cleanup_succeeded = match state
+    let removed = state
         .ctx
         .breakpoints
-        .remove_all(&mut *state.ctx.backend, &state.ctx.target)
-        .and_then(|()| state.ctx.disarm_traps())
-    {
+        .edit()
+        .remove_all(&mut *state.ctx.backend, &state.ctx.target);
+    let breakpoint_cleanup_succeeded = match removed.and_then(|()| state.ctx.disarm_traps()) {
         Ok(()) => true,
         Err(error) => {
             error!("failed to uninstall breakpoints on exit: {error}");
@@ -1609,6 +1609,7 @@ mod tests {
         let mut session = session_with_mock(backend);
         session
             .breakpoints
+            .edit()
             .insert_for_test(0, VirtAddr(0x1000), true, None);
         let mut state = remote_state(&mut session, 5_000);
         let (result, text) = capture(|| state.dispatch_line(HALTED_PROBE));
@@ -1623,6 +1624,7 @@ mod tests {
         let mut session = session_with_mock(MockBackend::default().running());
         session
             .breakpoints
+            .edit()
             .insert_for_test(0, VirtAddr(0x1000), true, None);
         let mut state = remote_state(&mut session, 150);
         let (result, text) = capture(|| state.dispatch_line(HALTED_PROBE));
@@ -1677,6 +1679,7 @@ mod tests {
         let mut session = session_with_mock(backend);
         session
             .breakpoints
+            .edit()
             .insert_for_test(0, VirtAddr(0x1000), true, None);
         let mut state = remote_state(&mut session, 5_000);
         let (result, text) = capture(|| state.dispatch_line("g"));

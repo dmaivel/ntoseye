@@ -647,6 +647,7 @@ fn reload_symbols(
         .map_err(|error| Error::DebugInfo(format!("symbol reload failed: {error}")))?;
     if let Err(error) = session
         .breakpoints
+        .edit()
         .resolve_symbolic(session.backend.as_mut(), &session.target)
     {
         report.breakpoint_error = Some(error.to_string());

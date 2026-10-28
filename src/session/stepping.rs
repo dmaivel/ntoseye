@@ -103,6 +103,7 @@ impl Session {
         };
         for id in self.breakpoints.one_shot_hit_ids() {
             self.breakpoints
+                .edit()
                 .remove(self.backend.as_mut(), &self.target, id)?;
         }
 
@@ -111,6 +112,7 @@ impl Session {
         // ends on the vCPU it ran, whichever one the stub last reported.
         if let Err(error) = self
             .breakpoints
+            .edit()
             .refresh_enabled(self.backend.as_mut(), &self.target)
         {
             self.notices.push(Notice::warning(format!(
@@ -283,7 +285,7 @@ impl Session {
         if let Err(error) =
             plant_target_site(self.backend.as_mut(), &self.target, trap.address, original)
         {
-            self.module_traps.remove(index);
+            self.module_traps.edit().remove(index);
             self.notices.push(Notice::warning(format!(
                 "failed to re-arm the module-{} trap: {error}",
                 event_word(event)
@@ -305,7 +307,7 @@ impl Session {
             self.backend.as_mut(),
             &self.register_map,
             &self.target,
-            &mut self.breakpoints,
+            &mut self.breakpoints.edit(),
             &self.current_thread,
         )
     }
@@ -338,7 +340,7 @@ impl Session {
         let memory = self.target.address_space(code_dtb);
         let mut bytes = [0u8; 16];
         memory.read_bytes(VirtAddr(pc), &mut bytes)?;
-        self.mask_code(VirtAddr(pc), &mut bytes, active_dtb);
+        self.target.mask_code(VirtAddr(pc), &mut bytes, active_dtb);
 
         let machine = self.target.executing_machine(VirtAddr(pc));
         let (length, flow) = decode_first(&bytes, machine)
@@ -431,7 +433,7 @@ impl Session {
         let machine = self.target.executing_machine(VirtAddr(ip));
         let length = machine.max_instruction_bytes();
         // The thread's own code, whichever process inspection is attached to.
-        self.read_masked_in(
+        self.target.read_masked_in(
             code_root(&self.target, cr3, ip),
             VirtAddr(ip),
             &mut bytes[..length],
@@ -1200,6 +1202,7 @@ impl Session {
             .kthread;
         let watch = self
             .breakpoints
+            .edit()
             .add_temporary_watch(
                 self.backend.as_mut(),
                 &self.target,
@@ -1265,12 +1268,12 @@ impl Session {
         let Some(run) = self.handed_back_run.as_mut() else {
             return Ok(());
         };
-        if run.checked.elapsed() < FOLLOW_CHECK {
-            return Ok(());
-        }
         let Some(thread) = run.thread.clone() else {
             return Ok(());
         };
+        if run.checked.elapsed() < FOLLOW_CHECK {
+            return Ok(());
+        }
         run.checked = Instant::now();
         let now = self.target.thread_info_from_ethread(thread.ethread);
         if !now.is_ok_and(|now| thread.exited(&now)) {
@@ -1308,9 +1311,11 @@ impl Session {
         for &id in sites {
             if armed {
                 self.breakpoints
+                    .edit()
                     .enable(self.backend.as_mut(), &self.target, id)?;
             } else {
                 self.breakpoints
+                    .edit()
                     .disable(self.backend.as_mut(), &self.target, id)?;
             }
         }
@@ -1321,7 +1326,7 @@ impl Session {
     /// manager, so a removal may be a no-op; its error is ignored.
     fn remove_temporary(&mut self, ids: &[u32]) {
         for &id in ids {
-            let (breakpoints, backend, target) = self.breakpoint_sites();
+            let (mut breakpoints, backend, target) = self.breakpoint_sites();
             let _ = breakpoints.remove(backend, target, id);
         }
     }

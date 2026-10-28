@@ -17,7 +17,7 @@ use crate::nt::breakpoints::{
 };
 use crate::nt::expr::Expr;
 use crate::nt::guest::vm_exits::ExitFilter;
-use crate::nt::guest::{ModuleSymbolLoadReport, hypercalls};
+use crate::nt::guest::{ModuleSymbolLoadReport, ProcessInfo, hypercalls};
 use crate::nt::symbols::split_query_module;
 use crate::nt::target::{MemoryKind, Target};
 use crate::session::exception_policy::ExceptionPolicyMode;
@@ -53,8 +53,13 @@ impl Session {
         config: BreakpointConfig,
     ) -> Result<u32> {
         self.require_software_breakpoints()?;
-        self.breakpoints
-            .add_configured(self.backend.as_mut(), &self.target, addr, symbol, config)
+        self.breakpoints.edit().add_configured(
+            self.backend.as_mut(),
+            &self.target,
+            addr,
+            symbol,
+            config,
+        )
     }
 
     /// Set a symbol-identity breakpoint: it survives module unload/reload and
@@ -66,6 +71,7 @@ impl Session {
     ) -> Result<u32> {
         self.require_software_breakpoints()?;
         self.breakpoints
+            .edit()
             .add_symbolic(self.backend.as_mut(), &self.target, symbol, config)
     }
 
@@ -90,7 +96,7 @@ impl Session {
             .target
             .symbols
             .format_closest_symbol_for_address(dtb, address);
-        let id = self.breakpoints.add_configured(
+        let id = self.breakpoints.edit().add_configured(
             self.backend.as_mut(),
             &self.target,
             address,
@@ -115,9 +121,12 @@ impl Session {
         } else {
             self.check_symbol_site(&spec, config.scope.as_ref())?
         };
-        let id =
-            self.breakpoints
-                .add_symbolic(self.backend.as_mut(), &self.target, spec, config)?;
+        let id = self.breakpoints.edit().add_symbolic(
+            self.backend.as_mut(),
+            &self.target,
+            spec,
+            config,
+        )?;
         Ok(CheckedBreakpoint { id, warning })
     }
 
@@ -156,6 +165,7 @@ impl Session {
     ) -> Result<Vec<u32>> {
         self.require_software_breakpoints()?;
         self.breakpoints
+            .edit()
             .add_source(self.backend.as_mut(), &self.target, source, config)
     }
 
@@ -163,7 +173,8 @@ impl Session {
     /// `pattern` (`bm`): `*`/`?` globs, optionally `module!`-qualified; at
     /// most `limit` matches. Data symbols the pattern also matches are
     /// skipped, as WinDbg's `bm` does. Returns the ids created and the
-    /// errors of matches that failed to install.
+    /// errors of matches that failed to install. A `/p` scope searches that
+    /// process's modules ([`Self::in_breakpoint_scope`]).
     pub fn add_pattern_breakpoints(
         &mut self,
         pattern: &str,
@@ -171,29 +182,48 @@ impl Session {
         limit: usize,
     ) -> Result<PatternBreakpoints> {
         self.require_software_breakpoints()?;
-        let dtb = self.target.current_dtb();
-        let names: Vec<String> = match split_query_module(pattern) {
-            Some((module, query)) => self
-                .target
-                .symbols
-                .search_symbols_in_modules(dtb, module, query, limit),
-            None => self.target.current_symbol_index().search(pattern, limit),
-        };
+        let scope = config.scope.as_ref();
+        let (names, matched) = self.in_breakpoint_scope(scope, |target| {
+            let module = split_query_module(pattern);
+            // `.process /p` would load every module's symbols; the pattern
+            // names the modules it searches. A process whose loader list
+            // cannot be read (a kernel-only one) has only what is loaded.
+            if let Some(BreakpointScope::Process { pid, dtb, .. }) = scope {
+                let _ = target.load_process_module_symbols(
+                    *pid,
+                    *dtb,
+                    module.map(|(module, _)| module),
+                );
+            }
+            let dtb = target.current_dtb();
+            let names = match module {
+                Some((module, query)) => target
+                    .symbols
+                    .search_symbols_in_modules(dtb, module, query, limit),
+                None => target.current_symbol_index().search(pattern, limit),
+            };
+            let matched = names.len();
+            let canonical = names
+                .into_iter()
+                .take(limit)
+                .map(|name| {
+                    Ok(target
+                        .symbols
+                        .find_symbol_with_module(dtb, &name)?
+                        .map(|(_, module)| {
+                            let bare = name
+                                .rsplit_once('!')
+                                .map_or(name.as_str(), |(_, bare)| bare);
+                            format!("{module}!{bare}")
+                        })
+                        .unwrap_or_else(|| name.clone()))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok((canonical, matched))
+        })?;
         let mut ids = Vec::new();
         let mut errors = Vec::new();
-        let matched = names.len();
-        for name in names.into_iter().take(limit) {
-            let canonical = self
-                .target
-                .symbols
-                .find_symbol_with_module(dtb, &name)?
-                .map(|(_, module)| {
-                    let bare = name
-                        .rsplit_once('!')
-                        .map_or(name.as_str(), |(_, bare)| bare);
-                    format!("{module}!{bare}")
-                })
-                .unwrap_or_else(|| name.clone());
+        for canonical in names {
             match self.add_symbol_breakpoint(canonical, config.clone()) {
                 Ok(id) => ids.push(id),
                 Err(Error::NotCode { .. }) => {}
@@ -215,16 +245,69 @@ impl Session {
     /// The `/p <pid>` breakpoint scope: hits are reported only from that
     /// process's address space.
     pub fn breakpoint_scope_for_pid(&self, pid: u64) -> Result<BreakpointScope> {
-        let process = self
-            .target
+        self.process_for_pid(pid)
+            .map(|process| BreakpointScope::process(&process))
+    }
+
+    fn process_for_pid(&self, pid: u64) -> Result<ProcessInfo> {
+        self.target
             .guest
             .as_ref()
             .ok_or(Error::NtoskrnlNotFound)?
             .enumerate_processes()?
             .into_iter()
             .find(|process| process.pid == pid)
-            .ok_or_else(|| Error::InvalidArgument(format!("process {pid} not found")))?;
-        Ok(BreakpointScope::process(&process))
+            .ok_or_else(|| Error::InvalidArgument(format!("process {pid} not found")))
+    }
+
+    /// Resolve a breakpoint's address with `resolve` in the address space
+    /// its `scope` names, as [`Self::in_breakpoint_scope`] does, so `ba e1
+    /// /p 4 kernelbase!SleepEx+0x60` needs no `.process` around it. When
+    /// `resolve` misses a symbol of a module the `/p` process maps, that
+    /// module's symbols are loaded and `resolve` runs again.
+    pub fn resolve_in_breakpoint_scope<T>(
+        &mut self,
+        scope: Option<&BreakpointScope>,
+        resolve: impl Fn(&Target) -> Result<T>,
+    ) -> Result<T> {
+        let process = match scope {
+            Some(BreakpointScope::Process { pid, dtb, .. }) => Some((*pid, *dtb)),
+            _ => None,
+        };
+        self.in_breakpoint_scope(scope, |target| {
+            loop {
+                let result = resolve(target);
+                // Each load attempts modules not tried before, so this ends.
+                if let (Err(Error::SymbolNotFound(name)), Some((pid, dtb))) = (&result, process)
+                    && let Some((module, _)) = name.split_once('!')
+                    && matches!(
+                        target.load_process_module_symbols(pid, dtb, Some(module.trim())),
+                        Ok(true)
+                    )
+                {
+                    continue;
+                }
+                return result;
+            }
+        })
+    }
+
+    /// Run `f` in the address space a breakpoint's `scope` names: for `/p
+    /// <pid>`, that process's, as `.process /p` selects it, with the
+    /// selection put back afterwards; otherwise the current context, where
+    /// a kernel symbol resolves as anywhere.
+    fn in_breakpoint_scope<R>(
+        &mut self,
+        scope: Option<&BreakpointScope>,
+        f: impl FnOnce(&Target) -> Result<R>,
+    ) -> Result<R> {
+        match scope {
+            Some(BreakpointScope::Process { pid, .. }) => {
+                let process = self.process_for_pid(*pid)?;
+                self.target.in_process_scope(process, f)
+            }
+            _ => f(&self.target),
+        }
     }
 
     /// Arm the debugger's own kernel traps the backend needs: the bugcheck
@@ -302,11 +385,12 @@ impl Session {
         {
             return;
         }
-        self.bugcheck_trap = self.plant_trap(
+        let trap = self.plant_trap(
             "nt!KeBugCheckEx",
             "a bugcheck trap",
             "cannot detect a bugcheck by itself",
         );
+        *self.bugcheck_trap.edit() = trap;
     }
 
     /// Keep automatic breakpoints on the kernel functions that report a
@@ -346,7 +430,7 @@ impl Session {
                     };
                     for symbol in module_trap_symbols(event) {
                         if let Some(site) = self.plant_trap(symbol, what, needs) {
-                            self.module_traps.push(ModuleTrap {
+                            self.module_traps.edit().push(ModuleTrap {
                                 event,
                                 site,
                                 user: false,
@@ -376,7 +460,7 @@ impl Session {
                     "reports no user-mode image loads by itself; it stays while a breakpoint \
                      scoped to a process waits for its module or an sx ld filter can name a DLL",
                 ) {
-                    self.module_traps.push(ModuleTrap {
+                    self.module_traps.edit().push(ModuleTrap {
                         event: ModuleEvent::Load,
                         site,
                         user: true,
@@ -421,7 +505,8 @@ impl Session {
     /// that cannot be lifted stays, so a later resume tries again.
     fn lift_module_traps(&mut self, event: ModuleEvent, user: bool) {
         let mut kept = Vec::new();
-        for trap in take(&mut self.module_traps) {
+        let traps = take(&mut *self.module_traps.edit());
+        for trap in traps {
             if trap.event != event || trap.user != user {
                 kept.push(trap);
                 continue;
@@ -436,7 +521,7 @@ impl Session {
                 kept.push(trap);
             }
         }
-        self.module_traps = kept;
+        *self.module_traps.edit() = kept;
         // The other event's trap stays planted, and so does its marker.
         self.module_trap_interrupted
             .take_if(|(interrupted, _)| *interrupted == event);
@@ -571,7 +656,9 @@ impl Session {
             .map(Expr::parse)
             .transpose()?
             .map(Arc::new);
-        self.breakpoints.set_condition(id, condition, compiled)
+        self.breakpoints
+            .edit()
+            .set_condition(id, condition, compiled)
     }
 
     /// Watch data accesses at `addr` (global across guest address spaces),
@@ -639,7 +726,7 @@ impl Session {
             Some(partition) => self.partition_breakpoint_config(partition, addr, config)?,
             None => config,
         };
-        let (breakpoints, backend, target) = self.breakpoint_sites();
+        let (mut breakpoints, backend, target) = self.breakpoint_sites();
         if access == HwBreakpointAccess::Execute
             && backend.debug_traps_reach_target()
             && let Some(refusal) = target.breakpoint_site_refusal(addr)
@@ -695,7 +782,7 @@ impl Session {
             })?
             .handler;
         let symbol = hypercalls::handler_name(&table, filter.code).map(|name| format!("hv!{name}"));
-        self.breakpoints.add_hardware_configured(
+        self.breakpoints.edit().add_hardware_configured(
             self.backend.as_mut(),
             &self.target,
             VirtAddr(handler),
@@ -732,7 +819,7 @@ impl Session {
         }
         self.require_hypervisor_caller(filter.partition, filter.vp)?;
         let entry = self.target.vm_exit_entry()?;
-        self.breakpoints.add_hardware_configured(
+        self.breakpoints.edit().add_hardware_configured(
             self.backend.as_mut(),
             &self.target,
             VirtAddr(entry),
@@ -748,7 +835,7 @@ impl Session {
 
     /// Remove a breakpoint by id.
     pub fn remove_breakpoint(&mut self, id: u32) -> Result<()> {
-        let (breakpoints, backend, target) = self.breakpoint_sites();
+        let (mut breakpoints, backend, target) = self.breakpoint_sites();
         breakpoints.remove(backend, target, id)
     }
 
@@ -786,14 +873,14 @@ impl Session {
 
     /// Re-arm a disabled breakpoint (re-patch its `int3`).
     pub fn enable_breakpoint(&mut self, id: u32) -> Result<()> {
-        let (breakpoints, backend, target) = self.breakpoint_sites();
+        let (mut breakpoints, backend, target) = self.breakpoint_sites();
         breakpoints.enable(backend, target, id)
     }
 
     /// Disable a breakpoint (restore the original byte) without forgetting it,
     /// so it can be re-enabled later.
     pub fn disable_breakpoint(&mut self, id: u32) -> Result<()> {
-        let (breakpoints, backend, target) = self.breakpoint_sites();
+        let (mut breakpoints, backend, target) = self.breakpoint_sites();
         breakpoints.disable(backend, target, id)
     }
 
@@ -805,38 +892,6 @@ impl Session {
     /// Return one breakpoint by id.
     pub fn breakpoint(&self, id: u32) -> Option<&BreakpointInfo> {
         self.breakpoints.list().into_iter().find(|bp| bp.id == id)
-    }
-
-    /// Put the original bytes of every debugger-owned site back into `buf`,
-    /// read at `start` in the address space `dtb`: the manager's breakpoints
-    /// and the session's own traps. Without this a view shows the debugger's
-    /// `int3` instead of the guest's code. A partition view's memory holds
-    /// none: its breakpoints are debug registers, and the sites are the
-    /// target's.
-    pub fn mask_code(&self, start: VirtAddr, buf: &mut [u8], dtb: u64) {
-        if self.partition().is_some() {
-            return;
-        }
-        self.breakpoints
-            .mask_breakpoint_bytes(&self.target, start, buf, dtb);
-        self.mask_traps(start, buf);
-    }
-
-    /// Put the traps' displaced instructions back into a read that covers
-    /// them. The traps are not the manager's breakpoints, so the manager
-    /// cannot mask them.
-    fn mask_traps(&self, start: VirtAddr, buf: &mut [u8]) {
-        let module_sites = self.module_traps.iter().map(|trap| &trap.site);
-        for trap in self.bugcheck_trap.iter().chain(module_sites) {
-            if trap.original.is_empty() || trap.address.0 < start.0 {
-                continue;
-            }
-            let offset = (trap.address.0 - start.0) as usize;
-            let end = offset + trap.original.len();
-            if end <= buf.len() {
-                buf[offset..end].copy_from_slice(&trap.original);
-            }
-        }
     }
 
     /// Write `data` at `address` of `memory`: the inspection address space
@@ -870,7 +925,7 @@ impl Session {
     }
 
     /// Write `data` at `address` in the address space `dtb` as
-    /// [`Self::read_masked_in`] reads it: where the write lands on one of
+    /// [`Target::read_masked_in`] reads it: where the write lands on one of
     /// this session's breakpoints or traps, it replaces the code the site
     /// displaced, and the site stays planted over the new code.
     pub fn write_in(&mut self, dtb: Dtb, address: VirtAddr, data: &[u8]) -> Result<()> {
@@ -936,8 +991,10 @@ impl Session {
                     return session.replant_traps(&traps[..lifted]).and(Err(error));
                 }
             }
-            let (breakpoints, backend, target) = session.breakpoint_sites();
-            let written = breakpoints.write_under(backend, target, ids, || write(target));
+            let written = {
+                let (mut breakpoints, backend, target) = session.breakpoint_sites();
+                breakpoints.write_under(backend, target, ids, || write(target))
+            };
             let replanted = session.replant_traps(traps);
             written.and(replanted)
         })
@@ -966,16 +1023,21 @@ impl Session {
                 (!original.is_empty()).then_some(original.as_slice()),
             ) {
                 Ok(()) => {
-                    let module_sites = self.module_traps.iter_mut().map(|trap| &mut trap.site);
-                    for site in self.bugcheck_trap.iter_mut().chain(module_sites) {
+                    let mut module_traps = self.module_traps.edit();
+                    let mut bugcheck_trap = self.bugcheck_trap.edit();
+                    let module_sites = module_traps.iter_mut().map(|trap| &mut trap.site);
+                    for site in bugcheck_trap.iter_mut().chain(module_sites) {
                         if site.address == address {
                             site.original.clone_from(&original);
                         }
                     }
                 }
                 Err(error) => {
-                    self.bugcheck_trap.take_if(|trap| trap.address == address);
+                    self.bugcheck_trap
+                        .edit()
+                        .take_if(|trap| trap.address == address);
                     self.module_traps
+                        .edit()
                         .retain(|trap| trap.site.address != address);
                     failed.push(format!("{:#x} ({error})", address.0));
                 }
@@ -994,7 +1056,7 @@ impl Session {
     /// removals remain managed so callers can retry and must not resume the
     /// target as if cleanup had succeeded.
     pub fn remove_all_breakpoints(&mut self) -> Result<()> {
-        let (breakpoints, backend, target) = self.breakpoint_sites();
+        let (mut breakpoints, backend, target) = self.breakpoint_sites();
         breakpoints.remove_all(backend, target)
     }
 
@@ -1037,13 +1099,13 @@ impl Session {
     /// reach it with no debugger attached; if the session dies first, the
     /// site journal covers them.
     pub fn disarm_traps(&mut self) -> Result<()> {
-        if let Some(trap) = &self.bugcheck_trap {
+        if let Some(trap) = &*self.bugcheck_trap {
             lift_target_site(self.backend.as_mut(), &self.target, trap.address)?;
-            self.bugcheck_trap = None;
+            *self.bugcheck_trap.edit() = None;
         }
         while let Some(trap) = self.module_traps.last() {
             lift_target_site(self.backend.as_mut(), &self.target, trap.site.address)?;
-            self.module_traps.pop();
+            self.module_traps.edit().pop();
         }
         self.module_trap_interrupted = None;
         Ok(())
@@ -1107,6 +1169,7 @@ impl Session {
         self.symbols_reconciled_at = self.target.symbols.load_generation();
         if let Err(error) = self
             .breakpoints
+            .edit()
             .reconcile_symbolic_after_module_refresh(self.backend.as_mut(), &self.target)
         {
             self.notices.push(Notice::warning(format!(

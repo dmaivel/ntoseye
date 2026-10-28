@@ -155,30 +155,22 @@ impl Session {
         Ok((selected, thread))
     }
 
-    /// Read guest virtual memory in the inspection address space
-    /// ([`Target::current_dtb`](crate::nt::target::Target::current_dtb)) with our
-    /// own breakpoint patch bytes masked back to the original code, so every
-    /// host (REPL, MCP, SDK) sees the same bytes the guest would run. What a
-    /// user-mode minidump did not capture of a module's image is read from
-    /// its image file ([`Target::read_image_backed`](crate::nt::target::Target::read_image_backed)).
-    pub fn read_masked(&self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
-        self.read_masked_in(self.target.current_dtb(), addr, buf)
-    }
-
     /// Search the inspection address space for `pattern`
     /// ([`Target::search`](crate::nt::target::Target::search)) as
-    /// [`Self::read_masked`] reads it, so a breakpoint this session planted
-    /// neither hides the original bytes nor matches as an `int3`.
+    /// [`Target::read_masked`](crate::nt::target::Target::read_masked) reads
+    /// it, so a breakpoint this session planted neither hides the original
+    /// bytes nor matches as an `int3`.
     pub fn search(&self, start: VirtAddr, pattern: &[u8], length: usize) -> Result<SearchResult> {
         self.target.search(start, pattern, length, |address, buf| {
-            self.read_masked(address, buf)
+            self.target.read_masked(address, buf)
         })
     }
 
     /// Compare two ranges of the inspection address space
     /// ([`Target::compare`](crate::nt::target::Target::compare)) as
-    /// [`Self::read_masked`] reads them, so a breakpoint this session planted
-    /// is compared as the byte it displaced.
+    /// [`Target::read_masked`](crate::nt::target::Target::read_masked) reads
+    /// them, so a breakpoint this session planted is compared as the byte it
+    /// displaced.
     pub fn compare(
         &self,
         first: VirtAddr,
@@ -186,25 +178,8 @@ impl Session {
         length: usize,
     ) -> Result<CompareResult> {
         self.target.compare(first, second, length, |address, buf| {
-            self.read_masked(address, buf)
+            self.target.read_masked(address, buf)
         })
-    }
-
-    /// [`Self::read_masked`] in the address space `dtb` rather than the
-    /// inspection one, for values that belong to a particular stack frame.
-    pub fn read_masked_in(&self, dtb: Dtb, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
-        self.target.read_image_backed(dtb, addr, buf)?;
-        self.mask_breakpoints(dtb, addr, buf);
-        Ok(())
-    }
-
-    /// Put the code this session's breakpoints replaced back into `buf`, read
-    /// at `addr` in `dtb`'s address space ([`Self::mask_code`]), except in a
-    /// VTL1 address space.
-    fn mask_breakpoints(&self, dtb: Dtb, addr: VirtAddr, buf: &mut [u8]) {
-        if !self.target.symbols.is_secure_root(dtb) {
-            self.mask_code(addr, buf, dtb);
-        }
     }
 
     /// Compare `module`'s executable sections against its cached image
@@ -216,9 +191,7 @@ impl Session {
         let dtb = self.target.process_dtb();
         self.target
             .check_image(module, include_diffs, &|address, buf| {
-                self.target.address_space(dtb).read_bytes(address, buf)?;
-                self.mask_breakpoints(dtb, address, buf);
-                Ok(())
+                self.target.read_masked_held(dtb, address, buf)
             })
     }
 
@@ -247,18 +220,21 @@ impl Session {
                     "string address overflows".to_string(),
                 )));
             }
-            self.read_masked(at, buf).map_err(|error| match error {
-                Error::TargetRunning(_) => ScanFault::Fatal(error),
-                error => ScanFault::Unreadable(error),
-            })
+            self.target
+                .read_masked(at, buf)
+                .map_err(|error| match error {
+                    Error::TargetRunning(_) => ScanFault::Fatal(error),
+                    error => ScanFault::Unreadable(error),
+                })
         })
     }
 
-    /// Read as much of `buf` as the guest will give with [`Self::read_masked`],
-    /// one page at a time, returning how many leading bytes are valid: the
-    /// read stops at the first unreadable page.
+    /// Read as much of `buf` as the guest will give with
+    /// [`Target::read_masked`](crate::nt::target::Target::read_masked), one
+    /// page at a time, returning how many leading bytes are valid: the read
+    /// stops at the first unreadable page.
     pub fn read_masked_partial(&self, addr: VirtAddr, buf: &mut [u8]) -> usize {
-        if self.read_masked(addr, buf).is_ok() {
+        if self.target.read_masked(addr, buf).is_ok() {
             return buf.len();
         }
         let mut read = 0;
@@ -266,6 +242,7 @@ impl Session {
             let chunk_address = VirtAddr(addr.0.wrapping_add(read as u64));
             let end = (read + PAGE_SIZE - chunk_address.page_offset() as usize).min(buf.len());
             if self
+                .target
                 .read_masked(chunk_address, &mut buf[read..end])
                 .is_err()
             {
@@ -290,7 +267,7 @@ impl Session {
         let readable = self.read_masked_partial(addr, &mut buf);
         if readable == 0 && !buf.is_empty() {
             // Nothing reads: report why the first byte does not.
-            self.read_masked(addr, &mut buf[..1])?;
+            self.target.read_masked(addr, &mut buf[..1])?;
         }
         let bytes = &buf[..readable];
         let read_end = addr.0.saturating_add(readable as u64);
@@ -359,6 +336,7 @@ impl Session {
             from: VirtAddr(from),
         };
         if self
+            .target
             .read_masked_in(dtb, VirtAddr(from), &mut bytes)
             .is_err()
         {
@@ -444,7 +422,7 @@ impl Session {
         }
 
         let mut bytes = vec![0u8; len];
-        self.read_masked(VirtAddr(start), &mut bytes)?;
+        self.target.read_masked(VirtAddr(start), &mut bytes)?;
         let resolve = |target| format_symbol(&self.target, &trace, target);
         let machine = self.target.code_machine(VirtAddr(start));
         let rows = decode_code(&bytes, start, None, machine, resolve);
@@ -480,8 +458,9 @@ impl Session {
             ))
         })?;
         let span = (limit.0 - start.0).min(MAX_LEAF_BYTES) as usize;
-        let (code, valid) =
-            read_page_chunks(start, span, |address, buf| self.read_masked(address, buf))?;
+        let (code, valid) = read_page_chunks(start, span, |address, buf| {
+            self.target.read_masked(address, buf)
+        })?;
         let readable = valid.iter().position(|valid| !valid).unwrap_or(span);
         let machine = self.target.code_machine(start);
         let length = function_extent(&code[..readable], start.0, machine).ok_or_else(|| {
@@ -548,8 +527,9 @@ impl Session {
         let max_bytes = count.saturating_mul(machine.max_instruction_bytes());
         let start = VirtAddr(addr.0.saturating_sub(max_bytes as u64));
         let length = usize::try_from(addr.0 - start.0).unwrap_or(max_bytes);
-        let (data, valid) =
-            read_page_chunks(start, length, |address, buf| self.read_masked(address, buf))?;
+        let (data, valid) = read_page_chunks(start, length, |address, buf| {
+            self.target.read_masked(address, buf)
+        })?;
         let readable_suffix_start = valid
             .iter()
             .rposition(|readable| !readable)

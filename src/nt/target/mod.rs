@@ -78,7 +78,7 @@ use crate::{
         types::{CodeMachine, Dtb, VirtAddr},
     },
     nt::{
-        breakpoints::SiteJournal,
+        breakpoints::{CodeSites, SiteJournal},
         dmp::DmpInfo,
         guest::{Guest, ModuleInfo, ModuleSymbolLoadReport, ProcessInfo},
         symbols::{CodeFrame, SymbolStore},
@@ -179,6 +179,9 @@ pub struct Target {
     /// into guest memory itself, so a session that dies with them in place is
     /// repaired by the next; `None` for targets nothing is patched into.
     pub site_journal: Option<SiteJournal>,
+    /// Where the session's breakpoints and traps are planted and the code
+    /// they displaced, which reads mask back ([`Self::mask_code`]).
+    pub code_sites: Arc<CodeSites>,
     /// The `_ETHREAD` each processor runs, standing in for the KPRCB walk
     /// in tests over bare memory; shared so a mock backend can switch it.
     #[cfg(test)]

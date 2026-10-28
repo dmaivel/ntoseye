@@ -22,13 +22,16 @@ mod install;
 mod journal;
 mod manager;
 mod resolve;
+mod sites;
 mod spec;
 #[cfg(test)]
 mod test_backend;
 
+pub use config::same_address_space;
 use install::BreakpointBackend;
-pub use install::{SiteFrames, lift_target_site, plant_target_site};
+pub use install::{BreakpointPatch, SiteFrames, lift_target_site, plant_target_site};
 pub use journal::{Repair, Restore, SiteJournal, SiteMemory};
+pub use sites::{CodeSites, Edit, PlantedSite, Publish, Published, TrapKind};
 
 /// A hardware (debug-register) breakpoint's parameters: the access it traps on,
 /// the watch width in bytes, and its backend slot (a logical record for GDB).

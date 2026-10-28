@@ -453,7 +453,9 @@ pub fn code_window(
     if !valid[at] {
         return classic();
     }
-    session.mask_code(VirtAddr(from), &mut bytes, trace.active_dtb);
+    session
+        .target
+        .mask_code(VirtAddr(from), &mut bytes, trace.active_dtb);
     let lo = valid[..at]
         .iter()
         .rposition(|valid| !valid)

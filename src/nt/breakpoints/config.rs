@@ -10,7 +10,7 @@ use super::{
 };
 use crate::arch::Arch;
 use crate::base::error::{Error, Result};
-use crate::base::types::VirtAddr;
+use crate::base::types::{Dtb, VirtAddr};
 use crate::nt::bugchecks::looks_like_kernel_pointer;
 use crate::nt::expr::Expr;
 use crate::nt::guest::{
@@ -66,20 +66,19 @@ impl BreakpointScope {
         }
     }
 
-    /// Whether `dtb` names the address space this scope is bound to.
-    ///
-    /// A dtb register carries more than the page-table base: a PCID in CR3's
-    /// low bits, an ASID in TTBR0_EL1's bits 48..63. Both sides are masked
-    /// down to the base frame, and the mask differs per architecture: AMD64's
-    /// leaves ARM64 ASID bits 48..51 in the comparison, so a process-scoped
-    /// breakpoint would stop matching its own process when the ASID rolls.
+    /// Whether `dtb` names the address space this scope is bound to (see
+    /// [`same_address_space`]). Every address space maps the kernel's.
     pub fn matches_dtb(&self, dtb: u64, arch: Arch) -> bool {
+        self.process_dtb()
+            .is_none_or(|scope| same_address_space(scope, dtb, arch))
+    }
+
+    /// The address space a process scope is bound to; `None` for the
+    /// kernel's.
+    pub fn process_dtb(&self) -> Option<Dtb> {
         match self {
-            Self::Kernel => true,
-            Self::Process { dtb: scope, .. } => {
-                let mask = arch.dtb_page_mask();
-                (dtb & mask) == (*scope & mask)
-            }
+            Self::Kernel => None,
+            Self::Process { dtb, .. } => Some(*dtb),
         }
     }
 
@@ -89,6 +88,18 @@ impl BreakpointScope {
             Self::Process { pid, name, .. } => format!("{name} (PID {pid})"),
         }
     }
+}
+
+/// Whether the dtb register values `a` and `b` name the same address space.
+///
+/// A dtb register carries more than the page-table base: a PCID in CR3's
+/// low bits, an ASID in TTBR0_EL1's bits 48..63. Both sides are masked down
+/// to the base frame, and the mask differs per architecture: AMD64's leaves
+/// ARM64 ASID bits 48..51 in the comparison, so a process-scoped breakpoint
+/// would stop matching its own process when the ASID rolls.
+pub fn same_address_space(a: Dtb, b: Dtb, arch: Arch) -> bool {
+    let mask = arch.dtb_page_mask();
+    (a & mask) == (b & mask)
 }
 
 impl ThreadScope {

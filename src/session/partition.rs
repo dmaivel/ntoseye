@@ -14,8 +14,8 @@ use crate::base::error::{Error, Result};
 use crate::base::notice::Notice;
 use crate::base::types::VirtAddr;
 use crate::nt::breakpoints::{
-    BreakpointConfig, BreakpointHitDisposition, BreakpointInfo, BreakpointManager, PartitionFilter,
-    StepFrame,
+    BreakpointConfig, BreakpointHitDisposition, BreakpointInfo, BreakpointManager, Edit,
+    PartitionFilter, StepFrame,
 };
 use crate::nt::guest::HvPartition;
 use crate::nt::target::Target;
@@ -276,10 +276,12 @@ impl Session {
     /// shown. Every breakpoint is the target's, a partition's included, as
     /// the target's processors trap it; a view's backend and target are only
     /// the partition's VPs and memory, which no site is written to.
-    pub fn breakpoint_sites(&mut self) -> (&mut BreakpointManager, &mut dyn DebugBackend, &Target) {
+    pub fn breakpoint_sites(
+        &mut self,
+    ) -> (Edit<'_, BreakpointManager>, &mut dyn DebugBackend, &Target) {
         match &mut self.partition_view {
-            Some(view) => (&mut self.breakpoints, view.backend.as_mut(), &view.target),
-            None => (&mut self.breakpoints, self.backend.as_mut(), &self.target),
+            Some(view) => (self.breakpoints.edit(), view.backend.as_mut(), &view.target),
+            None => (self.breakpoints.edit(), self.backend.as_mut(), &self.target),
         }
     }
 
@@ -411,7 +413,7 @@ impl Session {
                     .ok()
             })
             .unwrap_or_else(|| self.target.current_dtb());
-        let (breakpoints, backend, target) = self.breakpoint_sites();
+        let (mut breakpoints, backend, target) = self.breakpoint_sites();
         breakpoints.add_temporary_code(backend, target, address, frame, partition, root)
     }
 
@@ -457,7 +459,7 @@ impl Session {
             }
         }
         let verdict = judge_partition_hit(
-            &mut self.breakpoints,
+            &mut self.breakpoints.edit(),
             checked_on.as_mut().map(|(target, _)| target),
             &breakpoint,
             partition,
@@ -478,7 +480,7 @@ impl Session {
         };
         if breakpoint.one_shot {
             // Kept, hidden, until the next resume removes it.
-            self.breakpoints.mark_one_shot_hit(breakpoint.id)?;
+            self.breakpoints.edit().mark_one_shot_hit(breakpoint.id)?;
         }
         let shown = self.enter_partition(partition).and_then(|()| match vp {
             Some(vp) => self.set_current_thread(&vp_thread_id(partition, vp)),

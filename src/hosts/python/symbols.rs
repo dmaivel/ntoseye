@@ -8,13 +8,14 @@ use super::context::{Context, Space};
 use super::handle::Owner;
 use super::record::Typed;
 use super::{err, raise, symbol_not_found};
-use crate::base::types::{Dtb, VirtAddr};
+use crate::base::error::{Error, Result};
+use crate::base::types::VirtAddr;
 use crate::nt::breakpoints::BreakpointSpec;
 use crate::nt::symbols::{
     CodeFrame, ProcedureLocal, SourceLocation, SymbolCandidate, parse_source_paths,
     parse_symbol_sources,
 };
-use crate::nt::target::SymbolSearchMatch;
+use crate::nt::target::{SymbolSearchMatch, Target};
 use crate::session::Session;
 
 /// Symbol lookup in one address space (`dbg.symbols`, `proc.symbols`).
@@ -39,16 +40,15 @@ pub enum Location {
 }
 
 impl Location {
-    /// The address in `dtb`'s space; a spec that does not resolve raises
-    /// `SymbolNotFoundError`.
-    pub fn resolve(&self, session: &Session, dtb: Dtb) -> PyResult<u64> {
+    /// The address in `target`'s inspection scope; a spec that does not
+    /// resolve is [`Error::SymbolNotFound`].
+    pub fn resolve(&self, target: &Target) -> Result<VirtAddr> {
         match self {
-            Location::Address(address) => Ok(*address),
+            Location::Address(address) => Ok(VirtAddr(*address)),
             Location::Symbol(spec) => {
-                BreakpointSpec::resolve_symbol_offset(&session.target, dtb, spec)
-                    .map_err(err)?
-                    .map(|(address, _)| address.0)
-                    .ok_or_else(|| symbol_not_found(spec))
+                BreakpointSpec::resolve_symbol_offset(target, target.current_dtb(), spec)?
+                    .map(|(address, _)| address)
+                    .ok_or_else(|| Error::SymbolNotFound(spec.clone()))
             }
         }
     }

@@ -355,6 +355,7 @@ impl Struct {
         let read = self.owner.with_in(py, &self.space.context(), |session| {
             let mut bytes = vec![0; size];
             Ok(session
+                .target
                 .read_masked(VirtAddr(addr), &mut bytes)
                 .map(|()| bytes))
         })?;
@@ -434,6 +435,7 @@ impl Struct {
         let read = self.owner.with_in(py, &self.space.context(), |session| {
             let mut bytes = vec![0; length];
             Ok(session
+                .target
                 .read_masked(VirtAddr(addr), &mut bytes)
                 .map(|()| bytes))
         })?;
@@ -486,6 +488,7 @@ impl Struct {
                 // Read as the write replaces: a breakpoint planted in these
                 // bytes is the code it displaced.
                 Ok(session
+                    .target
                     .read_masked(VirtAddr(addr), &mut bytes)
                     .and_then(|()| {
                         let raw = (le_uint(&bytes) & !(mask << pos)) | ((integer & mask) << pos);
@@ -540,6 +543,7 @@ impl Struct {
         let read = self.owner.with_in(py, &self.space.context(), |session| {
             let mut bytes = vec![0; info.size];
             Ok(session
+                .target
                 .read_masked(VirtAddr(addr), &mut bytes)
                 .map(|()| info.decode_fields(&bytes)))
         })?;
@@ -620,6 +624,7 @@ impl Struct {
         let read = self.owner.with_in(py, &self.space.context(), |session| {
             let mut bytes = vec![0; size];
             Ok(session
+                .target
                 .read_masked(VirtAddr(addr), &mut bytes)
                 .map(|()| le_uint(&bytes)))
         })?;

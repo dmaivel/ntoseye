@@ -216,7 +216,10 @@ fn condition_and_commands(
 /// refuses an address inside an instruction. When nothing near the address
 /// says where instructions start, or that code cannot be read, bp sets the
 /// breakpoint and warns that it could not check. /a skips the check. A
-/// file:line sets a source breakpoint, as bu does.
+/// file:line sets a source breakpoint, as bu does. With /p, the address is
+/// evaluated in that process, as after .process /p, so bp /p 4140
+/// kernelbase!SleepEx+0x10 needs no .process first; the current process
+/// context stays as it was.
 #[command(
     names = ["bp"],
     category = "breakpoints and events",
@@ -231,17 +234,19 @@ fn set_breakpoint(
 ) -> Result<BreakpointsSet> {
     let spec = args.target.clone();
     let config = state.breakpoint_config(args)?;
-    let address = match Expr::eval_with_radix(&spec, &state.ctx.target, state.radix) {
+    let radix = state.radix;
+    let address = match state
+        .ctx
+        .resolve_in_breakpoint_scope(config.scope.as_ref(), |target| {
+            Expr::eval_with_radix(&spec, target, radix)
+        }) {
         Ok(address) => address,
-        Err(error) => match state.resolve_symbol_in_scope(&spec, config.scope.as_ref()) {
-            Some(address) => address,
-            // `bp queue.c:42` is a source line, which only fails as an
-            // expression.
-            None if BreakpointSpec::source(&spec, 0).is_some() => {
-                return set_source_breakpoint(state.ctx, spec, config);
-            }
-            None => return Err(error),
-        },
+        // `bp queue.c:42` is a source line, which only fails as an
+        // expression.
+        Err(_) if BreakpointSpec::source(&spec, 0).is_some() => {
+            return set_source_breakpoint(state.ctx, spec, config);
+        }
+        Err(error) => return Err(error),
     };
     let set = state.ctx.set_code_breakpoint(address, config)?;
     Ok(BreakpointsSet::Address {
@@ -286,7 +291,8 @@ fn set_symbolic_breakpoint(
 /// Set deferred symbolic breakpoints on the symbols that match a pattern.
 ///
 /// Only code symbols match, so bm skips the data symbols that the pattern
-/// also matches.
+/// also matches. With /p, the pattern matches the symbols of that process's
+/// modules, whose symbols ntoseye loads for it.
 #[command(
     names = ["bm"],
     category = "breakpoints and events",
@@ -315,9 +321,11 @@ fn set_pattern_breakpoints(
 ///
 /// The access is e=execute, r=read/write, or w=write, and the size is 1, 2,
 /// 4, or 8 bytes. An execute breakpoint has size 1. The options may also
-/// follow the access and size, as WinDbg writes them: ba e1 /p 4 kernelbase!SleepEx. The command is not
-/// available on a dump or on the `memory` backend. Example: ba w4
-/// nt!MyGlobal. In VTL1 (the .vtl 1 view or a vCPU stopped in VTL1), ntoseye
+/// follow the access and size, as WinDbg writes them: ba e1 /p 4
+/// kernelbase!SleepEx. With /p, the address is evaluated in that process, as
+/// after .process /p, and the current process context stays as it was. The
+/// command is not available on a dump or on the `memory` backend. Example:
+/// ba w4 nt!MyGlobal. In VTL1 (the .vtl 1 view or a vCPU stopped in VTL1), ntoseye
 /// accepts only `ba e1`, and only on GDB backends. This breakpoint is global,
 /// so you cannot use /p or /t, which name NT processes and threads. Example:
 /// .vtl 1; ba e1 securekernel!SkeSelectProcessAddressSpace; g
@@ -340,13 +348,12 @@ fn set_hardware_breakpoint(
     let target = args.target.clone();
     let condition = args.condition.clone();
     let config = state.breakpoint_config(args)?;
-    // A user-mode symbol under `/p` is the process's, as for `bp`.
-    let address = match Expr::eval_with_radix(&target, &state.ctx.target, state.radix) {
-        Ok(address) => address,
-        Err(error) => state
-            .resolve_symbol_in_scope(&target, config.scope.as_ref())
-            .ok_or(error)?,
-    };
+    let radix = state.radix;
+    let address = state
+        .ctx
+        .resolve_in_breakpoint_scope(config.scope.as_ref(), |context| {
+            Expr::eval_with_radix(&target, context, radix)
+        })?;
     let id = state
         .ctx
         .set_hardware_breakpoint(address, access, len, config)?;
@@ -844,7 +851,11 @@ fn set_condition(
         let expr = compile_repl_condition(Some(&condition), state.radix)?;
         (Some(condition), expr)
     };
-    state.ctx.breakpoints.set_condition(id, condition, expr)?;
+    state
+        .ctx
+        .breakpoints
+        .edit()
+        .set_condition(id, condition, expr)?;
     outln!("breakpoint {} condition updated", ui::bp_id(id));
     Ok(())
 }
@@ -870,7 +881,7 @@ fn set_condition_and_commands(
     let BreakpointId(id) = id;
     let (condition, action) = update;
     let expr = compile_repl_condition(Some(&condition), state.radix)?;
-    let breakpoints = &mut state.ctx.breakpoints;
+    let mut breakpoints = state.ctx.breakpoints.edit();
     breakpoints.set_condition(id, Some(condition), expr)?;
     breakpoints.set_action(id, action)?;
     outln!(
@@ -895,7 +906,7 @@ fn set_commands(
 ) -> Result<()> {
     let BreakpointId(id) = id;
     let action = (!commands.eq_ignore_ascii_case("clear")).then_some(commands);
-    session.breakpoints.set_action(id, action)?;
+    session.breakpoints.edit().set_action(id, action)?;
     outln!("breakpoint {} action updated", ui::bp_id(id));
     Ok(())
 }
@@ -914,7 +925,7 @@ fn renumber_breakpoint(
     new_id: BreakpointId,
 ) -> Result<()> {
     let (BreakpointId(old_id), BreakpointId(new_id)) = (id, new_id);
-    state.ctx.breakpoints.renumber(old_id, new_id)?;
+    state.ctx.breakpoints.edit().renumber(old_id, new_id)?;
     state.caches.refresh_breakpoints(&state.ctx.breakpoints);
     outln!(
         "breakpoint {} renumbered to {}",
@@ -938,7 +949,7 @@ fn reset_pass_count(
     #[arg(parse = pass_count)] passes: u64,
 ) -> Result<()> {
     let BreakpointId(id) = id;
-    session.breakpoints.set_pass_count(id, passes)?;
+    session.breakpoints.edit().set_pass_count(id, passes)?;
     outln!("breakpoint {} pass count reset", ui::bp_id(id));
     Ok(())
 }
@@ -1541,23 +1552,6 @@ fn parse_hw_breakpoint_spec(spec: &str) -> Result<(HwBreakpointAccess, u8)> {
 }
 
 impl ReplState<'_> {
-    fn breakpoint_scope(&self, pid: Option<u64>) -> Result<Option<BreakpointScope>> {
-        let Some(pid) = pid else {
-            return Ok(None);
-        };
-        let process = self
-            .ctx
-            .target
-            .guest
-            .as_ref()
-            .ok_or(Error::NtoskrnlNotFound)?
-            .enumerate_processes()?
-            .into_iter()
-            .find(|process| process.pid == pid)
-            .ok_or_else(|| Error::InvalidArgument(format!("process {pid} not found")))?;
-        Ok(Some(BreakpointScope::process(&process)))
-    }
-
     /// The thread `/t` names, as a filter. Accepts what `.thread` accepts: a
     /// thread id, an ETHREAD, or a KTHREAD.
     fn breakpoint_thread_scope(&mut self, thread: Option<u64>) -> Result<Option<ThreadScope>> {
@@ -1594,7 +1588,10 @@ impl ReplState<'_> {
 
     fn breakpoint_config(&mut self, parsed: ParsedBreakpointArgs) -> Result<BreakpointConfig> {
         let condition_expr = compile_repl_condition(parsed.condition.as_deref(), self.radix)?;
-        let scope = self.breakpoint_scope(parsed.pid)?;
+        let scope = parsed
+            .pid
+            .map(|pid| self.ctx.breakpoint_scope_for_pid(pid))
+            .transpose()?;
         let thread = self.breakpoint_thread_scope(parsed.thread)?;
         let processor = self.breakpoint_processor_scope(parsed.processor)?;
         Ok(BreakpointConfig {
@@ -1639,30 +1636,6 @@ impl ReplState<'_> {
             ..BreakpointConfig::default()
         };
         Ok((vp, config))
-    }
-
-    /// `bp /p <pid> mod!sym` names the address space the symbol lives in, but
-    /// the expression evaluator only knows the inspection scope. When the
-    /// evaluation fails and the spec is a plain `mod!sym`, resolve it under
-    /// the `/p` process instead, loading that module's symbols on demand.
-    fn resolve_symbol_in_scope(
-        &self,
-        spec: &str,
-        scope: Option<&BreakpointScope>,
-    ) -> Option<VirtAddr> {
-        let Some(BreakpointScope::Process { pid, dtb, .. }) = scope else {
-            return None;
-        };
-        let (module, _) = spec.split_once('!')?;
-        let symbols = &self.ctx.target.symbols;
-        if let Ok(Some(address)) = symbols.find_symbol_across_modules(*dtb, spec) {
-            return Some(address);
-        }
-        self.ctx
-            .target
-            .load_process_module_symbols(*pid, *dtb, Some(module.trim()))
-            .ok()?;
-        symbols.find_symbol_across_modules(*dtb, spec).ok()?
     }
 }
 

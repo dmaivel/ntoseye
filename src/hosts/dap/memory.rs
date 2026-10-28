@@ -160,7 +160,12 @@ impl Server {
         let window = count.saturating_mul(machine.max_instruction_bytes());
         let start = address.saturating_sub(window as u64);
         let mut bytes = vec![0u8; (address - start) as usize];
-        if bytes.is_empty() || session.read_masked(VirtAddr(start), &mut bytes).is_err() {
+        if bytes.is_empty()
+            || session
+                .target
+                .read_masked(VirtAddr(start), &mut bytes)
+                .is_err()
+        {
             return Ok(Vec::new());
         }
         let rows = decode_preceding(machine, &bytes, start, address, count, |target| {
