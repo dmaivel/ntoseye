@@ -1099,14 +1099,16 @@ impl Target {
         let user_system = self.user_dump_info().map(|info| &info.system);
         // A kernel dump header's MajorVersion is 0xF (free) or 0xC (checked)
         // and its MinorVersion the build number, not the Windows version:
-        // the kernel's KUSER_SHARED_DATA has that.
+        // the kernel's KUSER_SHARED_DATA has that. Early in boot (a KD attach
+        // at the first break) the kernel has not filled it in yet, and a
+        // major version of 0 is no version: both numbers are unknown then.
         let major = user_system
             .map(|system| u64::from(system.major_version))
             .filter(|value| *value != 0)
-            .or_else(|| kuser.nt_major_version());
+            .or_else(|| kuser.nt_major_version().filter(|value| *value != 0));
         let minor = match user_system {
             Some(system) => Some(u64::from(system.minor_version)),
-            None => kuser.nt_minor_version(),
+            None => major.and_then(|_| kuser.nt_minor_version()),
         };
         let build = user_system
             .map(|system| u64::from(system.build_number))

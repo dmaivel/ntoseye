@@ -114,6 +114,7 @@ Keeping this file:
 - A run to an address handed back running (MCP `gu` or `p` over a call past `timeout_ms`, a DAP step) takes its temporary breakpoint out at the stop a later call collects, where it stayed in `bl` as a breakpoint on the thread and stopped it at that return again on every later `g`.
 - Expressions (`by`, `poi`, ...) and breakpoint conditions read the code under the session's own breakpoints and traps, as `db` shows it, on every host, where they read the `int3`: `eb nt!NtClose by(nt!NtClose)` with a breakpoint there wrote `cc` back as the original code, and `bc` then left it in the guest for good.
 - Typed reads (`dt`, `dx`, DAP variables, and the extensions that read kernel structures) show the code a planted breakpoint or trap displaced, as `db` and expressions do, where a struct or array over a breakpoint showed its `int3`.
+- `vertarget` on a target broken into early in boot shows its Windows version as unknown, where it showed `Windows 0.0` before the kernel had filled the version in.
 
 ## v0.52.0 (2026-10-25)
 
