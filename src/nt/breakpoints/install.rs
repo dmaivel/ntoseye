@@ -307,12 +307,16 @@ impl BreakpointManager {
             .any(|c| c.capability == capability && c.supported)
         {
             Ok(())
-        } else if let Some(address) =
-            address.filter(|_| user_space && client.supports_watchpoints())
+        } else if capability == DebugCapability::UserModeBreakpoints
+            && client.supports_watchpoints()
         {
+            // A deferred breakpoint scoped to a process has no address yet,
+            // but its site is in user space all the same.
+            let at = address
+                .map(|address| format!(" ({:#x})", address.0))
+                .unwrap_or_default();
             Err(Error::Breakpoint(format!(
-                "this backend cannot plant a software breakpoint in user space ({:#x}); a hardware breakpoint (ba e1) can stop there",
-                address.0
+                "this backend cannot plant a software breakpoint in user space{at}; a hardware breakpoint (ba e1) can stop there"
             )))
         } else {
             Err(Error::Breakpoint(format!(
