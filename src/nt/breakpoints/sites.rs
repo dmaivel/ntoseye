@@ -68,35 +68,47 @@ impl CodeSites {
     /// Put the code every site displaced back into `buf`, read at `start` in
     /// the address space `dtb` of `debugger`: a breakpoint's where the read
     /// reaches the frame it was written into ([`site_in_view`]), a trap's
-    /// (kernel code) under every address space.
+    /// where it reaches the kernel's frame. A site the read covers only part
+    /// of has that part put back: ARM64's breakpoint is four bytes, so a
+    /// one-byte read can land inside it.
     pub fn mask(&self, debugger: &Target, start: VirtAddr, buf: &mut [u8], dtb: Dtb) {
         let sites = self.sites.read().unwrap_or_else(PoisonError::into_inner);
-        let end = start.0.wrapping_add(buf.len() as u64);
         for site in &sites.breakpoints {
-            if site.address.0 >= start.0
-                && site.address.0 < end
+            let original = site.original.as_slice();
+            if overlaps(start, buf.len(), site.address, original.len())
                 && site_in_view(debugger, site.address, site.process, dtb)
             {
-                overlay(buf, start, site.address, site.original.as_slice());
+                overlay(buf, start, site.address, original);
             }
         }
         for (address, original) in sites.traps.iter().flatten() {
-            if address.0 >= start.0 {
-                overlay(buf, start, *address, original.as_slice());
+            let original = original.as_slice();
+            if overlaps(start, buf.len(), *address, original.len())
+                && site_in_view(debugger, *address, None, dtb)
+            {
+                overlay(buf, start, *address, original);
             }
         }
     }
 }
 
-/// Copy `original`, the code at `address`, over its place in `buf` read at
-/// `start`, when all of it falls inside.
+/// Whether `len` bytes at `start` and a site of `site_len` bytes at
+/// `address` share a byte.
+pub fn overlaps(start: VirtAddr, len: usize, address: VirtAddr, site_len: usize) -> bool {
+    address.0 < start.0.saturating_add(len as u64)
+        && start.0 < address.0.saturating_add(site_len as u64)
+}
+
+/// Copy the part of `original`, the code at `address`, that falls inside
+/// `buf`, read at `start`, over its place there.
 fn overlay(buf: &mut [u8], start: VirtAddr, address: VirtAddr, original: &[u8]) {
-    let offset = address.0 - start.0;
-    if let Ok(offset) = usize::try_from(offset)
-        && let Some(slot) = buf.get_mut(offset..offset.saturating_add(original.len()))
-    {
-        slot.copy_from_slice(original);
-    }
+    // Skip the site's bytes before the read, then the read's before the site.
+    let skipped = usize::try_from(start.0.saturating_sub(address.0)).unwrap_or(usize::MAX);
+    let offset = usize::try_from(address.0.saturating_sub(start.0)).unwrap_or(usize::MAX);
+    let original = original.get(skipped..).unwrap_or_default();
+    let buf = buf.get_mut(offset..).unwrap_or_default();
+    let len = original.len().min(buf.len());
+    buf[..len].copy_from_slice(&original[..len]);
 }
 
 /// An owner of debugger sites that a [`Published`] value republishes after
@@ -163,5 +175,48 @@ impl<T: Publish> DerefMut for Edit<'_, T> {
 impl<T: Publish> Drop for Edit<'_, T> {
     fn drop(&mut self) {
         self.value.publish(self.sites);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{overlaps, overlay};
+    use crate::base::types::VirtAddr;
+
+    /// ARM64's `brk #0xF000` over `original`, at 0x1000 in a read that
+    /// starts at `start` and is `len` bytes long, masked.
+    fn masked(start: u64, len: usize) -> Vec<u8> {
+        let original = [0xa1, 0xb2, 0xc3, 0xd4];
+        let brk = [0x00, 0x00, 0x3e, 0xd4, 0xee, 0xee];
+        let site = VirtAddr(0x1000);
+        // Guest memory from 0xffe: two bytes of other code, the brk, more code.
+        let memory = [[0xee, 0xee].as_slice(), &brk].concat();
+        let offset = usize::try_from(start - 0xffe).unwrap();
+        let mut buf = memory[offset..offset + len].to_vec();
+        if overlaps(VirtAddr(start), len, site, original.len()) {
+            overlay(&mut buf, VirtAddr(start), site, &original);
+        }
+        buf
+    }
+
+    #[test]
+    fn a_read_covering_part_of_a_site_sees_that_part_of_the_original() {
+        assert_eq!(masked(0x1000, 1), [0xa1]);
+        assert_eq!(masked(0x1000, 2), [0xa1, 0xb2]);
+        assert_eq!(masked(0x1001, 1), [0xb2]);
+        assert_eq!(masked(0x1002, 4), [0xc3, 0xd4, 0xee, 0xee]);
+        assert_eq!(masked(0xfff, 3), [0xee, 0xa1, 0xb2]);
+        assert_eq!(
+            masked(0xffe, 8),
+            [0xee, 0xee, 0xa1, 0xb2, 0xc3, 0xd4, 0xee, 0xee]
+        );
+    }
+
+    #[test]
+    fn a_read_beside_a_site_is_left_alone() {
+        assert!(!overlaps(VirtAddr(0xffe), 2, VirtAddr(0x1000), 4));
+        assert!(!overlaps(VirtAddr(0x1004), 2, VirtAddr(0x1000), 4));
+        assert!(overlaps(VirtAddr(0x1003), 1, VirtAddr(0x1000), 4));
+        assert_eq!(masked(0x1004, 2), [0xee, 0xee]);
     }
 }

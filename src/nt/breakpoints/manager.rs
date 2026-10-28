@@ -502,13 +502,14 @@ impl BreakpointManager {
         for &id in ids {
             let bp = self.breakpoints.get(&id).ok_or(Error::BPNotFound(id))?;
             if let Err(error) = Self::uninstall_breakpoint(client, debugger, bp) {
-                return self.replant(client, debugger, &lifted).and(Err(error));
+                let replanted = self.replant(client, debugger, &lifted);
+                return written_and_replanted(Err(error), replanted);
             }
             lifted.push(id);
         }
         let written = write();
         let replanted = self.replant(client, debugger, &lifted);
-        written.and(replanted)
+        written_and_replanted(written, replanted)
     }
 
     /// Plant the breakpoints [`Self::write_under`] lifted, each displacing
@@ -726,12 +727,39 @@ impl BreakpointManager {
     }
 }
 
+/// The outcome of a write made with sites lifted, given `written`, the
+/// write's, and `replanted`, planting the sites again. When both fail the
+/// error names both, so a site dropped around a failed write is reported
+/// rather than hidden behind the write's error (which a host may even take
+/// for success, as a DAP partial write).
+pub fn written_and_replanted(written: Result<()>, replanted: Result<()>) -> Result<()> {
+    match (written, replanted) {
+        (Err(written), Err(replanted)) => Err(Error::Breakpoint(format!("{written}; {replanted}"))),
+        (written, replanted) => written.and(replanted),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::arch::HwBreakpointAccess;
     use crate::base::error::Error;
     use crate::base::types::VirtAddr;
     use crate::nt::breakpoints::{BreakpointManager, HardwareBreakpoint};
+
+    #[test]
+    fn failed_write_keeps_the_replant_failure() {
+        let written = Err(Error::PartialWrite(2));
+        let replanted = Err(Error::Breakpoint("breakpoint #3 is disabled".into()));
+        let error = super::written_and_replanted(written, replanted).unwrap_err();
+        assert!(!matches!(error, Error::PartialWrite(_)));
+        let message = error.to_string();
+        assert!(message.contains("partial write"), "{message}");
+        assert!(message.contains("#3 is disabled"), "{message}");
+        assert!(matches!(
+            super::written_and_replanted(Err(Error::PartialWrite(2)), Ok(())),
+            Err(Error::PartialWrite(2))
+        ));
+    }
 
     #[test]
     fn failed_uninstall_keeps_breakpoint_managed_for_retry() {

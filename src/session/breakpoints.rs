@@ -13,7 +13,8 @@ use crate::base::notice::Notice;
 use crate::base::types::{Dtb, PhysAddr, VirtAddr};
 use crate::nt::breakpoints::{
     BreakpointConfig, BreakpointInfo, BreakpointManager, BreakpointScope, BreakpointSpec,
-    HypercallFilter, ThreadScope, lift_target_site, plant_target_site,
+    HypercallFilter, ThreadScope, lift_target_site, overlaps, plant_target_site, site_in_view,
+    written_and_replanted,
 };
 use crate::nt::expr::Expr;
 use crate::nt::guest::vm_exits::ExitFilter;
@@ -904,22 +905,23 @@ impl Session {
                 self.write_in(self.target.current_dtb(), VirtAddr(address), data)
             }
             MemoryKind::Physical => {
-                let (ids, traps) = if self.partition().is_some() {
-                    Default::default()
-                } else {
-                    let kernel = self.target.kernel_address_space();
-                    let traps = self.trap_sites_under(address, data.len(), |trap| {
+                let sites = |session: &Session| {
+                    if session.partition().is_some() {
+                        return Default::default();
+                    }
+                    let kernel = session.target.kernel_address_space();
+                    let traps = session.trap_sites_under(address, data.len(), |trap| {
                         let translation = kernel.virt_to_phys(trap).ok().flatten()?;
                         Some(translation.address)
                     });
-                    let ids = self.breakpoints.sites_under_physical_write(
-                        &self.target,
+                    let ids = session.breakpoints.sites_under_physical_write(
+                        &session.target,
                         address,
                         data.len(),
                     );
                     (ids, traps)
                 };
-                self.write_around_sites(&ids, &traps, |target| target.write_physical(address, data))
+                self.write_around_sites(sites, |target| target.write_physical(address, data))
             }
         }
     }
@@ -929,18 +931,22 @@ impl Session {
     /// this session's breakpoints or traps, it replaces the code the site
     /// displaced, and the site stays planted over the new code.
     pub fn write_in(&mut self, dtb: Dtb, address: VirtAddr, data: &[u8]) -> Result<()> {
-        // The same sites a read masks (see `mask_breakpoints`).
-        let (ids, traps) = if self.partition().is_some() || self.target.symbols.is_secure_root(dtb)
-        {
-            Default::default()
-        } else {
-            let traps = self.trap_sites_under(address.0, data.len(), |trap| Some(trap.0));
-            let ids = self
+        // The same sites a read masks (see `CodeSites::mask`): a trap is
+        // kernel code, under the write where `dtb` reaches its kernel frame.
+        let sites = |session: &Session| {
+            if session.partition().is_some() || session.target.symbols.is_secure_root(dtb) {
+                return Default::default();
+            }
+            let target = &session.target;
+            let traps = session.trap_sites_under(address.0, data.len(), |trap| {
+                site_in_view(target, trap, None, dtb).then_some(trap.0)
+            });
+            let ids = session
                 .breakpoints
-                .sites_under_write(&self.target, dtb, address, data.len());
+                .sites_under_write(target, dtb, address, data.len());
             (ids, traps)
         };
-        self.write_around_sites(&ids, &traps, |target| {
+        self.write_around_sites(sites, |target| {
             target.address_space(dtb).write_bytes(address, data)
         })
     }
@@ -954,8 +960,7 @@ impl Session {
         len: usize,
         locate: impl Fn(VirtAddr) -> Option<u64>,
     ) -> Vec<VirtAddr> {
-        let end = start.saturating_add(len as u64);
-        let site_len = u64::from(self.target.arch().breakpoint_size());
+        let site_len = usize::from(self.target.arch().breakpoint_size());
         let module_sites = self.module_traps.iter().map(|trap| &trap.site);
         self.bugcheck_trap
             .iter()
@@ -963,40 +968,43 @@ impl Session {
             .map(|trap| trap.address)
             .filter(|&address| {
                 locate(address)
-                    .is_some_and(|site| site < end && start < site.saturating_add(site_len))
+                    .is_some_and(|site| overlaps(VirtAddr(start), len, VirtAddr(site), site_len))
             })
             .collect()
     }
 
-    /// Run `write` with the breakpoints `ids` and the traps at `traps`
-    /// lifted, planting each again over the code the write left (see
+    /// Run `write` with the breakpoints and traps `sites` names lifted,
+    /// planting each again over the code the write left (see
     /// [`BreakpointManager::write_under`]). With no site in the way the
     /// write goes straight to the target, running or not; otherwise the
     /// target is halted for it, since a site is planted and lifted through
-    /// the backend.
+    /// the backend. The sites are looked up again once it is halted: the
+    /// stop that halts it may have planted, dropped or reloaded some.
     fn write_around_sites(
         &mut self,
-        ids: &[u32],
-        traps: &[VirtAddr],
+        sites: impl Fn(&Session) -> (Vec<u32>, Vec<VirtAddr>),
         write: impl FnOnce(&Target) -> Result<()>,
     ) -> Result<()> {
+        let (ids, traps) = sites(self);
         if ids.is_empty() && traps.is_empty() {
             return write(&self.target);
         }
         self.with_target_halted(|session| {
+            let (ids, traps) = sites(session);
             for (lifted, &trap) in traps.iter().enumerate() {
                 if let Err(error) =
                     lift_target_site(session.backend.as_mut(), &session.target, trap)
                 {
-                    return session.replant_traps(&traps[..lifted]).and(Err(error));
+                    let replanted = session.replant_traps(&traps[..lifted]);
+                    return written_and_replanted(Err(error), replanted);
                 }
             }
             let written = {
                 let (mut breakpoints, backend, target) = session.breakpoint_sites();
-                breakpoints.write_under(backend, target, ids, || write(target))
+                breakpoints.write_under(backend, target, &ids, || write(target))
             };
-            let replanted = session.replant_traps(traps);
-            written.and(replanted)
+            let replanted = session.replant_traps(&traps);
+            written_and_replanted(written, replanted)
         })
     }
 
