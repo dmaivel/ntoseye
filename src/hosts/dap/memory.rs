@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 
 use crate::base::disasm::decode_preceding;
 use crate::base::error::Error;
-use crate::base::memory::MemoryOps;
 use crate::base::types::VirtAddr;
+use crate::nt::target::MemoryKind;
 
 use super::{Handled, Server, arg_bool, arg_i64, arg_str, parse_address, source_value};
 
@@ -65,10 +65,7 @@ impl Server {
         }
         let allow_partial = arg_bool(args, "allowPartial").unwrap_or(false);
         let session = self.session()?;
-        let written = session
-            .target
-            .context_memory()
-            .write_bytes(VirtAddr(address), &bytes);
+        let written = session.write_memory(MemoryKind::Virtual, address, &bytes);
         let written = match written {
             Ok(()) => bytes.len(),
             // The write ran into an untranslatable page after committing a

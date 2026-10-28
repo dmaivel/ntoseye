@@ -42,7 +42,7 @@ use crate::session::{Cancel, Motion, RunOutcome, Session, StepMode};
 use crate::{Backend, TargetSpec};
 
 use breakpoints::BreakpointState;
-use run_control::StepRequest;
+use run_control::{StepInProgress, StepRequest};
 use stack::DapThread;
 use wire::{ClientMessage, Request};
 
@@ -186,6 +186,9 @@ struct Server {
     instruction_breakpoints: Vec<u32>,
     data_breakpoints: Vec<u32>,
     last_stop: Option<StopInfo>,
+    /// The step whose runs are under way, between the response to its
+    /// request and the stop it ends on.
+    step: Option<StepInProgress>,
     /// Last state reported per installed breakpoint id, so a deferred
     /// breakpoint that arms (or a resolved one whose module unloads) produces
     /// exactly one `breakpoint` event instead of one per stop. The address is
@@ -291,6 +294,7 @@ impl Server {
             instruction_breakpoints: Vec::new(),
             data_breakpoints: Vec::new(),
             last_stop: None,
+            step: None,
             verified: HashMap::new(),
             debug_seq: 0,
             cancel,
@@ -368,8 +372,14 @@ impl Server {
                 }
                 match self.drive(Motion::Wait, &Cancel::within(RUN_POLL)) {
                     Ok(RunOutcome::Running) => {}
-                    Ok(RunOutcome::Stopped(stop)) => self.report_stop(stop),
+                    Ok(RunOutcome::Stopped(stop)) => self.on_stopped(stop),
                     Err(error) => {
+                        // A step whose thread exited ends here, halted
+                        // where the session broke in.
+                        if self.step.is_some() {
+                            self.report_ended_step(&error);
+                            return;
+                        }
                         self.emit_output("stderr", format!("target wait failed: {error}\n"));
                         // Stop polling a transport that just failed, instead
                         // of repeating the same error every tick. The client

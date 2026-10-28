@@ -96,6 +96,11 @@ Keeping this file:
 - A full KD breakpoint table gives one message that says when this session's own breakpoints fill it, where `bm` printed one per symbol blaming a previous session.
 - `!poolfind` leaves out blocks whose tag does not read as one, where a wildcard search listed data the scan took for headers as `Allocated?` blocks tagged `....` (47 on a Windows 11 dump).
 - A module image the symbol server does not have is fetched once per session, where every new GDB server client queued it again and its next `monitor` reply carried dozens of fetch-failure lines; `.reload` or a symbol path change retries it.
+- A memory write (`e*`, `f`, `m`, `.readmem`, DAP `writeMemory` and `setVariable`, GDB server `M`, SDK writes) over one of the session's breakpoints changes the code under it and keeps the breakpoint planted, where it replaced the `int3`; over KD that left a breakpoint table entry Windows could not release.
+- Over KD, attach reports only the stranded breakpoint table entries it released and warns about one Windows keeps, where it claimed to release it on every attach; a breakpoint set at a kept entry's address stops, where it was reported set but never hit.
+- A breakpoint or step site in user code whose process has exited is removed through its physical page when the page is still the one it was planted in (a DLL's shared code page other processes run), and dropped when the page was reused, where removal failed and detach left the guest halted.
+- DAP: `next`, `stepIn` and `stepOut` are answered at once with a `continued` event, so the editor shows the thread running, other requests are answered and Pause ends a long step; a step whose thread exits ends with a `step` stop that says so.
+- GDB server: when a client leaves and one of its breakpoints cannot be removed, the guest stays halted and the failure is reported, as with `q` and a DAP disconnect, where it resumed the guest.
 
 ## v0.52.0 (2026-10-25)
 

@@ -474,6 +474,72 @@ impl BreakpointManager {
         Ok(())
     }
 
+    /// Run `write` with the breakpoints `ids` lifted (see
+    /// [`Self::sites_under_write`]), then plant them again over whatever
+    /// code it left there. A write that lands on a site changes the
+    /// instruction the breakpoint displaced, not the breakpoint: written
+    /// over the planted instruction instead, it would be undone by the
+    /// breakpoint's removal, which puts the displaced copy back, and a KD
+    /// target, which restores only where it still finds its breakpoint,
+    /// would keep the entry until it reboots. A breakpoint that cannot be
+    /// planted again is left disabled and named in the error.
+    pub fn write_under(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+        ids: &[u32],
+        write: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let mut lifted = Vec::with_capacity(ids.len());
+        for &id in ids {
+            let bp = self.breakpoints.get(&id).ok_or(Error::BPNotFound(id))?;
+            if let Err(error) = Self::uninstall_breakpoint(client, debugger, bp) {
+                return self.replant(client, debugger, &lifted).and(Err(error));
+            }
+            lifted.push(id);
+        }
+        let written = write();
+        let replanted = self.replant(client, debugger, &lifted);
+        written.and(replanted)
+    }
+
+    /// Plant the breakpoints [`Self::write_under`] lifted, each displacing
+    /// the code now at its site.
+    fn replant(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+        ids: &[u32],
+    ) -> Result<()> {
+        let mut failed = Vec::new();
+        for &id in ids {
+            let Some(bp) = self.breakpoints.get_mut(&id) else {
+                continue;
+            };
+            match Self::install_breakpoint(client, debugger, bp.address, &bp.scope) {
+                Ok(backend) => bp.backend = backend,
+                Err(error) => {
+                    bp.enabled = false;
+                    failed.push((id, error));
+                }
+            }
+        }
+        if failed.is_empty() {
+            return Ok(());
+        }
+        for (id, _) in &failed {
+            self.forget_interrupted_hits(*id);
+        }
+        let failed: Vec<String> = failed
+            .iter()
+            .map(|(id, error)| format!("#{id} ({error})"))
+            .collect();
+        Err(Error::Breakpoint(format!(
+            "breakpoint {} could not be planted again around the write and is disabled",
+            failed.join(", ")
+        )))
+    }
+
     pub fn disable_guest_memory_patch_in_address_space(
         &mut self,
         client: &mut dyn DebugBackend,
@@ -490,7 +556,7 @@ impl BreakpointManager {
         match &bp.backend {
             BreakpointBackend::GuestMemoryPatch { original } => {
                 write_user_code(debugger, dtb, bp.address, original.as_slice())?;
-                forget_site(debugger, &debugger.address_space(dtb), bp.address);
+                forget_site(debugger, Self::site_dtb(debugger, bp), bp.address);
                 client.note_breakpoint_uninstalled(bp.address.0);
                 bp.enabled = false;
                 Ok(())

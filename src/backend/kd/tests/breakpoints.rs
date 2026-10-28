@@ -6,7 +6,10 @@ use crate::base::bytes;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
-use crate::backend::kd::breakpoints::{KD_BREAKPOINT_TABLE_SIZE, PendingWriteBreakpoint};
+use crate::backend::kd::breakpoints::{
+    KD_BREAKPOINT_TABLE_SIZE, PendingWriteBreakpoint, Reclaim, StrandedEntries,
+    restore_unowned_breakpoint_handles,
+};
 use crate::backend::kd::framing::{
     CONTROL_PACKET_LEADER, INITIAL_PACKET_ID, PACKET_TYPE_KD_ACKNOWLEDGE,
     PACKET_TYPE_KD_STATE_MANIPULATE, data_packet,
@@ -46,6 +49,10 @@ fn breakpoint_install_reclaims_slots_stranded_by_a_dead_session() {
             STATUS_UNSUCCESSFUL
         };
         script.push((api::DBGKD_RESTORE_BREAKPOINT, status, 0));
+        // Asked again, the slot the release freed refuses.
+        if handle == 7 {
+            script.push((api::DBGKD_RESTORE_BREAKPOINT, STATUS_UNSUCCESSFUL, 0));
+        }
     }
     script.push((api::DBGKD_WRITE_BREAKPOINT, api::STATUS_SUCCESS, 9));
     let worker = serve_breakpoints(kernel, script);
@@ -65,7 +72,161 @@ fn breakpoint_install_reclaims_slots_stranded_by_a_dead_session() {
         !released.contains(&3),
         "reclaim released a handle this session still owns: {released:?}"
     );
-    assert_eq!(released.len(), KD_BREAKPOINT_TABLE_SIZE as usize - 1);
+    assert_eq!(released.len(), KD_BREAKPOINT_TABLE_SIZE as usize);
+}
+
+/// The target accepts the handle of an entry it cannot release as readily
+/// as one it frees: only the second ask, which the freed slot refuses,
+/// tells them apart. An entry kept is not reported as released.
+#[test]
+fn a_stranded_entry_the_target_keeps_is_not_counted_as_released() {
+    let (kernel, host) = UnixStream::pair().unwrap();
+    let mut backend = kd_backend_with_framing(host);
+    backend.link.halt();
+    backend.exit_prepared = true;
+
+    let mut script = Vec::new();
+    for handle in 1..=KD_BREAKPOINT_TABLE_SIZE {
+        let answers: &[u32] = match handle {
+            // Kept: accepted every time.
+            1 => &[api::STATUS_SUCCESS, api::STATUS_SUCCESS],
+            // Released: the second ask finds the slot empty.
+            2 => &[api::STATUS_SUCCESS, STATUS_UNSUCCESSFUL],
+            _ => &[STATUS_UNSUCCESSFUL],
+        };
+        for &status in answers {
+            script.push((api::DBGKD_RESTORE_BREAKPOINT, status, 0));
+        }
+    }
+    let worker = serve_breakpoints(kernel, script);
+
+    let mut stranded = StrandedEntries::default();
+    let reclaim = restore_unowned_breakpoint_handles(
+        backend.link.framing("halted").unwrap(),
+        0,
+        &HashSet::new(),
+        &mut stranded,
+    );
+
+    assert_eq!(
+        reclaim,
+        Reclaim {
+            released: 1,
+            held: 1
+        }
+    );
+    assert_eq!(stranded.held, HashSet::from([1]));
+    assert_eq!(stranded.released, HashSet::from([2]));
+    drop(backend);
+    worker.join().unwrap();
+}
+
+/// A halted fake kernel holding one code byte at every address, `code`,
+/// and one table entry owing its restore of `saved` there. It answers in
+/// request order from an `(api, handle)` script as `KdpAddBreakpoint` and
+/// `KdpDeleteBreakpoint` do: a write breakpoint returns `handle`, handing
+/// back the owing entry without writing anything or else planting `int3`;
+/// a restore puts back `saved`. A read returns the byte and a write stores
+/// it. Each reply echoes the request's union, as Windows does. Yields each
+/// request's API and trailing data.
+fn serve_one_site(
+    mut kernel: UnixStream,
+    code: u8,
+    saved: u8,
+    script: Vec<(u32, u32)>,
+) -> JoinHandle<Vec<(u32, Vec<u8>)>> {
+    const UNION: usize = 16;
+    spawn(move || {
+        let mut kernel_id = INITIAL_PACKET_ID;
+        let mut script = script.into_iter();
+        let mut byte = code;
+        let mut owing = true;
+        let mut seen = Vec::new();
+        loop {
+            let Some(request) = recv_host_request(&mut kernel) else {
+                assert!(script.next().is_none(), "missing request");
+                return seen;
+            };
+            let api_number = bytes::read_u32(&request, 0);
+            let trailing = request[api::MANIPULATE_HEADER_SIZE..].to_vec();
+            let (expected_api, handle) = script.next().expect("unexpected request");
+            assert_eq!(api_number, expected_api);
+            let mut reply = request[..api::MANIPULATE_HEADER_SIZE].to_vec();
+            let mut data = Vec::new();
+            match api_number {
+                api::DBGKD_WRITE_BREAKPOINT => {
+                    bytes::write_u32(&mut reply, UNION + 8, handle);
+                    if !owing {
+                        byte = 0xcc;
+                    }
+                    owing = false;
+                }
+                api::DBGKD_RESTORE_BREAKPOINT => byte = saved,
+                api::DBGKD_READ_VIRTUAL_MEMORY => {
+                    data = vec![byte; bytes::read_u32(&request, UNION + 8) as usize];
+                    bytes::write_u32(&mut reply, UNION + 12, data.len() as u32);
+                }
+                api::DBGKD_WRITE_VIRTUAL_MEMORY => {
+                    byte = trailing[0];
+                    bytes::write_u32(&mut reply, UNION + 12, trailing.len() as u32);
+                }
+                other => panic!("unexpected API {other:#x}"),
+            }
+            seen.push((api_number, trailing));
+            reply.extend_from_slice(&data);
+            kernel
+                .write_all(&data_packet(
+                    PACKET_TYPE_KD_STATE_MANIPULATE,
+                    kernel_id,
+                    &reply,
+                ))
+                .unwrap();
+            kernel_id ^= 1;
+        }
+    })
+}
+
+/// Installed at the address of an entry the target kept, a breakpoint gets
+/// that entry back with no `int3` written. The install gives the entry's
+/// restore the `int3` it looks for, puts back the code the restore
+/// replaced with its stale copy, and installs afresh, so the site is
+/// planted over the code that is there now.
+#[test]
+fn an_install_handed_a_kept_entry_plants_its_breakpoint() {
+    const ADDR: u64 = 0xffff_f800_0001_2000;
+    let (kernel, host) = UnixStream::pair().unwrap();
+    let mut backend = kd_backend_with_framing(host);
+    backend.link.halt();
+    backend.exit_prepared = true;
+    backend.stranded.held.insert(1);
+    let worker = serve_one_site(
+        kernel,
+        0x48,
+        0x90,
+        vec![
+            (api::DBGKD_WRITE_BREAKPOINT, 1),
+            (api::DBGKD_READ_VIRTUAL_MEMORY, 0),
+            (api::DBGKD_WRITE_VIRTUAL_MEMORY, 0),
+            (api::DBGKD_RESTORE_BREAKPOINT, 0),
+            (api::DBGKD_READ_VIRTUAL_MEMORY, 0),
+            (api::DBGKD_WRITE_VIRTUAL_MEMORY, 0),
+            (api::DBGKD_WRITE_BREAKPOINT, 1),
+        ],
+    );
+
+    backend.set_breakpoint(ADDR).unwrap();
+
+    assert_eq!(backend.bp_handles.get(&ADDR), Some(&1));
+    assert!(backend.stranded.held.is_empty());
+    drop(backend);
+    let writes: Vec<Vec<u8>> = worker
+        .join()
+        .unwrap()
+        .into_iter()
+        .filter(|(api_number, _)| *api_number == api::DBGKD_WRITE_VIRTUAL_MEMORY)
+        .map(|(_, data)| data)
+        .collect();
+    assert_eq!(writes, [vec![0xcc], vec![0x48]]);
 }
 
 #[test]

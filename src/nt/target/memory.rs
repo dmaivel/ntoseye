@@ -381,16 +381,6 @@ impl Target {
         self.address_space(self.current_dtb())
     }
 
-    /// Write `data` at `address` of `memory`: the inspection address space
-    /// ([`Self::context_memory`]) or guest-physical memory. Every host's
-    /// memory write (`eb`, `!eb`, `Memory.write`) goes through it.
-    pub fn write_memory(&self, memory: MemoryKind, address: u64, data: &[u8]) -> Result<()> {
-        match memory {
-            MemoryKind::Virtual => self.context_memory().write_bytes(VirtAddr(address), data),
-            MemoryKind::Physical => self.write_physical(address, data),
-        }
-    }
-
     /// The virtual memory expressions read in the [`ExpressionScope`]: the
     /// inspection address space, or a hypercall caller's.
     pub fn expression_memory(&self) -> ExpressionMemory<'_> {

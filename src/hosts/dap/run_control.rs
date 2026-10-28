@@ -66,6 +66,9 @@ impl Server {
 
     pub(super) fn on_continue(&mut self, request: &Request) -> Handled {
         self.refuse_on_dump("continue")?;
+        // A step still running becomes this run: its sites would otherwise
+        // end the continue as a step.
+        self.end_step();
         // Resume and take a stop already waiting; the rest arrive while the
         // loop services the running target.
         let continue_ = Motion::Continue {
@@ -110,6 +113,12 @@ impl Server {
         Ok(None)
     }
 
+    /// Start a step and answer at once, as `continue` does: the step's runs
+    /// go on while the loop services the running target, which answers
+    /// other requests meanwhile and lets `pause` or a disconnect end it, and
+    /// the stop it ends on is reported when it comes. A client that waited
+    /// for the response instead would show the thread stopped, without a
+    /// pause, for as long as a step over a long call takes.
     pub(super) fn on_step(&mut self, request: &Request, step: StepRequest) -> Handled {
         self.refuse_on_dump("stepping")?;
         let instruction_granularity =
@@ -121,12 +130,20 @@ impl Server {
             return Ok(None);
         }
         self.invalidate_stop_state();
-        match self.run_step(step, instruction_granularity) {
-            Ok(stop) => {
+        match self.start_step(step, instruction_granularity) {
+            Ok(outcome) => {
+                self.state = RunState::Running;
                 self.respond(request, Ok(None));
-                self.report_stop(stop);
+                self.send_event(
+                    "continued",
+                    json!({"threadId": 1, "allThreadsContinued": true}),
+                );
+                if let RunOutcome::Stopped(stop) = outcome {
+                    self.on_stopped(stop);
+                }
             }
             Err(message) => {
+                self.end_step();
                 self.respond(request, Err(message));
                 // The step failed with the target still halted where it was,
                 // so re-announce that stop to keep the client's view live. A
@@ -145,27 +162,21 @@ impl Server {
         Ok(None)
     }
 
-    /// Run a step motion to its stop. A step always ends halted: a `pause`
-    /// (the session's interrupt request) halts it where it is.
-    fn step_motion(&mut self, motion: Motion) -> result::Result<Stop, String> {
-        match self.drive(motion, &Cancel::NEVER)? {
-            RunOutcome::Stopped(stop) => Ok(stop),
-            RunOutcome::Running => Err("the target is still running".to_string()),
-        }
-    }
-
-    /// Step by source line, or by instruction when requested or unmapped.
-    fn run_step(
+    /// Start a step by source line, or by instruction when requested or
+    /// unmapped, recording it as the step in progress: its first run, and
+    /// where that run stopped if it already did.
+    pub fn start_step(
         &mut self,
         step: StepRequest,
         instruction_granularity: bool,
-    ) -> result::Result<Stop, String> {
+    ) -> result::Result<RunOutcome, String> {
+        self.step = Some(StepInProgress::default());
         let mode = match step {
             StepRequest::Step(mode) => mode,
             StepRequest::Out => return self.step_motion(Motion::StepOut),
         };
 
-        let (mut rip, start) = {
+        let (rip, start) = {
             let session = self.session()?;
             let rip = session.run_status().rip;
             let start = rip
@@ -173,38 +184,132 @@ impl Server {
                 .map(|location| (location.file, location.line));
             (rip.unwrap_or(0), start)
         };
-        if instruction_granularity || start.is_none() {
+        let Some((file, line)) = start.filter(|_| !instruction_granularity) else {
             return self.step_once(mode);
+        };
+        if let Some(step) = self.step.as_mut() {
+            step.line = Some(LineStep {
+                mode,
+                file,
+                line,
+                runs_left: STEP_LINE_BUDGET - 1,
+            });
         }
+        self.advance_within_line(mode, rip)
+    }
 
-        let mut last = None;
-        for _ in 0..STEP_LINE_BUDGET {
-            let stop = self.advance_within_line(mode, rip)?;
-            if !matches!(stop.kind, StopKind::Step) || self.cancel.load(Ordering::Relaxed) {
-                return Ok(stop);
+    /// A stop the running target reached. One that ends a run of a step by
+    /// source line still on its line starts the step's next run; any other
+    /// is reported.
+    pub(super) fn on_stopped(&mut self, mut stop: Stop) {
+        while let Some(line) = self.step.as_mut().and_then(|step| step.line.as_mut()) {
+            if !matches!(stop.kind, StopKind::Step)
+                || self.cancel.load(Ordering::Relaxed)
+                || line.runs_left == 0
+            {
+                break;
             }
-            rip = stop.rip.unwrap_or(0);
-            let session = self.session()?;
+            line.runs_left -= 1;
+            let (mode, file, number) = (line.mode, line.file.clone(), line.line);
+            let rip = stop.rip.unwrap_or(0);
+            let Some(session) = self.session.as_ref() else {
+                break;
+            };
             match session.target.source_location(VirtAddr(rip)) {
-                // Left line-mapped code (a call into a module without private
-                // symbols): stop here rather than running on blindly.
-                None => return Ok(stop),
-                Some(location) => {
-                    if start
-                        .as_ref()
-                        .is_none_or(|(file, line)| location.line != *line || location.file != *file)
-                    {
-                        return Ok(stop);
-                    }
+                Some(location) if location.file == file && location.line == number => {}
+                // Another line, or code without line records (a call into a
+                // module without private symbols): the step ends here rather
+                // than running on blindly.
+                _ => break,
+            }
+            match self.advance_within_line(mode, rip) {
+                Ok(RunOutcome::Running) => return,
+                Ok(RunOutcome::Stopped(next)) => stop = next,
+                // The target stays where the last run left it.
+                Err(message) => {
+                    self.emit_output("stderr", format!("the step stopped early: {message}\n"));
+                    break;
                 }
             }
-            last = Some(stop);
         }
-        last.ok_or_else(|| "the step budget ran out".to_string())
+        self.report_stop(stop);
+    }
+
+    /// Run one motion of the step in progress, handing the target back
+    /// running unless it stopped at once, as a continue does. A run to an
+    /// address handed back that way leaves its temporary sites armed, for
+    /// the wait that ends it; they are the step's to remove
+    /// ([`Self::end_step`]).
+    fn step_motion(&mut self, motion: Motion) -> result::Result<RunOutcome, String> {
+        let armed = self.armed_temporary_sites();
+        let outcome = self.drive(motion, &Cancel::poll())?;
+        let planted: Vec<(u32, u64)> = self
+            .armed_temporary_sites()
+            .into_iter()
+            .filter(|site| !armed.contains(site))
+            .collect();
+        if let Some(step) = self.step.as_mut() {
+            step.sites.extend(planted);
+        }
+        Ok(outcome)
+    }
+
+    /// The temporary sites the session has armed, by id and serial.
+    fn armed_temporary_sites(&self) -> Vec<(u32, u64)> {
+        self.session.as_ref().map_or_else(Vec::new, |session| {
+            session
+                .list_breakpoints()
+                .into_iter()
+                .filter(|breakpoint| breakpoint.temporary)
+                .map(|breakpoint| (breakpoint.id, breakpoint.serial))
+                .collect()
+        })
+    }
+
+    /// End the step in progress, if any, removing the temporary sites its
+    /// runs left armed: a stop elsewhere (a breakpoint, an exception, a
+    /// `pause`) leaves them, and the next run would stop at one as if the
+    /// step had ended there. A site that fired is the stop's own, and the
+    /// next resume removes it.
+    pub(super) fn end_step(&mut self) {
+        let Some(step) = self.step.take() else {
+            return;
+        };
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let armed: Vec<u32> = step
+            .sites
+            .into_iter()
+            .filter(|&(id, serial)| {
+                session
+                    .breakpoint(id)
+                    .is_some_and(|breakpoint| breakpoint.serial == serial)
+            })
+            .map(|(id, _)| id)
+            .collect();
+        if armed.is_empty() {
+            return;
+        }
+        let removed = session.with_target_halted(|session| {
+            armed
+                .iter()
+                .try_for_each(|&id| session.remove_breakpoint(id))
+        });
+        if let Err(error) = removed {
+            self.emit_output(
+                "important",
+                format!("the step's temporary breakpoint could not be removed: {error}\n"),
+            );
+        }
     }
 
     /// Run through a fall-through range, or single-step if no range can be used.
-    fn advance_within_line(&mut self, mode: StepMode, rip: u64) -> result::Result<Stop, String> {
+    fn advance_within_line(
+        &mut self,
+        mode: StepMode,
+        rip: u64,
+    ) -> result::Result<RunOutcome, String> {
         let Some(end) = self.coalescible_line_end(rip)? else {
             return self.step_once(mode);
         };
@@ -218,7 +323,7 @@ impl Server {
             disposition: ContinueDisposition::Handled,
         };
         match self.step_motion(run) {
-            Ok(stop) => Ok(stop),
+            Ok(outcome) => Ok(outcome),
             // The temporary breakpoint could not be written (a non-resident or
             // read-only page at that address). Stepping needs no breakpoint.
             Err(_) => self.step_once(mode),
@@ -264,7 +369,7 @@ impl Server {
         Ok(Some(VirtAddr(run_end)))
     }
 
-    fn step_once(&mut self, mode: StepMode) -> result::Result<Stop, String> {
+    fn step_once(&mut self, mode: StepMode) -> result::Result<RunOutcome, String> {
         self.step_motion(match mode {
             StepMode::Into => Motion::Step,
             StepMode::Over => Motion::StepOver,
@@ -347,14 +452,36 @@ impl Server {
         }
     }
 
-    /// Report a stop to the client: the DAP reason for its kind, a requested
-    /// break-in (or a target found halted for a `pause`) as `pause`.
-    pub(super) fn report_stop(&mut self, stop: Stop) {
+    /// The bookkeeping every reported stop starts with: the step in
+    /// progress ends, the client's view of the last stop is dropped, and
+    /// what arrived meanwhile goes out first.
+    fn enter_halted(&mut self) {
+        self.end_step();
         self.invalidate_stop_state();
         self.state = RunState::Halted;
         self.cancel.store(false, Ordering::Relaxed);
         self.drain_debug_output();
         self.reconcile_breakpoints();
+    }
+
+    /// Report a step that ended before it got where it was going, `why`
+    /// (its thread exited), with the target halted wherever that left it:
+    /// a `step` stop, as a completed step is, whose description says so.
+    pub(super) fn report_ended_step(&mut self, why: &str) {
+        self.enter_halted();
+        self.publish_stop(StopInfo {
+            reason: "step",
+            description: format!("step ended: {why}"),
+            exception_id: None,
+            detail: Some(why.to_string()),
+            breakpoint_id: None,
+        });
+    }
+
+    /// Report a stop to the client: the DAP reason for its kind, a requested
+    /// break-in (or a target found halted for a `pause`) as `pause`.
+    pub(super) fn report_stop(&mut self, stop: Stop) {
+        self.enter_halted();
 
         let rip = stop.rip.unwrap_or(0);
         let info = match &stop.kind {
@@ -525,4 +652,25 @@ impl Server {
 pub(super) enum StepRequest {
     Step(StepMode),
     Out,
+}
+
+/// A step whose runs are under way.
+#[derive(Default)]
+pub struct StepInProgress {
+    /// The temporary sites its runs armed, by id and serial.
+    sites: Vec<(u32, u64)>,
+    /// For a step by source line, what decides whether a run's stop ends
+    /// it.
+    line: Option<LineStep>,
+}
+
+/// A step by source line: it runs on while its runs stop on the line it
+/// started on.
+struct LineStep {
+    mode: StepMode,
+    file: String,
+    line: u32,
+    /// How many more runs it may take before it stops where it got to, for
+    /// a line that execution never leaves.
+    runs_left: usize,
 }

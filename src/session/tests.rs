@@ -20,7 +20,7 @@ use crate::nt::breakpoints::{
 };
 use crate::nt::dmp::structs::Header64;
 use crate::nt::guest::ModuleInfo;
-use crate::nt::target::SelectedFrame;
+use crate::nt::target::{MemoryKind, SelectedFrame};
 use crate::session::exception_policy::{ExceptionPolicyFinalAction, ExceptionPolicyMode};
 use iced_x86::{Decoder, DecoderOptions};
 use parking_lot::Mutex;
@@ -319,7 +319,7 @@ impl MockBackend {
         self
     }
 
-    fn set(&mut self, name: &str, value: u64) {
+    pub fn set(&mut self, name: &str, value: u64) {
         self.register_map
             .write_u64(name, &mut self.regs, value)
             .unwrap();
@@ -1207,6 +1207,35 @@ fn a_breakpoint_takes_over_the_site_of_a_fired_one_shot() {
     let listed: Vec<_> = session.breakpoints.list().iter().map(|bp| bp.id).collect();
     assert_eq!(listed, [taken]);
     assert!(!session.breakpoints.list()[0].one_shot);
+}
+
+/// A write over a planted breakpoint goes to the code the breakpoint
+/// displaced: the site is lifted for the write and planted again after it,
+/// whether or not the write lands (this memory refuses it), and a write
+/// beside the site leaves it alone. Written over the planted instruction,
+/// the write would be undone by the breakpoint's removal.
+#[test]
+fn a_write_over_a_breakpoint_lifts_and_replants_it() {
+    let backend = MockBackend {
+        allow_breakpoints: true,
+        ..MockBackend::default()
+    };
+    let sites = backend.site_log();
+    let mut session = session_with_mock(backend);
+    session
+        .add_breakpoint(VirtAddr(0x1000), None, BreakpointConfig::default())
+        .unwrap();
+
+    let beside = session.write_memory(MemoryKind::Virtual, 0x1001, &[0x11]);
+    let over = session.write_memory(MemoryKind::Virtual, 0xfff, &[0x11, 0x22, 0x33]);
+
+    assert!(matches!(beside, Err(Error::ReadOnlyDump)), "{beside:?}");
+    assert!(matches!(over, Err(Error::ReadOnlyDump)), "{over:?}");
+    assert_eq!(
+        *sites.lock(),
+        [(0x1000, true), (0x1000, false), (0x1000, true)]
+    );
+    assert!(session.breakpoints.list()[0].enabled);
 }
 
 #[test]

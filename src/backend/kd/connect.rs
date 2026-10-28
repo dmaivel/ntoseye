@@ -16,7 +16,8 @@ use crate::base::memory::{AddressSpace, MemoryOps, TranslationCache};
 use crate::base::types::{Dtb, PhysAddr, VirtAddr};
 
 use super::breakpoints::{
-    breakpoint_instruction_at, reclaimed_breakpoints_notice, restore_unowned_breakpoint_handles,
+    StrandedEntries, breakpoint_instruction_at, reclaimed_breakpoints_notice,
+    restore_unowned_breakpoint_handles,
 };
 use super::halt::HaltRegisters;
 use super::kdnet::KdNetStream;
@@ -152,12 +153,12 @@ impl KdBackend {
         // held until the guest reboots. Release them before anything reads
         // guest memory or resumes, so no later decision has to reason about an
         // `int3` nobody can account for.
-        let mut released_handles = HashSet::new();
+        let mut stranded = StrandedEntries::default();
         if let Some(notice) = reclaimed_breakpoints_notice(restore_unowned_breakpoint_handles(
             &mut framing,
             initial_stop.processor,
             &HashSet::new(),
-            &mut released_handles,
+            &mut stranded,
         )) {
             progress(&notice.text);
         }
@@ -227,7 +228,7 @@ impl KdBackend {
             debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
             translations: Arc::new(TranslationCache::default()),
             notices: Vec::new(),
-            released_handles,
+            stranded,
             running_reason: MEMORY_OVER_KD_CHOSEN,
         })
     }

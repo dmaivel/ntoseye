@@ -1233,14 +1233,13 @@ impl Render for ValuesWritten {
 /// addresses, or guest-physical ones. `noun` names what they are in an
 /// error. Every memory-writing command and SDK method writes through it.
 pub fn write_memory(
-    session: &Session,
+    session: &mut Session,
     memory: MemoryKind,
     address: VirtAddr,
     bytes: &[u8],
     noun: &str,
 ) -> Result<()> {
     session
-        .target
         .write_memory(memory, address.0, bytes)
         .map_err(|error| {
             let space = match memory {
@@ -1252,13 +1251,13 @@ pub fn write_memory(
 }
 
 /// Write `bytes` at `address` in the inspection space.
-fn write_virtual(session: &Session, address: VirtAddr, bytes: &[u8], noun: &str) -> Result<()> {
+fn write_virtual(session: &mut Session, address: VirtAddr, bytes: &[u8], noun: &str) -> Result<()> {
     write_memory(session, MemoryKind::Virtual, address, bytes, noun)
 }
 
 /// Write `values` as `unit`s at `address`.
 fn write_integers(
-    session: &Session,
+    session: &mut Session,
     address: VirtAddr,
     values: Vec<u64>,
     unit: WriteUnit,
@@ -1318,7 +1317,7 @@ pub fn write_values(
     forms = [write_bytes, write_u8],
 )]
 fn eb(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(parse = write_values)] values: Vec<u64>,
 ) -> Result<ValuesWritten> {
@@ -1328,7 +1327,7 @@ fn eb(
 /// Write bytes to this address space.
 #[command(form_of = eb, python = Memory, python_name = "write")]
 fn write_bytes(
-    session: &Session,
+    session: &mut Session,
     #[arg(receiver)] memory: MemoryKind,
     address: VirtAddr,
     data: Vec<u8>,
@@ -1339,7 +1338,7 @@ fn write_bytes(
 /// Write a little-endian byte.
 #[command(form_of = eb, python = Memory)]
 fn write_u8(
-    session: &Session,
+    session: &mut Session,
     #[arg(receiver)] memory: MemoryKind,
     address: VirtAddr,
     value: u8,
@@ -1356,7 +1355,7 @@ fn write_u8(
     forms = [write_u16],
 )]
 fn ew(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(parse = write_values)] values: Vec<u64>,
 ) -> Result<ValuesWritten> {
@@ -1366,7 +1365,7 @@ fn ew(
 /// Write a little-endian 16-bit integer.
 #[command(form_of = ew, python = Memory)]
 fn write_u16(
-    session: &Session,
+    session: &mut Session,
     #[arg(receiver)] memory: MemoryKind,
     address: VirtAddr,
     value: u16,
@@ -1384,7 +1383,7 @@ fn write_u16(
     forms = [write_u32],
 )]
 fn ed(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(parse = write_values)] values: Vec<u64>,
 ) -> Result<ValuesWritten> {
@@ -1394,7 +1393,7 @@ fn ed(
 /// Write a little-endian 32-bit integer.
 #[command(form_of = ed, python = Memory)]
 fn write_u32(
-    session: &Session,
+    session: &mut Session,
     #[arg(receiver)] memory: MemoryKind,
     address: VirtAddr,
     value: u32,
@@ -1412,7 +1411,7 @@ fn write_u32(
     forms = [write_u64],
 )]
 fn eq(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(parse = write_values)] values: Vec<u64>,
 ) -> Result<ValuesWritten> {
@@ -1422,7 +1421,7 @@ fn eq(
 /// Write a little-endian 64-bit integer.
 #[command(form_of = eq, python = Memory)]
 fn write_u64(
-    session: &Session,
+    session: &mut Session,
     #[arg(receiver)] memory: MemoryKind,
     address: VirtAddr,
     value: u64,
@@ -1462,7 +1461,7 @@ fn float_values(
     python = none,
 )]
 fn ef(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(parse = float_values)] numbers: Vec<f64>,
     #[arg(invoked)] name: &str,
@@ -1506,7 +1505,7 @@ impl Render for StringWritten {
 /// Write `text` at `address` as ANSI or UTF-16, NUL-terminated or not;
 /// `command` names it in an error.
 fn write_string(
-    session: &Session,
+    session: &mut Session,
     address: VirtAddr,
     text: &str,
     unicode: bool,
@@ -1539,7 +1538,7 @@ fn write_string(
     python = none,
 )]
 fn ea(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(rest, usage = "<text>", complete = None)] text: String,
 ) -> Result<StringWritten> {
@@ -1555,7 +1554,7 @@ fn ea(
     python = none,
 )]
 fn eu(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(rest, usage = "<text>", complete = None)] text: String,
 ) -> Result<StringWritten> {
@@ -1571,7 +1570,7 @@ fn eu(
     python = none,
 )]
 fn eza(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(rest, usage = "<text>", complete = None)] text: String,
 ) -> Result<StringWritten> {
@@ -1587,7 +1586,7 @@ fn eza(
     python = none,
 )]
 fn ezu(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(rest, usage = "<text>", complete = None)] text: String,
 ) -> Result<StringWritten> {
@@ -1690,7 +1689,7 @@ pub struct FileToMemory {
     python = none,
 )]
 fn readmem(
-    session: &Session,
+    session: &mut Session,
     #[arg(name = "file")] path: String,
     #[arg(parse = file_range)] range: AddressRange,
 ) -> Result<FileToMemory> {
@@ -1713,10 +1712,7 @@ fn readmem(
             loaded.read_error = Some((offset, error.to_string()));
             return;
         }
-        if let Err(error) = session
-            .target
-            .write_memory(MemoryKind::Virtual, address.0, &bytes)
-        {
+        if let Err(error) = session.write_memory(MemoryKind::Virtual, address.0, &bytes) {
             loaded.failed.push((address, error));
             loaded.unwritten += len;
         }
@@ -1911,13 +1907,12 @@ impl Render for MemoryFilled {
     python = none,
 )]
 fn fill(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = fill_range)] range: AddressRange,
     #[arg(parse = fill_pattern)] pattern: Vec<u8>,
 ) -> Result<MemoryFilled> {
     let data = repeat_pattern(&pattern, range.len());
     session
-        .target
         .write_memory(MemoryKind::Virtual, range.start.0, &data)
         .map_err(|error| Error::DebugInfo(format!("failed to fill memory: {error}")))?;
     Ok(MemoryFilled {
@@ -2044,7 +2039,7 @@ impl Render for MemoryCopied {
     python = none,
 )]
 fn move_memory(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = paired_range)] range: AddressRange,
     destination: VirtAddr,
 ) -> Result<MemoryCopied> {
@@ -2070,7 +2065,6 @@ fn move_memory(
         )));
     }
     session
-        .target
         .write_memory(MemoryKind::Virtual, destination.0, &data)
         .map_err(|error| {
             Error::DebugInfo(format!(

@@ -294,7 +294,7 @@ The Debug Console uses the same remote dispatch context as MCP and does not acce
 
 Breakpoint actions still run. For example, a breakpoint created with `bp nt!NtCreateFile do "k; gc"` runs its action at each hit and prints the output in the console, and because the action ends in `gc`, the target continues.
 
-Pause also interrupts a step over a long-running call.
+A step is answered at once and runs the way a continue does: while it runs, the editor shows the thread as running, the adapter answers its other requests, and Pause ends the step where it is, for example a step over a call that waits.
 
 Disconnect, terminate, `SIGTERM`, `SIGHUP`, and `SIGINT` detach the adapter as `qd` does, which removes the installed breakpoints and resumes the guest. The adapter does this cleanup before it sends the disconnect response, because a client can kill the adapter immediately. If the target cannot halt for the cleanup, the adapter reports the failure and does not resume the target.
 

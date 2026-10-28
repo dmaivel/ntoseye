@@ -17,7 +17,9 @@ use crate::nt::symbols::{
 };
 use crate::nt::target::SelectedFrame;
 use crate::session::exception_policy::ExceptionPolicyMode;
-use crate::session::tests::{MockBackend, session_with_mock};
+use crate::session::tests::{
+    MockBackend, breakpoint_event, session_running_code, session_with_mock,
+};
 use crate::session::{StopKind, session_over_memory};
 
 #[test]
@@ -410,6 +412,53 @@ fn decode_sink(sink: &Rc<RefCell<Vec<u8>>>) -> Vec<Value> {
 
 fn request(seq: i64, command: &str) -> Value {
     json!({"seq": seq, "type": "request", "command": command})
+}
+
+/// A step over a call hands the target back running, as a continue does,
+/// instead of waiting for the call to return, so other requests are
+/// answered meanwhile; a `pause` ends it where it is and takes out the
+/// breakpoint it planted at the return address. (The test memory is a
+/// dump, whose `next` request is refused, so the step starts below it.)
+#[test]
+fn a_step_over_a_call_runs_on_until_paused() {
+    // call 0x1010; the return address is 0x1005.
+    let mut code = [0x90u8; 0x40];
+    code[..5].copy_from_slice(&[0xe8, 0x0b, 0x00, 0x00, 0x00]);
+    let mut backend = MockBackend::default()
+        .one_vcpu()
+        .halts_only_on_interrupt()
+        .with_breakpoints();
+    backend.set("rip", 0x1000);
+    backend.queue_interrupt(breakpoint_event(0x1020));
+    let sites = backend.site_log();
+    let session = session_running_code(&code, backend);
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, sink) = server_with_sink(Some(session), rx);
+    server.configured = true;
+    let dispatch = |server: &mut Server, message: Value| {
+        server.dispatch(Request::from_message(&message).unwrap());
+    };
+
+    let outcome = server.start_step(StepRequest::Step(StepMode::Over), true);
+    assert!(matches!(outcome, Ok(RunOutcome::Running)), "{outcome:?}");
+    assert_eq!(sites.lock().last(), Some(&(0x1005, true)));
+    server.state = RunState::Running;
+    dispatch(&mut server, request(1, "threads"));
+    server.cancel.store(true, Ordering::Relaxed);
+    dispatch(&mut server, request(2, "pause"));
+
+    let messages = decode_sink(&sink);
+    let threads = messages
+        .iter()
+        .find(|message| message["command"] == "threads")
+        .unwrap();
+    assert_eq!(threads["success"], true, "{threads:?}");
+    let stopped = messages
+        .iter()
+        .find(|message| message["event"] == "stopped")
+        .unwrap_or_else(|| panic!("no stopped event in {messages:?}"));
+    assert_eq!(stopped["body"]["reason"], "pause");
+    assert_eq!(sites.lock().last(), Some(&(0x1005, false)));
 }
 
 #[test]

@@ -433,6 +433,7 @@ impl Session {
             reload_surface_pending: false,
             parked_stop: None,
             pending_walk: None,
+            handed_back_run: None,
             current_stop: None,
             stop_snapshot: None,
             halt_requested: false,

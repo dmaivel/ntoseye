@@ -390,9 +390,9 @@ pub struct KdBackend {
     /// Operator-facing diagnostics raised mid-operation, drained by the
     /// session through [`DebugBackend::take_notices`].
     notices: Vec<Notice>,
-    /// Table handles reclaimed from dead sessions; see
+    /// Table entries left by dead sessions; see
     /// [`restore_unowned_breakpoint_handles`](breakpoints::restore_unowned_breakpoint_handles).
-    released_handles: HashSet<u32>,
+    stranded: breakpoints::StrandedEntries,
     /// Why a request cannot be served while the target runs, for the error
     /// a running target answers with; see [`Self::note_host_memory_unavailable`].
     running_reason: &'static str,

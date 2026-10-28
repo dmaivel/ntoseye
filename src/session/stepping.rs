@@ -33,8 +33,8 @@ use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::hits::{reported_watch_hit, stack_pointer};
 use crate::session::{
     CallTrace, CallTraceEnd, CallTraceFrame, Cancel, CancelBehavior, ContinueOutcome, ControlState,
-    CurrentInstruction, ModuleTrap, PendingWalk, STATUS_BREAKPOINT, STATUS_SINGLE_STEP, Session,
-    StepKind, StepMode, StepStack, StopResolution,
+    CurrentInstruction, HandedBackRun, ModuleTrap, PendingWalk, STATUS_BREAKPOINT,
+    STATUS_SINGLE_STEP, Session, StepKind, StepMode, StepStack, StopResolution,
 };
 
 impl Session {
@@ -1040,6 +1040,12 @@ impl Session {
         );
         if matches!(outcome, Ok(ContinueOutcome::Running)) {
             if cancel.behavior == CancelBehavior::ReturnRunning {
+                // The waits that go on with it check on its thread instead.
+                self.handed_back_run = followed.map(|thread| HandedBackRun {
+                    thread,
+                    sites: temporary,
+                    checked: Instant::now(),
+                });
                 return outcome;
             }
             // Halted where it is; a stop that raced the break-in is the
@@ -1220,6 +1226,42 @@ impl Session {
     /// halted.
     pub fn end_follow_watch(&mut self, watch: FollowWatch) {
         self.remove_temporary(&[watch.id]);
+    }
+
+    /// Go on with a run handed back running (see [`HandedBackRun`]) while
+    /// the target still runs: every [`FOLLOW_CHECK`], make sure its thread
+    /// can still reach its sites, as the run itself did. When the thread
+    /// exited, the target is halted, the sites removed, and the run ends
+    /// with an error that says so, rather than running until someone breaks
+    /// in. A stop that raced the break-in is parked for the next wait. A
+    /// thread that cannot be read proves nothing, and the run goes on.
+    pub(super) fn check_handed_back_run(&mut self) -> Result<()> {
+        let Some(run) = self.handed_back_run.as_mut() else {
+            return Ok(());
+        };
+        if run.checked.elapsed() < FOLLOW_CHECK {
+            return Ok(());
+        }
+        run.checked = Instant::now();
+        let thread = run.thread.clone();
+        let now = self.target.thread_info_from_ethread(thread.ethread);
+        if !now.is_ok_and(|now| thread.exited(&now)) {
+            return Ok(());
+        }
+        let sites = self
+            .handed_back_run
+            .take()
+            .map(|run| run.sites)
+            .unwrap_or_default();
+        match self.halt()? {
+            ContinueOutcome::Stopped {
+                exception_code: None,
+                ..
+            } => {}
+            raced => self.parked_stop = Some(raced),
+        }
+        self.remove_temporary(&sites);
+        Err(followed_thread_exited(&thread))
     }
 
     /// Enable `sites` (`armed`) or disable them.

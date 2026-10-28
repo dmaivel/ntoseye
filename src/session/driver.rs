@@ -480,8 +480,10 @@ impl Session {
             self.halt_requested = false;
             let (outcome, fresh) = self.advance(&motion, cancel)?;
             if matches!(outcome, ContinueOutcome::Running) {
+                self.check_handed_back_run()?;
                 return Ok(RunOutcome::Running);
             }
+            self.handed_back_run = None;
             if !fresh {
                 return Ok(RunOutcome::Stopped(self.current_snapshot(outcome)));
             }

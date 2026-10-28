@@ -5,7 +5,6 @@ use std::result;
 
 use serde_json::{Value, json};
 
-use crate::base::memory::MemoryOps;
 use crate::base::types::{Dtb, VirtAddr};
 use crate::nt::layout::{FieldInfo, ParsedType, find_field};
 use crate::nt::symbols::{LocalVariableLocation, ProcedureLocal};
@@ -397,9 +396,7 @@ impl Server {
                             .ok_or_else(|| format!("'{name}' has no resolvable address"))?;
                         let bytes = value.to_le_bytes();
                         session
-                            .target
-                            .address_space(dtb)
-                            .write_bytes(VirtAddr(address), &bytes[..size])
+                            .write_in(dtb, VirtAddr(address), &bytes[..size])
                             .map_err(|error| error.to_string())?;
                     }
                 }
@@ -525,9 +522,7 @@ impl Server {
     ) -> result::Result<(), String> {
         let bytes = value.to_le_bytes();
         self.session()?
-            .target
-            .address_space(dtb)
-            .write_bytes(address, &bytes[..size])
+            .write_in(dtb, address, &bytes[..size])
             .map_err(|error| error.to_string())
     }
 }

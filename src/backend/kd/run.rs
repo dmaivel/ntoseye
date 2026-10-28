@@ -216,10 +216,10 @@ impl KdBackend {
             self.link.framing(self.running_reason)?,
             processor,
             &owned,
-            &mut self.released_handles,
+            &mut self.stranded,
         );
         self.notices.extend(reclaimed_breakpoints_notice(reclaimed));
-        if reclaimed != 0
+        if reclaimed.released != 0
             && !breakpoint_instruction_at(
                 self.link.framing(self.running_reason)?,
                 arch,

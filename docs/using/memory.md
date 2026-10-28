@@ -28,6 +28,8 @@ Neither type of write keeps write protection or copy-on-write. The kernel does a
 
 As a result, if you write a breakpoint into a shared image page, every process that maps that page sees the breakpoint, whatever the type of write. See [breakpoints in shared pages](breakpoints.md#user-mode-breakpoints-in-shared-pages).
 
+A write that covers one of the session's software breakpoints (`eb`, `f`, a DAP `writeMemory`, a gdb `M` packet, `Memory.write`) changes the code under the breakpoint, which reads show in its place: `ntoseye` takes the breakpoint out, writes, and puts it back over the new code.
+
 `ntoseye` checks the identity of the host mapping when it attaches, and again when it builds the debugger state after a guest reboot. If the host memory no longer matches, it shows a warning, and reads through the host mapping are then not reliable. Attach again with `--memory-source kd`.
 
 Because the `kd` source does not need access to the hypervisor or to the VM process, you can debug AMD64 and ARM64 Windows VMs or physical machines across any routable network. This has two costs: commands that use memory need a halted target, and network latency makes large scans slower than scans of direct host memory.

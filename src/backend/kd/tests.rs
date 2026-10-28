@@ -6,6 +6,7 @@ use std::os::unix::net::UnixStream;
 use std::thread::{JoinHandle, spawn};
 
 use crate::arch::{amd64, arm64};
+use crate::backend::kd::breakpoints::StrandedEntries;
 use crate::backend::kd::connect::MEMORY_OVER_KD_CHOSEN;
 use crate::backend::kd::framing::{
     HEADER_SIZE, Header, INITIAL_PACKET_ID, PACKET_TYPE_KD_ACKNOWLEDGE,
@@ -203,7 +204,7 @@ fn kd_backend_with_pump(pump: PumpHandle, breakin_clone: UnixStream) -> KdBacken
         debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
         translations: Arc::new(TranslationCache::default()),
         notices: Vec::new(),
-        released_handles: HashSet::new(),
+        stranded: StrandedEntries::default(),
         running_reason: MEMORY_OVER_KD_CHOSEN,
     }
 }
@@ -254,7 +255,7 @@ fn kd_backend_with_framing(host: UnixStream) -> KdBackend {
         debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
         translations: Arc::new(TranslationCache::default()),
         notices: Vec::new(),
-        released_handles: HashSet::new(),
+        stranded: StrandedEntries::default(),
         running_reason: MEMORY_OVER_KD_CHOSEN,
     }
 }

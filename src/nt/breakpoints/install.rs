@@ -4,17 +4,18 @@
 
 use pelite::{PeView, image::IMAGE_SCN_MEM_EXECUTE};
 
-use super::journal::site_window;
+use super::journal::{Restore, SiteMemory, site_window};
 use super::{BreakpointInfo, BreakpointManager, BreakpointScope};
 use crate::arch::{Arch, Family};
 use crate::backend::dbg_backend::{DebugBackend, DebugCapability};
-use crate::backend::phys::PhysMem;
+use crate::backend::kd::trace_enabled;
 use crate::base::error::{Error, Result};
-use crate::base::memory::{AddressSpace, MemoryOps, PAGE_SIZE, Residency};
+use crate::base::memory::{MemoryOps, PAGE_SIZE, Residency};
 use crate::base::types::{Dtb, PhysAddr, VirtAddr};
 use crate::nt::guest::ModuleInfo;
 use crate::nt::pe::read_pe_header_page;
 use crate::nt::target::Target;
+use crate::nt::target::mm::PfnSelector;
 
 /// Who owns the patched instruction for a breakpoint.
 ///
@@ -83,18 +84,17 @@ pub(super) enum BreakpointBackend {
 }
 
 /// Record a host-patched site in the target's journal before its breakpoint
-/// instruction is written: `original` is the instruction it displaces, and
-/// the bytes after it come from memory. Recording first means a session that
-/// dies at any point leaves nothing patched that the journal does not know.
-fn journal_site(
-    debugger: &Target,
-    memory: &AddressSpace<'_, PhysMem>,
-    address: VirtAddr,
-    original: &[u8],
-) {
+/// instruction is written at `address` in `dtb`'s address space: `original`
+/// is the instruction it displaces, and the bytes after it come from memory.
+/// Recording first means a session that dies at any point leaves nothing
+/// patched that the journal does not know. The frame's PTE is recorded with
+/// it, so the site can still be told from a reused frame once its address
+/// no longer translates.
+fn journal_site(debugger: &Target, dtb: Dtb, address: VirtAddr, original: &[u8]) {
     let Some(journal) = debugger.site_journal.as_ref() else {
         return;
     };
+    let memory = debugger.address_space(dtb);
     let Ok(Some(translation)) = memory.virt_to_phys(address) else {
         return;
     };
@@ -104,17 +104,86 @@ fn journal_site(
         return;
     }
     bytes[..original.len()].copy_from_slice(original);
-    journal.record(translation.address, &bytes[..len]);
+    let pte = frame_pte(debugger, translation.address).filter(|pte| *pte != 0);
+    journal.record(dtb, address, translation.address, &bytes[..len], pte);
 }
 
-/// Drop a host-patched site from the journal once its original instruction
-/// is back in guest memory.
-pub fn forget_site(debugger: &Target, memory: &AddressSpace<'_, PhysMem>, address: VirtAddr) {
-    if let Some(journal) = debugger.site_journal.as_ref()
-        && let Ok(Some(translation)) = memory.virt_to_phys(address)
-    {
-        journal.forget(translation.address);
+/// `_MMPFN.PteAddress` of the frame holding guest-physical `address`: the
+/// PTE mapping the page it holds.
+fn frame_pte(debugger: &Target, address: PhysAddr) -> Option<u64> {
+    debugger
+        .inspect_pfn(PfnSelector::Pfn(address / PAGE_SIZE as u64))
+        .ok()
+        .map(|detail| detail.pte_address.0)
+}
+
+/// Drop a host-patched site planted at `address` in `dtb`'s address space
+/// from the journal once its original instruction is back in guest memory.
+pub fn forget_site(debugger: &Target, dtb: Dtb, address: VirtAddr) {
+    if let Some(journal) = debugger.site_journal.as_ref() {
+        journal.forget(dtb, address);
     }
+}
+
+/// Take out the host-patched site at `address` in `dtb`'s address space,
+/// writing back `original`, the instruction it displaced.
+///
+/// An address that no longer translates there (its process has exited,
+/// taking its page tables) cannot be written through them, but its frame
+/// may still hold the breakpoint: a page of a shared image stays in every
+/// other process mapping it. The journal then writes the frame it recorded,
+/// only if that still holds the breakpoint and the same page (see
+/// [`SiteJournal::lift`]); a frame the guest has since given to other data
+/// is left alone, and the site is dropped either way, so a site whose
+/// process is gone does not keep the session from detaching.
+///
+/// [`SiteJournal::lift`]: super::SiteJournal::lift
+fn lift_user_site(debugger: &Target, dtb: Dtb, address: VirtAddr, original: &[u8]) -> Result<()> {
+    let refused = match write_user_code(debugger, dtb, address, original) {
+        Ok(()) => {
+            forget_site(debugger, dtb, address);
+            return Ok(());
+        }
+        Err(error) => error,
+    };
+    let mapped = matches!(
+        debugger.address_space(dtb).virt_to_phys(address),
+        Ok(Some(translation)) if translation.residency == Residency::Mapped
+    );
+    let opcode = debugger.arch().breakpoint_instruction();
+    let lifted = debugger
+        .site_journal
+        .as_ref()
+        .filter(|_| !mapped)
+        .and_then(|journal| journal.lift(dtb, address, &SiteFrames::new(debugger), opcode));
+    let Some((frame, restore)) = lifted else {
+        return Err(refused);
+    };
+    let outcome = match restore {
+        Restore::Restored => "wrote its original instruction back through its frame".to_string(),
+        Restore::NotPatched => "dropped: its frame no longer holds the breakpoint".to_string(),
+        Restore::Reused { now } => {
+            format!("dropped: its frame now holds another page, the one PTE {now:#x} maps")
+        }
+        Restore::Unconfirmed => "dropped: the PFN database could not be read to tell whether \
+                                 its frame still holds its page; the next attach retries it"
+            .to_string(),
+        Restore::Failed => {
+            return Err(Error::Breakpoint(format!(
+                "{:#x} no longer translates in its process, and writing its original instruction \
+                 back through frame {frame:#x} failed",
+                address.0
+            )));
+        }
+    };
+    if trace_enabled() {
+        eprintln!(
+            "breakpoint: site {:#x} no longer translates in address space {dtb:#x} ({refused}); \
+             {outcome} (frame {frame:#x})",
+            address.0
+        );
+    }
+    Ok(())
 }
 
 /// Plant a breakpoint through the backend at kernel `address`, whose
@@ -136,13 +205,12 @@ pub fn plant_target_site(
         return Err(Error::Breakpoint(refusal));
     }
     let journaled = !client.reclaims_abandoned_breakpoints();
-    let memory = debugger.address_space(debugger.kernel_dtb());
     if journaled && let Some(original) = original {
-        journal_site(debugger, &memory, address, original);
+        journal_site(debugger, debugger.kernel_dtb(), address, original);
     }
     let planted = client.set_breakpoint(address.0);
     if planted.is_err() && journaled {
-        forget_site(debugger, &memory, address);
+        forget_site(debugger, debugger.kernel_dtb(), address);
     }
     planted
 }
@@ -155,11 +223,7 @@ pub fn lift_target_site(
 ) -> Result<()> {
     client.remove_breakpoint(address.0)?;
     if !client.reclaims_abandoned_breakpoints() {
-        forget_site(
-            debugger,
-            &debugger.address_space(debugger.kernel_dtb()),
-            address,
-        );
+        forget_site(debugger, debugger.kernel_dtb(), address);
     }
     Ok(())
 }
@@ -328,7 +392,7 @@ impl BreakpointManager {
             plant_target_site(client, debugger, address, None)?;
             return Ok(BreakpointBackend::Kernel { original: None });
         }
-        journal_site(debugger, &memory, address, original.as_slice());
+        journal_site(debugger, dtb, address, original.as_slice());
         write_user_code(debugger, dtb, address, opcode)?;
         // The kernel does not know about a breakpoint patched through
         // host memory, so update the backend's stop bookkeeping.
@@ -353,8 +417,7 @@ impl BreakpointManager {
                 BreakpointScope::Process { dtb, .. },
                 BreakpointBackend::GuestMemoryPatch { original },
             ) => {
-                let memory = debugger.address_space(*dtb);
-                journal_site(debugger, &memory, bp.address, original.as_slice());
+                journal_site(debugger, *dtb, bp.address, original.as_slice());
                 write_user_code(
                     debugger,
                     *dtb,
@@ -389,8 +452,7 @@ impl BreakpointManager {
                 BreakpointScope::Process { dtb, .. },
                 BreakpointBackend::GuestMemoryPatch { original },
             ) => {
-                write_user_code(debugger, *dtb, bp.address, original.as_slice())?;
-                forget_site(debugger, &debugger.address_space(*dtb), bp.address);
+                lift_user_site(debugger, *dtb, bp.address, original.as_slice())?;
                 client.note_breakpoint_uninstalled(bp.address.0);
                 Ok(())
             }
@@ -609,10 +671,7 @@ impl BreakpointManager {
         cr3: u64,
     ) {
         let end = start.0.wrapping_add(buf.len() as u64);
-        for bp in self.breakpoints.values() {
-            if !bp.resolved || !bp.enabled || bp.hardware.is_some() {
-                continue;
-            }
+        for bp in self.planted_sites() {
             if bp.address.0 < start.0 || bp.address.0 >= end {
                 continue;
             }
@@ -651,7 +710,7 @@ impl BreakpointManager {
     }
 
     /// The address space `bp` was planted in.
-    fn site_dtb(debugger: &Target, bp: &BreakpointInfo) -> Dtb {
+    pub fn site_dtb(debugger: &Target, bp: &BreakpointInfo) -> Dtb {
         match &bp.scope {
             BreakpointScope::Process { dtb, .. } => *dtb,
             BreakpointScope::Kernel => debugger.kernel_dtb(),
@@ -663,9 +722,7 @@ impl BreakpointManager {
     /// holds there instead. A site that does not translate in the address
     /// space it was planted in is left out: its page is not in RAM to copy.
     pub fn displaced_frames(&self, debugger: &Target) -> Vec<(PhysAddr, Vec<u8>)> {
-        self.breakpoints
-            .values()
-            .filter(|bp| bp.resolved && bp.enabled && bp.hardware.is_none())
+        self.planted_sites()
             .filter_map(|bp| {
                 let bytes = bp.backend.original_bytes();
                 if bytes.is_empty() {
@@ -679,6 +736,62 @@ impl BreakpointManager {
                 Some((translation.address, bytes.to_vec()))
             })
             .collect()
+    }
+
+    /// The breakpoints whose planted instruction a write of `len` bytes at
+    /// `start` in the address space `dtb` lands on: wherever a read there
+    /// would have them masked ([`Self::mask_breakpoint_bytes`]).
+    pub fn sites_under_write(
+        &self,
+        debugger: &Target,
+        dtb: Dtb,
+        start: VirtAddr,
+        len: usize,
+    ) -> Vec<u32> {
+        let end = start.0.saturating_add(len as u64);
+        let site_len = debugger.arch().breakpoint_instruction().len() as u64;
+        self.planted_sites()
+            .filter(|bp| {
+                bp.address.0 < end
+                    && start.0 < bp.address.0.saturating_add(site_len)
+                    && Self::site_is_in_view(debugger, bp, dtb)
+            })
+            .map(|bp| bp.id)
+            .collect()
+    }
+
+    /// [`Self::sites_under_write`] for a write of `len` bytes at the
+    /// guest-physical `start`: the breakpoints planted in the frames it
+    /// covers.
+    pub fn sites_under_physical_write(
+        &self,
+        debugger: &Target,
+        start: PhysAddr,
+        len: usize,
+    ) -> Vec<u32> {
+        let end = start.saturating_add(len as u64);
+        let site_len = debugger.arch().breakpoint_instruction().len() as u64;
+        self.planted_sites()
+            .filter(|bp| {
+                debugger
+                    .address_space(Self::site_dtb(debugger, bp))
+                    .virt_to_phys(bp.address)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|translation| {
+                        translation.address < end
+                            && start < translation.address.saturating_add(site_len)
+                    })
+            })
+            .map(|bp| bp.id)
+            .collect()
+    }
+
+    /// The breakpoints with an instruction planted in guest memory.
+    fn planted_sites(&self) -> impl Iterator<Item = &BreakpointInfo> {
+        self.breakpoints
+            .values()
+            .filter(|bp| bp.resolved && bp.enabled && bp.hardware.is_none())
     }
 }
 
@@ -764,6 +877,12 @@ impl MemoryOps<PhysAddr> for SiteFrames<'_> {
             .or_else(|refused| {
                 write_frame_through_host(self.debugger, addr, buf).unwrap_or(Err(refused))
             })
+    }
+}
+
+impl SiteMemory for SiteFrames<'_> {
+    fn pte_address(&self, address: PhysAddr) -> Option<u64> {
+        frame_pte(self.debugger, address)
     }
 }
 

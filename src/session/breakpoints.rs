@@ -10,7 +10,7 @@ use crate::backend::partition_backend::PartitionBackend;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::notice::Notice;
-use crate::base::types::{PhysAddr, VirtAddr};
+use crate::base::types::{Dtb, PhysAddr, VirtAddr};
 use crate::nt::breakpoints::{
     BreakpointConfig, BreakpointInfo, BreakpointManager, BreakpointScope, BreakpointSpec,
     HypercallFilter, ThreadScope, lift_target_site, plant_target_site,
@@ -19,6 +19,7 @@ use crate::nt::expr::Expr;
 use crate::nt::guest::vm_exits::ExitFilter;
 use crate::nt::guest::{ModuleSymbolLoadReport, hypercalls};
 use crate::nt::symbols::split_query_module;
+use crate::nt::target::{MemoryKind, Target};
 use crate::session::exception_policy::ExceptionPolicyMode;
 use crate::session::{ModuleTrap, Session, TrapSite};
 
@@ -844,6 +845,157 @@ impl Session {
                 buf[offset..end].copy_from_slice(&trap.original);
             }
         }
+    }
+
+    /// Write `data` at `address` of `memory`: the inspection address space
+    /// ([`Self::write_in`]), or guest-physical memory. Every host's memory
+    /// write (`eb`, `!eb`, `f`, `Memory.write`, a DAP `writeMemory`, a gdb
+    /// `M` packet) goes through it or [`Self::write_in`].
+    pub fn write_memory(&mut self, memory: MemoryKind, address: u64, data: &[u8]) -> Result<()> {
+        match memory {
+            MemoryKind::Virtual => {
+                self.write_in(self.target.current_dtb(), VirtAddr(address), data)
+            }
+            MemoryKind::Physical => {
+                let (ids, traps) = if self.partition().is_some() {
+                    Default::default()
+                } else {
+                    let kernel = self.target.kernel_address_space();
+                    let traps = self.trap_sites_under(address, data.len(), |trap| {
+                        let translation = kernel.virt_to_phys(trap).ok().flatten()?;
+                        Some(translation.address)
+                    });
+                    let ids = self.breakpoints.sites_under_physical_write(
+                        &self.target,
+                        address,
+                        data.len(),
+                    );
+                    (ids, traps)
+                };
+                self.write_around_sites(&ids, &traps, |target| target.write_physical(address, data))
+            }
+        }
+    }
+
+    /// Write `data` at `address` in the address space `dtb` as
+    /// [`Self::read_masked_in`] reads it: where the write lands on one of
+    /// this session's breakpoints or traps, it replaces the code the site
+    /// displaced, and the site stays planted over the new code.
+    pub fn write_in(&mut self, dtb: Dtb, address: VirtAddr, data: &[u8]) -> Result<()> {
+        // The same sites a read masks (see `mask_breakpoints`).
+        let (ids, traps) = if self.partition().is_some() || self.target.symbols.is_secure_root(dtb)
+        {
+            Default::default()
+        } else {
+            let traps = self.trap_sites_under(address.0, data.len(), |trap| Some(trap.0));
+            let ids = self
+                .breakpoints
+                .sites_under_write(&self.target, dtb, address, data.len());
+            (ids, traps)
+        };
+        self.write_around_sites(&ids, &traps, |target| {
+            target.address_space(dtb).write_bytes(address, data)
+        })
+    }
+
+    /// The traps a write of `len` bytes at `start` lands on, where `locate`
+    /// says where a trap's site is in the write's address space (`None`: it
+    /// is not there).
+    fn trap_sites_under(
+        &self,
+        start: u64,
+        len: usize,
+        locate: impl Fn(VirtAddr) -> Option<u64>,
+    ) -> Vec<VirtAddr> {
+        let end = start.saturating_add(len as u64);
+        let site_len = u64::from(self.target.arch().breakpoint_size());
+        let module_sites = self.module_traps.iter().map(|trap| &trap.site);
+        self.bugcheck_trap
+            .iter()
+            .chain(module_sites)
+            .map(|trap| trap.address)
+            .filter(|&address| {
+                locate(address)
+                    .is_some_and(|site| site < end && start < site.saturating_add(site_len))
+            })
+            .collect()
+    }
+
+    /// Run `write` with the breakpoints `ids` and the traps at `traps`
+    /// lifted, planting each again over the code the write left (see
+    /// [`BreakpointManager::write_under`]). With no site in the way the
+    /// write goes straight to the target, running or not; otherwise the
+    /// target is halted for it, since a site is planted and lifted through
+    /// the backend.
+    fn write_around_sites(
+        &mut self,
+        ids: &[u32],
+        traps: &[VirtAddr],
+        write: impl FnOnce(&Target) -> Result<()>,
+    ) -> Result<()> {
+        if ids.is_empty() && traps.is_empty() {
+            return write(&self.target);
+        }
+        self.with_target_halted(|session| {
+            for (lifted, &trap) in traps.iter().enumerate() {
+                if let Err(error) =
+                    lift_target_site(session.backend.as_mut(), &session.target, trap)
+                {
+                    return session.replant_traps(&traps[..lifted]).and(Err(error));
+                }
+            }
+            let (breakpoints, backend, target) = session.breakpoint_sites();
+            let written = breakpoints.write_under(backend, target, ids, || write(target));
+            let replanted = session.replant_traps(traps);
+            written.and(replanted)
+        })
+    }
+
+    /// Plant the traps at `addresses` again after a write lifted them, each
+    /// displacing the code now there. One that cannot be planted is dropped
+    /// and named in the error: kept, it would be masked and lifted as if it
+    /// were still there.
+    fn replant_traps(&mut self, addresses: &[VirtAddr]) -> Result<()> {
+        let mut failed = Vec::new();
+        for &address in addresses {
+            let mut original = vec![0u8; usize::from(self.target.arch().breakpoint_size())];
+            if self
+                .target
+                .kernel_address_space()
+                .read_bytes(address, &mut original)
+                .is_err()
+            {
+                original.clear();
+            }
+            match plant_target_site(
+                self.backend.as_mut(),
+                &self.target,
+                address,
+                (!original.is_empty()).then_some(original.as_slice()),
+            ) {
+                Ok(()) => {
+                    let module_sites = self.module_traps.iter_mut().map(|trap| &mut trap.site);
+                    for site in self.bugcheck_trap.iter_mut().chain(module_sites) {
+                        if site.address == address {
+                            site.original.clone_from(&original);
+                        }
+                    }
+                }
+                Err(error) => {
+                    self.bugcheck_trap.take_if(|trap| trap.address == address);
+                    self.module_traps
+                        .retain(|trap| trap.site.address != address);
+                    failed.push(format!("{:#x} ({error})", address.0));
+                }
+            }
+        }
+        if failed.is_empty() {
+            return Ok(());
+        }
+        Err(Error::Breakpoint(format!(
+            "the debugger's trap at {} could not be planted again around the write",
+            failed.join(", ")
+        )))
     }
 
     /// Uninstall every breakpoint. Successful removals are forgotten; failed

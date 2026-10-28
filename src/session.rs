@@ -11,6 +11,7 @@ use std::process::id;
 use std::sync::LazyLock;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 #[cfg(test)]
 use crate::TargetSpec;
@@ -25,7 +26,7 @@ use crate::base::error::{Error, Result};
 use crate::base::notice::Notice;
 use crate::base::ntstatus::exception_code_name;
 use crate::base::types::VirtAddr;
-use crate::nt::breakpoints::{BreakpointInfo, BreakpointManager, StepFrame};
+use crate::nt::breakpoints::{BreakpointInfo, BreakpointManager, StepFrame, ThreadScope};
 #[cfg(test)]
 use crate::nt::dmp::triage::{TriageBlock, make_triage_dump};
 use crate::nt::expr::NumberRadix;
@@ -413,6 +414,18 @@ pub struct PendingWalk {
     /// successors of the instruction it was stepping when the step was
     /// diverted off them. Empty: the walk goes on from where `vcpu` is.
     pub sites: Vec<(VirtAddr, Option<StepFrame>)>,
+}
+
+/// A run to an address that followed a thread and was handed back running
+/// (see [`Session::run_to_any`]): its later waits still check that the
+/// thread can reach its sites, as the run itself did.
+#[derive(Debug, Clone)]
+pub struct HandedBackRun {
+    pub thread: ThreadScope,
+    /// The temporary sites it armed.
+    pub sites: Vec<u32>,
+    /// When the thread was last found alive.
+    pub checked: Instant,
 }
 
 /// Where a step's run-to must find the stepping thread's stack pointer (see
@@ -855,6 +868,8 @@ pub struct Session {
     parked_stop: Option<ContinueOutcome>,
     /// Where the step walk another stop ended goes on from.
     pending_walk: Option<PendingWalk>,
+    /// The run handed back running that a wait goes on with, until it stops.
+    handed_back_run: Option<HandedBackRun>,
     /// The stop the target is halted at, as it was surfaced: set by every
     /// visible classification and every host-facing run/step result, cleared
     /// when the target moves. Unlike `parked_stop` it is not consumed by

@@ -12,8 +12,8 @@ use gdbstub::target::{TargetError, TargetResult};
 use libc::EFAULT;
 
 use crate::base::error::{Error, Result};
-use crate::base::memory::MemoryOps;
 use crate::base::types::VirtAddr;
+use crate::nt::target::MemoryKind;
 use crate::session::Session;
 
 use super::layout::Layout;
@@ -129,9 +129,7 @@ impl MultiThreadBase for GdbTarget<'_> {
     fn write_addrs(&mut self, start_addr: u64, data: &[u8], _tid: Tid) -> TargetResult<(), Self> {
         let written = self
             .session
-            .target
-            .context_memory()
-            .write_bytes(VirtAddr(start_addr), data);
+            .write_memory(MemoryKind::Virtual, start_addr, data);
         written.map_err(|_| TargetError::Errno(EFAULT as u8))
     }
 

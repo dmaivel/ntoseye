@@ -8,6 +8,7 @@ use crate::arch::Arch;
 use crate::backend::kd::framing::KdFraming;
 use crate::base::error::{Error, Result};
 use crate::base::notice::Notice;
+use crate::base::types::VirtAddr;
 
 use super::transport::KdTransport;
 use super::{
@@ -49,39 +50,80 @@ pub(super) fn breakpoint_instruction_at(
     }
 }
 
-/// Release every entry in the target's breakpoint table whose handle is in
-/// neither `owned` nor `released`, reporting how many the target accepted and
-/// adding those to `released`.
+/// The table entries earlier sessions left, as this session found them.
+#[derive(Debug, Default)]
+pub struct StrandedEntries {
+    /// Handles whose entry was released: the slot was freed, and is ours
+    /// to fill since.
+    pub released: HashSet<u32>,
+    /// Handles whose entry the target kept. Its restore puts the code the
+    /// entry saved back only where it finds the breakpoint instruction the
+    /// entry wrote, and only into a resident page; otherwise it keeps the
+    /// entry, marked as owing that restore: a site an earlier session wrote
+    /// over, or a breakpoint left in a page since paged out or unloaded.
+    /// Asking again is no use. The entry stays until a page fault in its
+    /// page lets the target finish the restore, the guest reboots, or a
+    /// breakpoint is installed at its address, which the target answers
+    /// with this entry (see [`KdBackend::replant_held_entry`]).
+    pub held: HashSet<u32>,
+}
+
+/// What one pass of [`restore_unowned_breakpoint_handles`] did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Reclaim {
+    /// Entries released.
+    pub released: usize,
+    /// Entries the target kept.
+    pub held: usize,
+}
+
+/// Release every entry in the target's breakpoint table whose handle is
+/// neither `owned` nor already in `stranded`, recording each in `stranded`
+/// as released or held.
 ///
 /// Handles are table indices plus one and only one debugger may be attached at
 /// a time, so every handle we do not hold belongs to a session that is gone and
 /// is ours to release. Releasing one restores the byte the entry displaced,
 /// which is the only correct way to get a guest past an `int3` we cannot
-/// account for. An empty slot refuses the handle. An entry whose page is not
-/// resident (a breakpoint left in an unloaded driver) is accepted every time
-/// but only marked expired: the kernel keeps it until the page returns, so a
-/// released handle is never asked about again.
+/// account for. An empty slot refuses the handle. The target accepts the
+/// handle of an entry it keeps too (see [`StrandedEntries::held`]), so a
+/// handle it accepts is asked for once more: the slot it freed refuses.
 pub(super) fn restore_unowned_breakpoint_handles(
     framing: &mut KdFraming<KdTransport>,
     processor: u16,
     owned: &HashSet<u32>,
-    released: &mut HashSet<u32>,
-) -> usize {
-    let mut reclaimed = 0;
+    stranded: &mut StrandedEntries,
+) -> Reclaim {
+    let mut reclaim = Reclaim::default();
+    let mut restore = |handle| {
+        with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
+            api::restore_breakpoint(framing, processor, handle)
+        })
+    };
     for handle in 1..=KD_BREAKPOINT_TABLE_SIZE {
-        if owned.contains(&handle) || released.contains(&handle) {
+        if owned.contains(&handle)
+            || stranded.released.contains(&handle)
+            || stranded.held.contains(&handle)
+        {
             continue;
         }
-        match with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
-            api::restore_breakpoint(framing, processor, handle)
-        }) {
-            Ok(()) => {
-                kd_trace!("kd: reclaim: released handle {handle}");
-                released.insert(handle);
-                reclaimed += 1;
-            }
+        let answer = match restore(handle) {
+            Ok(()) => restore(handle),
             // An empty slot refuses the handle; that is the common answer.
-            Err(Error::KdStatus { .. }) => {}
+            Err(Error::KdStatus { .. }) => continue,
+            Err(error) => Err(error),
+        };
+        match answer {
+            Err(Error::KdStatus { .. }) => {
+                kd_trace!("kd: reclaim: released handle {handle}");
+                stranded.released.insert(handle);
+                reclaim.released += 1;
+            }
+            Ok(()) => {
+                kd_trace!("kd: reclaim: the target keeps handle {handle}");
+                stranded.held.insert(handle);
+                reclaim.held += 1;
+            }
             // Transport trouble will resurface on whatever the caller does
             // next, with a better error than a reclaim failure could give.
             Err(error) => {
@@ -90,18 +132,35 @@ pub(super) fn restore_unowned_breakpoint_handles(
             }
         }
     }
-    reclaimed
+    reclaim
 }
 
-/// Word reclaimed table entries for the operator. A stranded entry is
-/// invisible to them but costs a breakpoint slot for the rest of the boot.
-pub(super) fn reclaimed_breakpoints_notice(reclaimed: usize) -> Option<Notice> {
-    (reclaimed != 0).then(|| {
-        Notice::info(format!(
-            "released {reclaimed} breakpoint table entr{} stranded by an earlier session",
-            if reclaimed == 1 { "y" } else { "ies" }
-        ))
-    })
+/// Word a reclaim for the operator. A stranded entry is invisible to them
+/// but costs a breakpoint slot, and one the target keeps goes on costing it.
+pub(super) fn reclaimed_breakpoints_notice(reclaim: Reclaim) -> Option<Notice> {
+    let entries = |count: usize| {
+        format!(
+            "{count} breakpoint table entr{}",
+            if count == 1 { "y" } else { "ies" }
+        )
+    };
+    let released = format!(
+        "released {} stranded by an earlier session",
+        entries(reclaim.released)
+    );
+    let held = format!(
+        "{} an earlier session left could not be released: the target could not put back the \
+         code {} displaced, and keeps {} until it can",
+        entries(reclaim.held),
+        if reclaim.held == 1 { "it" } else { "they" },
+        if reclaim.held == 1 { "it" } else { "them" },
+    );
+    match (reclaim.released, reclaim.held) {
+        (0, 0) => None,
+        (_, 0) => Some(Notice::info(released)),
+        (0, _) => Some(Notice::warning(held)),
+        _ => Some(Notice::warning(format!("{released}; {held}"))),
+    }
 }
 
 impl KdBackend {
@@ -144,6 +203,7 @@ impl KdBackend {
                     handle
                 );
                 self.pending_write_breakpoint = None;
+                let handle = self.replant_held_entry(pending.addr, pending.processor, handle)?;
                 self.bp_handles.insert(pending.addr, handle);
                 self.dropped_bp_addresses.remove(&pending.addr);
                 self.managed_bp_addresses.insert(pending.addr);
@@ -181,10 +241,10 @@ impl KdBackend {
     /// installable again, though the slot itself only frees on reboot.
     fn write_breakpoint_after_reclaim(&mut self, addr: u64, processor: u16) -> Result<u32> {
         let reclaimed = self.reclaim_stranded_breakpoints(processor);
-        if reclaimed == 0 {
+        self.notices.extend(reclaimed_breakpoints_notice(reclaimed));
+        if reclaimed.released == 0 {
             return Err(self.breakpoint_table_error(addr));
         }
-        self.notices.extend(reclaimed_breakpoints_notice(reclaimed));
         match with_framing_read_timeout_raw(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
             api::write_breakpoint(framing, processor, addr)
         }) {
@@ -198,15 +258,14 @@ impl KdBackend {
         }
     }
 
-    /// Release every table handle this session does not own, reporting how many
-    /// the target accepted. A handle for a free slot is refused, so the count is
-    /// the number of entries actually recovered.
-    fn reclaim_stranded_breakpoints(&mut self, processor: u16) -> usize {
+    /// Release every table handle this session does not own (see
+    /// [`restore_unowned_breakpoint_handles`]).
+    fn reclaim_stranded_breakpoints(&mut self, processor: u16) -> Reclaim {
         let owned: HashSet<u32> = self.bp_handles.values().copied().collect();
         let Ok(framing) = self.link.framing(self.running_reason) else {
-            return 0;
+            return Reclaim::default();
         };
-        restore_unowned_breakpoint_handles(framing, processor, &owned, &mut self.released_handles)
+        restore_unowned_breakpoint_handles(framing, processor, &owned, &mut self.stranded)
     }
 
     /// Name the cause the raw NTSTATUS hides. WinDbg reports this as
@@ -260,11 +319,58 @@ impl KdBackend {
             }
             Err(err) => return Err(err),
         };
+        let handle = self.replant_held_entry(addr, processor, handle)?;
         kd_trace!("kd: write_breakpoint: {addr:#x} -> handle {handle}");
         self.bp_handles.insert(addr, handle);
         self.dropped_bp_addresses.remove(&addr);
         self.managed_bp_addresses.insert(addr);
         Ok(())
+    }
+
+    /// The target answered an install at `addr` with `handle`. When that is
+    /// an entry an earlier session left and the target kept (see
+    /// [`StrandedEntries::held`]), the install wrote nothing: for an entry
+    /// still owing its restore at the same address, `KdpAddBreakpoint`
+    /// drops the debt and hands the entry back, taking the breakpoint
+    /// instruction it once wrote to be in place, so the breakpoint would
+    /// never hit. Release the entry the only way the target allows, by
+    /// giving its restore the instruction it looks for, put back the code
+    /// that was there if the copy the entry saved differs, and install
+    /// afresh. Any other handle is returned as it is.
+    fn replant_held_entry(&mut self, addr: u64, processor: u16, handle: u32) -> Result<u32> {
+        if !self.stranded.held.remove(&handle) {
+            return Ok(handle);
+        }
+        kd_trace!("kd: write_breakpoint: {addr:#x} got kept handle {handle}; replanting");
+        let replanted = self.release_held_entry(addr, processor, handle);
+        if replanted.is_err() {
+            self.stranded.held.insert(handle);
+        }
+        replanted
+    }
+
+    fn release_held_entry(&mut self, addr: u64, processor: u16, handle: u32) -> Result<u32> {
+        let instruction = self.arch.breakpoint_instruction();
+        let mut code = vec![0u8; instruction.len()];
+        self.read_virtual_bytes(VirtAddr(addr), &mut code)?;
+        if code == instruction {
+            return Ok(handle);
+        }
+        self.write_virtual_bytes(VirtAddr(addr), instruction)?;
+        with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+            api::restore_breakpoint(framing, processor, handle)
+        })?;
+        // The restore wrote the code the entry saved.
+        self.virtual_lines.clear();
+        let mut restored = vec![0u8; code.len()];
+        self.read_virtual_bytes(VirtAddr(addr), &mut restored)?;
+        if restored != code {
+            self.write_virtual_bytes(VirtAddr(addr), &code)?;
+        }
+        self.stranded.released.insert(handle);
+        with_framing_read_timeout_raw(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+            api::write_breakpoint(framing, processor, addr)
+        })
     }
 
     pub(super) fn uninstall_breakpoint(&mut self, addr: u64) -> Result<()> {

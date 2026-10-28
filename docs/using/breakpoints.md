@@ -74,7 +74,7 @@ A `ba e1` stop can occur before the instruction page fault, when there are no by
 
 No target sets a breakpoint for one thread. A software site is a byte in a page that all threads share, and a debug register belongs to a processor on which Windows can schedule any thread. Every thread that executes the site traps, and `ntoseye` discards the hits of the other threads. Each discarded hit costs a step-over and a resume, so a filter on a site that the whole system calls slows the session down. If `ntoseye` cannot find the thread of a hit, it reports the hit instead of discarding it, so a filter does not hide a stop from you.
 
-{command}`p` over a call, {command}`gu`, {command}`wt`, and the SDK's `step_over()`, `step_out()`, and step-until walks wait for their own thread, and they keep this cost down with a free debug register. Such a step watches the thread's `KTHREAD.State` and sets its breakpoints only while Windows is about to run the thread or runs it, so the other threads that run the same code do not stop the target while the thread waits. Without a free slot, or in a remote `dbg.command()` call that hands back a running target, the breakpoints stay set for the whole wait.
+{command}`p` over a call, {command}`gu`, {command}`wt`, and the SDK's `step_over()`, `step_out()`, and step-until walks wait for their own thread, and they keep this cost down with a free debug register. Such a step watches the thread's `KTHREAD.State` and sets its breakpoints only while Windows is about to run the thread or runs it, so the other threads that run the same code do not stop the target while the thread waits. Without a free slot, or in a remote `dbg.command()` call or a step from a DAP editor, either of which hands back a running target, the breakpoints stay set for the whole wait.
 
 `/c` filters on the processor. It takes a processor number as {command}`~` shows it, and `ntoseye` compares this number with the vCPU that reported the stop. Because `ntoseye` gets this vCPU at no cost, `/c` does not add a walk the way `/t` does.
 
@@ -117,6 +117,8 @@ g
 KD has a software-breakpoint table with a fixed size of 32 entries. If you kill a session with `SIGKILL`, its entries stay installed and can prevent later breakpoints at the same addresses.
 
 When `ntoseye` attaches, it reclaims the entries that no live session owns, restores the displaced instructions, and reports how many entries it reclaimed. If an install collides with an entry, it also reclaims stale entries and tries the install again. `bc *` clears only the handles of the current session, and a normal exit, `SIGTERM`, or `SIGHUP` releases them.
+
+Windows releases an entry only where it can put the displaced instruction back: the page must be resident, and the site must still hold the breakpoint instruction. Otherwise it keeps the entry, and `ntoseye` reports the entries it could not release. Windows hands such an entry back, without writing a breakpoint instruction, to the next install at its address; `ntoseye` then releases the entry and installs the breakpoint again, so the breakpoint stops.
 
 ## Stopping at a driver load
 
@@ -212,13 +214,15 @@ No view shows the injected byte. `ntoseye` hides a site in every read that reach
 
 ### The site journal
 
-The breakpoint table of the target does not contain these bytes, so before `ntoseye` writes a byte, it records the site in `~/.ntoseye/sites/` together with the frame, the kernel base of the boot, and the original bytes.
+The breakpoint table of the target does not contain these bytes, so before `ntoseye` writes a byte, it records the site in `~/.ntoseye/sites/` together with the frame, the page that the frame holds (the `PteAddress` of its `_MMPFN`), the kernel base of the boot, and the original bytes.
 
 When `ntoseye` exits, detaches, or gets a terminating signal, it removes the byte and the record. If a session ends without this cleanup, for example because it is killed or crashes, the byte and the record stay.
 
+After the process of a site exits, its page tables are gone, and `ntoseye` cannot remove the byte through them. The page of a shared image stays in memory while other processes map it, so `ntoseye` writes the original bytes through the recorded frame instead, but only while the frame still contains the breakpoint and still holds the same page. Otherwise it leaves the frame unchanged. In both cases the breakpoint is removed, so a detach still resumes the guest.
+
 The next attach to the same boot writes the original bytes back and shows how many sites it restored. This attach can use the same endpoint or a different one, for example a `kdnet` attach after a `gdb` session was killed.
 
-`ntoseye` restores a site only while the frame still contains the breakpoint followed by the recorded bytes. If the guest has restored or reused the frame since the session ended, `ntoseye` leaves the frame unchanged.
+`ntoseye` restores a site only while the frame still contains the breakpoint followed by the recorded bytes and still holds the same page. If the guest has restored or reused the frame since the session ended, `ntoseye` leaves the frame unchanged. A record from an older version of `ntoseye` has no page, and `ntoseye` restores it by its bytes alone, as that version did.
 
 `ntoseye` sets kernel breakpoints through the breakpoint API of the target. The Windows KD breakpoint table keeps its entries after a session ends without cleanup, and the next session releases them, but the breakpoint table of a GDB stub does not always keep its entries. Under VBS, an `int3` that such a session set in kernel code stays after the next connect. On the `gdb` backend, `ntoseye` therefore also records kernel sites in the journal, including the [bugcheck trap](bugchecks.md#how-the-crash-is-caught).
 
