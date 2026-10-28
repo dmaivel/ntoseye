@@ -270,9 +270,11 @@ fn manipulate_reply_payload(api_number: u32, processor: u16, union_body: &[u8]) 
 }
 
 /// A halted fake kernel answering breakpoint APIs from an ordered
-/// `(api, status, handle)` script. The handle rides in the manipulate
-/// header union, where `DbgKdWriteBreakPointApi` returns it, rather than in
-/// trailing data. Yields the `(api, union)` pairs the host actually sent -
+/// `(api, status, handle)` script. Each reply is the request's header, as
+/// Windows answers in the request it received, with the scripted status;
+/// a write breakpoint's also carries the handle in the union, where
+/// `DbgKdWriteBreakPointApi` returns it. A refused read is a page that is
+/// not resident. Yields the `(api, union)` pairs the host actually sent -
 /// a breakpoint address for a write, a table handle for a restore.
 fn serve_breakpoints(
     mut kernel: UnixStream,
@@ -295,10 +297,11 @@ fn serve_breakpoints(
             let (expected_api, status, handle) =
                 script.next().expect("unexpected breakpoint request");
             assert_eq!(api_number, expected_api);
-            let mut reply = vec![0u8; api::MANIPULATE_HEADER_SIZE];
-            reply[0..4].copy_from_slice(&api_number.to_le_bytes());
+            let mut reply = request[..api::MANIPULATE_HEADER_SIZE].to_vec();
             reply[8..12].copy_from_slice(&status.to_le_bytes());
-            reply[UNION + 8..UNION + 12].copy_from_slice(&handle.to_le_bytes());
+            if api_number == api::DBGKD_WRITE_BREAKPOINT {
+                reply[UNION + 8..UNION + 12].copy_from_slice(&handle.to_le_bytes());
+            }
             kernel
                 .write_all(&data_packet(
                     PACKET_TYPE_KD_STATE_MANIPULATE,

@@ -201,6 +201,31 @@ impl Guest {
         Ok(self.process_from_span(eprocess_va, &span))
     }
 
+    /// Whether process `pid`, whose page-table root is `dtb`, has exited:
+    /// it has left the active process list, or is still on it with
+    /// `ExitTime` set, its threads gone and its user address space torn down
+    /// or about to be. An error when the list or the process cannot be read,
+    /// which says nothing either way; an empty list was not read either,
+    /// since every system has its System process.
+    pub fn process_exited(&self, pid: u64, dtb: Dtb) -> Result<bool> {
+        let processes = self.enumerate_processes()?;
+        if processes.is_empty() {
+            return Ok(false);
+        }
+        let Some(process) = processes
+            .into_iter()
+            .find(|process| process.pid == pid && process.dtb == dtb)
+        else {
+            return Ok(true);
+        };
+        let exit_time: u64 = self
+            .ntoskrnl
+            .types()
+            .struct_at("_EPROCESS", process.eprocess)?
+            .read_field("ExitTime")?;
+        Ok(exit_time != 0)
+    }
+
     /// The process whose KVA-shadow user root is `user_root`
     /// (`_KPROCESS.UserDirectoryTableBase`), compared under `mask`. `None`
     /// when no process owns it or the kernel has no shadow roots.

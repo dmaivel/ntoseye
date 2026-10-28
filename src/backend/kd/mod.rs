@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
@@ -122,6 +123,23 @@ pub struct StateChange {
     /// `DBGKD_ANY_CONTROL_REPORT`, verbatim. Every stop carries it, so the
     /// fields it holds cost nothing: see [`ControlReport`].
     control_report: Option<ControlReport>,
+}
+
+impl StateChange {
+    /// The bytes from the stop's PC whose breakpoint-table entries the
+    /// target deleted before reporting it: `KdpSetCommonState` copies up to
+    /// [`api::DBGKD_MAXSTREAM`] bytes from there into the report, fewer when
+    /// the next page is unreadable, and deletes the entries in just what it
+    /// copied. A report the architecture's reader does not interpret is
+    /// taken to cover the whole stream.
+    pub fn report_window(&self, arch: Arch) -> Range<u64> {
+        let len = self
+            .control_report
+            .as_ref()
+            .and_then(|report| machine(arch).reported_instruction_count(report))
+            .unwrap_or(api::DBGKD_MAXSTREAM);
+        self.program_counter..self.program_counter.saturating_add(len)
+    }
 }
 
 /// The control report a 64-bit KD state change carries after its exception
@@ -773,13 +791,13 @@ impl DebugBackend for KdBackend {
         true
     }
 
-    /// `KdpReportExceptionStateChange` calls `KdpDeleteBreakpointRange` over
-    /// the `DBGKD_MAXSTREAM` bytes it reports from the stop PC, so every
-    /// table entry there is gone (and its handle dead) once the stop is on
-    /// the wire. The full window is reported even when the stream was cut
-    /// short by a page end: rewriting a surviving entry only churns it.
-    /// A step on another processor puts two more reports on the wire, and
-    /// their windows count too.
+    /// `KdpSetCommonState` calls `KdpDeleteBreakpointRange` over the
+    /// instruction bytes it reports from the stop PC, so every table entry
+    /// there is gone (and its handle dead) once the stop is on the wire. A
+    /// stream cut short by an unreadable page leaves the entries past its
+    /// end alone, and they are not reported. A step on another processor
+    /// puts two more reports on the wire, and a stop the event pump absorbs
+    /// one more; their windows count too.
     fn sites_dropped_by_stop(&self) -> Vec<u64> {
         self.dropped_bp_addresses.iter().copied().collect()
     }

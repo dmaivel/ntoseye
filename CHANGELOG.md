@@ -115,6 +115,7 @@ Keeping this file:
 - Expressions (`by`, `poi`, ...) and breakpoint conditions read the code under the session's own breakpoints and traps, as `db` shows it, on every host, where they read the `int3`: `eb nt!NtClose by(nt!NtClose)` with a breakpoint there wrote `cc` back as the original code, and `bc` then left it in the guest for good.
 - Typed reads (`dt`, `dx`, DAP variables, and the extensions that read kernel structures) show the code a planted breakpoint or trap displaced, as `db` and expressions do, where a struct or array over a breakpoint showed its `int3`.
 - `vertarget` on a target broken into early in boot shows its Windows version as unknown, where it showed `Windows 0.0` before the kernel had filled the version in.
+- Over KD, a stop the transport absorbs on its own (a breakpoint reported again after it was retired) no longer leaves the breakpoint entries that stop freed recorded as the session's, where a later `bc` could delete an entry that had reused the handle.
 
 ## v0.52.0 (2026-10-25)
 

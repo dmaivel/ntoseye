@@ -324,11 +324,12 @@ const SMSS_EPROCESS: u64 = 0xffff_e000_0002_0000;
 
 /// A halted guest whose process list is System (root `0x1ad000`) and
 /// smss.exe (`SMSS_EPROCESS`, root `0x2be000`, KVA-shadow user root
-/// `0x2bf000` stored with PCID bits).
-fn two_process_guest() -> (Guest, Arc<Mutex<KdBackend>>, JoinHandle<usize>) {
+/// `0x2bf000` stored with PCID bits), whose `ExitTime` is `smss_exit_time`.
+fn two_process_guest(smss_exit_time: u64) -> (Guest, Arc<Mutex<KdBackend>>, JoinHandle<usize>) {
     const PID: u32 = 0x440;
     const LINKS: u32 = 0x448;
     const NAME: u32 = 0x5a8;
+    const EXIT_TIME: u32 = 0x5b8;
     const DTB: u32 = 0x28;
     const USER_DTB: u32 = 0x388;
     let eprocess = layout(
@@ -342,6 +343,7 @@ fn two_process_guest() -> (Guest, Arc<Mutex<KdBackend>>, JoinHandle<usize>) {
             ("UniqueProcessId", primitive(PID, 8)),
             ("ActiveProcessLinks", primitive(LINKS, 16)),
             ("ImageFileName", primitive(NAME, 15)),
+            ("ExitTime", primitive(EXIT_TIME, 8)),
         ],
     );
     let kprocess = layout(
@@ -358,21 +360,29 @@ fn two_process_guest() -> (Guest, Arc<Mutex<KdBackend>>, JoinHandle<usize>) {
     let mut nt = vec![0u8; 0x2000];
     put_u64(&mut nt, 0x1000, system);
     put_u64(&mut nt, 0x1008, system + LINKS as u64);
-    let process = |pid: u64, dtb: u64, user_dtb: u64, name: &[u8], next: u64| {
+    let process = |pid: u64, dtb: u64, user_dtb: u64, name: &[u8], exit_time: u64, next: u64| {
         let mut bytes = vec![0u8; 0x600];
         put_u64(&mut bytes, PID as usize, pid);
         put_u64(&mut bytes, DTB as usize, dtb);
         put_u64(&mut bytes, USER_DTB as usize, user_dtb);
         put_u64(&mut bytes, LINKS as usize, next + LINKS as u64);
+        put_u64(&mut bytes, EXIT_TIME as usize, exit_time);
         bytes[NAME as usize..NAME as usize + name.len()].copy_from_slice(name);
         bytes
     };
     let regions = vec![
         (FAKE_KERNEL_BASE, nt),
-        (system, process(4, 0x1ad000, 0, b"System", SMSS_EPROCESS)),
+        (system, process(4, 0x1ad000, 0, b"System", 0, SMSS_EPROCESS)),
         (
             SMSS_EPROCESS,
-            process(0x1d8, 0x2be000, 0x2bf002, b"smss.exe", head - LINKS as u64),
+            process(
+                0x1d8,
+                0x2be000,
+                0x2bf002,
+                b"smss.exe",
+                smss_exit_time,
+                head - LINKS as u64,
+            ),
         ),
     ];
     synthetic_guest(
@@ -387,7 +397,7 @@ fn two_process_guest() -> (Guest, Arc<Mutex<KdBackend>>, JoinHandle<usize>) {
 
 #[test]
 fn process_walk_reads_one_span_per_process_and_memoizes_per_halt() {
-    let (guest, backend, worker) = two_process_guest();
+    let (guest, backend, worker) = two_process_guest(0);
 
     let first = guest.enumerate_processes().unwrap();
     let names: Vec<_> = first.iter().map(|p| (p.name.as_str(), p.pid)).collect();
@@ -418,7 +428,7 @@ fn process_walk_reads_one_span_per_process_and_memoizes_per_halt() {
 /// is that field without its PCID bits; a process without one has none.
 #[test]
 fn kva_shadow_user_root_resolves_to_its_process() {
-    let (guest, backend, worker) = two_process_guest();
+    let (guest, backend, worker) = two_process_guest(0);
     let mask = Arch::Amd64.dtb_page_mask();
 
     let owner = guest.process_for_user_root(0x2bf000, mask).unwrap();
@@ -429,6 +439,26 @@ fn kva_shadow_user_root_resolves_to_its_process() {
     let system = guest.process_at(VirtAddr(0xffff_e000_0001_0000)).unwrap();
     assert_eq!(guest.user_root(&system, mask), None);
 
+    drop(guest);
+    drop(backend);
+    worker.join().unwrap();
+}
+
+/// A process has exited once it is off the active process list, its PID
+/// given to a process with another root, or while it stays on the list
+/// with `ExitTime` set (a process object something still references).
+#[test]
+fn a_process_has_exited_once_off_the_list_or_its_exit_time_is_set() {
+    let (guest, backend, worker) = two_process_guest(0);
+    assert!(!guest.process_exited(0x1d8, 0x2be000).unwrap());
+    assert!(guest.process_exited(0x1d8, 0x3c0000).unwrap());
+    assert!(guest.process_exited(0x2a4, 0x2be000).unwrap());
+    drop(guest);
+    drop(backend);
+    worker.join().unwrap();
+
+    let (guest, backend, worker) = two_process_guest(0x01db_2f3a_6c1e_0000);
+    assert!(guest.process_exited(0x1d8, 0x2be000).unwrap());
     drop(guest);
     drop(backend);
     worker.join().unwrap();

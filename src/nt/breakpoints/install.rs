@@ -136,20 +136,31 @@ pub fn forget_site(debugger: &Target, dtb: Dtb, address: VirtAddr) {
     }
 }
 
-/// Take out the host-patched site at `address` in `dtb`'s address space,
-/// writing back `original`, the instruction it displaced.
+/// Take out the host-patched site at `address` in the address space `dtb` of
+/// process `pid`, writing back `original`, the instruction it displaced.
 ///
-/// An address that no longer translates there (its process has exited,
-/// taking its page tables) cannot be written through them, but its frame
-/// may still hold the breakpoint: a page of a shared image stays in every
-/// other process mapping it. The journal then writes the frame it recorded,
-/// only if that still holds the breakpoint and the same page (see
+/// Once the process has exited, taking its page tables, the address no
+/// longer translates and cannot be written through them, but its frame may
+/// still hold the breakpoint: a page of a shared image stays in every other
+/// process mapping it. The journal then writes the frame it recorded, only
+/// if that still holds the breakpoint and the same page (see
 /// [`SiteJournal::lift`]); a frame the guest has since given to other data
 /// is left alone, and the site is dropped either way, so a site whose
 /// process is gone does not keep the session from detaching.
 ///
+/// Anything short of that keeps the site and fails: a page of a live
+/// process that is merely paged out may come back from the pagefile with
+/// the breakpoint in it, whatever its old frame now holds, and a failed
+/// write or walk (a KD link that timed out) says nothing about the site.
+///
 /// [`SiteJournal::lift`]: super::SiteJournal::lift
-fn lift_user_site(debugger: &Target, dtb: Dtb, address: VirtAddr, original: &[u8]) -> Result<()> {
+fn lift_user_site(
+    debugger: &Target,
+    pid: u64,
+    dtb: Dtb,
+    address: VirtAddr,
+    original: &[u8],
+) -> Result<()> {
     let refused = match write_user_code(debugger, dtb, address, original) {
         Ok(()) => {
             forget_site(debugger, dtb, address);
@@ -157,15 +168,16 @@ fn lift_user_site(debugger: &Target, dtb: Dtb, address: VirtAddr, original: &[u8
         }
         Err(error) => error,
     };
-    let mapped = matches!(
-        debugger.address_space(dtb).virt_to_phys(address),
-        Ok(Some(translation)) if translation.residency == Residency::Mapped
-    );
+    let gone = matches!(debugger.address_space(dtb).virt_to_phys(address), Ok(None))
+        && debugger
+            .guest()
+            .and_then(|guest| guest.process_exited(pid, dtb))
+            .unwrap_or(false);
     let opcode = debugger.arch().breakpoint_instruction();
     let lifted = debugger
         .site_journal
         .as_ref()
-        .filter(|_| !mapped)
+        .filter(|_| gone)
         .and_then(|journal| journal.lift(dtb, address, &SiteFrames::new(debugger), opcode));
     let Some((frame, restore)) = lifted else {
         return Err(refused);
@@ -179,18 +191,25 @@ fn lift_user_site(debugger: &Target, dtb: Dtb, address: VirtAddr, original: &[u8
         Restore::Unconfirmed => "dropped: the PFN database could not be read to tell whether \
                                  its frame still holds its page; the next attach retries it"
             .to_string(),
+        Restore::Unreadable => {
+            return Err(Error::Breakpoint(format!(
+                "{:#x} no longer translates in its exited process, and frame {frame:#x} could not \
+                 be read to tell whether it still holds the breakpoint",
+                address.0
+            )));
+        }
         Restore::Failed => {
             return Err(Error::Breakpoint(format!(
-                "{:#x} no longer translates in its process, and writing its original instruction \
-                 back through frame {frame:#x} failed",
+                "{:#x} no longer translates in its exited process, and writing its original \
+                 instruction back through frame {frame:#x} failed",
                 address.0
             )));
         }
     };
     if trace_enabled() {
         eprintln!(
-            "breakpoint: site {:#x} no longer translates in address space {dtb:#x} ({refused}); \
-             {outcome} (frame {frame:#x})",
+            "breakpoint: site {:#x} no longer translates in address space {dtb:#x} of exited \
+             process {pid} ({refused}); {outcome} (frame {frame:#x})",
             address.0
         );
     }
@@ -460,10 +479,10 @@ impl BreakpointManager {
         match (&bp.scope, &bp.backend) {
             (_, BreakpointBackend::Kernel { .. }) => lift_target_site(client, debugger, bp.address),
             (
-                BreakpointScope::Process { dtb, .. },
+                BreakpointScope::Process { dtb, pid, .. },
                 BreakpointBackend::GuestMemoryPatch { original },
             ) => {
-                lift_user_site(debugger, *dtb, bp.address, original.as_slice())?;
+                lift_user_site(debugger, *pid, *dtb, bp.address, original.as_slice())?;
                 client.note_breakpoint_uninstalled(bp.address.0);
                 Ok(())
             }
@@ -895,6 +914,39 @@ mod tests {
         BreakpointConfig, BreakpointManager, BreakpointScope, CodeSites, Publish, SiteJournal,
     };
     use crate::session::session_over_memory;
+
+    /// A user site that cannot be written back is kept, journal entry and
+    /// all, unless its process is known to have exited: a page of a live
+    /// process that is paged out can come back with the breakpoint in it,
+    /// and a write or walk that timed out says nothing. This dump has no
+    /// process list to tell, and its frames cannot be read either.
+    #[test]
+    fn a_user_site_whose_process_is_not_known_to_have_exited_is_kept() {
+        let dir = std::env::temp_dir().join(format!("ntoseye-lift-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut session = session_over_memory(0x1000, &[0x90; 0x40]);
+        session.target.site_journal = Some(SiteJournal::open(&dir, "target", 0xfffff800));
+        let journal = session.target.site_journal.as_ref().unwrap();
+        let dtb = session.target.current_dtb();
+        let address = VirtAddr(0x7ff6_1234_5000);
+        journal.record(dtb, address, 0x2000, &[0x4c, 0x8b, 0xd1], None);
+
+        let lifted = super::lift_user_site(&session.target, 0x1d8, dtb, address, &[0x4c]);
+
+        assert!(lifted.is_err(), "an unconfirmed lift reported success");
+        assert!(dir.join("target").exists(), "the site left the journal");
+        assert_eq!(
+            journal.lift(
+                dtb,
+                address,
+                &super::SiteFrames::new(&session.target),
+                &[0xcc]
+            ),
+            Some((0x2000, super::Restore::Unreadable)),
+            "the site's frame was forgotten"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     /// A backend whose target does not take out what a dead session planted
     /// (a GDB stub) has each kernel site journaled from before it is planted

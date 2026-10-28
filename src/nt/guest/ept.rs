@@ -335,18 +335,30 @@ impl<'a, B: MemoryOps<PhysAddr>> EptMemory<'a, B> {
     }
 
     /// The host physical address of guest physical `gpa`.
+    ///
+    /// An address the EPT does not map has no memory behind it, and is
+    /// reported as a target reports one past its RAM, as
+    /// [`Error::BadPhysicalAddress`]: a page walk reaching it through stale
+    /// page tables finds nothing there, as it would natively. A table the
+    /// walk cannot read reports why, so a host transport that failed is not
+    /// taken for a hole.
     pub fn host_address(&self, gpa: u64) -> Result<u64> {
+        let mut unreadable = None;
         let translation = translate(self.eptp, gpa, self.mode_based, |address| {
-            self.host.read::<u64>(address).ok()
+            self.host
+                .read::<u64>(address)
+                .map_err(|error| unreadable = Some(error))
+                .ok()
         });
         match translation {
             Some(EptTranslation::Mapped(mapping)) if mapping.read => Ok(mapping.host_physical),
-            Some(_) => Err(Error::Hypervisor(format!(
-                "guest physical {gpa:#x} is not mapped"
+            Some(EptTranslation::Mapped(_)) => Err(Error::Hypervisor(format!(
+                "guest physical {gpa:#x} is mapped without read access"
             ))),
-            None => Err(Error::Hypervisor(
-                "the EPT is unreadable or not a 4-level walk".to_string(),
-            )),
+            Some(EptTranslation::NotPresent { .. }) => Err(Error::BadPhysicalAddress(gpa)),
+            None => Err(unreadable.unwrap_or_else(|| {
+                Error::Hypervisor("the EPT pointer does not describe a 4-level walk".to_string())
+            })),
         }
     }
 }
@@ -394,6 +406,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::base::memory::AddressSpace;
+    use crate::base::types::VirtAddr;
 
     /// A 4-level, write-back EPT pointer rooted at `root`.
     fn eptp(root: u64) -> u64 {
@@ -608,6 +622,44 @@ mod tests {
         assert_eq!(buf, [0xfe, 0xff, 0x00, 0x01]);
         assert_eq!(guest.host_address(0x20_2010).unwrap(), 0x9_9010);
         assert!(guest.read_bytes(0x20_3000, &mut buf).is_err());
+    }
+
+    /// Host memory whose every read fails as a transport that timed out.
+    struct Unreachable;
+
+    impl MemoryOps<PhysAddr> for Unreachable {
+        fn read_bytes(&self, _: PhysAddr, _: &mut [u8]) -> Result<()> {
+            Err(Error::Kd("KD request timed out after 5s".into()))
+        }
+
+        fn write_bytes(&self, _: PhysAddr, _: &[u8]) -> Result<()> {
+            Err(Error::Kd("KD request timed out after 5s".into()))
+        }
+    }
+
+    /// A guest physical address the EPT does not map is a hole, as a native
+    /// target's past its RAM is, which a page walk takes for a page that is
+    /// not present; an EPT the host could not be read for says why instead.
+    #[test]
+    fn an_unmapped_guest_page_is_a_bad_physical_address_and_a_failed_walk_is_not() {
+        let host = Host::new(tables(RWX, RWX));
+        let guest = EptMemory::new(&host, eptp(PML4), false);
+        let mut buf = [0u8; 8];
+        assert!(matches!(
+            guest.read_bytes(0x20_3000, &mut buf),
+            Err(Error::BadPhysicalAddress(0x20_3000))
+        ));
+        // Page tables the guest left at that address read as not present.
+        assert!(matches!(
+            AddressSpace::new_amd64(&guest, 0x20_3000).virt_to_phys(VirtAddr(0)),
+            Ok(None)
+        ));
+
+        let unreachable = EptMemory::new(&Unreachable, eptp(PML4), false);
+        assert!(matches!(
+            unreachable.read_bytes(0x20_1000, &mut buf),
+            Err(Error::Kd(_))
+        ));
     }
 
     /// A write lands in host memory where the EPT puts each page it spans,

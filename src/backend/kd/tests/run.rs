@@ -10,7 +10,8 @@ use std::sync::mpsc;
 use std::thread::{JoinHandle, spawn};
 
 use crate::backend::kd::amd64::{
-    CONTROL_DR6_OFFSET, CONTROL_DR7_OFFSET, CONTROL_EFLAGS_OFFSET, CONTROL_REPORT_SIZE,
+    CONTROL_DR6_OFFSET, CONTROL_DR7_OFFSET, CONTROL_EFLAGS_OFFSET,
+    CONTROL_INSTRUCTION_COUNT_OFFSET, CONTROL_REPORT_SIZE,
 };
 use crate::backend::kd::breakpoints::KD_BREAKPOINT_TABLE_SIZE;
 use crate::backend::kd::framing::PACKET_TYPE_KD_STATE_CHANGE64;
@@ -151,6 +152,7 @@ fn known_breakin_stop_is_marked_assisted_unless_managed() {
         shutdown: Arc::new(AtomicBool::new(false)),
         reported_stop: Arc::new(AtomicBool::new(false)),
         breakin_requested: Arc::new(AtomicBool::new(false)),
+        absorbed_windows: Arc::default(),
     };
     let mut backend = kd_backend_with_pump(pump, breakin_clone);
     let pc = 0xfffff800_deadbeef;
@@ -194,6 +196,7 @@ fn a_breakin_answered_by_another_stop_is_absorbed_when_it_arrives_late() {
         shutdown: Arc::new(AtomicBool::new(false)),
         reported_stop: Arc::new(AtomicBool::new(false)),
         breakin_requested: Arc::new(AtomicBool::new(false)),
+        absorbed_windows: Arc::default(),
     };
     let mut backend = kd_backend_with_pump(pump, breakin_clone);
     // The break-in landed while the target was reporting a module load, so
@@ -243,6 +246,7 @@ fn a_break_at_the_named_breakin_site_is_noise_after_a_connect_that_stopped_elsew
         shutdown: Arc::new(AtomicBool::new(false)),
         reported_stop: Arc::new(AtomicBool::new(false)),
         breakin_requested: Arc::new(AtomicBool::new(false)),
+        absorbed_windows: Arc::default(),
     };
     let mut backend = kd_backend_with_pump(pump, breakin_clone);
     // The connect found the target halted at a user-mode `int 3` of its own
@@ -290,7 +294,7 @@ fn a_break_at_the_named_breakin_site_is_noise_after_a_connect_that_stopped_elsew
 }
 
 /// An exception state change from `processor` of four at `pc`, whose
-/// control report carries `dr7`.
+/// control report carries `dr7` and the whole instruction stream from `pc`.
 fn processor_report(processor: u16, code: u32, pc: u64, dr7: u64) -> Vec<u8> {
     let mut payload = vec![0u8; CONTROL_REPORT_OFFSET + CONTROL_REPORT_SIZE];
     bytes::write_u32(&mut payload, 0, DBG_KD_EXCEPTION_STATE_CHANGE);
@@ -302,6 +306,11 @@ fn processor_report(processor: u16, code: u32, pc: u64, dr7: u64) -> Vec<u8> {
         &mut payload,
         CONTROL_REPORT_OFFSET + CONTROL_DR7_OFFSET,
         dr7,
+    );
+    bytes::write_u16(
+        &mut payload,
+        CONTROL_REPORT_OFFSET + CONTROL_INSTRUCTION_COUNT_OFFSET,
+        api::DBGKD_MAXSTREAM as u16,
     );
     payload
 }
@@ -505,4 +514,28 @@ fn lifting_a_site_a_stop_dropped_leaves_the_entry_that_reused_its_handle() {
     drop(backend);
     let requests = worker.join().unwrap();
     assert_eq!(requests, vec![(api::DBGKD_WRITE_BREAKPOINT, NEW)]);
+}
+
+/// A stop whose instruction stream runs into an unreadable page reports
+/// fewer bytes, and the target deletes the entries in just those: one
+/// past them survives, still ours to restore by its handle.
+#[test]
+fn a_stop_drops_only_the_sites_in_the_stream_it_reported() {
+    const PC: u64 = 0xffff_f800_0000_1ffc;
+    let (_kernel, host) = UnixStream::pair().unwrap();
+    let mut backend = kd_backend_with_framing(host);
+    backend.exit_prepared = true;
+    backend.bp_handles.insert(PC + 2, 1);
+    backend.bp_handles.insert(PC + 4, 2);
+    let mut report = processor_report(0, STATUS_BREAKPOINT, PC, 0x400);
+    bytes::write_u16(
+        &mut report,
+        CONTROL_REPORT_OFFSET + CONTROL_INSTRUCTION_COUNT_OFFSET,
+        4,
+    );
+
+    backend.record_stop(&parse_state_change(&report).unwrap());
+
+    assert_eq!(backend.sites_dropped_by_stop(), vec![PC + 2]);
+    assert_eq!(backend.bp_handles.get(&(PC + 4)), Some(&2));
 }

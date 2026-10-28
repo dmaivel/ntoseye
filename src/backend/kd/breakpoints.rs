@@ -193,7 +193,7 @@ impl KdBackend {
         let result = with_framing_read_timeout_raw(
             self.framing_unchecked()?,
             KD_REQUEST_TIMEOUT,
-            |framing| api::recv_write_breakpoint_reply(framing, pending.processor),
+            |framing| api::recv_write_breakpoint_reply(framing, pending.processor, pending.addr),
         );
         match result {
             Ok(handle) => {
@@ -245,9 +245,7 @@ impl KdBackend {
         if reclaimed.released == 0 {
             return Err(self.breakpoint_table_error(addr));
         }
-        match with_framing_read_timeout_raw(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
-            api::write_breakpoint(framing, processor, addr)
-        }) {
+        match self.write_breakpoint(addr, processor) {
             Ok(handle) => Ok(handle),
             Err(Error::KdStatus { ntstatus, api })
                 if ntstatus == STATUS_UNSUCCESSFUL && api == api::DBGKD_WRITE_BREAKPOINT =>
@@ -266,6 +264,27 @@ impl KdBackend {
             return Reclaim::default();
         };
         restore_unowned_breakpoint_handles(framing, processor, &owned, &mut self.stranded)
+    }
+
+    /// Ask the target for a breakpoint at `addr`. A reply that does not come
+    /// in time leaves the install pending: the target may still have added
+    /// the entry, and its late reply, which only a retry of the same install
+    /// takes (see [`Self::complete_pending_write_breakpoint`]), names it.
+    fn write_breakpoint(&mut self, addr: u64, processor: u16) -> Result<u32> {
+        let result =
+            with_framing_read_timeout_raw(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
+                api::write_breakpoint(framing, processor, addr)
+            });
+        if let Err(Error::Io(e)) = &result
+            && is_temporary_io_error(e.kind())
+        {
+            self.pending_write_breakpoint = Some(PendingWriteBreakpoint { addr, processor });
+            return Err(Error::Kd(format!(
+                "KD request timed out after {}s; breakpoint install is pending, retry the same bp command to complete it",
+                KD_REQUEST_TIMEOUT.as_secs()
+            )));
+        }
+        result
     }
 
     /// Name the cause the raw NTSTATUS hides. WinDbg reports this as
@@ -299,19 +318,8 @@ impl KdBackend {
         // must see it.
         self.virtual_lines.clear();
         let processor = self.current_processor;
-        let result =
-            with_framing_read_timeout_raw(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
-                api::write_breakpoint(framing, processor, addr)
-            });
-        let handle = match result {
+        let handle = match self.write_breakpoint(addr, processor) {
             Ok(handle) => handle,
-            Err(Error::Io(e)) if is_temporary_io_error(e.kind()) => {
-                self.pending_write_breakpoint = Some(PendingWriteBreakpoint { addr, processor });
-                return Err(Error::Kd(format!(
-                    "KD request timed out after {}s; breakpoint install is pending, retry the same bp command to complete it",
-                    KD_REQUEST_TIMEOUT.as_secs()
-                )));
-            }
             Err(Error::KdStatus { ntstatus, api })
                 if ntstatus == STATUS_UNSUCCESSFUL && api == api::DBGKD_WRITE_BREAKPOINT =>
             {
@@ -337,16 +345,20 @@ impl KdBackend {
     /// giving its restore the instruction it looks for, put back the code
     /// that was there if the copy the entry saved differs, and install
     /// afresh. Any other handle is returned as it is.
+    ///
+    /// Whatever the target answered with is an entry at `addr` now, no
+    /// longer the one held: the held entry was handed back, or it had freed
+    /// itself (a page fault let its restore finish) and its slot went to
+    /// this install. So the handle leaves [`StrandedEntries::held`] either
+    /// way. When the replant fails, the entry is left to the next reclaim,
+    /// which releases it or finds it kept again; a handle still counted as
+    /// held would be skipped, and every install at `addr` refused.
     fn replant_held_entry(&mut self, addr: u64, processor: u16, handle: u32) -> Result<u32> {
         if !self.stranded.held.remove(&handle) {
             return Ok(handle);
         }
         kd_trace!("kd: write_breakpoint: {addr:#x} got kept handle {handle}; replanting");
-        let replanted = self.release_held_entry(addr, processor, handle);
-        if replanted.is_err() {
-            self.stranded.held.insert(handle);
-        }
-        replanted
+        self.release_held_entry(addr, processor, handle)
     }
 
     fn release_held_entry(&mut self, addr: u64, processor: u16, handle: u32) -> Result<u32> {
@@ -356,21 +368,41 @@ impl KdBackend {
         if code == instruction {
             return Ok(handle);
         }
+        if let Err(error) = self.restore_held_entry(addr, processor, handle, &code) {
+            // The site may hold the instruction written for the restore, or
+            // the entry's stale copy the restore wrote: put back the code
+            // that was there, so that the next release of the entry finds
+            // no breakpoint and leaves the code alone.
+            self.virtual_lines.clear();
+            let _ = self.write_virtual_bytes(VirtAddr(addr), &code);
+            return Err(error);
+        }
+        self.write_breakpoint(addr, processor)
+    }
+
+    /// Release the held entry `handle` at `addr`, whose site holds `code`,
+    /// leaving `code` there.
+    fn restore_held_entry(
+        &mut self,
+        addr: u64,
+        processor: u16,
+        handle: u32,
+        code: &[u8],
+    ) -> Result<()> {
+        let instruction = self.arch.breakpoint_instruction();
         self.write_virtual_bytes(VirtAddr(addr), instruction)?;
         with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
             api::restore_breakpoint(framing, processor, handle)
         })?;
         // The restore wrote the code the entry saved.
         self.virtual_lines.clear();
+        self.stranded.released.insert(handle);
         let mut restored = vec![0u8; code.len()];
         self.read_virtual_bytes(VirtAddr(addr), &mut restored)?;
         if restored != code {
-            self.write_virtual_bytes(VirtAddr(addr), &code)?;
+            self.write_virtual_bytes(VirtAddr(addr), code)?;
         }
-        self.stranded.released.insert(handle);
-        with_framing_read_timeout_raw(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
-            api::write_breakpoint(framing, processor, addr)
-        })
+        Ok(())
     }
 
     pub(super) fn uninstall_breakpoint(&mut self, addr: u64) -> Result<()> {

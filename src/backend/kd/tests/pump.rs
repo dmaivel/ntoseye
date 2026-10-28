@@ -28,6 +28,40 @@ fn pump_shutdown_without_a_pump_keeps_the_framing() {
     backend.link.resume(&mut backend.registers);
 }
 
+/// The target deleted the table entries in the window of each stop the
+/// pump absorbed as it reported it. Once the foreground has the framing
+/// back they are dropped as a reported stop's are, so their dead handles
+/// are never used to restore whatever entry reused them.
+#[test]
+fn the_sites_an_absorbed_stop_deleted_are_dropped_when_the_pump_returns() {
+    const ABSORBED: u64 = 0xffff_f800_0000_1000;
+    const SHORT: u64 = 0xffff_f800_0000_2ffe;
+    let (_kernel, host) = UnixStream::pair().unwrap();
+    let breakin_clone = host.try_clone().unwrap();
+    let pump = PumpHandle {
+        join: spawn(move || KdFraming::new(host.into())),
+        stop_rx: mpsc::channel().1,
+        shutdown: Arc::new(AtomicBool::new(false)),
+        reported_stop: Arc::new(AtomicBool::new(false)),
+        breakin_requested: Arc::new(AtomicBool::new(false)),
+        absorbed_windows: Arc::new(Mutex::new(vec![ABSORBED..ABSORBED + 16, SHORT..SHORT + 2])),
+    };
+    let mut backend = kd_backend_with_pump(pump, breakin_clone);
+    backend.exit_prepared = true;
+    backend.bp_handles.insert(ABSORBED + 8, 1);
+    backend.bp_handles.insert(ABSORBED + 16, 2);
+    backend.bp_handles.insert(SHORT, 3);
+    backend.bp_handles.insert(SHORT + 2, 4);
+
+    assert!(backend.shutdown_pump_with_stop().unwrap().is_none());
+
+    let mut dropped = backend.sites_dropped_by_stop();
+    dropped.sort_unstable();
+    assert_eq!(dropped, vec![ABSORBED + 8, SHORT]);
+    assert_eq!(backend.bp_handles.get(&(ABSORBED + 16)), Some(&2));
+    assert_eq!(backend.bp_handles.get(&(SHORT + 2)), Some(&4));
+}
+
 #[test]
 fn pump_shutdown_reclaims_framing_after_reported_error() {
     let (mut kernel, host) = UnixStream::pair().unwrap();
@@ -44,6 +78,7 @@ fn pump_shutdown_reclaims_framing_after_reported_error() {
         shutdown: Arc::new(AtomicBool::new(false)),
         reported_stop: Arc::new(AtomicBool::new(true)),
         breakin_requested: Arc::new(AtomicBool::new(false)),
+        absorbed_windows: Arc::default(),
     };
     let mut backend = kd_backend_with_pump(pump, breakin_clone);
     backend.exit_prepared = true;
@@ -97,6 +132,7 @@ fn has_pending_stop_flags_undrained_pump_stop_until_consumed() {
         shutdown,
         reported_stop,
         breakin_requested: Arc::new(AtomicBool::new(false)),
+        absorbed_windows: Arc::default(),
     };
     let mut backend = kd_backend_with_pump(pump, breakin_clone);
 

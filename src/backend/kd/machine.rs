@@ -6,7 +6,7 @@
 
 use super::framing::KdFraming;
 use super::transport::KdTransport;
-use super::{KdBackend, TrapState, amd64, arm64};
+use super::{ControlReport, KdBackend, TrapState, amd64, arm64};
 use crate::arch::Arch;
 use crate::base::error::Result;
 
@@ -37,6 +37,13 @@ pub trait KdMachine: Sync {
     /// The trap flag and debug status the current processor's stop
     /// reported, where the architecture's report carries them.
     fn stop_trap_state(&self, kd: &mut KdBackend) -> Option<TrapState>;
+
+    /// How many bytes of `InstructionStream` a stop's control `report`
+    /// carries from its PC, where the architecture's report is read: the
+    /// target copies up to [`super::api::DBGKD_MAXSTREAM`], fewer when the
+    /// next page is unreadable, and deletes the breakpoint-table entries in
+    /// just what it copied.
+    fn reported_instruction_count(&self, report: &ControlReport) -> Option<u64>;
 
     /// Fill the register buffer's slots past the `CONTEXT` in `context`.
     fn append_registers(&self, kd: &mut KdBackend, context: &mut Vec<u8>) -> Result<()>;

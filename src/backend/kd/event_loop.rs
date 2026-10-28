@@ -2,9 +2,10 @@ use super::machine::machine;
 use std::collections::HashSet;
 use std::env::VarError;
 use std::io::ErrorKind;
-use std::sync::Arc;
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -767,6 +768,10 @@ pub struct ContinueDrain {
     /// A break here was asked for and must be reported. See
     /// [`crate::backend::dbg_backend::DebugBackend::surface_next_break_at`].
     surface_address: Option<u64>,
+    /// The report window of each stop absorbed (see
+    /// [`StateChange::report_window`]): the target deleted the breakpoint
+    /// table entries there as it reported a stop the foreground never sees.
+    absorbed_windows: Arc<Mutex<Vec<Range<u64>>>>,
 }
 
 impl ContinueDrain {
@@ -793,6 +798,7 @@ impl ContinueDrain {
             remaining: Self::MAX_ABSORBED,
             interrupt_requested: Arc::new(AtomicBool::new(false)),
             surface_address,
+            absorbed_windows: Arc::default(),
         }
     }
 
@@ -800,6 +806,12 @@ impl ContinueDrain {
     /// stop is reported rather than absorbed.
     pub fn interrupt_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.interrupt_requested)
+    }
+
+    /// Where the windows of the stops absorbed are kept, for the foreground
+    /// to drop the entries they deleted once it takes the framing back.
+    pub fn absorbed_windows(&self) -> Arc<Mutex<Vec<Range<u64>>>> {
+        Arc::clone(&self.absorbed_windows)
     }
 
     pub fn is_spurious(&self, stop: &StateChange) -> bool {
@@ -831,6 +843,10 @@ impl ContinueDrain {
     ) -> Result<()> {
         self.remaining -= 1;
         self.resumed_from_rip = stop.program_counter;
+        self.absorbed_windows
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(stop.report_window(arch));
         kd_trace!(
             "kd: pump: absorbing re-break at {:#x} on p{} ({} left)",
             stop.program_counter,
@@ -868,6 +884,8 @@ pub struct PumpHandle {
     /// Raised by the foreground before it writes a break-in byte, so the
     /// pump reports the stop instead of absorbing it as post-continue noise.
     pub breakin_requested: Arc<AtomicBool>,
+    /// See [`ContinueDrain::absorbed_windows`].
+    pub absorbed_windows: Arc<Mutex<Vec<Range<u64>>>>,
 }
 
 /// The pump's side of its link to the foreground: where it reports the stop

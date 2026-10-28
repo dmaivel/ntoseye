@@ -156,8 +156,10 @@ impl SiteJournal {
     /// The frame is written only when it still holds the breakpoint and the
     /// page it was planted in, as on the next attach's [`Self::repair`]; a
     /// site that does not is dropped untouched, and one whose page cannot be
-    /// told stays journaled for the next attach. The frame and what it
-    /// found, or `None` when this session did not plant the site.
+    /// told stays journaled for the next attach. A frame that cannot be read
+    /// or written leaves the site as it was, for the caller to try again.
+    /// The frame and what it found, or `None` when this session did not
+    /// plant the site.
     pub fn lift(
         &self,
         dtb: Dtb,
@@ -178,7 +180,7 @@ impl SiteJournal {
             Restore::Unconfirmed => {
                 state.planted.remove(&(dtb, address.0));
             }
-            Restore::Failed => {}
+            Restore::Unreadable | Restore::Failed => {}
         }
         Some((frame, restore))
     }
@@ -199,8 +201,8 @@ impl SiteJournal {
     /// written when its frame still holds `opcode` followed by exactly the
     /// bytes recorded after it, and still holds the page it was planted in;
     /// anything else means the guest restored it or reused the frame, and
-    /// the entry is dropped untouched. One whose page cannot be told is kept
-    /// for the next attach.
+    /// the entry is dropped untouched. One whose page cannot be told, or
+    /// whose frame cannot be read, is kept for the next attach.
     pub fn repair(&self, memory: &impl SiteMemory, opcode: &[u8]) -> Repair {
         let mut state = self.state();
         let mut repair = Repair::default();
@@ -227,7 +229,7 @@ impl SiteJournal {
                     }
                     state.sites.remove(&address);
                 }
-                Restore::Unconfirmed | Restore::Failed => repair.failed += 1,
+                Restore::Unconfirmed | Restore::Unreadable | Restore::Failed => repair.failed += 1,
             }
         }
         self.persist(&mut state);
@@ -315,6 +317,9 @@ pub enum Restore {
     /// Its frame still reads as the site, but the PFN database could not be
     /// read to tell whether it still holds the page the site was planted in.
     Unconfirmed,
+    /// Its frame could not be read, so whether it still holds the breakpoint
+    /// is not known: a read that times out says nothing about the site.
+    Unreadable,
     /// Still patched, but the write failed.
     Failed,
 }
@@ -332,8 +337,10 @@ pub enum Restore {
 /// offset, is not a case worth trading that for.
 fn restore(memory: &impl SiteMemory, opcode: &[u8], address: u64, site: &Site) -> Restore {
     let mut current = vec![0u8; site.original.len()];
+    if memory.read_bytes(address, &mut current).is_err() {
+        return Restore::Unreadable;
+    }
     let still_patched = site.original.len() >= opcode.len()
-        && memory.read_bytes(address, &mut current).is_ok()
         && current[..opcode.len()] == *opcode
         && current[opcode.len()..] == site.original[opcode.len()..];
     if !still_patched {
@@ -696,6 +703,47 @@ mod tests {
         let next = SiteJournal::open(&dir.0, "target", BASE);
         let frames = Frames::with(0x1000, &patched());
         assert_eq!(next.repair(&frames, INT3).restored, 1);
+    }
+
+    /// A read of the frame that fails, as one over a KD link that times
+    /// out, says nothing about whether the breakpoint is still there: the
+    /// site stays, and a later lift that can read the frame restores it.
+    #[test]
+    fn a_site_whose_frame_cannot_be_read_is_kept_for_the_next_lift() {
+        let dir = Dir::new("lift-unreadable");
+        let journal = SiteJournal::open(&dir.0, "target", BASE);
+        plant(&journal, 0x1000);
+
+        assert_eq!(
+            journal.lift(DTB, VirtAddr(0x1000), &Frames::default(), INT3),
+            Some((0x1000, Restore::Unreadable))
+        );
+        assert!(dir.0.join("target").exists());
+        let frames = Frames::with(0x1000, &patched());
+        assert_eq!(
+            journal.lift(DTB, VirtAddr(0x1000), &frames, INT3),
+            Some((0x1000, Restore::Restored))
+        );
+        assert_eq!(frames.get(0x1000, 8), NTCLOSE);
+
+        // An attach that cannot read the frame keeps the site for the next.
+        plant(&journal, 0x2000);
+        drop(journal);
+        let next = SiteJournal::open(&dir.0, "target", BASE);
+        assert_eq!(
+            next.repair(&Frames::default(), INT3),
+            Repair {
+                restored: 0,
+                failed: 1
+            }
+        );
+        drop(next);
+        let last = SiteJournal::open(&dir.0, "target", BASE);
+        assert_eq!(
+            last.repair(&Frames::with(0x2000, &patched()), INT3)
+                .restored,
+            1
+        );
     }
 
     #[test]

@@ -501,5 +501,11 @@ mod tests {
         assert!(kernel_image_still_mapped(Err(Error::TargetRunning(
             "a read"
         ))));
+        // A partition's EPT reports an address it does not map as a bad
+        // physical address, as a native target does one past its RAM;
+        // what is left of its errors says nothing about the guest's memory.
+        assert!(kernel_image_still_mapped(Err(Error::Hypervisor(
+            "the EPT pointer does not describe a 4-level walk".into()
+        ))));
     }
 }

@@ -69,6 +69,7 @@ fn exit_resume_consumes_pump_stop_before_final_continue() {
         shutdown,
         reported_stop: Arc::new(AtomicBool::new(false)),
         breakin_requested: Arc::new(AtomicBool::new(false)),
+        absorbed_windows: Arc::default(),
     };
     let mut backend = kd_backend_with_pump(pump, breakin_clone);
     let (continue_tx, continue_rx) = mpsc::channel();

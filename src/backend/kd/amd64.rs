@@ -78,6 +78,10 @@ impl KdMachine for Amd64Kd {
         trap_state(kd.registers.report(kd.current_processor)?)
     }
 
+    fn reported_instruction_count(&self, report: &ControlReport) -> Option<u64> {
+        instruction_count(report)
+    }
+
     // The control registers from KSPECIAL_REGISTERS, and EFER, read once
     // per processor.
     fn append_registers(&self, kd: &mut KdBackend, context: &mut Vec<u8>) -> Result<()> {
@@ -119,6 +123,7 @@ pub const CONTROL_REPORT_SIZE: usize = 48;
 pub const CONTROL_DR6_OFFSET: usize = 0;
 pub const CONTROL_DR7_OFFSET: usize = 8;
 pub const CONTROL_EFLAGS_OFFSET: usize = 16;
+pub const CONTROL_INSTRUCTION_COUNT_OFFSET: usize = 20;
 
 /// The AMD64 fields of a stop's control report.
 fn fields(report: &ControlReport) -> Option<&[u8]> {
@@ -138,4 +143,11 @@ pub fn trap_state(report: &ControlReport) -> Option<TrapState> {
 /// preserve.
 pub fn reported_dr7(report: &ControlReport) -> Option<u64> {
     Some(bytes::read_u64(fields(report)?, CONTROL_DR7_OFFSET))
+}
+
+/// `InstructionCount`: the bytes of `InstructionStream` the target copied
+/// from the stop PC, never more than the stream holds.
+pub fn instruction_count(report: &ControlReport) -> Option<u64> {
+    let count = bytes::read_u16(fields(report)?, CONTROL_INSTRUCTION_COUNT_OFFSET);
+    Some(u64::from(count).min(api::DBGKD_MAXSTREAM))
 }

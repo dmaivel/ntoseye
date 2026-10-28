@@ -4,6 +4,7 @@
 use super::machine::machine;
 use std::collections::HashSet;
 use std::io::ErrorKind;
+use std::ops::Range;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -14,7 +15,8 @@ use crate::backend::dbg_backend::{
 use crate::base::error::{Error, Result};
 
 use super::breakpoints::{
-    breakpoint_instruction_at, reclaimed_breakpoints_notice, restore_unowned_breakpoint_handles,
+    StrandedEntries, breakpoint_instruction_at, reclaimed_breakpoints_notice,
+    restore_unowned_breakpoint_handles,
 };
 use super::{
     AwaitStateOptions, ContinueDrain, DBG_KD_EXCEPTION_STATE_CHANGE,
@@ -108,6 +110,9 @@ impl KdBackend {
             self.retired_bp_addresses.clear();
             self.late_breakin = false;
             self.pending_write_breakpoint = None;
+            // The reboot emptied the target's breakpoint table, and the
+            // entries earlier sessions stranded in it went with it.
+            self.stranded = StrandedEntries::default();
         } else if stop.is_bugcheck {
             self.reconnect_assist_after_continue = Some(POST_BUGCHECK_RECONNECT_ASSIST_DELAY);
         }
@@ -138,7 +143,7 @@ impl KdBackend {
         self.last_stop_processor = stop.processor;
         self.last_exception_code = stop.exception_code;
         self.last_rip = stop.program_counter;
-        self.drop_report_window(stop.program_counter);
+        self.drop_report_window(stop.report_window(self.arch));
         self.registers
             .stopped(stop.processor, stop.control_report.clone());
         self.stop_was_managed_breakpoint = managed_breakpoint_stop;
@@ -467,16 +472,15 @@ impl KdBackend {
                 stop.processor
             )));
         }
-        self.drop_report_window(stop.program_counter);
+        self.drop_report_window(stop.report_window(self.arch));
         self.registers.stopped(processor, stop.control_report);
         Ok(())
     }
 
-    /// `KdpReportExceptionStateChange` calls `KdpDeleteBreakpointRange` over
-    /// the `DBGKD_MAXSTREAM` bytes it reports from `pc`, freeing the handle
-    /// of every entry there before the report is on the wire.
-    fn drop_report_window(&mut self, pc: u64) {
-        let window = pc..pc.saturating_add(api::DBGKD_MAXSTREAM);
+    /// A stop report deleted every table entry in `window` (see
+    /// [`StateChange::report_window`]), freeing its handle before the report
+    /// was on the wire.
+    pub fn drop_report_window(&mut self, window: Range<u64>) {
         let dropped: Vec<u64> = self
             .bp_handles
             .keys()

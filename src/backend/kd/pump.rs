@@ -2,9 +2,10 @@
 //! taking it back when the target stops or the foreground needs the socket.
 
 use std::io::Write;
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread::spawn;
 use std::time::Duration;
 
@@ -41,6 +42,10 @@ impl KdBackend {
             .as_ref()
             .map(ContinueDrain::interrupt_flag)
             .unwrap_or_default();
+        let absorbed_windows = drain
+            .as_ref()
+            .map(ContinueDrain::absorbed_windows)
+            .unwrap_or_default();
         let join = spawn(move || {
             run_pump(
                 framing,
@@ -63,16 +68,28 @@ impl KdBackend {
                 shutdown,
                 reported_stop,
                 breakin_requested,
+                absorbed_windows,
             },
             &mut self.registers,
         );
         Ok(())
     }
 
+    /// Drop the table entries the stops a pump absorbed deleted, in
+    /// `windows`, which it has finished adding to once its thread is joined.
+    fn drop_absorbed_windows(&mut self, windows: &Mutex<Vec<Range<u64>>>) {
+        let windows = std::mem::take(&mut *windows.lock().unwrap_or_else(PoisonError::into_inner));
+        for window in windows {
+            self.drop_report_window(window);
+        }
+    }
+
     /// Join the pump thread and take back ownership of the framing
     pub(super) fn reclaim_framing(&mut self) {
         if let Some(pump) = self.link.take_pump() {
-            match pump.join.join() {
+            let join = pump.join.join();
+            self.drop_absorbed_windows(&pump.absorbed_windows);
+            match join {
                 // Whoever asked for the framing back also consumes the stop,
                 // if there was one, and records it; until then the target is
                 // still running.
@@ -140,12 +157,15 @@ impl KdBackend {
             shutdown,
             reported_stop: _,
             breakin_requested: _,
+            absorbed_windows,
         } = pump;
         shutdown.store(true, Ordering::SeqCst);
         // A reported error still leaves framing in the join value. Reclaim it
         // before propagating that error, just as we do for a successful stop.
         let stop = Self::try_recv_pump_stop(&stop_rx);
-        match join.join() {
+        let joined = join.join();
+        self.drop_absorbed_windows(&absorbed_windows);
+        match joined {
             Ok(framing) => self.link = Link::RunningInline(framing),
             Err(_) => {
                 kd_trace!("kd: pump: thread panicked during shutdown, framing lost");

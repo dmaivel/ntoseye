@@ -448,6 +448,7 @@ fn pump_absorbs_rebreak_after_continue_and_reports_real_stop() {
         Arch::Amd64.register_map().clone(),
         None,
     );
+    let absorbed_windows = drain.absorbed_windows();
     let (tx, rx) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));
     let handle = {
@@ -541,6 +542,12 @@ fn pump_absorbs_rebreak_after_continue_and_reports_real_stop() {
         .expect("pump reported no stop")
         .expect("pump reported an error");
     assert_eq!(stop.program_counter, real_stop);
+    // The re-break's report deleted the entries in its window, though only
+    // the foreground can drop them.
+    assert_eq!(
+        *absorbed_windows.lock().unwrap(),
+        vec![resumed_from..resumed_from + api::DBGKD_MAXSTREAM]
+    );
 
     shutdown.store(true, Ordering::SeqCst);
     let _framing = handle.join().expect("pump thread panicked");

@@ -740,20 +740,29 @@ pub fn write_breakpoint<T: Read + Write>(
 ) -> Result<u32> {
     let mut header = make_header(DBGKD_WRITE_BREAKPOINT, processor);
     write_u64(&mut header, UNION_OFFSET, addr);
-    let (parsed, reply_header, _) = send_manipulate(framing, &header, &[])?;
+    // The reply keeps `BreakPointAddress`: a late reply to an install at
+    // another address must not hand this one its handle.
+    let (parsed, reply_header, _) =
+        send_manipulate_echoing(framing, &header, &[], Some(BREAKPOINT_ADDRESS_ECHO))?;
     check_status(&parsed, DBGKD_WRITE_BREAKPOINT)?;
     Ok(read_u32(&reply_header, UNION_OFFSET + 8))
 }
 
-/// Receive a late `DbgKdWriteBreakPointApi` reply after the original wait
-/// timed out. Used by the KD backend to complete an in-flight breakpoint install
-/// without sending a duplicate request.
+/// `BreakPointAddress`, which a `DbgKdWriteBreakPointApi` reply echoes.
+const BREAKPOINT_ADDRESS_ECHO: Range<usize> = UNION_OFFSET..UNION_OFFSET + 8;
+
+/// Receive a late `DbgKdWriteBreakPointApi` reply for an install at `addr`
+/// after the original wait timed out. Used by the KD backend to complete an
+/// in-flight breakpoint install without sending a duplicate request.
 pub fn recv_write_breakpoint_reply<T: Read + Write>(
     framing: &mut KdFraming<T>,
     processor: u16,
+    addr: u64,
 ) -> Result<u32> {
-    let request = make_header(DBGKD_WRITE_BREAKPOINT, processor);
-    let (parsed, reply_header, _) = recv_manipulate_reply(framing, &request, None)?;
+    let mut request = make_header(DBGKD_WRITE_BREAKPOINT, processor);
+    write_u64(&mut request, UNION_OFFSET, addr);
+    let (parsed, reply_header, _) =
+        recv_manipulate_reply(framing, &request, Some(BREAKPOINT_ADDRESS_ECHO))?;
     check_status(&parsed, DBGKD_WRITE_BREAKPOINT)?;
     Ok(read_u32(&reply_header, UNION_OFFSET + 8))
 }
@@ -1152,6 +1161,35 @@ mod tests {
         let actual = read_virtual_memory(&mut framing, 0, 0xffff_f800_7483_0200, 0x200).unwrap();
 
         assert_eq!(actual, [0x22; 0x200]);
+    }
+
+    /// The late reply to an install that timed out names the handle of the
+    /// entry at its own address. An install at another address drops it and
+    /// takes its own handle, which follows.
+    #[test]
+    fn a_stale_write_breakpoint_reply_for_another_address_is_dropped() {
+        let reply_to = |address: u64, handle: u32| {
+            let mut union_body = [0u8; 12];
+            write_u64(&mut union_body, 0, address);
+            write_u32(&mut union_body, 8, handle);
+            build_reply(DBGKD_WRITE_BREAKPOINT, 0, &union_body, &[])
+        };
+        let mut stream = ack_then_reply(
+            (INITIAL_PACKET_ID | SYNC_PACKET_ID) & !SYNC_PACKET_ID,
+            INITIAL_PACKET_ID,
+            &reply_to(0xffff_f800_0001_2000, 4),
+        );
+        stream.extend(data_packet(
+            PACKET_TYPE_KD_STATE_MANIPULATE,
+            INITIAL_PACKET_ID ^ 1,
+            &reply_to(0xffff_f800_0003_4000, 5),
+        ));
+        let mut framing = KdFraming::new(Loopback::new(stream));
+
+        assert_eq!(
+            write_breakpoint(&mut framing, 0, 0xffff_f800_0003_4000).unwrap(),
+            5
+        );
     }
 
     #[test]

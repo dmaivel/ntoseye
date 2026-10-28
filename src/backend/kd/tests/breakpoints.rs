@@ -229,6 +229,50 @@ fn an_install_handed_a_kept_entry_plants_its_breakpoint() {
     assert_eq!(writes, [vec![0xcc], vec![0x48]]);
 }
 
+/// A kept entry can free itself once a page fault lets its restore finish,
+/// and its slot then goes to the next install: here one at a site whose
+/// page is not resident, which the replant cannot read. Whatever the
+/// target answered with is an entry at that address, so it is not counted
+/// as kept any more: the next install there, refused while the entry
+/// stands, releases it and installs afresh instead of finding the table
+/// full for good.
+#[test]
+fn an_entry_a_replant_could_not_release_is_left_to_the_next_reclaim() {
+    const ADDR: u64 = 0xffff_f800_0001_2000;
+    let (kernel, host) = UnixStream::pair().unwrap();
+    let mut backend = kd_backend_with_framing(host);
+    backend.link.halt();
+    backend.exit_prepared = true;
+    backend.stranded.held.insert(1);
+    let mut script = vec![
+        (api::DBGKD_WRITE_BREAKPOINT, api::STATUS_SUCCESS, 1),
+        (api::DBGKD_READ_VIRTUAL_MEMORY, STATUS_UNSUCCESSFUL, 0),
+        (api::DBGKD_WRITE_BREAKPOINT, STATUS_UNSUCCESSFUL, 0),
+        (api::DBGKD_RESTORE_BREAKPOINT, api::STATUS_SUCCESS, 0),
+        (api::DBGKD_RESTORE_BREAKPOINT, STATUS_UNSUCCESSFUL, 0),
+    ];
+    for _ in 2..=KD_BREAKPOINT_TABLE_SIZE {
+        script.push((api::DBGKD_RESTORE_BREAKPOINT, STATUS_UNSUCCESSFUL, 0));
+    }
+    script.push((api::DBGKD_WRITE_BREAKPOINT, api::STATUS_SUCCESS, 1));
+    let worker = serve_breakpoints(kernel, script);
+
+    assert!(backend.set_breakpoint(ADDR).is_err());
+    backend.set_breakpoint(ADDR).unwrap();
+
+    assert_eq!(backend.bp_handles.get(&ADDR), Some(&1));
+    drop(backend);
+    let restored: Vec<u64> = worker
+        .join()
+        .unwrap()
+        .into_iter()
+        .filter(|(api_number, _)| *api_number == api::DBGKD_RESTORE_BREAKPOINT)
+        .map(|(_, handle)| handle)
+        .take(2)
+        .collect();
+    assert_eq!(restored, [1, 1]);
+}
+
 #[test]
 fn a_refused_restore_keeps_a_site_that_still_holds_a_breakpoint() {
     const ADDR: u64 = 0xffff_f800_0001_2000;

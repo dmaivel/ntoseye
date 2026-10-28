@@ -11,7 +11,7 @@ use super::registers::{
     special_into_context,
 };
 use super::transport::KdTransport;
-use super::{KD_REQUEST_TIMEOUT, KdBackend, TrapState, api};
+use super::{ControlReport, KD_REQUEST_TIMEOUT, KdBackend, TrapState, api};
 use crate::arch::Arch;
 use crate::base::error::Result;
 
@@ -50,6 +50,12 @@ impl KdMachine for Arm64Kd {
     }
 
     fn stop_trap_state(&self, _: &mut KdBackend) -> Option<TrapState> {
+        None
+    }
+
+    // The ARM64 control report is not read, so a stop is taken to have
+    // deleted the entries in the whole stream window.
+    fn reported_instruction_count(&self, _: &ControlReport) -> Option<u64> {
         None
     }
 
