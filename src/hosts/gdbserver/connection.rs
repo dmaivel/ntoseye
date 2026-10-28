@@ -88,6 +88,18 @@ impl Client {
         }
     }
 
+    /// Whether `byte`, read between packets, is an acknowledgment the
+    /// server drops rather than handing gdbstub. gdb sends `-` each time a
+    /// reply takes longer than its `remotetimeout` (2 s by default, which a
+    /// `monitor` command loading symbols can exceed), in either mode, and
+    /// keeps waiting. No reply has gone out to retransmit then, so the only
+    /// right answer is the late reply itself; gdbstub, which cannot
+    /// retransmit, would drop the client instead. In no-acknowledgment mode
+    /// neither side may expect `+` or `-` at all.
+    pub(super) fn drops_acknowledgment(&self, byte: u8) -> bool {
+        byte == b'-' || (self.no_ack && byte == b'+')
+    }
+
     /// Answer a packet the server handled itself.
     pub(super) fn reply(&mut self, body: &[u8]) -> io::Result<()> {
         if !self.no_ack {
@@ -261,8 +273,34 @@ impl ConnectionExt for Client {
 
 #[cfg(test)]
 mod tests {
-    use super::{advertise, xfer_reply};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    use super::{Client, advertise, xfer_reply};
     use crate::backend::gdb::{append_packet, packet_checksum};
+
+    /// gdb sends `-` whenever a reply outlasts its `remotetimeout`, in
+    /// either mode; the server drops it, where gdbstub dropped the client.
+    /// `+` is gdbstub's to skip in acknowledgment mode, and noise once the
+    /// client turned acknowledgments off.
+    #[test]
+    fn a_late_reply_nak_is_dropped_and_acks_only_without_acknowledgments() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let _peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let mut client = Client::new(stream, Arc::new(AtomicBool::new(false))).unwrap();
+        assert!(client.drops_acknowledgment(b'-'));
+        assert!(!client.drops_acknowledgment(b'+'));
+        assert!(!client.drops_acknowledgment(b'$'));
+        client.observe(b"QStartNoAckMode");
+        assert!(client.drops_acknowledgment(b'-'));
+        assert!(client.drops_acknowledgment(b'+'));
+        assert!(
+            !client.drops_acknowledgment(0x03),
+            "an interrupt is never dropped"
+        );
+    }
 
     fn checksum_valid(packet: &[u8]) -> bool {
         let start = packet.iter().position(|byte| *byte == b'$').unwrap();

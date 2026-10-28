@@ -193,6 +193,9 @@ fn drive(target: &mut GdbTarget<'_>, client: Client) -> Result<&'static str> {
                         }
                     }
                 }
+                Ok(Some(byte)) if idle.borrow_conn().drops_acknowledgment(byte) => {
+                    GdbStubStateMachine::Idle(idle)
+                }
                 Ok(Some(byte)) => idle.incoming_data(target, byte).map_err(protocol_error)?,
                 Ok(None) => {
                     if target.terminating() {
@@ -207,6 +210,9 @@ fn drive(target: &mut GdbTarget<'_>, client: Client) -> Result<&'static str> {
                 Ok(Wait::Stopped(reason)) => running
                     .report_stop(target, reason)
                     .map_err(protocol_error)?,
+                Ok(Wait::Data(byte)) if running.borrow_conn().drops_acknowledgment(byte) => {
+                    GdbStubStateMachine::Running(running)
+                }
                 Ok(Wait::Data(byte)) => running
                     .incoming_data(target, byte)
                     .map_err(protocol_error)?,

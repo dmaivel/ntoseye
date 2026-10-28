@@ -109,6 +109,7 @@ Keeping this file:
 - A KD request that times out while the session checks the kernel image (as during a Ctrl+C into a flood of breakpoint hits) no longer reads as a guest reboot, which rebuilt the session, forgot the step's breakpoint still planted in guest memory, and left the guest halted at exit.
 - On the `gdb` backend, `p` over a call, `gu` and the other runs to an address in user code take a free hardware breakpoint slot for the run, where they ended with an error.
 - `r` shows pseudo-registers (`r $proc`, `r $peb, rip`), as WinDbg does, where only `$t0`-`$t19` worked and the rest were "not found".
+- GDB server: a reply that takes longer than gdb's `remotetimeout` (a `monitor` command loading symbols) no longer drops the client: gdb's `-` for the late reply is ignored, as the protocol requires in no-acknowledgment mode, where gdbstub ended the session.
 
 ## v0.52.0 (2026-10-25)
 
