@@ -171,7 +171,7 @@ The commands that look at one process work on the dump's own records:
    33 0000005ceb90f8e0  00007ff94930caec  ntdll!RtlUserThreadStart+0x2c
   ```
 
-- Memory commands, {command}`u`, {command}`dt`, {command}`dx`, {command}`x`, {command}`ln`, and {command}`s` read the captured memory, and say so when an address was not captured. `$teb` and `$peb` point to the selected thread's TEB and the process's PEB.
+- Memory commands, {command}`u`, {command}`dt`, {command}`dx`, {command}`x`, {command}`ln`, and {command}`s` read the captured memory, and say so when an address was not captured. A module's code and headers that the dump did not capture, as in a small dump, are read from the module's image file, relocated to where the module was loaded, as WinDbg does, so {command}`u`, {command}`uf`, {command}`db`, {command}`!dh`, and {command}`!lmi` work there too; {command}`!chkimg` compares only what the dump holds. `$teb` and `$peb` point to the selected thread's TEB and the process's PEB.
 - {command}`analyze` reports the exception: its code and name, its flags and parameters (an access violation's read, write, or execute and its address, and the parameters of C++ and CLR exceptions), the faulting thread's stack, the module the exception was raised in, a failure signature, and the culprit, the first frame outside the system modules. `!analyze -v` adds the whole stack, the exception's registers, and every module. A dump written without an exception says so and shows the process and the current thread's stack instead.
 
   ```text

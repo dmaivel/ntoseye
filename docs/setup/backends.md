@@ -65,10 +65,11 @@ These functions are not available in this mode:
 
 - execution control
 - registers
-- execution-context selection
 - breakpoints
 - bugcheck stops
 - reload detection
+
+`~N` and `~Ns` select processor N, so {command}`!idt`, {command}`!gdt`, {command}`!pcr`, and the other commands that read a processor's PRCB inspect that processor, as on a halted target. Its registers stay unavailable.
 
 To see the backend's full feature matrix, run {command}`capabilities` in the REPL. Debug output is available, read from the kernel's DbgPrint buffer as with the `gdb` backend ([Debug output](../using/drivers.md#debug-output)).
 

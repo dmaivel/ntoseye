@@ -105,7 +105,7 @@ g
 - The loaded image range.
 - The symbol status.
 - Where ntoseye read the image from, for example guest memory.
-- The GUID and age of the accepted PDB.
+- The GUID and age of the accepted PDB, as the image names it and symbol stores file it. The PDB file itself can record a higher age.
 
 `.reload mydriver` does the same as `ld mydriver`, and {command}`.reload` without a module reloads all modules in the current inspection scope.
 

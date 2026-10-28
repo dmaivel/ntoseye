@@ -60,11 +60,11 @@ To download the symbols again when the cache has a copy, use `--force-download-s
 
 ## Breakpoints and stepping
 
-**A user-mode breakpoint over KD fails with `Windows refused to write the breakpoint`.** When VBS is on, Windows does not allow the debugger to write some user-mode code, such as ntdll's and kernelbase's. On an x86 guest whose memory `ntoseye` reads from the VM process (`--memory-source auto` or `host`, see [where reads come from](../using/memory.md#where-reads-come-from)), `ntoseye` then writes the breakpoint into that memory itself, so the error appears only when reads go through KD, or on ARM64. There, use a hardware execution breakpoint instead ({command}`ba` `e1`, or `hardware=True` in the SDK), which hits without writing to memory. There are four hardware breakpoint slots.
+**A user-mode breakpoint over KD fails with `Windows refused to write the breakpoint`.** When VBS is on, Windows does not allow the debugger to write some user-mode code, such as ntdll's and kernelbase's. On an x86 guest whose memory `ntoseye` reads from the VM process (`--memory-source auto` or `host`, see [where reads come from](../using/memory.md#where-reads-come-from)), `ntoseye` then writes the breakpoint into that memory itself, so the error appears only when reads go through KD, or on ARM64. There, use a hardware execution breakpoint instead ({command}`ba` `e1`, or `hardware=True` in the SDK), which hits without writing to memory. An AMD64 processor has four hardware breakpoint slots, and an ARM64 processor the number it implements, often six for execution.
 
 **A breakpoint scoped to one process slows the whole guest.** A user-mode breakpoint in a shared DLL stops each process that runs the code, and `ntoseye` resumes each hit outside the scope of the breakpoint, one at a time. [Breakpoints in shared pages](../using/breakpoints.md#user-mode-breakpoints-in-shared-pages) shows the cost and lists workarounds.
 
-**Breakpoints fail at some addresses after a session was killed.** KD has a breakpoint table with 32 entries. If a session is killed with `SIGKILL`, its entries stay installed until the next attach, which frees the entries that no live session owns. See [Breakpoints](../using/breakpoints.md).
+**Breakpoints fail at some addresses after a session was killed.** KD has a breakpoint table with 32 entries. If a session is killed with `SIGKILL`, its entries stay installed until the next attach, which frees the entries that no live session owns and warns about any that Windows keeps. See [the KD breakpoint table](../using/breakpoints.md#the-kd-breakpoint-table).
 
 ## Memory
 

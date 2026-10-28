@@ -174,7 +174,7 @@ If the PDB exists only inside the guest, ntoseye can read it from guest memory i
 | Function breakpoints | `bu <symbol>` |
 | Instruction breakpoints | `bp <address>` |
 | Data breakpoints | {command}`ba` hardware watchpoints |
-| Exception breakpoints | none (use {command}`sx` in the console) |
+| Exception breakpoints | {command}`sx` exception policies and module load and unload filters |
 | Condition and hit count | breakpoint condition and WinDbg pass count |
 | Log points | a `.printf "..."; gc` breakpoint action |
 | Step over and into | one source line, or one instruction |
@@ -252,7 +252,7 @@ Function breakpoints use `bu <symbol>` but skip the prologue, so the parameters 
 
 Instruction breakpoints, which you set from the disassembly view, use `bp <address>`.
 
-Data breakpoints use {command}`ba` on variable storage, including fields and array elements. Locals held in registers and bitfields have no separate address that ntoseye can watch. Only KD and KDNET support data breakpoints.
+Data breakpoints use {command}`ba` on variable storage, including fields and array elements. Locals held in registers and bitfields have no separate address that ntoseye can watch. The `kd`, `kdnet`, and `gdb` backends support data breakpoints.
 
 No DAP breakpoint type names a hypercall's caller, so set a [hypercall breakpoint](../using/breakpoints.md#hypercall-breakpoints) with {command}`!hvbp` in the Debug Console. The client's continue honors its filter, and its hit is reported as a breakpoint stop.
 
@@ -278,7 +278,7 @@ The disassembly view uses {command}`u` to scroll forward and {command}`ub` to sc
 
 ### Memory
 
-The memory view reads and writes virtual memory in the current process context. When ntoseye reads memory, it replaces the bytes of its own breakpoints with the original opcodes, so the view does not show an `int3` that ntoseye put in memory.
+The memory view reads and writes virtual memory in the current process context. When ntoseye reads memory, it replaces the bytes of its own breakpoints with the original opcodes, so the view does not show an `int3` that ntoseye put in memory. A write over one of these breakpoints changes the code under it, and the breakpoint stays set.
 
 If a write crosses into a page that ntoseye cannot translate, ntoseye writes the bytes before that page. When the request sets `allowPartial`, the response gives the number of bytes written. Otherwise, the write fails and gives that number.
 
@@ -294,7 +294,7 @@ The Debug Console uses the same remote dispatch context as MCP and does not acce
 
 Breakpoint actions still run. For example, a breakpoint created with `bp nt!NtCreateFile do "k; gc"` runs its action at each hit and prints the output in the console, and because the action ends in `gc`, the target continues.
 
-A step is answered at once and runs the way a continue does: while it runs, the editor shows the thread as running, the adapter answers its other requests, and Pause ends the step where it is, for example a step over a call that waits.
+A step is answered at once and runs the way a continue does: while it runs, the editor shows the thread as running, the adapter answers its other requests, and Pause ends the step where it is, for example a step over a call that waits. A step whose thread exits ends with a stop that says so.
 
 Disconnect, terminate, `SIGTERM`, `SIGHUP`, and `SIGINT` detach the adapter as `qd` does, which removes the installed breakpoints and resumes the guest. The adapter does this cleanup before it sends the disconnect response, because a client can kill the adapter immediately. If the target cannot halt for the cleanup, the adapter reports the failure and does not resume the target.
 

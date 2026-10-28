@@ -9,7 +9,7 @@ If the agent's harness keeps a Python kernel alive between calls, such as oh-my-
 | Tool | Purpose |
 | --- | --- |
 | `command` | Runs one REPL line and returns its text with a `[target ...]` trailer. A `;` separates commands, and {command}`help` lists them. The arguments are `line` and `timeout_ms` (default 10 s, maximum 5 min). |
-| `output` | Reads more of a long `command` result: the lines from `offset`, or only the lines that contain `filter`. The arguments are `id`, `offset`, `limit`, and `filter`. |
+| `output` | Reads more of a long `command` result: the lines from `offset`, or only the lines that contain `filter`, at most `limit` of them (at least 1) and a page's worth. The arguments are `id`, `offset`, `limit`, and `filter`. |
 | `open` / `close` | `open` attaches to a target using `backend`, `connect`, and, for `kdnet`, `key`. For `kd` and `kdnet`, it also accepts `kd_handshake_timeout` in seconds. For a crash dump or a [user-mode minidump](#user-mode-minidumps), use `backend: dump` with the dump path as `connect`. `close` releases the target. The server holds one session at a time. |
 
 ## Run control
@@ -48,7 +48,7 @@ The trailer takes one of three forms:
 - `[target halted @ <vcpu> <rip> <symbol> | process <name> (<pid>) | scope <name> (<pid>)]`
 - `[minidump <name> (pid <pid>), <n> threads | thread ~<n> <pid>.<tid> <rip> <symbol> | exception <code> on ~<n> <pid>.<tid>]`, for a [user-mode minidump](#user-mode-minidumps)
 
-In the halted form, `process` is the process whose page tables the stopped vCPU has loaded, and `scope` is the {command}`.process` inspection scope that memory commands read through. The scope stays after the target resumes, so `process` and `scope` can differ.
+In the halted form, `process` is the process whose page tables the stopped vCPU has loaded, or, where two processes share them, the stopped thread's (Idle, not System, on an idle processor), and `scope` is the {command}`.process` inspection scope that memory commands read through. A plain {command}`.process` scope ends when the target resumes; one that `.process /i` or {command}`attach` selected stays until its process exits, so `process` and `scope` can differ.
 
 A vCPU that runs a guest partition's VP shows that guest's code, and the trailer names the VP: `[target halted @ processor 1 0x56383cc2d7df | runs partition 0x5 VP 2]`. While {command}`.partition` shows a guest partition in place of the target, the trailer ends with `| inspecting partition 0x4`, and everything before it is that guest's: its VPs are the vCPUs (`p4.1`), and the process is its own.
 
