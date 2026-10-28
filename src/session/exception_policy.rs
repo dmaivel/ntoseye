@@ -100,7 +100,7 @@ pub struct ExceptionPolicy {
 
 #[record]
 impl ExceptionPolicy {
-    /// The WinDbg alias of the code (`av`, `bp`, ...), if it has one.
+    /// The WinDbg alias of the code (`av`, `bpe`, ...), if it has one.
     #[record(getter)]
     pub fn alias(&self) -> Option<&'static str> {
         exception_alias(self.code)
@@ -422,17 +422,19 @@ pub fn exception_alias(code: u32) -> Option<&'static str> {
         .find_map(|(alias, alias_code)| (*alias_code == code).then_some(*alias))
 }
 
-// WinDbg's commonly used exception-filter aliases. Event aliases that are not
-// exception codes (process/thread/module creation) intentionally do not live in
-// this numeric exception policy table.
+// The exception event codes of WinDbg's event table ("Controlling Exceptions
+// and Events"). Where WinDbg names one exception twice, once for its break
+// status and once for its handling status (`bpe`/`bpec`, `sse`/`ssec`,
+// `cce`/`cc`, `ch`/`hc`), both names select the same policy here, and the
+// break-status name, listed first, is the one shown. Event aliases that are
+// not exception codes (process/thread/module creation) intentionally do not
+// live in this numeric exception policy table.
 const EXCEPTION_ALIASES: &[(&str, u32)] = &[
-    ("asrt", 0x4000_0015), // STATUS_FATAL_APP_EXIT / assertion filter
+    ("asrt", 0xc000_0420), // STATUS_ASSERTION_FAILURE
     ("av", 0xc000_0005),
-    ("bp", STATUS_BREAKPOINT),
     ("dm", 0x8000_0002),
     ("dz", 0xc000_0094),
     ("eh", 0xe06d_7363),
-    ("cc", 0xe06d_7363),
     ("gp", 0x8000_0001),
     ("ii", 0xc000_001d),
     ("iov", 0xc000_0095),
@@ -440,10 +442,25 @@ const EXCEPTION_ALIASES: &[(&str, u32)] = &[
     ("isc", 0xc000_001c),
     ("lsq", 0xc000_001e),
     ("sbo", 0xc000_0409),
-    ("sse", STATUS_SINGLE_STEP),
     ("sov", 0xc000_00fd),
+    ("wkd", 0x8000_0007), // STATUS_WAKE_SYSTEM_DEBUGGER
+    ("aph", 0xcfff_ffff), // STATUS_APPLICATION_HANG
+    ("ch", 0xc000_0008),  // STATUS_INVALID_HANDLE
+    ("hc", 0xc000_0008),
+    ("dbce", 0x4001_0009), // DBG_COMMAND_EXCEPTION
+    ("vcpp", 0x406d_1388), // the Visual C++ thread-naming exception
     ("wos", 0x4000_001e),
     ("wob", 0x4000_001f),
+    ("sse", STATUS_SINGLE_STEP),
+    ("ssec", STATUS_SINGLE_STEP),
+    ("bpe", STATUS_BREAKPOINT),
+    ("bpec", STATUS_BREAKPOINT),
+    // DBG_CONTROL_C; a console's Ctrl+Break raises DBG_CONTROL_BREAK
+    // (0x40010008), which takes its code.
+    ("cce", 0x4001_0005),
+    ("cc", 0x4001_0005),
+    ("clr", 0xe043_4352),  // the CLR's managed exception
+    ("clrn", 0x0424_2420), // the CLR's debugger notification
 ];
 
 #[cfg(test)]
@@ -472,8 +489,14 @@ mod tests {
     #[test]
     fn parses_common_aliases_and_hex_codes() {
         assert_eq!(parse_exception_code("av").unwrap(), 0xc000_0005);
-        assert_eq!(parse_exception_code("bp").unwrap(), STATUS_BREAKPOINT);
+        assert_eq!(parse_exception_code("bpe").unwrap(), STATUS_BREAKPOINT);
         assert_eq!(parse_exception_code("sse").unwrap(), STATUS_SINGLE_STEP);
+        assert_eq!(parse_exception_code("asrt").unwrap(), 0xc000_0420);
+        assert_eq!(parse_exception_code("cc").unwrap(), 0x4001_0005);
+        // Two names for one exception: the break-status one is shown.
+        assert_eq!(exception_alias(0x4001_0005), Some("cce"));
+        assert_eq!(exception_alias(STATUS_BREAKPOINT), Some("bpe"));
+        assert!(parse_exception_code("bp").is_err());
         assert_eq!(parse_exception_code("SOV").unwrap(), 0xc000_00fd);
         assert_eq!(parse_exception_code("0xC0000094").unwrap(), 0xc000_0094);
         assert_eq!(parse_exception_code("c000001d").unwrap(), 0xc000_001d);

@@ -5349,7 +5349,7 @@ class ExceptionPolicy(BaseRecord):
     @property
     def alias(self, /) -> str |None:
         """
-        The WinDbg alias of the code (`av`, `bp`, ...), if it has one.
+        The WinDbg alias of the code (`av`, `bpe`, ...), if it has one.
         """
     @property
     def code(self, /) -> int:

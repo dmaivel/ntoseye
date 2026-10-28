@@ -27,6 +27,7 @@ Keeping this file:
 - `PteWalk`, the SDK's `!pte` result, lists the entries the walk read as `levels`, root first, as `VtopDetail` does, in place of its `pxe`, `ppe`, `pde` and `pte` fields.
 - `SystemPteTypeDetail.used` is `None` where `SystemPteTypeDetail.counters_hold` is false, and `SystemPtesDetail.uncounted` names the allocators its totals leave out.
 - `LfhSubsegment.block_count` counts the blocks a subsegment withholds, and `LfhSubsegment.bit_stride` gives its bitmap's bits per block; `LfhSubsegment.bucket` is `None` for a subsegment that names no bucket, and `VtopDetail.physical_walk` says whether its entry addresses are physical (an explicit DTB) or in the self-map.
+- `sx` aliases follow WinDbg's event table: `cc` is Ctrl+C (0x40010005), where it named the C++ exception (`eh`); `asrt` is an assertion failure (0xC0000420); the breakpoint exception is `bpe`, where it was `bp`; and `bpec`, `ssec`, `cce`, `ch`, `hc`, `wkd`, `aph`, `dbce`, `vcpp`, `clr` and `clrn` are added.
 
 ### Fixed
 
