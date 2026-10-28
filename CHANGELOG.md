@@ -94,6 +94,7 @@ Keeping this file:
 - `pc`, `tc`, `ph`, `th`, `pt`, `tt`, `pa` and `ta` execute the current instruction before looking for a match, so repeating one moves on, where it stayed put; the SDK's `step(until=)` and `step_over(until=)` likewise.
 - `.lastevent` reports a single step; breakpoint conditions can name `$tid`, `$thread` and `$proc`; `sxe -c "<commands>"` works without `-f` and the event breaks; `threads 0n<pid>` matches as `threads <pid>` does; and `x` finds a DLL's symbols at its load stop.
 - A full KD breakpoint table gives one message that says when this session's own breakpoints fill it, where `bm` printed one per symbol blaming a previous session.
+- `!poolfind` leaves out blocks whose tag does not read as one, where a wildcard search listed data the scan took for headers as `Allocated?` blocks tagged `....` (47 on a Windows 11 dump).
 
 ## v0.52.0 (2026-10-25)
 

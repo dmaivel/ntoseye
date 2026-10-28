@@ -226,7 +226,12 @@ impl Target {
                 let end = VirtAddr(end.0 & !(PAGE_SIZE as u64 - 1));
                 let scan = scan_present_pool_pages(self, start, end, |page_va, page| {
                     for block in reader.page_blocks(page_va, page) {
-                        if block.synthetic_free || !glob_matches(tag, &tag_string(block.tag), false)
+                        // A tag that does not read is data the lax scan
+                        // took for a header (the tracker table counts no
+                        // such tag), which only a wildcard would match.
+                        if block.synthetic_free
+                            || !tag_looks_printable(block.tag)
+                            || !glob_matches(tag, &tag_string(block.tag), false)
                         {
                             continue;
                         }
