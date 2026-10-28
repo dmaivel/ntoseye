@@ -107,6 +107,7 @@ Keeping this file:
 - On the `gdb` backend, a deferred `bu /p` is refused with the user-space reason that suggests `ba e1`, where it said the backend could not plant breakpoints at all.
 - On the `gdb` backend, `ba e` in a WOW64 process's 32-bit code is refused: when such a breakpoint fired while the other vCPUs ran, QEMU paused the VM with an internal error and the guest had to be reset.
 - A KD request that times out while the session checks the kernel image (as during a Ctrl+C into a flood of breakpoint hits) no longer reads as a guest reboot, which rebuilt the session, forgot the step's breakpoint still planted in guest memory, and left the guest halted at exit.
+- On the `gdb` backend, `p` over a call, `gu` and the other runs to an address in user code take a free hardware breakpoint slot for the run, where they ended with an error.
 
 ## v0.52.0 (2026-10-25)
 

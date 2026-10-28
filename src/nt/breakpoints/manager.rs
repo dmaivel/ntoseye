@@ -132,10 +132,18 @@ impl BreakpointManager {
             partition,
             ..BreakpointConfig::default()
         };
-        // Secure-kernel code is never patched, and a partition's cannot be:
-        // a run-to there (`p` over a call, `gu`) takes a debug-register slot
-        // for the run instead.
-        let (id, hardware) = if partition.is_some() || debugger.is_secure_address(address) {
+        // Secure-kernel code is never patched, and a partition's cannot be,
+        // nor user-space code on a backend that plants no user-mode software
+        // breakpoint (a GDB stub: see `validate_scope_capability`): a run-to
+        // there (`p` over a call, `gu`) takes a debug-register slot for the
+        // run instead.
+        let user_space_unpatchable = !debugger.arch().paging().is_kernel_address(address)
+            && !client.supports_user_mode_breakpoints()
+            && client.supports_watchpoints();
+        let (id, hardware) = if partition.is_some()
+            || debugger.is_secure_address(address)
+            || user_space_unpatchable
+        {
             let id = self.add_hardware_configured(
                 client,
                 debugger,

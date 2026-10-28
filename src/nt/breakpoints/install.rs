@@ -894,6 +894,7 @@ impl SiteMemory for SiteFrames<'_> {
 mod tests {
     use std::fs;
 
+    use crate::base::error::Error;
     use crate::base::types::VirtAddr;
     use crate::nt::breakpoints::test_backend::SlotRecorder;
     use crate::nt::breakpoints::{
@@ -965,6 +966,32 @@ mod tests {
             .add_configured(&mut client, &session.target, kernel, None, kernel_scope())
             .expect("a kernel site needs only kernel breakpoints");
         assert_eq!(client.installed, vec![kernel.0]);
+    }
+
+    /// A run to a user-space address (`p` over a call, `gu` back into user
+    /// code) on such a backend takes a debug register for the run instead
+    /// of failing, and gives it back when the run's site is removed.
+    #[test]
+    fn a_run_to_user_space_takes_a_debug_register_where_no_int3_can_go() {
+        let session = session_over_memory(0x1000, &[0x90; 0x40]);
+        let mut manager = BreakpointManager::new();
+        let mut client = SlotRecorder::kernel_only_with_debug_registers();
+        let user = VirtAddr(0x7ffd_4952_3ab7);
+        let id = manager
+            .add_temporary_code(&mut client, &session.target, user, None, None, 0x1000)
+            .expect("a debug register can stop there");
+        assert!(client.installed.is_empty(), "no int3 in user space");
+        assert!(client.hardware.contains(&Some(user.0)));
+        manager.remove(&mut client, &session.target, id).unwrap();
+        assert!(client.hardware.iter().all(Option::is_none));
+
+        // Without debug registers it is still refused.
+        let mut client = SlotRecorder::kernel_only();
+        assert!(matches!(
+            manager.add_temporary_code(&mut client, &session.target, user, None, None, 0x1000),
+            Err(Error::Breakpoint(_))
+        ));
+        assert!(client.installed.is_empty());
     }
 
     #[test]

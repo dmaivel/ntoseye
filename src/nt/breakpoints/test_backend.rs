@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::arch::RegisterMap;
+use crate::arch::{HwBreakpointAccess, RegisterMap};
 use crate::backend::dbg_backend::{DebugBackend, StopEvent};
 use crate::base::error::{Error, Result};
 
@@ -19,6 +19,8 @@ pub(super) struct SlotRecorder {
     reclaims: bool,
     /// See [`DebugBackend::supports_user_mode_breakpoints`].
     user_mode: bool,
+    /// Debug-register slots it has, with the address each is armed at.
+    pub(super) hardware: Vec<Option<u64>>,
 }
 
 impl SlotRecorder {
@@ -30,6 +32,7 @@ impl SlotRecorder {
             installed: Vec::new(),
             reclaims: true,
             user_mode: true,
+            hardware: Vec::new(),
         }
     }
 
@@ -52,6 +55,14 @@ impl SlotRecorder {
         Self {
             user_mode: false,
             ..Self::unreclaimed()
+        }
+    }
+
+    /// [`Self::kernel_only`] with a GDB stub's four debug registers.
+    pub(super) fn kernel_only_with_debug_registers() -> Self {
+        Self {
+            hardware: vec![None; 4],
+            ..Self::kernel_only()
         }
     }
 
@@ -101,6 +112,26 @@ impl DebugBackend for SlotRecorder {
     }
     fn clear_hardware_breakpoint(&mut self, slot: usize) -> Result<()> {
         self.cleared.push(slot);
+        if let Some(armed) = self.hardware.get_mut(slot) {
+            *armed = None;
+        }
+        Ok(())
+    }
+    fn supports_watchpoints(&self) -> bool {
+        !self.hardware.is_empty()
+    }
+    fn hardware_breakpoint_slots(&self) -> usize {
+        self.hardware.len()
+    }
+    fn set_hardware_breakpoint(
+        &mut self,
+        slot: usize,
+        addr: u64,
+        _access: HwBreakpointAccess,
+        _len: u8,
+    ) -> Result<()> {
+        let armed = self.hardware.get_mut(slot).ok_or(Error::NotSupported)?;
+        *armed = Some(addr);
         Ok(())
     }
     fn continue_execution(&mut self) -> Result<()> {
