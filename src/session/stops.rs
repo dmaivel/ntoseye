@@ -466,11 +466,23 @@ impl Session {
 
         if event.modules_changed || event.module_event.is_some() {
             let surfaced = match event.module_event.clone() {
-                // A user-mode image changes no kernel module list.
-                // While the user-image trap is planted it reports every
-                // mapping, this one too.
+                // A user-mode image changes no kernel module list. Where the
+                // user-image trap fires as well, it reports this mapping
+                // too, before or after Windows does, and the second report
+                // of it is dropped; on ARM64 the trap never sees a DLL load
+                // after a process starts, and this report is the only one.
                 Some(notification) if notification.process.is_some() => {
-                    if self.user_image_trap_planted() {
+                    let root = self
+                        .backend
+                        .read_registers()
+                        .ok()
+                        .and_then(|registers| {
+                            self.register_map
+                                .read_u64(self.target.arch().dtb_register(), &registers)
+                                .ok()
+                        })
+                        .unwrap_or_default();
+                    if self.mapping_reported_before(root, notification.base, false) {
                         None
                     } else {
                         notification.path.as_deref().and_then(|path| {
@@ -742,6 +754,7 @@ impl Session {
         let module = (!repeated)
             .then(|| self.user_image_at_trap(cr3))
             .flatten()
+            .filter(|(base, ..)| !self.mapping_reported_before(cr3, *base, true))
             .and_then(|(base, size, path, process)| {
                 self.user_module_event(
                     ModuleEvent::Load,
@@ -809,6 +822,22 @@ impl Session {
             utf16le_lossy(&bytes),
             process,
         ))
+    }
+
+    /// Whether the user-mode image mapped at `base` into the address space
+    /// `root` is the mapping the other source reported last (see
+    /// [`Session::last_user_image`]): Windows' own report (`from_trap`
+    /// false) and the user-image trap's describe one map call once each.
+    /// Two reports from the same source are two mappings, as when a DLL is
+    /// loaded, freed and loaded again at the same base.
+    fn mapping_reported_before(&mut self, root: u64, base: VirtAddr, from_trap: bool) -> bool {
+        let mapping = (root & self.target.arch().dtb_page_mask(), base);
+        if self.last_user_image == Some((mapping.0, mapping.1, !from_trap)) {
+            self.last_user_image = None;
+            return true;
+        }
+        self.last_user_image = Some((mapping.0, mapping.1, from_trap));
+        false
     }
 
     /// Resume past a module trap no filter stopped at: a breakpoint of the

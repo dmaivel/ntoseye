@@ -883,6 +883,12 @@ pub struct Session {
     /// module trap while being run past it, before executing it: its next
     /// hit on that event's trap is the same event, not a new one.
     module_trap_interrupted: Option<(ModuleEvent, u64)>,
+    /// The user-mode image mapping last reported, by the address-space root
+    /// it was mapped into, its base, and whether the user-image trap (rather
+    /// than Windows) reported it. Under `!gflag +ksl` Windows reports an
+    /// image's first mapping itself, and where the trap fires too it reports
+    /// the same map call again: that second report is no new load.
+    last_user_image: Option<(u64, VirtAddr, bool)>,
     /// A break-in's last try is classifying a stop: a hit a filter declines
     /// is held as the pause rather than resumed (see
     /// [`Session::interrupt_classified`]).

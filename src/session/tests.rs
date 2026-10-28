@@ -3611,6 +3611,42 @@ fn a_user_image_notification_is_filtered_by_its_path() {
     assert_eq!(continues.load(Ordering::Relaxed), 1);
 }
 
+/// `sxe ld:mydll` plants the user-image trap, which on ARM64 never sees a
+/// DLL loaded after its process started: Windows' own report under
+/// `!gflag +ksl` is then the only one, and it stops, where it was dropped
+/// for the trap to report.
+#[test]
+fn a_user_image_report_stops_while_the_user_image_trap_is_planted() {
+    let mut stop = module_change_event();
+    stop.modules_changed = false;
+    stop.module_event = Some(ModuleNotification {
+        kind: ModuleEvent::Load,
+        base: VirtAddr(0x7ff8_0000_0000),
+        size: 0x4_0000,
+        path: Some(r"\ntx\MyDll.dll".to_string()),
+        process: Some(0xf63e_c080),
+    });
+    let (mut session, _, _, continues) = session_at_module_trap(ModuleEvent::Load);
+    session.module_traps.edit().clear();
+    session.module_traps.edit().push(ModuleTrap {
+        user: true,
+        ..module_trap(ModuleEvent::Load, LOAD_TRAP)
+    });
+    assert!(session.user_image_trap_planted());
+    session.exception_policies.set_module_event(
+        ModuleEvent::Load,
+        Some("mydll".into()),
+        ExceptionPolicyMode::Break,
+        None,
+    );
+    let resolution = session.classify_stop_event(stop).unwrap();
+    let StopResolution::ModuleLoad { module, .. } = resolution else {
+        panic!("expected a module-load stop, got {resolution:?}");
+    };
+    assert_eq!(module.name, "MyDll.dll");
+    assert_eq!(continues.load(Ordering::Relaxed), 0);
+}
+
 /// `sxn ld` and `sxn ud` report the event as a notice and do not stop.
 #[test]
 fn a_module_trap_hit_a_notify_filter_names_reports_and_resumes() {

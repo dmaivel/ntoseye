@@ -143,6 +143,7 @@ impl Session {
             *self.bugcheck_trap.edit() = None;
             self.module_traps.edit().clear();
             self.module_trap_interrupted = None;
+            self.last_user_image = None;
             let TargetReloadOutcome {
                 report,
                 hint,
