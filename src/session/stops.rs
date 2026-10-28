@@ -472,17 +472,35 @@ impl Session {
                 // of it is dropped; on ARM64 the trap never sees a DLL load
                 // after a process starts, and this report is the only one.
                 Some(notification) if notification.process.is_some() => {
-                    let root = self
-                        .backend
-                        .read_registers()
-                        .ok()
-                        .and_then(|registers| {
-                            self.register_map
-                                .read_u64(self.target.arch().dtb_register(), &registers)
-                                .ok()
-                        })
-                        .unwrap_or_default();
-                    if self.mapping_reported_before(root, notification.base, false) {
+                    // Only a load can be reported twice (the trap reports no
+                    // unloads), and only while the trap is planted; the root
+                    // costs a register read, which an uninteresting report
+                    // need not pay.
+                    let duplicate = if self.user_image_trap_planted() {
+                        let root = self
+                            .backend
+                            .read_registers()
+                            .ok()
+                            .and_then(|registers| {
+                                self.register_map
+                                    .read_u64(self.target.arch().dtb_register(), &registers)
+                                    .ok()
+                            })
+                            .unwrap_or_default();
+                        match notification.kind {
+                            ModuleEvent::Load => {
+                                self.mapping_reported_before(root, notification.base, false)
+                            }
+                            ModuleEvent::Unload => {
+                                self.forget_reported_mapping(root, notification.base);
+                                false
+                            }
+                        }
+                    } else {
+                        self.last_user_image = None;
+                        false
+                    };
+                    if duplicate {
                         None
                     } else {
                         notification.path.as_deref().and_then(|path| {
@@ -838,6 +856,19 @@ impl Session {
         }
         self.last_user_image = Some((mapping.0, mapping.1, from_trap));
         false
+    }
+
+    /// Forget the last reported mapping if it is the one unmapped at `base`
+    /// from `root`: a later load there is a new mapping, whichever source
+    /// reports it.
+    fn forget_reported_mapping(&mut self, root: u64, base: VirtAddr) {
+        let root = root & self.target.arch().dtb_page_mask();
+        if self
+            .last_user_image
+            .is_some_and(|(last_root, last_base, _)| last_root == root && last_base == base)
+        {
+            self.last_user_image = None;
+        }
     }
 
     /// Resume past a module trap no filter stopped at: a breakpoint of the
