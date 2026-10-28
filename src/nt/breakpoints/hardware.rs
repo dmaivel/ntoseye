@@ -8,7 +8,7 @@ use super::{
 use crate::arch::{HardwareWatch, HwBreakpointAccess};
 use crate::backend::dbg_backend::{DebugBackend, WatchpointAccess};
 use crate::base::error::{Error, Result};
-use crate::base::types::VirtAddr;
+use crate::base::types::{CodeMachine, VirtAddr};
 use crate::nt::target::Target;
 
 impl BreakpointInfo {
@@ -82,6 +82,22 @@ impl BreakpointManager {
             }
         }
         let condition_expr = Self::configured_condition(&config)?;
+        // QEMU (11.1 under KVM) cannot resume a vCPU that one of its
+        // hardware execute breakpoints stopped in 32-bit code while the
+        // other vCPUs ran: it pauses the VM with an internal error ("Failed
+        // to set special registers") before reporting the stop, and only a
+        // reset brings the guest back. A step's temporary site, which runs
+        // its vCPU alone, and data watches hit by 32-bit code are not
+        // affected.
+        if access == HwBreakpointAccess::Execute
+            && client.hardware_breakpoints_trap_in_host()
+            && debugger.executing_machine(address) == CodeMachine::X86
+        {
+            return Err(Error::Breakpoint(format!(
+                "{:#x} is 32-bit code: QEMU cannot resume the VM when a hardware execute breakpoint fires there, and pauses it with an internal error until it is reset. Stop on the thread's next system call in nt instead, or step to the instruction",
+                address.0
+            )));
+        }
         debugger.arch().debug_registers().validate(HardwareWatch {
             address: address.0,
             access,

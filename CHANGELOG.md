@@ -105,6 +105,7 @@ Keeping this file:
 - On ARM64 over KD, `ba` stops: its controls asked for matching that a processor without EL2 never does, the breakpoint exception Windows raises for a hardware hit was resumed as a stale breakpoint, and the slots offered were the eight the CONTEXT holds rather than the processor's own (six execute slots on a typical guest).
 - On ARM64, `p`, `gu`, `pa`, `pc`, `pt` and `wt` over a call to `__security_push_cookie`, which nearly every function with a stack cookie makes in its prologue, end where they should, where they ran on until interrupted, and `wt` no longer nests the caller's later calls under it.
 - On the `gdb` backend, a deferred `bu /p` is refused with the user-space reason that suggests `ba e1`, where it said the backend could not plant breakpoints at all.
+- On the `gdb` backend, `ba e` in a WOW64 process's 32-bit code is refused: when such a breakpoint fired while the other vCPUs ran, QEMU paused the VM with an internal error and the guest had to be reset.
 
 ## v0.52.0 (2026-10-25)
 
