@@ -312,11 +312,10 @@ impl Session {
         )
     }
 
-    /// Decode the instruction at the current thread's program counter, masking
-    /// any software-breakpoint patch and reading through the thread's own root,
-    /// which it fetches through. Selects the current thread first; the VM must
-    /// be halted.
-    pub fn current_instruction(&mut self) -> Result<CurrentInstruction> {
+    /// The current thread's program counter, the root its code is fetched
+    /// through, and its active root. Selects the current thread first; the
+    /// VM must be halted.
+    fn current_pc_roots(&mut self) -> Result<(u64, u64, u64)> {
         self.require_steppable_vcpu()?;
         self.backend.set_current_thread(&self.current_thread)?;
         let regs = self.backend.read_registers()?;
@@ -337,6 +336,15 @@ impl Session {
                 (preferred_code_dtb(&trace, pc), trace.active_dtb)
             }
         };
+        Ok((pc, code_dtb, active_dtb))
+    }
+
+    /// Decode the instruction at the current thread's program counter, masking
+    /// any software-breakpoint patch and reading through the thread's own root,
+    /// which it fetches through. Selects the current thread first; the VM must
+    /// be halted.
+    pub fn current_instruction(&mut self) -> Result<CurrentInstruction> {
+        let (pc, code_dtb, active_dtb) = self.current_pc_roots()?;
         let memory = self.target.address_space(code_dtb);
         let mut bytes = [0u8; 16];
         memory.read_bytes(VirtAddr(pc), &mut bytes)?;
@@ -980,13 +988,20 @@ impl Session {
             // So does a call to one of the [`STACK_MOVING_HELPERS`], and a
             // return from inside one.
             StepStack::CallReturn | StepStack::FunctionReturn => {
-                let instruction = self.current_instruction()?;
-                let helper = match stack {
-                    StepStack::CallReturn => instruction.call_target,
-                    _ => Some(instruction.ip),
+                // A return needs only the pc, which a pc whose page is not
+                // resident still has; only a call's target needs decoding.
+                let (helper, code_dtb) = match stack {
+                    StepStack::CallReturn => {
+                        let instruction = self.current_instruction()?;
+                        (instruction.call_target, instruction.code_dtb)
+                    }
+                    _ => {
+                        let (pc, code_dtb, _) = self.current_pc_roots()?;
+                        (Some(pc), code_dtb)
+                    }
                 };
                 if helper.is_some_and(|address| {
-                    try_format_symbol_at(&self.target, instruction.code_dtb, address)
+                    try_format_symbol_at(&self.target, code_dtb, address)
                         .is_some_and(|symbol| is_stack_moving_helper(&symbol))
                 }) {
                     None
@@ -1069,9 +1084,13 @@ impl Session {
         if matches!(outcome, Ok(ContinueOutcome::Running)) {
             if cancel.behavior == CancelBehavior::ReturnRunning {
                 // The waits that go on with it check on its thread instead.
+                let sites = temporary
+                    .iter()
+                    .filter_map(|&id| self.breakpoint(id).map(|site| (id, site.serial)))
+                    .collect();
                 self.handed_back_run = Some(HandedBackRun {
                     thread: followed,
-                    sites: temporary,
+                    sites,
                     checked: Instant::now(),
                 });
                 return outcome;
@@ -1291,19 +1310,49 @@ impl Session {
             } => {}
             raced => self.parked_stop = Some(raced),
         }
+        let sites = self.live_sites(&sites);
         self.remove_temporary(&sites);
         Err(followed_thread_exited(&thread))
     }
 
-    /// End a run handed back running (see [`HandedBackRun`]) at the stop a
-    /// later wait surfaced, which is its own (one of its sites fired) or one
-    /// that ended it elsewhere: its sites come out, as a run waited on to
-    /// the end takes them out. Left armed, a site went on stopping the
-    /// thread at the return of every later call there.
-    pub(super) fn end_handed_back_run(&mut self) {
-        if let Some(run) = self.handed_back_run.take() {
-            self.remove_temporary(&run.sites);
+    /// End a run handed back running (see [`HandedBackRun`]), if any: at
+    /// the stop a later wait surfaced, which is its own (one of its sites
+    /// fired) or one that ended it elsewhere, or when a host starts another
+    /// run instead of waiting on it. Its sites come out, as a run waited on
+    /// to the end takes them out. Left armed, a site went on stopping the
+    /// thread at the return of every later call there, and the run's thread
+    /// check went on halting the runs after it once that thread exited.
+    pub fn end_handed_back_run(&mut self) {
+        let Some(run) = self.handed_back_run.take() else {
+            return;
+        };
+        let sites = self.live_sites(&run.sites);
+        if sites.is_empty() {
+            return;
         }
+        // A host may start the next run while this one still runs.
+        let removed = self.with_target_halted(|session| {
+            session.remove_temporary(&sites);
+            Ok(())
+        });
+        if let Err(error) = removed {
+            self.notices.push(Notice::warning(format!(
+                "the run's temporary breakpoint could not be removed: {error}"
+            )));
+        }
+    }
+
+    /// The ids of `sites` (by id and serial) still set: one removed
+    /// meanwhile may have had its id reused by another breakpoint.
+    fn live_sites(&self, sites: &[(u32, u64)]) -> Vec<u32> {
+        sites
+            .iter()
+            .filter(|&&(id, serial)| {
+                self.breakpoint(id)
+                    .is_some_and(|site| site.serial == serial)
+            })
+            .map(|&(id, _)| id)
+            .collect()
     }
 
     /// Enable `sites` (`armed`) or disable them.

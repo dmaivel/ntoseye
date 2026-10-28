@@ -461,6 +461,39 @@ fn a_step_over_a_call_runs_on_until_paused() {
     assert_eq!(sites.lock().last(), Some(&(0x1005, false)));
 }
 
+/// A step request while a step still runs is refused, and the running
+/// step keeps its site: replacing it lost the step and left its site armed.
+#[test]
+fn a_step_request_while_a_step_runs_is_refused() {
+    // call 0x1010; the return address is 0x1005.
+    let mut code = [0x90u8; 0x40];
+    code[..5].copy_from_slice(&[0xe8, 0x0b, 0x00, 0x00, 0x00]);
+    let mut backend = MockBackend::default()
+        .one_vcpu()
+        .halts_only_on_interrupt()
+        .with_breakpoints();
+    backend.set("rip", 0x1000);
+    let sites = backend.site_log();
+    let session = session_running_code(&code, backend);
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, sink) = server_with_sink(Some(session), rx);
+    server.configured = true;
+
+    let outcome = server.start_step(StepRequest::Step(StepMode::Over), true);
+    assert!(matches!(outcome, Ok(RunOutcome::Running)), "{outcome:?}");
+    server.state = RunState::Running;
+    server.dispatch(Request::from_message(&request(1, "next")).unwrap());
+
+    let messages = decode_sink(&sink);
+    let next = messages
+        .iter()
+        .find(|message| message["command"] == "next")
+        .unwrap();
+    assert_eq!(next["success"], false, "{next:?}");
+    assert!(server.step.is_some());
+    assert_eq!(sites.lock().last(), Some(&(0x1005, true)));
+}
+
 #[test]
 fn a_termination_signal_releases_the_target_before_the_loop_exits() {
     // The loop must detach before exiting.

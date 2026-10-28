@@ -4477,6 +4477,76 @@ fn a_run_to_handed_back_running_leaves_its_site_armed() {
     assert_eq!(sites.lock().last(), Some(&(0x1040, false)));
 }
 
+/// A run handed back running and then replaced by a new run, as a DAP
+/// `continue` sent while a step still runs does, the new run ends the old:
+/// its site comes out rather than ending the continue as a step.
+#[test]
+fn a_new_run_ends_the_run_handed_back_running() {
+    let mut session = handed_back_run_to(0x1040, 1);
+    let outcome = session
+        .run(
+            Motion::Continue {
+                disposition: ContinueDisposition::Handled,
+            },
+            &Cancel::within(Duration::from_millis(20)),
+        )
+        .unwrap();
+    assert!(matches!(outcome, RunOutcome::Running));
+    assert!(session.breakpoints.list().is_empty());
+}
+
+/// A breakpoint that reuses the id of a handed-back run's site, removed
+/// meanwhile, is not the run's to take out when the run ends.
+#[test]
+fn ending_a_handed_back_run_keeps_a_breakpoint_that_reused_its_site_id() {
+    let mut session = handed_back_run_to(0x1040, 2);
+    let site = session.breakpoints.list()[0].id;
+    let reused = session
+        .with_target_halted(|session| {
+            session.remove_breakpoint(site)?;
+            session.add_breakpoint(VirtAddr(0x1050), None, BreakpointConfig::default())
+        })
+        .unwrap();
+    assert_eq!(reused, site);
+
+    session.end_handed_back_run();
+    let left: Vec<u64> = session
+        .breakpoints
+        .list()
+        .iter()
+        .map(|breakpoint| breakpoint.address.0)
+        .collect();
+    assert_eq!(left, [0x1050]);
+}
+
+/// A session whose run to `address` was handed back running, its site
+/// armed, with `breakins` break-ins queued for the edits that follow.
+fn handed_back_run_to(address: u64, breakins: usize) -> Session {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        one_vcpu: true,
+        halts_only_on_interrupt: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1010);
+    for _ in 0..breakins {
+        backend.queue_interrupt(breakpoint_event(0x2000));
+    }
+    let mut session = stepping_session(&[0x90u8; 0x80], backend);
+    session.current_thread = "p01.01".into();
+    let run_to = Motion::RunTo {
+        address: VirtAddr(address),
+        frame: None,
+        disposition: ContinueDisposition::Handled,
+    };
+    let outcome = session
+        .run(run_to, &Cancel::within(Duration::from_millis(20)))
+        .unwrap();
+    assert!(matches!(outcome, RunOutcome::Running));
+    assert_eq!(session.breakpoints.list().len(), 1);
+    session
+}
+
 /// A stop's report takes the module traps in its window out of the
 /// target's table too; resuming plants them again, or their events stop.
 #[test]

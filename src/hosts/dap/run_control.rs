@@ -121,6 +121,15 @@ impl Server {
     /// pause, for as long as a step over a long call takes.
     pub(super) fn on_step(&mut self, request: &Request, step: StepRequest) -> Handled {
         self.refuse_on_dump("stepping")?;
+        // A step steps from a stop; replacing one still running would lose
+        // its line and its sites.
+        if matches!(self.state, RunState::Running) {
+            self.respond(
+                request,
+                Err("the target is running: pause it before stepping".to_string()),
+            );
+            return Ok(None);
+        }
         let instruction_granularity =
             arg_str(&request.arguments, "granularity").as_deref() == Some("instruction");
         if let Some(thread) = arg_i64(&request.arguments, "threadId")
@@ -278,6 +287,9 @@ impl Server {
         let Some(session) = self.session.as_mut() else {
             return;
         };
+        // The session's own record of a run handed back running ends with
+        // the step, or its checks would halt the next run.
+        session.end_handed_back_run();
         let armed: Vec<u32> = step
             .sites
             .into_iter()

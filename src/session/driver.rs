@@ -474,6 +474,11 @@ impl Session {
     /// `Motion::Break`, a cancellation that halts) or the session's
     /// interrupt request arrived meanwhile: halt wins.
     pub fn run(&mut self, motion: Motion, cancel: &Cancel<'_>) -> Result<RunOutcome> {
+        // A new run replaces one handed back running that the host no longer
+        // waits on.
+        if !matches!(motion, Motion::Wait | Motion::Break) {
+            self.end_handed_back_run();
+        }
         let stepping = self.current_thread.clone();
         let mut motion = self.plan(motion)?;
         loop {

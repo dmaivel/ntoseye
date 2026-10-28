@@ -152,6 +152,9 @@ impl Session {
     /// Clear every inspection cache that cannot survive a crash/reboot command
     /// before the shared wait loop re-establishes the next stop.
     pub fn clear_resume_state(&mut self) {
+        // The target runs into the crash, which ends a `.process` context
+        // as any run does.
+        self.target.end_process_context_on_run();
         self.target.selected_frame = None;
         self.target.registers = None;
         self.target.clear_context_dtb_override();

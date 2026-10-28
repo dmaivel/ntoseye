@@ -795,8 +795,22 @@ impl Session {
     /// its first whose kernel stack is resident, or its first that has not
     /// terminated. What a host selects after switching
     /// to a process, so the thread's own views (`!teb`, `!gle`, `k`) are the
-    /// process's. `None` when the process has no thread to select.
+    /// process's. `None` when the process has no thread to select; then, as
+    /// on an error, no thread is selected, rather than one of the process
+    /// switched away from.
     pub fn select_process_thread(
+        &mut self,
+        process: &ProcessInfo,
+    ) -> Result<Option<(ThreadInfo, ThreadContext)>> {
+        let selected = self.select_thread_of(process);
+        if !matches!(selected, Ok(Some(_))) {
+            self.target.clear_current_windows_thread_context();
+        }
+        selected
+    }
+
+    /// [`Self::select_process_thread`] before a failure clears the selection.
+    fn select_thread_of(
         &mut self,
         process: &ProcessInfo,
     ) -> Result<Option<(ThreadInfo, ThreadContext)>> {

@@ -427,8 +427,9 @@ pub struct PendingWalk {
 pub struct HandedBackRun {
     /// The thread it follows, if any.
     pub thread: Option<ThreadScope>,
-    /// The temporary sites it armed.
-    pub sites: Vec<u32>,
+    /// The temporary sites it armed, by id and serial: an id freed meanwhile
+    /// may name a later breakpoint, which is not the run's to remove.
+    pub sites: Vec<(u32, u64)>,
     /// When the thread was last found alive.
     pub checked: Instant,
 }
