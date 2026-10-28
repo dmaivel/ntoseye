@@ -249,6 +249,49 @@ fn a_pdb_put_in_a_local_directory_is_found_once_reload_forgets_it() {
 }
 
 #[test]
+fn an_image_whose_background_fetch_failed_is_not_queued_again() {
+    use crate::base::notice::{Notice, NoticeLevel};
+    use std::time::{Duration, Instant};
+
+    // No server to ask, so the fetch fails at once, as one a server has no
+    // copy for does.
+    let job = DownloadJob {
+        urls: Vec::new(),
+        path: temp_root("failed-image-fetch").join("driver.sys"),
+        filename: "driver.sys".to_string(),
+        pdb: None,
+    };
+    let store = Arc::new(SymbolStore::new());
+    assert!(store.fetch_image_later(job.clone()).unwrap().is_none());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut notices = Vec::new();
+    let failure = loop {
+        if let Some(notice) = notices
+            .iter()
+            .find(|notice: &&Notice| notice.level == NoticeLevel::Warning)
+        {
+            break notice.text.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the background fetch never ended"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+        notices.extend(store.take_notices());
+    };
+
+    // A second client asking again learns why it failed, with nothing
+    // queued or announced.
+    let error = store.fetch_image_later(job.clone()).unwrap_err();
+    assert!(failure.ends_with(&error.to_string()), "{failure} / {error}");
+    assert!(store.take_notices().is_empty());
+
+    // `.reload` asks the sources again.
+    store.forget_unavailable();
+    assert!(store.fetch_image_later(job).unwrap().is_none());
+}
+
+#[test]
 fn pdb_identity_requires_guid_and_non_stale_age() {
     let expected = PdbIdentity {
         guid: 0x1234,

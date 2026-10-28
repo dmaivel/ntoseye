@@ -291,8 +291,11 @@ impl SymbolStore {
     /// The module image's path when it is already in the cache; otherwise
     /// `None`, with the download queued for a background thread (once, however
     /// often this is asked) and its outcome reported through the store's
-    /// notices. For callers that must answer at once, such as a protocol
-    /// request with a client-side timeout.
+    /// notices. An image whose download failed is not queued again until
+    /// `.reload` or a change of the symbol path (see
+    /// [`Self::forget_unavailable`]); asking for it returns why it failed. For
+    /// callers that must answer at once, such as a protocol request with a
+    /// client-side timeout.
     pub fn image_or_fetch_later(
         self: &Arc<Self>,
         image_file_name: &str,
@@ -300,18 +303,33 @@ impl SymbolStore {
         size_of_image: u32,
     ) -> Result<Option<PathBuf>> {
         let job = Self::build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
+        self.fetch_image_later(job)
+    }
+
+    /// The image `job` names when it is already in place; otherwise `None`,
+    /// with `job` queued as [`Self::image_or_fetch_later`] describes.
+    pub fn fetch_image_later(self: &Arc<Self>, job: DownloadJob) -> Result<Option<PathBuf>> {
         if !job.needs_download() {
             return Ok(Some(job.path));
         }
-        if !self.image_fetches.lock().insert(job.path.clone()) {
-            return Ok(None);
+        {
+            // Checked under the fetch set's lock: the worker records a
+            // failure before it takes the path out of the set, so a request
+            // cannot slip between the two and queue the image again.
+            let mut fetches = self.image_fetches.lock();
+            if let Some(reason) = self.unavailable(&job) {
+                return Err(Error::DebugInfo(reason));
+            }
+            if !fetches.insert(job.path.clone()) {
+                return Ok(None);
+            }
         }
         let path = job.path.clone();
         let name = job.filename.clone();
         if let Err(error) = self.queue_image_fetch(job) {
             self.image_fetches.lock().remove(&path);
             return Err(Error::DebugInfo(format!(
-                "could not start the background fetch of {image_file_name}: {error}"
+                "could not start the background fetch of {name}: {error}"
             )));
         }
         self.push_notice(Notice::info(format!("fetching {name} in the background")));
@@ -335,16 +353,29 @@ impl SymbolStore {
                             let Some(store) = store.upgrade() else {
                                 return;
                             };
-                            store.image_fetches.lock().remove(&job.path);
                             let name = &job.filename;
-                            store.push_notice(match outcome {
+                            let notice = match outcome {
                                 Ok(()) => {
                                     Notice::info(format!("background fetch finished for {name}"))
                                 }
-                                Err(error) => Notice::warning(format!(
-                                    "background fetch failed for {name}: {error}"
-                                )),
-                            });
+                                Err(error) => {
+                                    // Any failure, not only a server's
+                                    // "not found", as a download in the
+                                    // foreground does: every gdb client asks
+                                    // for every loaded module's image when it
+                                    // connects, so an image no server has, or
+                                    // a host offline, would cost a request
+                                    // and two notices per module per client.
+                                    // `.reload` or a new symbol path retries.
+                                    let error = error.to_string();
+                                    store.remember_unavailable(&job, &error);
+                                    Notice::warning(format!(
+                                        "background fetch failed for {name}: {error}"
+                                    ))
+                                }
+                            };
+                            store.image_fetches.lock().remove(&job.path);
+                            store.push_notice(notice);
                         }
                     })?;
                 queue.insert(sender)

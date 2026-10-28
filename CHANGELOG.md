@@ -95,6 +95,7 @@ Keeping this file:
 - `.lastevent` reports a single step; breakpoint conditions can name `$tid`, `$thread` and `$proc`; `sxe -c "<commands>"` works without `-f` and the event breaks; `threads 0n<pid>` matches as `threads <pid>` does; and `x` finds a DLL's symbols at its load stop.
 - A full KD breakpoint table gives one message that says when this session's own breakpoints fill it, where `bm` printed one per symbol blaming a previous session.
 - `!poolfind` leaves out blocks whose tag does not read as one, where a wildcard search listed data the scan took for headers as `Allocated?` blocks tagged `....` (47 on a Windows 11 dump).
+- A module image the symbol server does not have is fetched once per session, where every new GDB server client queued it again and its next `monitor` reply carried dozens of fetch-failure lines; `.reload` or a symbol path change retries it.
 
 ## v0.52.0 (2026-10-25)
 
