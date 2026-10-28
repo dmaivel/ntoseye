@@ -39,22 +39,31 @@ fn amd64_hardware_slots_remain_four_shared_slots() {
 }
 
 #[test]
-fn arm64_hardware_slots_remain_two_data_and_eight_execute_slots() {
+fn arm64_hardware_slots_are_the_implemented_ones_of_the_context_slots() {
     let (_kernel, host) = UnixStream::pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.arch = Arch::Arm64;
     backend.register_map = Arch::Arm64.register_map().clone();
     backend.exit_prepared = true;
 
+    // Slots stay numbered as the CONTEXT's registers.
     assert_eq!(backend.hardware_breakpoint_slots(), 10);
+    // Unread, only the architecture's two of each are certain.
     assert_eq!(backend.hardware_slot_range(HwBreakpointAccess::Write), 0..2);
+    assert_eq!(
+        backend.hardware_slot_range(HwBreakpointAccess::Execute),
+        2..4
+    );
+
+    // Six breakpoints and four watchpoints, of which the CONTEXT holds two.
+    backend.debug_features = Some(0x1030_5106);
     assert_eq!(
         backend.hardware_slot_range(HwBreakpointAccess::ReadWrite),
         0..2
     );
     assert_eq!(
         backend.hardware_slot_range(HwBreakpointAccess::Execute),
-        2..10
+        2..8
     );
 }
 

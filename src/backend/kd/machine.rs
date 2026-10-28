@@ -15,6 +15,12 @@ pub trait KdMachine: Sync {
     /// [`super::connect::normalize_kernel_dtb`].
     fn kernel_root(&self, kd: &mut KdBackend, processor: u16) -> Result<u64>;
 
+    /// The debug feature register of `processor`, which counts the hardware
+    /// breakpoints it implements (see
+    /// [`crate::arch::DebugRegisters::implemented_slots_for`]); `None` where
+    /// the architecture has none or the target does not answer.
+    fn debug_features(&self, kd: &mut KdBackend, processor: u16) -> Option<u64>;
+
     /// Continue `processor` with `status`, single-stepping when `trace`,
     /// with the hardware breakpoints the halt set kept.
     fn resume(&self, kd: &mut KdBackend, processor: u16, status: u32, trace: bool) -> Result<()>;

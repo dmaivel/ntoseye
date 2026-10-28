@@ -101,6 +101,7 @@ Keeping this file:
 - A breakpoint or step site in user code whose process has exited is removed through its physical page when the page is still the one it was planted in (a DLL's shared code page other processes run), and dropped when the page was reused, where removal failed and detach left the guest halted.
 - DAP: `next`, `stepIn` and `stepOut` are answered at once with a `continued` event, so the editor shows the thread running, other requests are answered and Pause ends a long step; a step whose thread exits ends with a `step` stop that says so.
 - GDB server: when a client leaves and one of its breakpoints cannot be removed, the guest stays halted and the failure is reported, as with `q` and a DAP disconnect, where it resumed the guest.
+- On ARM64 over KD, `ba` stops: its controls asked for matching that a processor without EL2 never does, the breakpoint exception Windows raises for a hardware hit was resumed as a stale breakpoint, and the slots offered were the eight the CONTEXT holds rather than the processor's own (six execute slots on a typical guest).
 
 ## v0.52.0 (2026-10-25)
 

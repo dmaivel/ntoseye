@@ -24,6 +24,9 @@ pub const ARM64_WINDBG_TTBR1_EL1: u32 = 0x0003_0201;
 pub const ARM64_WINDBG_TTBR0_EL1: u32 = 0x0003_0200;
 pub const ARM64_WINDBG_ESR_EL1: u32 = 0x0003_0520;
 pub const ARM64_WINDBG_FAR_EL1: u32 = 0x0003_0600;
+/// `ID_AA64DFR0_EL1`: op0=3, op1=0, CRn=0, CRm=5, op2=0. It counts the
+/// breakpoint and watchpoint register pairs.
+pub const ARM64_WINDBG_ID_AA64DFR0_EL1: u32 = 0x0003_0050;
 /// `TPIDR_EL1`: op0=3, op1=0, CRn=13, CRm=0, op2=4. Windows keeps the
 /// processor's KPCR there, with flags in the low bits.
 const ARM64_WINDBG_TPIDR_EL1: u32 = 0x0003_0d04;

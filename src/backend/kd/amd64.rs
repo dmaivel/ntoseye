@@ -19,6 +19,11 @@ impl KdMachine for Amd64Kd {
         Arch::Amd64.special_register_map().read_u64("cr3", &special)
     }
 
+    // DR0-DR3 are architectural: every x64 processor has all four.
+    fn debug_features(&self, _: &mut KdBackend, _: u16) -> Option<u64> {
+        None
+    }
+
     fn resume(&self, kd: &mut KdBackend, processor: u16, status: u32, trace: bool) -> Result<()> {
         // The stop reported DR7, so a resume that read no special registers
         // needs none: only a host write can have changed it, and that drops

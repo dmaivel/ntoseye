@@ -11,7 +11,7 @@ use crate::backend::kd::framing::{
     INITIAL_PACKET_ID, PACKET_TYPE_KD_ACKNOWLEDGE, PACKET_TYPE_KD_STATE_MANIPULATE, control_packet,
     data_packet,
 };
-use crate::backend::kd::registers::ARM64_WINDBG_TTBR1_EL1;
+use crate::backend::kd::registers::{ARM64_WINDBG_ID_AA64DFR0_EL1, ARM64_WINDBG_TTBR1_EL1};
 
 #[test]
 fn explicit_kdnet_handshake_timeout_is_used_for_the_initial_wait() {
@@ -120,6 +120,32 @@ fn arm64_target_hints_read_ttbr1_through_kd() {
             ))
             .unwrap();
         let _ttbr_ack = read_wire_packet(&mut kernel);
+
+        let features_request = read_wire_packet(&mut kernel);
+        let features_id = wire_header(&features_request).packet_id;
+        assert_eq!(
+            u32::from_le_bytes(features_request[32..36].try_into().unwrap()),
+            ARM64_WINDBG_ID_AA64DFR0_EL1
+        );
+        kernel
+            .write_all(&control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, features_id))
+            .unwrap();
+        let mut features_union = [0u8; 12];
+        features_union[0..4].copy_from_slice(&ARM64_WINDBG_ID_AA64DFR0_EL1.to_le_bytes());
+        features_union[4..8].copy_from_slice(&0x1030_5106u32.to_le_bytes());
+        let features_reply = manipulate_reply_payload(
+            api::DBGKD_READ_MACHINE_SPECIFIC_REGISTER,
+            0,
+            &features_union,
+        );
+        kernel
+            .write_all(&data_packet(
+                PACKET_TYPE_KD_STATE_MANIPULATE,
+                INITIAL_PACKET_ID,
+                &features_reply,
+            ))
+            .unwrap();
+        let _features_ack = read_wire_packet(&mut kernel);
     });
 
     let hints = backend.target_hints().unwrap();
@@ -129,6 +155,11 @@ fn arm64_target_hints_read_ttbr1_through_kd() {
     assert_eq!(hints.kernel_dtb, 0x80d4_5000);
     assert_eq!(hints.kernel_base, VirtAddr(kernel_base));
     assert_eq!(hints.ps_loaded_module_list, VirtAddr(module_list));
+    // The target's six breakpoint pairs, not the CONTEXT's eight.
+    assert_eq!(
+        backend.hardware_slot_range(HwBreakpointAccess::Execute),
+        2..8
+    );
 }
 
 /// A reply the target sent a debugger that went away (here to a

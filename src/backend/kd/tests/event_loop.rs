@@ -115,6 +115,32 @@ fn wow64_traps_parse_as_the_native_ones() {
     }
 }
 
+/// Windows on ARM64 reports a hardware breakpoint hit as a
+/// `STATUS_BREAKPOINT` of type `BREAKPOINT_HW_BREAK` (7), and a watchpoint
+/// hit as one of type `BREAKPOINT_HW_WATCH` (6) with the address accessed;
+/// both are the debug trap x64 reports, and only the record's type tells
+/// them from a `brk`.
+#[test]
+fn arm64_hardware_hits_parse_as_debug_traps_with_the_watched_address() {
+    let stop = |parameters: &[u64]| {
+        let mut payload = vec![0u8; 188];
+        payload[0..4].copy_from_slice(&DBG_KD_EXCEPTION_STATE_CHANGE.to_le_bytes());
+        payload[32..36].copy_from_slice(&STATUS_BREAKPOINT.to_le_bytes());
+        payload[56..60].copy_from_slice(&(parameters.len() as u32).to_le_bytes());
+        for (index, parameter) in parameters.iter().enumerate() {
+            payload[64 + index * 8..72 + index * 8].copy_from_slice(&parameter.to_le_bytes());
+        }
+        let stop = parse_state_change(&payload).unwrap();
+        (stop.exception_code, stop_event(stop).watchpoint_address)
+    };
+    let watched = 0xffff_8101_9de9_d1fc;
+    assert_eq!(stop(&[6, watched]), (STATUS_SINGLE_STEP, Some(watched)));
+    assert_eq!(stop(&[7]), (STATUS_SINGLE_STEP, None));
+    // A `brk` (BREAKPOINT_BREAK), and a debug print, stay breakpoints.
+    assert_eq!(stop(&[0]), (STATUS_BREAKPOINT, None));
+    assert_eq!(stop(&[1, watched]), (STATUS_BREAKPOINT, None));
+}
+
 #[test]
 fn parse_load_symbols_state_change_extracts_base_hint() {
     let mut payload = vec![0u8; 64];

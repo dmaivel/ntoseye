@@ -75,11 +75,6 @@ pub fn parse_state_change(payload: &[u8]) -> Result<StateChange> {
         )));
     }
     let new_state = read_u32(payload, 0);
-    let exception_code = if new_state == DBG_KD_EXCEPTION_STATE_CHANGE && payload.len() >= 36 {
-        native_trap_code(read_u32(payload, 32))
-    } else {
-        0
-    };
     let exception_address = if new_state == DBG_KD_EXCEPTION_STATE_CHANGE && payload.len() >= 56 {
         Some(read_u64(payload, 48))
     } else {
@@ -101,6 +96,14 @@ pub fn parse_state_change(payload: &[u8]) -> Result<StateChange> {
                     .collect(),
             }
         });
+    let exception_code = if new_state == DBG_KD_EXCEPTION_STATE_CHANGE && payload.len() >= 36 {
+        let parameters = exception_record
+            .as_ref()
+            .map_or(&[][..], |record| &record.parameters[..]);
+        native_trap_code(read_u32(payload, 32), parameters)
+    } else {
+        0
+    };
     let exception_first_chance =
         if new_state == DBG_KD_EXCEPTION_STATE_CHANGE && payload.len() >= 188 {
             Some(read_u32(payload, 184) != 0)

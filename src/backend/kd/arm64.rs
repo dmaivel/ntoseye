@@ -6,8 +6,9 @@ use super::event_loop::with_framing_read_timeout;
 use super::framing::KdFraming;
 use super::machine::KdMachine;
 use super::registers::{
-    ARM64_WINDBG_ESR_EL1, ARM64_WINDBG_FAR_EL1, ARM64_WINDBG_TTBR0_EL1, ARM64_WINDBG_TTBR1_EL1,
-    arm64_x18, check_special_size, special_into_context,
+    ARM64_WINDBG_ESR_EL1, ARM64_WINDBG_FAR_EL1, ARM64_WINDBG_ID_AA64DFR0_EL1,
+    ARM64_WINDBG_TTBR0_EL1, ARM64_WINDBG_TTBR1_EL1, arm64_x18, check_special_size,
+    special_into_context,
 };
 use super::transport::KdTransport;
 use super::{KD_REQUEST_TIMEOUT, KdBackend, TrapState, api};
@@ -21,6 +22,14 @@ impl KdMachine for Arm64Kd {
         with_framing_read_timeout(kd.framing()?, KD_REQUEST_TIMEOUT, |framing| {
             api::read_machine_specific_register(framing, processor, ARM64_WINDBG_TTBR1_EL1)
         })
+    }
+
+    fn debug_features(&self, kd: &mut KdBackend, processor: u16) -> Option<u64> {
+        with_framing_read_timeout(kd.framing().ok()?, KD_REQUEST_TIMEOUT, |framing| {
+            api::read_machine_specific_register(framing, processor, ARM64_WINDBG_ID_AA64DFR0_EL1)
+        })
+        .inspect_err(|error| kd_trace!("kd: ARM64 ID_AA64DFR0_EL1 unavailable: {error}"))
+        .ok()
     }
 
     // ARM64_DBGKD_CONTROL_SET has no Dr7 field; the kernel single-steps via

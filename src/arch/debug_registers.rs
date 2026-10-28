@@ -60,6 +60,19 @@ pub trait DebugRegisters: Sync {
     /// The slots that can trap on `access`.
     fn slots_for(&self, access: HwBreakpointAccess) -> Range<usize>;
 
+    /// Those of [`Self::slots_for`] that the processor implements, as
+    /// `debug_features`, the family's debug feature register, counts them;
+    /// `None` when it could not be read. Every slot, for a family whose
+    /// slots are all architectural.
+    fn implemented_slots_for(
+        &self,
+        access: HwBreakpointAccess,
+        debug_features: Option<u64>,
+    ) -> Range<usize> {
+        let _ = debug_features;
+        self.slots_for(access)
+    }
+
     /// Why `watch` cannot be armed, if it cannot.
     fn validate(&self, watch: HardwareWatch) -> Result<()>;
 

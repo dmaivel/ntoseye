@@ -221,6 +221,7 @@ impl KdBackend {
             surface_break_at: None,
             special_registers_unsupported: false,
             efer_cache: HashMap::new(),
+            debug_features: None,
             virtual_lines: LineCache::default(),
             table_lines: LineCache::default(),
             virtual_fill_cap: KD_REMOTE_MEMORY_CHUNK,
@@ -256,6 +257,7 @@ impl KdBackend {
             )));
         }
         self.kernel_dtb_override = kernel_dtb;
+        self.debug_features = machine(self.arch).debug_features(self, processor);
         kd_trace!(
             "kd: memory hints: dtb={kernel_dtb:#x} base={:#x} psmods={:#x} arch={:?}",
             version.kern_base,

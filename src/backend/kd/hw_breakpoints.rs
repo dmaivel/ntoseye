@@ -85,7 +85,7 @@ impl KdBackend {
             )));
         }
         if let Some(watch) = watch {
-            let slots = self.debug_registers().slots_for(watch.access);
+            let slots = self.hardware_slot_range(watch.access);
             if !slots.contains(&slot) {
                 return Err(Error::Kd(format!(
                     "{} slot {slot} is outside slots {}-{}",

@@ -160,13 +160,37 @@ const STATUS_SINGLE_STEP: u32 = 0x8000_0004;
 const STATUS_WX86_SINGLE_STEP: u32 = 0x4000_001E;
 const STATUS_WX86_BREAKPOINT: u32 = 0x4000_001F;
 
-/// `code` as the trap it is to the debugger: a WOW64 thread's x86 single
-/// step and breakpoint are the native ones, whatever code Windows gave them.
-fn native_trap_code(code: u32) -> u32 {
-    match code {
-        STATUS_WX86_SINGLE_STEP => STATUS_SINGLE_STEP,
-        STATUS_WX86_BREAKPOINT => STATUS_BREAKPOINT,
-        code => code,
+/// The `ExceptionInformation[0]` of the `STATUS_BREAKPOINT` that Windows on
+/// ARM64 raises for a hardware watchpoint hit (`BREAKPOINT_HW_WATCH`, with
+/// the address accessed in `[1]`) and a hardware breakpoint hit
+/// (`BREAKPOINT_HW_BREAK`), as ksarm64.h defines them. Windows on x64
+/// raises `STATUS_SINGLE_STEP` for both.
+const BREAKPOINT_HW_WATCH: u64 = 6;
+const BREAKPOINT_HW_BREAK: u64 = 7;
+
+/// `code`, raised with `parameters`, as the trap it is to the debugger: a
+/// WOW64 thread's x86 single step and breakpoint are the native ones,
+/// whatever code Windows gave them, and a hardware breakpoint or watchpoint
+/// hit that Windows on ARM64 reports as a breakpoint of its own type is the
+/// debug trap x64 reports it as. Taken for a `brk`, the hit would be
+/// resumed as one that no breakpoint is at.
+fn native_trap_code(code: u32, parameters: &[u64]) -> u32 {
+    match (code, parameters.first()) {
+        (STATUS_WX86_SINGLE_STEP, _) => STATUS_SINGLE_STEP,
+        (STATUS_WX86_BREAKPOINT, _) => STATUS_BREAKPOINT,
+        (STATUS_BREAKPOINT, Some(&(BREAKPOINT_HW_WATCH | BREAKPOINT_HW_BREAK))) => {
+            STATUS_SINGLE_STEP
+        }
+        (code, _) => code,
+    }
+}
+
+/// The address a hardware watchpoint hit accessed, when `record` reports
+/// one as Windows on ARM64 does (see [`BREAKPOINT_HW_WATCH`]).
+fn hardware_watch_address(record: &ExceptionRecord) -> Option<u64> {
+    match record.parameters[..] {
+        [BREAKPOINT_HW_WATCH, address, ..] if record.code == STATUS_BREAKPOINT => Some(address),
+        _ => None,
     }
 }
 const KD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -367,6 +391,10 @@ pub struct KdBackend {
     /// Avoid repeated round trips or timeouts after an ARM64 control-space read fails.
     special_registers_unsupported: bool,
     efer_cache: HashMap<u16, u64>,
+    /// The processor's debug feature register, which counts the hardware
+    /// breakpoints it implements, read at attach; `None` where the family
+    /// has none or the target refused it.
+    debug_features: Option<u64>,
     /// Virtual memory read through the target for the current halt; see
     /// [`Self::read_virtual_bytes`].
     virtual_lines: LineCache<(u16, u64)>,
@@ -529,7 +557,9 @@ impl DebugBackend for KdBackend {
     }
 
     fn hardware_slot_range(&self, access: HwBreakpointAccess) -> std::ops::Range<usize> {
-        self.arch.debug_registers().slots_for(access)
+        self.arch
+            .debug_registers()
+            .implemented_slots_for(access, self.debug_features)
     }
 
     fn set_hardware_breakpoint(

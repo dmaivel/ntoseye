@@ -20,8 +20,8 @@ use super::{
     AwaitStateOptions, ContinueDrain, DBG_KD_EXCEPTION_STATE_CHANGE,
     DBG_KD_LOAD_SYMBOLS_STATE_CHANGE, KD_REQUEST_TIMEOUT, KdBackend, Link, STATUS_BREAKPOINT,
     StateChange, StateChangeFilter, advance_pc_past_breakpoint, api, await_state_change,
-    blocking_read_timeout, breakin_and_wait, read_program_counter, thread_id_for,
-    with_framing_read_timeout,
+    blocking_read_timeout, breakin_and_wait, hardware_watch_address, read_program_counter,
+    thread_id_for, with_framing_read_timeout,
 };
 
 const POST_BUGCHECK_RECONNECT_ASSIST_DELAY: Duration = Duration::from_secs(20);
@@ -55,7 +55,10 @@ pub(super) fn stop_event(stop: StateChange) -> StopEvent {
         first_chance: stop.exception_first_chance,
         exception_address: stop.exception_address,
         program_counter: Some(stop.program_counter),
-        watchpoint_address: None,
+        watchpoint_address: stop
+            .exception_record
+            .as_ref()
+            .and_then(hardware_watch_address),
         is_bugcheck: stop.is_bugcheck,
         bugcheck: stop.bugcheck,
         target_reloaded: stop.target_reloaded,
