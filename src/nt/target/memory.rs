@@ -398,7 +398,7 @@ impl Target {
     }
 
     /// [`Self::mask_code`], except in a VTL1 address space.
-    fn mask_breakpoints(&self, dtb: Dtb, addr: VirtAddr, buf: &mut [u8]) {
+    pub fn mask_breakpoints(&self, dtb: Dtb, addr: VirtAddr, buf: &mut [u8]) {
         if !self.symbols.is_secure_root(dtb) {
             self.mask_code(addr, buf, dtb);
         }
@@ -459,9 +459,10 @@ impl Target {
         self.types_in(self.current_dtb())
     }
 
-    /// Kernel types read through `dtb`'s page tables.
+    /// Kernel types read through `dtb`'s page tables, with the session's
+    /// breakpoints and traps masked as [`Self::read_masked_held`] masks them.
     pub fn types_in(&self, dtb: Dtb) -> Types<'_> {
-        match &self.guest {
+        let types = match &self.guest {
             Some(guest) => guest.ntoskrnl.types_in(dtb),
             None => Types::new(
                 &self.symbols,
@@ -471,7 +472,8 @@ impl Target {
                 self.kernel_dtb(),
                 dtb,
             ),
-        }
+        };
+        types.masked_by(self)
     }
 
     /// Search `length` bytes from `start` for the byte `pattern`, reading

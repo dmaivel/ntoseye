@@ -21,6 +21,7 @@ use crate::nt::breakpoints::{
 use crate::nt::dmp::structs::Header64;
 use crate::nt::expr::Expr;
 use crate::nt::guest::ModuleInfo;
+use crate::nt::layout::{FieldInfo, ParsedType, TypeInfo};
 use crate::nt::target::{MemoryKind, SelectedFrame};
 use crate::session::exception_policy::{ExceptionPolicyFinalAction, ExceptionPolicyMode};
 use iced_x86::{Decoder, DecoderOptions};
@@ -1279,6 +1280,49 @@ fn expressions_read_the_code_under_a_site() {
     *session.bugcheck_trap.edit() = None;
     assert_eq!(eval(&session, "by(0x1000)"), 0xcc);
     assert_eq!(eval(&session, "by(0x1008)"), 0xcc);
+}
+
+/// A typed read (a `dt` field, a `dx` array element, an extension's struct
+/// walk) sees the code under a planted site as `db` does, and the bytes
+/// beside the site as memory holds them.
+#[test]
+fn typed_reads_see_the_code_under_a_site() {
+    let mut memory = [0u8; 0x10];
+    memory[..2].copy_from_slice(&[0xcc, 0x48]);
+    let mut session = session_over_memory(0x1000, &memory);
+    session
+        .breakpoints
+        .edit()
+        .insert_for_test(1, VirtAddr(0x1000), true, None);
+    let byte = |offset| FieldInfo {
+        offset,
+        size: 1,
+        type_data: ParsedType::Primitive("UCHAR".to_string()),
+    };
+    let layout = Arc::new(TypeInfo {
+        name: "_CODE".to_string(),
+        pointer_size: 8,
+        size: 2,
+        fields: [
+            ("First".to_string(), byte(0)),
+            ("Second".to_string(), byte(1)),
+        ]
+        .into_iter()
+        .collect(),
+    });
+    let types = session.target.context_types();
+
+    // Field reads, with the struct prefetched and without.
+    let code = types.struct_with_layout(Arc::clone(&layout), VirtAddr(0x1000));
+    assert_eq!(code.read_uint("First").unwrap(), 0x90);
+    assert_eq!(code.read_uint("Second").unwrap(), 0x48);
+    let code = code.prefetch();
+    assert_eq!(code.read_field_bytes("First", 2).unwrap(), [0x90]);
+    assert_eq!(code.read_uint("Second").unwrap(), 0x48);
+    // An element of an array starting a byte earlier, the site in its
+    // second field.
+    let element = types.struct_with_layout(layout, VirtAddr(0xfff)).prefetch();
+    assert_eq!(element.read_uint("Second").unwrap(), 0x90);
 }
 
 #[test]

@@ -9,7 +9,7 @@ use crate::base::memory::MemoryOps;
 use crate::base::types::VirtAddr;
 use crate::nt::cpu_state;
 use crate::nt::guest::Image;
-use crate::nt::layout::{FieldInfo, ParsedType, TypeInfo, le_uint};
+use crate::nt::layout::{FieldInfo, ParsedType, TypeInfo, Types, le_uint};
 use crate::nt::target::{DiagnosticValue, Target};
 use ntoseye_macros::record;
 
@@ -424,6 +424,13 @@ fn layout(target: &Target, name: &str) -> Result<Arc<TypeInfo>> {
     kernel(target)?.types().layout(name)
 }
 
+/// The kernel's types read as hosts show memory, with the session's
+/// breakpoints masked: these fields are displayed.
+fn shown_types(target: &Target) -> Result<Types<'_>> {
+    kernel(target)?;
+    Ok(target.types_in(target.kernel_dtb()))
+}
+
 fn lookup_field<'a>(layout: &'a TypeInfo, names: &[&str]) -> Result<(&'a str, &'a FieldInfo)> {
     names
         .iter()
@@ -439,8 +446,7 @@ fn field_bytes(
     names: &[&str],
 ) -> Result<Vec<u8>> {
     let (name, _) = lookup_field(layout, names)?;
-    kernel(target)?
-        .types()
+    shown_types(target)?
         .struct_with_layout(Arc::clone(layout), base)
         .read_field_bytes(name, MAX_FIELD_BYTES)
 }
@@ -452,8 +458,7 @@ fn field_u64(
     names: &[&str],
 ) -> Result<u64> {
     let (name, _) = lookup_field(layout, names)?;
-    kernel(target)?
-        .types()
+    shown_types(target)?
         .struct_with_layout(Arc::clone(layout), base)
         .read_uint(name)
 }
@@ -488,8 +493,7 @@ fn nested_field(
     };
     let address = base + u64::from(field.offset);
     let address = if pointer {
-        let pointer = kernel(target)?
-            .types()
+        let pointer = shown_types(target)?
             .struct_with_layout(Arc::clone(parent), base)
             .read_pointer(name)?;
         if pointer.is_zero() {
