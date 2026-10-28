@@ -114,11 +114,26 @@ impl Arch {
         let record = &record[..record.len().min(self.context_size())];
         let flags = get_u32(record, self.context_flags().offset).unwrap_or(0);
         let mut values = self.register_map().to_hashmap(record);
-        values.retain(|name, _| {
-            self.context_group(name)
-                .is_none_or(|group| flags & group == group)
-        });
+        values.retain(|name, _| self.context_group_present(flags, name));
         values
+    }
+
+    /// Whether a raw `CONTEXT` `record` records `register`: a field of the
+    /// record whose group its `ContextFlags` mark present.
+    pub fn context_records(self, record: &[u8], register: &str) -> bool {
+        let within = self
+            .register_map()
+            .info(register)
+            .is_some_and(|info| info.offset + info.size <= record.len().min(self.context_size()));
+        let flags = get_u32(record, self.context_flags().offset).unwrap_or(0);
+        within && self.context_group_present(flags, register)
+    }
+
+    /// Whether `ContextFlags` `flags` mark the group of `register` present;
+    /// a register in no group is in every record.
+    fn context_group_present(self, flags: u32, register: &str) -> bool {
+        self.context_group(register)
+            .is_none_or(|group| flags & group == group)
     }
 }
 

@@ -1,5 +1,6 @@
 //! What the server publishes about the target: the target description,
-//! thread, library, and memory-map transfers, and the kernel as the program.
+//! thread, library, and memory-map transfers, and the program: the kernel,
+//! or a user-mode minidump's main image.
 
 use std::fmt::Write as _;
 use std::fs::File;
@@ -25,9 +26,13 @@ use super::connection::{xfer_reply, xfer_window};
 
 impl GdbTarget<'_> {
     /// The images published as libraries: kernel modules, plus the current
-    /// process's modules once `.process` selects one.
+    /// process's modules once `.process` selects one; a user-mode
+    /// minidump's own modules.
     fn published_modules(&self) -> Vec<ModuleInfo> {
         let target = &self.session.target;
+        if let Some(modules) = target.user_modules() {
+            return modules.to_vec();
+        }
         let mut modules = target.kernel_modules().unwrap_or_default();
         if target.attached_process().is_some() {
             modules.extend(target.modules().unwrap_or_default());
@@ -78,34 +83,45 @@ impl GdbTarget<'_> {
         xfer_reply(&self.thread_list, offset, length)
     }
 
-    fn kernel_image_name(&self) -> String {
+    /// The image published as the program: the kernel, or a user-mode
+    /// minidump's main image, which its module list names first.
+    fn program(&self) -> Option<ModuleInfo> {
         let target = &self.session.target;
+        if let Some(modules) = target.user_modules() {
+            return modules.first().cloned();
+        }
+        let base = target.kernel_base()?;
         target
-            .kernel_base()
-            .and_then(|base| {
-                target
-                    .kernel_modules()
-                    .ok()?
-                    .into_iter()
-                    .find(|module| module.base_address == base)
-            })
-            .map(|module| module.name)
-            .unwrap_or_else(|| "ntoskrnl.exe".to_string())
+            .kernel_modules()
+            .ok()?
+            .into_iter()
+            .find(|module| module.base_address == base)
     }
 
-    /// The live kernel base minus the preferred base in the kernel's PE file.
+    /// The program's file name. A kernel whose module list is unreadable is
+    /// still `ntoskrnl.exe`; a user-mode minidump with no modules has none.
+    fn program_name(&self) -> Option<String> {
+        match self.program() {
+            Some(module) => Some(module.name),
+            None if self.session.target.user_dump().is_some() => None,
+            None => Some("ntoskrnl.exe".to_string()),
+        }
+    }
+
+    /// The program's loaded base minus the preferred base in its PE file.
     /// The file is the only source: the loader rewrites `ImageBase` in the
     /// mapped headers to the address it relocated the image to.
-    fn kernel_slide(&self) -> Option<u64> {
-        let target = &self.session.target;
-        let base = target.kernel_base()?;
-        let image = target
-            .module_image_or_fetch_later(&self.kernel_image_name())
+    fn program_slide(&self) -> Option<u64> {
+        let program = self.program()?;
+        let image = self
+            .session
+            .target
+            .module_image_or_fetch_later(&program.name)
             .ok()??;
         let mut headers = HeaderPage::zeroed();
         let read = File::open(image).ok()?.read_at(&mut headers[..], 0).ok()?;
         let view = PeView::from_bytes(&headers[..read]).ok()?;
-        Some(base.0.wrapping_sub(image_base(&view)))
+        Some(program.base_address.0.wrapping_sub(image_base(&view)))
     }
 }
 
@@ -352,9 +368,10 @@ impl Libraries for GdbTarget<'_> {
     }
 }
 
-/// The kernel image is the "program": a client that opened `ntoskrnl.exe`
-/// matches it by name and rebases its database to the live kernel, and gdb
-/// fetches it from the server when it has no file of its own.
+/// The kernel image, or a user-mode minidump's main image, is the "program":
+/// a client that opened `ntoskrnl.exe` matches it by name and rebases its
+/// database to the live kernel, and gdb fetches it from the server when it
+/// has no file of its own.
 impl ExecFile for GdbTarget<'_> {
     fn get_exec_file(
         &self,
@@ -363,8 +380,9 @@ impl ExecFile for GdbTarget<'_> {
         length: usize,
         buf: &mut [u8],
     ) -> TargetResult<usize, Self> {
+        let name = self.program_name().ok_or(TargetError::NonFatal)?;
         Ok(copy_window(
-            remote_path(&self.kernel_image_name()).as_bytes(),
+            remote_path(&name).as_bytes(),
             offset,
             length,
             buf,
@@ -372,13 +390,14 @@ impl ExecFile for GdbTarget<'_> {
     }
 }
 
-/// How far the program (the kernel image) sits from its preferred base, so
-/// gdb relocates a kernel file it loaded itself (`file ntoskrnl.exe`, or the
-/// image Ghidra launches gdb with) onto the live kernel. Zero, which gdb takes
+/// How far the program (the kernel image, or a user-mode minidump's main
+/// image) sits from its preferred base, so gdb relocates a file it loaded
+/// itself (`file ntoskrnl.exe`, or the image Ghidra launches gdb with) onto
+/// the target. Zero, which gdb takes
 /// as "not relocated", while the image is not in the symbol cache.
 impl SectionOffsets for GdbTarget<'_> {
     fn get_section_offsets(&mut self) -> std::result::Result<Offsets<u64>, Self::Error> {
-        let slide = self.kernel_slide().unwrap_or(0);
+        let slide = self.program_slide().unwrap_or(0);
         Ok(Offsets::Sections {
             text: slide,
             data: slide,

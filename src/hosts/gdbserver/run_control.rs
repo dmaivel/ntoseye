@@ -227,6 +227,25 @@ impl GdbTarget<'_> {
         self.signal(signal)
     }
 
+    /// The `?` reply for a user-mode minidump that records an exception:
+    /// the exception's signal on the thread that raised it. gdbstub answers
+    /// `?` with `SIGTRAP` on any thread, which would hide the crash.
+    pub(super) fn halt_reply(&mut self, multiprocess: bool) -> Option<Vec<u8>> {
+        let info = self.session.target.user_dump_info()?;
+        let exception = info.exception.as_ref()?;
+        let signal = exception_signal(exception.code);
+        let thread = info.backend_thread_id(exception.thread_id);
+        self.sync_threads();
+        let tid = self.tid_of(&thread).get();
+        // gdbstub names the one process 1, as the thread list does.
+        let thread = if multiprocess {
+            format!("p1.{tid:x}")
+        } else {
+            format!("{tid:x}")
+        };
+        Some(format!("T{:02x}thread:{thread};", signal.0).into_bytes())
+    }
+
     /// `signal` on the thread that stopped.
     fn signal(&mut self, signal: Signal) -> MultiThreadStopReason<u64> {
         self.sync_threads();

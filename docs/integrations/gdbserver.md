@@ -113,8 +113,8 @@ Binary Ninja can exit if it disconnects while it reads memory. By then, the serv
 | Step and continue | Step single-steps the selected vCPU, and continue resumes all vCPUs. Over `kd` and `kdnet`, the other vCPUs run during a step, and on an ARM64 target only the vCPU that stopped can step. A step or continue that cannot run is reported as `SIGINT`, with the reason on the console |
 | Interrupt | Break-in, reported as `SIGINT` |
 | `monitor` | Any ntoseye command that does not resume, step, reboot, or crash the target. `q` and `.shell` are not available |
-| Library list | Kernel modules, plus the modules of the current process after {command}`.process`. Each library is named `/` followed by its file name |
-| Program | `/ntoskrnl.exe`, with the relocation of the kernel from the preferred base of its file (`qOffsets`) |
+| Library list | Kernel modules, plus the modules of the current process after {command}`.process`. On a user-mode minidump, the dump's modules. Each library is named `/` followed by its file name |
+| Program | `/ntoskrnl.exe`, or the main image of a user-mode minidump, with its relocation from the preferred base of its file (`qOffsets`) |
 | Memory map | The user and kernel halves of the address space, with each library image as a separate region |
 | Console output | Guest `DbgPrint` output and stop details, while the target runs |
 | Remote files (`vFile`) | Read-only. The PE file of the loaded module that has the requested file name, and a generated `/proc/<pid>/maps` |

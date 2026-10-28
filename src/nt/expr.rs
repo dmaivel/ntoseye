@@ -11,7 +11,25 @@ use winnow::stream::{LocatingSlice, Stateful, Stream};
 mod eval;
 mod parser;
 
-use parser::{error_at, parse_logical_or, unwrap_parse_error, ws0};
+use parser::{ParseState, error_at, parse_logical_or, unwrap_parse_error, ws0};
+
+/// How deeply an expression may nest: parentheses, prefix operators, memory
+/// reads, and operator chains each add a level. Parsing, evaluating and
+/// dropping the tree all recurse once per level, so without a bound a long
+/// pasted expression overflows the stack and aborts the whole process. Real
+/// expressions such as `poi(poi(@$teb+0x60)+0x18)` or a cast with a field
+/// chain take well under ten levels, and a generated chain like `a|b|...`
+/// a level per term. A debug build spends about 20 KiB of stack on a
+/// parenthesized level, so this keeps it within half of the smallest stack
+/// a host runs commands on: the 8 MiB main thread (the MCP and Python
+/// actors get [`crate::session::COMMAND_THREAD_STACK`]).
+pub const MAX_EXPR_DEPTH: usize = 128;
+
+/// The error for an expression past [`MAX_EXPR_DEPTH`], shared by every
+/// expression parser so they all say the same thing.
+pub fn too_deep_message() -> String {
+    format!("expression nested too deeply (more than {MAX_EXPR_DEPTH} levels)")
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprType {
@@ -241,7 +259,7 @@ impl Expr {
         }
         let mut input = Stateful {
             input: LocatingSlice::new(input),
-            state: radix,
+            state: ParseState { radix, depth: 0 },
         };
         let expr = parse_logical_or
             .parse_next(&mut input)

@@ -279,13 +279,21 @@ impl Session {
     /// Disassemble `count` instructions starting at `addr` in the current
     /// address space. Our own breakpoint `int3` bytes are masked back to the
     /// original opcode, and branch / rip-relative targets get symbol comments.
+    /// Near unreadable memory it decodes the instructions that end before
+    /// it, fewer than `count`; it fails only when `addr` itself is unreadable.
     pub fn disassemble(&self, addr: VirtAddr, count: usize) -> Result<Vec<DisasmRow>> {
         let dtb = self.target.current_dtb();
 
         let machine = self.target.code_machine(addr);
         // Over-read so `count` instructions decode even at their longest.
         let mut buf = vec![0u8; count * machine.max_instruction_bytes()];
-        self.read_masked(addr, &mut buf)?;
+        let readable = self.read_masked_partial(addr, &mut buf);
+        if readable == 0 && !buf.is_empty() {
+            // Nothing reads: report why the first byte does not.
+            self.read_masked(addr, &mut buf[..1])?;
+        }
+        let bytes = &buf[..readable];
+        let read_end = addr.0.saturating_add(readable as u64);
 
         let symbols = &self.target.symbols;
         let resolve = |target: u64| {
@@ -293,7 +301,17 @@ impl Session {
                 .format_closest_symbol_for_address(dtb, VirtAddr(target))
                 .unwrap_or_default()
         };
-        Ok(decode_code(&buf, addr.0, Some(count), machine, resolve))
+        // An instruction cut off by the unreadable byte would decode from
+        // bytes that are not the target's, so the rows stop before it.
+        let mut rows = decode_code(bytes, addr.0, Some(count), machine, resolve);
+        if let Some(cut) = rows.iter().position(|row| {
+            row.ip
+                .saturating_add(row.hex.split_whitespace().count() as u64)
+                > read_end
+        }) {
+            rows.truncate(cut);
+        }
+        Ok(rows)
     }
 
     /// Whether an instruction starts at `ip` in the address space `dtb`. A

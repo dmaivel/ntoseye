@@ -375,6 +375,14 @@ pub struct ControlState {
 /// `step(until=)`/`step_over(until=)`) that never finds its target.
 pub const STEP_UNTIL_LIMIT: usize = 100_000;
 
+/// The stack of a thread a host spawns to run commands on (the MCP and
+/// Python session actors). Expression parsing and evaluation recurse once
+/// per nesting level (see [`crate::nt::expr::MAX_EXPR_DEPTH`]), so these
+/// threads get more than the 2 MiB default, and at least the 8 MiB main
+/// thread the REPL, DAP and gdbserver run commands on. The reservation costs
+/// address space, not memory.
+pub const COMMAND_THREAD_STACK: usize = 16 << 20;
+
 /// The plan for a step-over of the current instruction: either a plain
 /// single-step, or run to an address (the instruction after a `call`).
 #[derive(Debug, Clone, Copy)]

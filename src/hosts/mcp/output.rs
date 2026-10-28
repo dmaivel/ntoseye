@@ -20,8 +20,16 @@ pub struct OutputStore {
 
 struct Kept {
     id: u64,
-    lines: Vec<String>,
+    lines: Vec<Line>,
     bytes: usize,
+}
+
+/// One kept line, or a page-sized piece of a line longer than a page, so
+/// that every part of it can be read at an offset of its own.
+struct Line {
+    text: String,
+    /// The line goes on in the piece at the next offset.
+    continues: bool,
 }
 
 /// The lines of one page and the offset after the last of them.
@@ -35,14 +43,12 @@ impl OutputStore {
     /// at their ends, when it fits; else its first page, kept whole, with a
     /// footer that says how to read the rest.
     pub fn fit(&mut self, text: &str) -> String {
-        let lines: Vec<String> = text
-            .lines()
-            .map(|line| line.trim_end().to_owned())
-            .collect();
+        let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
         let chars: usize = lines.iter().map(|line| line.len() + 1).sum();
         if chars <= PAGE_CHARS {
             return joined(&lines);
         }
+        let lines = pieces(&lines);
         let page = page(&lines, 0, None);
         let total = lines.len();
         let id = self.keep(lines);
@@ -71,6 +77,9 @@ impl OutputStore {
             .find(|kept| kept.id == id)
             .ok_or_else(|| self.missing(id))?;
         let total = kept.lines.len();
+        if limit == Some(0) {
+            return Err("a limit of 0 reads no lines; give at least 1".to_string());
+        }
         if offset >= total {
             return Err(format!(
                 "output {id} has {total} lines, so offset {offset} is past its end"
@@ -97,13 +106,13 @@ impl OutputStore {
             if limit.is_some_and(|limit| found == limit) {
                 break;
             }
-            if line.to_lowercase().contains(&needle) {
-                let numbered = format!("{at}: {line}");
+            if line.text.to_lowercase().contains(&needle) {
+                let numbered = format!("{at}: {}", line.text);
                 if !text.is_empty() && text.len() + numbered.len() + 1 > PAGE_CHARS {
                     break;
                 }
-                text.push_str(&cut(&numbered));
-                text.push('\n');
+                text.push_str(&numbered);
+                push_end(&mut text, line, at);
                 found += 1;
             }
             scanned = at + 1;
@@ -120,10 +129,10 @@ impl OutputStore {
         ))
     }
 
-    fn keep(&mut self, lines: Vec<String>) -> u64 {
+    fn keep(&mut self, lines: Vec<Line>) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        let bytes = lines.iter().map(String::len).sum();
+        let bytes = lines.iter().map(|line| line.text.len()).sum();
         self.bytes += bytes;
         self.kept.push_back(Kept { id, lines, bytes });
         while self.bytes > KEPT_BYTES && self.kept.len() > 1 {
@@ -146,39 +155,56 @@ impl OutputStore {
 }
 
 /// The lines from `offset` that fit in a page: at most `limit`, as many as
-/// [`PAGE_CHARS`] holds, and always one, cut to the page if it is longer.
-fn page(lines: &[String], offset: usize, limit: Option<usize>) -> Page {
+/// [`PAGE_CHARS`] holds, and always one.
+fn page(lines: &[Line], offset: usize, limit: Option<usize>) -> Page {
     let mut text = String::new();
     let mut end = offset;
     for line in lines.iter().skip(offset).take(limit.unwrap_or(usize::MAX)) {
-        if end > offset && text.len() + line.len() + 1 > PAGE_CHARS {
+        if end > offset && text.len() + line.text.len() + 1 > PAGE_CHARS {
             break;
         }
-        text.push_str(&cut(line));
-        text.push('\n');
+        text.push_str(&line.text);
+        push_end(&mut text, line, end);
         end += 1;
     }
     Page { text, end }
 }
 
-/// `line`, cut to a page at a character boundary when it is longer.
-fn cut(line: &str) -> std::borrow::Cow<'_, str> {
-    if line.len() <= PAGE_CHARS {
-        return line.into();
+/// Ends the line at offset `at` in `text`, saying where it goes on if it
+/// was split.
+fn push_end(text: &mut String, line: &Line, at: usize) {
+    if line.continues {
+        text.push_str(&format!(" [line continues at offset {}]", at + 1));
     }
-    let mut end = PAGE_CHARS;
-    while !line.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!(
-        "{} [line cut at {end} of {} characters]",
-        &line[..end],
-        line.len()
-    )
-    .into()
+    text.push('\n');
 }
 
-fn joined(lines: &[String]) -> String {
+/// `lines` as kept lines, each longer than a page split at character
+/// boundaries into pieces that fit one.
+fn pieces(lines: &[&str]) -> Vec<Line> {
+    let mut kept = Vec::with_capacity(lines.len());
+    for line in lines {
+        let mut rest = *line;
+        while rest.len() > PAGE_CHARS {
+            let mut end = PAGE_CHARS;
+            while !rest.is_char_boundary(end) {
+                end -= 1;
+            }
+            kept.push(Line {
+                text: rest[..end].to_owned(),
+                continues: true,
+            });
+            rest = &rest[end..];
+        }
+        kept.push(Line {
+            text: rest.to_owned(),
+            continues: false,
+        });
+    }
+    kept
+}
+
+fn joined(lines: &[&str]) -> String {
     let mut text = lines.join("\n");
     if !text.is_empty() {
         text.push('\n');
@@ -261,15 +287,15 @@ mod tests {
         assert!(limited.contains("next offset"), "{limited}");
     }
 
-    /// One line longer than a page is cut, not dropped or left to stall
-    /// the paging.
+    /// A line longer than a page is split into pieces at character
+    /// boundaries, each read at its own offset, so none of it is lost.
     #[test]
-    fn a_line_longer_than_a_page_is_cut() {
+    fn a_line_longer_than_a_page_pages_in_pieces() {
         let mut store = OutputStore::default();
-        let text = format!("{}\nnext\n", "x".repeat(PAGE_CHARS * 2));
-        let first = store.fit(&text);
+        let long = "\u{e9}".repeat(PAGE_CHARS);
+        let first = store.fit(&format!("{long}\nnext\n"));
         assert!(
-            first.contains("[line cut at"),
+            first.contains("[line continues at offset 1]"),
             "{}",
             &first[first.len() - 300..]
         );
@@ -278,7 +304,33 @@ mod tests {
             "{}",
             &first[first.len() - 300..]
         );
-        assert!(store.read(0, 1, None, None).unwrap().starts_with("next\n"));
+        let second = store.read(0, 1, None, None).unwrap();
+        assert!(!second.contains("[line continues"), "{second}");
+        let third = store.read(0, 2, None, None).unwrap();
+        assert!(third.starts_with("next\n"), "{third}");
+        let pieces: String = [first, second]
+            .iter()
+            .map(|page| {
+                let line = page.lines().next().unwrap();
+                line.split(" [line continues").next().unwrap()
+            })
+            .collect();
+        assert_eq!(pieces, long);
+    }
+
+    /// A limit of 0 is refused instead of naming an empty range.
+    #[test]
+    fn a_limit_of_zero_is_refused() {
+        let mut store = OutputStore::default();
+        store.fit(&numbered(10_000, 20));
+        assert!(store.read(0, 0, Some(0), None).is_err());
+        assert!(store.read(0, 5, Some(0), Some("00")).is_err());
+        assert!(
+            store
+                .read(0, 5, Some(1), None)
+                .unwrap()
+                .contains("offsets 5-5")
+        );
     }
 
     /// Asking for an output that was never kept, or past its end, says

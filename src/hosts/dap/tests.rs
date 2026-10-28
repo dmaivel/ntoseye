@@ -30,13 +30,62 @@ fn a_disassembly_request_cannot_ask_for_unbounded_work() {
         .on_disassemble(&json!({
             "memoryReference": "0x1000",
             "instructionCount": i64::MAX,
-            "instructionOffset": i64::MIN,
+            "instructionOffset": -(MAX_DISASSEMBLE_INSTRUCTIONS as i64),
         }))
         .expect("the request is answered, not refused")
         .expect("a body is returned");
 
     let instructions = answer["instructions"].as_array().expect("instructions");
     assert_eq!(instructions.len(), MAX_DISASSEMBLE_INSTRUCTIONS);
+
+    // Past the window the rows' instructions are unknown: refused, not
+    // answered with rows from inside it under the wrong offsets.
+    for offset in [i64::MIN, MAX_DISASSEMBLE_INSTRUCTIONS as i64 + 1] {
+        assert!(
+            server
+                .on_disassemble(&json!({
+                    "memoryReference": "0x1000",
+                    "instructionCount": 1,
+                    "instructionOffset": offset,
+                }))
+                .is_err()
+        );
+    }
+}
+
+/// Code that runs into unreadable memory decodes up to it, and the rows
+/// past it are invalid; a skip ahead that runs out is invalid throughout,
+/// never rows from the reference filed under later offsets.
+#[test]
+fn a_decode_into_unreadable_memory_keeps_what_reads() {
+    let session = session_over_memory(0x1000, &[0x90u8; 0x1000]);
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(Some(session), rx);
+    let rows = |server: &mut Server, offset: i64, count: i64| {
+        let answer = server
+            .on_disassemble(&json!({
+                "memoryReference": "0x1fc0",
+                "instructionOffset": offset,
+                "instructionCount": count,
+            }))
+            .unwrap()
+            .unwrap();
+        answer["instructions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["address"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    let decoded = rows(&mut server, 0, 0x48);
+    assert_eq!(decoded[0x3f], "0x1fff");
+    assert!(decoded[0x40..].iter().all(|address| address == "-1"));
+
+    let skipped = rows(&mut server, 0x3e, 2);
+    assert_eq!(skipped, ["0x1ffe", "0x1fff"]);
+    let beyond = rows(&mut server, 0x45, 2);
+    assert!(beyond.iter().all(|address| address == "-1"), "{beyond:?}");
 }
 
 #[test]
@@ -224,6 +273,12 @@ fn source_without_a_local_file_is_not_advertised_as_openable() {
 fn dump_targets_take_precedence_over_live_backend_arguments() {
     let spec = target_spec(&json!({"dump": "/tmp/crash.dmp", "backend": "gdb"})).unwrap();
     assert!(matches!(spec, TargetSpec::Dump(path) if path.ends_with("crash.dmp")));
+}
+
+/// A `dump` that is not a path is refused, not ignored for a live attach.
+#[test]
+fn a_dump_that_is_not_a_string_is_an_invalid_argument() {
+    assert!(target_spec(&json!({"dump": 123})).is_err());
 }
 
 #[test]

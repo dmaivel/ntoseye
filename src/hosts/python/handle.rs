@@ -24,6 +24,7 @@ use super::{ErrorKind, error, raise};
 use crate::base::error::{Error, Result as CoreResult};
 use crate::hosts::repl::ReplStore;
 use crate::nt::target::InterruptRequester;
+use crate::session::COMMAND_THREAD_STACK;
 use crate::session::Session;
 use crate::session::effects::Effects;
 
@@ -148,6 +149,7 @@ impl Actor {
         let (opened, open_result) = mpsc::sync_channel(1);
         let thread = std::thread::Builder::new()
             .name("ntoseye-session".to_string())
+            .stack_size(COMMAND_THREAD_STACK)
             .spawn(move || {
                 let mut session = match open() {
                     Ok(session) => {

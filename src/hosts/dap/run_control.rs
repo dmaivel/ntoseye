@@ -65,7 +65,7 @@ impl Server {
     }
 
     pub(super) fn on_continue(&mut self, request: &Request) -> Handled {
-        self.refuse_on_user_dump("continue")?;
+        self.refuse_on_dump("continue")?;
         // Resume and take a stop already waiting; the rest arrive while the
         // loop services the running target.
         let continue_ = Motion::Continue {
@@ -111,7 +111,7 @@ impl Server {
     }
 
     pub(super) fn on_step(&mut self, request: &Request, step: StepRequest) -> Handled {
-        self.refuse_on_user_dump("stepping")?;
+        self.refuse_on_dump("stepping")?;
         let instruction_granularity =
             arg_str(&request.arguments, "granularity").as_deref() == Some("instruction");
         if let Some(thread) = arg_i64(&request.arguments, "threadId")

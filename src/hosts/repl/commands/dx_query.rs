@@ -12,7 +12,7 @@ use std::collections::HashSet;
 
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
-use crate::nt::expr::{Expr, ExprValue, NumberRadix};
+use crate::nt::expr::{Expr, ExprValue, MAX_EXPR_DEPTH, NumberRadix, too_deep_message};
 use crate::nt::layout::{ParsedType, is_signed_primitive};
 use crate::nt::target::Target;
 
@@ -226,9 +226,29 @@ struct Parser {
     /// The lambda parameters in scope, which a parenthesized name never
     /// casts to.
     params: Vec<String>,
+    /// How many levels deep the parse is: parsing, evaluating and dropping
+    /// the tree recurse once per level, so it is bounded by
+    /// [`MAX_EXPR_DEPTH`].
+    depth: usize,
 }
 
 impl Parser {
+    /// Go one level deeper, failing past [`MAX_EXPR_DEPTH`].
+    fn enter_level(&mut self) -> Result<()> {
+        if self.depth >= MAX_EXPR_DEPTH {
+            return Err(invalid(too_deep_message()));
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    fn nested<T>(&mut self, parse: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        self.enter_level()?;
+        let result = parse(self);
+        self.depth -= 1;
+        result
+    }
+
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.at)
     }
@@ -275,6 +295,11 @@ impl Parser {
     }
 
     fn expression(&mut self) -> Result<Node> {
+        // Every recursion but a prefix operator's passes through here.
+        self.nested(Self::expression_at_level)
+    }
+
+    fn expression_at_level(&mut self) -> Result<Node> {
         // `p => ...` and `(p) => ...`.
         let lambda = match (
             self.peek(),
@@ -317,21 +342,25 @@ impl Parser {
             return self.unary();
         }
         let mut left = self.binary(level + 1)?;
+        // Each link of a chain nests the tree built so far one level deeper.
+        let outer = self.depth;
         while let Some(Token::Punct(op)) = self.peek() {
             let Some(op) = BINARY_LEVELS[level].iter().find(|known| *known == op) else {
                 break;
             };
             self.at += 1;
+            self.enter_level()?;
             let right = self.binary(level + 1)?;
             left = Node::Binary(op, Box::new(left), Box::new(right));
         }
+        self.depth = outer;
         Ok(left)
     }
 
     fn unary(&mut self) -> Result<Node> {
         for op in ["-", "~", "!", "*", "&"] {
             if self.eat(op) {
-                let operand = self.unary()?;
+                let operand = self.nested(Self::unary)?;
                 return Ok(match (op, operand) {
                     // `-2147483648` is an `__int64` before it is negated.
                     ("-", Node::Int(integer)) => {
@@ -343,7 +372,7 @@ impl Parser {
         }
         if let Some((type_name, length)) = self.cast_type() {
             self.at += length;
-            let operand = self.unary()?;
+            let operand = self.nested(Self::unary)?;
             return Ok(Node::Cast(type_name, Box::new(operand)));
         }
         self.postfix()
@@ -499,6 +528,7 @@ fn parse(text: &str) -> Result<Node> {
         tokens: tokenize(text)?,
         at: 0,
         params: Vec::new(),
+        depth: 0,
     };
     let node = parser.expression()?;
     match parser.peek() {
@@ -1240,5 +1270,41 @@ mod tests {
         let session = crate::session::session_over_memory(0x1000, &[0; 0x10]);
         assert!(evaluate(&session.target, "new { A = 1 / 0 }").is_err());
         assert!(evaluate(&session.target, "new { A = \"x\" < 1 }").is_err());
+    }
+
+    /// Nesting past the bound is a parse error rather than a stack overflow
+    /// that aborts the process, and expressions just inside it parse and
+    /// evaluate, on the smallest stack a host runs commands on: the 8 MiB
+    /// main thread.
+    #[test]
+    fn deep_nesting_is_an_error_not_a_stack_overflow() {
+        // The object around each expression takes one level of its own.
+        let inner = MAX_EXPR_DEPTH - 2;
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(move || {
+                for deep in [
+                    "(".repeat(10_000),
+                    format!("{}1", "-".repeat(3000)),
+                    format!("1{}", " + 1".repeat(100_000)),
+                    format!("x{}", "[0".repeat(5000)),
+                    "new { A = ".repeat(5000),
+                ] {
+                    assert_eq!(message(&parse(&deep).unwrap_err()), too_deep_message());
+                }
+                for (text, value) in [
+                    (format!("{}1{}", "(".repeat(inner), ")".repeat(inner)), 1),
+                    (format!("{}1", "~~".repeat(inner / 2)), 1),
+                    (format!("1{}", " + 1".repeat(inner)), inner + 1),
+                ] {
+                    assert_eq!(
+                        fields(&format!("new {{ A = {text} }}")),
+                        [("A".to_string(), value.to_string())]
+                    );
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

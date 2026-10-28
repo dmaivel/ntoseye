@@ -323,6 +323,41 @@ fn test_parse_parentheses() {
     );
 }
 
+/// Nesting past the bound is a parse error rather than a stack overflow
+/// that aborts the process, whichever production nests, and expressions
+/// just inside it parse, evaluate and drop, on the smallest stack a host
+/// runs commands on: the 8 MiB main thread.
+#[test]
+fn test_deep_nesting_is_an_error_not_a_stack_overflow() {
+    let inner = MAX_EXPR_DEPTH - 1;
+    std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(move || {
+            for deep in [
+                "(".repeat(10_000),
+                "poi(".repeat(1000),
+                format!("{}1", "-".repeat(3000)),
+                format!("{}1", "*".repeat(5000)),
+                format!("1{}", "+1".repeat(100_000)),
+                format!("(int{})1", "*".repeat(5000)),
+            ] {
+                let error = Expr::parse_detailed(&deep).unwrap_err();
+                assert_eq!(error.label, too_deep_message(), "{}", &deep[..20]);
+            }
+            let session = session_over_memory(0x1000, &[0; 0x10]);
+            for (text, value) in [
+                (format!("{}1{}", "(".repeat(inner), ")".repeat(inner)), 1),
+                (format!("{}1", "--".repeat(inner / 2)), 1),
+                (format!("1{}", "+1".repeat(inner)), inner as u64 + 1),
+            ] {
+                assert_eq!(Expr::eval(&text, &session.target).unwrap().0, value);
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[test]
 fn test_parse_deref_binds_before_addition() {
     let expr = Expr::parse("*PsInitialSystemProcess + 8").unwrap();

@@ -84,6 +84,11 @@ Keeping this file:
 - `!process <process> 7` shows `VadRoot`'s root VAD and the number of VADs on Windows 7, Vista and XP x64, and quota usage on Vista and XP x64, where they showed `-`; `!peb` leaves out fields the build lacks instead of listing them as unavailable.
 - `!heap -x` gives a free block's user size without its header, and `!vad` names large-page section, physical and rotate views, where it showed `vad:7`.
 - `!pool` and `!poolval` on Windows XP x64 take a 16-byte free fragment whose PreviousSize chains it to the block before as a block, though its tag holds stale bytes, and list a block whose pool type is 0 as free; `!poolval` called a third of nonpaged pages invalid.
+- A deeply nested or very long expression in `?`, `dx`, `dt`, MCP `command` or DAP `evaluate` fails with "expression nested too deeply" past 128 levels, where a few hundred levels overflowed the stack and aborted the debugger, leaving a live target's breakpoints planted.
+- MCP: `output` with `limit: 0` is refused, where it panicked and left the session unusable until a restart; a panic while handling a request now fails only that request. The rest of an over-long single line can be read with `output`, in pieces cut at characters.
+- DAP: `disassemble` decodes up to unreadable memory, where it failed for the whole request, and no longer returns rows shifted from the instruction offsets asked for. A kernel crash dump refuses `next` and `stepOut` up front and withdraws writes and breakpoints, as a user-mode minidump does; exception filters on a dump stay unverified and leave the `sx` settings alone; a `dump` argument that is not a string is rejected.
+- GDB server: a user-mode minidump publishes its modules as libraries and in the memory map with its main image as the program, where it named `ntoskrnl.exe` and listed none; its target description no longer lists control registers the dump does not hold; and an access violation stops with SIGSEGV on the faulting thread, not SIGTRAP.
+- A kernel-dump processor with no captured context has its registers unavailable in `r`, `~`, the GDB server and DAP, where they read as zeros.
 
 ## v0.52.0 (2026-10-25)
 

@@ -68,7 +68,7 @@ A listing such as `x nt!*`, `!vad` or `!process 0 7` can run to megabytes, which
 [output 3: 35123 lines, offsets 0-611 shown; the output tool reads on from offset 612, or with a filter finds lines in it]
 ```
 
-The `output` tool reads the rest without running the command again: `{"id": 3, "offset": 612}` returns the next page, and `{"id": 3, "filter": "explorer"}` returns only the lines that contain `explorer`, each after its offset, so that a later call can read around a match. The server keeps the latest long results in memory, up to 64 MB, for as long as it runs, and reading them needs no session. ntoseye writes no files for them, so they also work for a client that has no access to the host's file system.
+The `output` tool reads the rest without running the command again: `{"id": 3, "offset": 612}` returns the next page, and `{"id": 3, "filter": "explorer"}` returns only the lines that contain `explorer`, each after its offset, so that a later call can read around a match. A line longer than a page is kept as page-sized pieces, each at its own offset and ending with `[line continues at offset <n>]`, so all of it can be read. The server keeps the latest long results in memory, up to 64 MB, for as long as it runs, and reading them needs no session. ntoseye writes no files for them, so they also work for a client that has no access to the host's file system.
 
 ntoseye also removes the spaces that pad table rows at their ends from every result.
 

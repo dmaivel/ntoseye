@@ -50,7 +50,7 @@ impl Server {
     }
 
     pub(super) fn on_write_memory(&mut self, args: &Value) -> Handled {
-        self.refuse_on_user_dump("writing memory")?;
+        self.refuse_on_dump("writing memory")?;
         let reference = arg_str(args, "memoryReference")
             .ok_or_else(|| "missing memoryReference".to_string())?;
         let base = parse_address(&reference)?;
@@ -96,31 +96,40 @@ impl Server {
         // A client records the reference's address positionally and derives
         // instruction-breakpoint offsets from it, so a hole is an invalid
         // row, never a shifted one.
+        // Past the window the rows' instructions are not known, and rows
+        // from inside it would be filed under the wrong offsets.
+        if instruction_offset.unsigned_abs() > MAX_DISASSEMBLE_INSTRUCTIONS as u64 {
+            return Err(format!(
+                "instructionOffset {instruction_offset} is beyond the \
+                 {MAX_DISASSEMBLE_INSTRUCTIONS} instructions disassemble decodes on either side \
+                 of the reference"
+            ));
+        }
         let mut rows: Vec<Option<DisassembledRow>> = Vec::with_capacity(count);
         // Negative offsets ask for the instructions *before* the reference, so
         // decode backwards into the gap first; a short decode leaves its hole
         // at the far end.
-        let backwards = usize::try_from(instruction_offset.min(0).saturating_neg())
-            .unwrap_or(0)
-            .min(MAX_DISASSEMBLE_INSTRUCTIONS);
+        let backwards = instruction_offset.min(0).unsigned_abs() as usize;
         if backwards > 0 {
             let preceding = self.disassemble_preceding(address, backwards)?;
             rows.resize_with(backwards.saturating_sub(preceding.len()), || None);
             rows.extend(preceding.into_iter().map(Some));
         }
-        let forward_start = if instruction_offset > 0 {
-            // Skip forward by decoding and dropping instructions.
-            let skip = (instruction_offset as usize).min(MAX_DISASSEMBLE_INSTRUCTIONS);
+        // Skip forward by decoding and dropping instructions. When that
+        // decode stops short, where the first row starts is unknown, and
+        // every row stays invalid.
+        let skip = instruction_offset.max(0) as usize;
+        let forward_start = if skip > 0 {
             let session = self.session()?;
-            match session.disassemble(VirtAddr(address), skip + 1) {
-                Ok(decoded) => decoded.get(skip).map(|row| row.ip).unwrap_or(address),
-                Err(_) => address,
-            }
+            session
+                .disassemble(VirtAddr(address), skip + 1)
+                .ok()
+                .and_then(|decoded| decoded.get(skip).map(|row| row.ip))
         } else {
-            address
+            Some(address)
         };
         let remaining = count.saturating_sub(rows.len());
-        if remaining > 0 {
+        if let Some(forward_start) = forward_start.filter(|_| remaining > 0) {
             let session = self.session()?;
             match session.disassemble(VirtAddr(forward_start), remaining) {
                 Ok(decoded) => rows.extend(decoded.into_iter().map(|row| {

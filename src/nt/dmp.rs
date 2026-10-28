@@ -588,7 +588,20 @@ impl DebugBackend for DmpBackend {
     }
 
     fn read_registers(&mut self) -> Result<Vec<u8>> {
-        Ok(self.per_cpu_registers[self.current_processor].clone())
+        let registers = &self.per_cpu_registers[self.current_processor];
+        // A processor the dump captured no context for keeps an empty one:
+        // its zeroes are not register values, so no reader may take them as
+        // such, as a minidump thread without a context is refused.
+        let pc = self
+            .register_map
+            .read_u64(self.header_context.arch().pc_register(), registers);
+        if matches!(pc, Ok(0)) {
+            return Err(Error::DebugInfo(
+                "registers are unavailable: the dump captured no context for this processor"
+                    .to_string(),
+            ));
+        }
+        Ok(registers.clone())
     }
 
     fn write_registers(&mut self, _data: &[u8]) -> Result<()> {
@@ -907,6 +920,18 @@ mod tests {
             map.read_u64("cr3", &data).unwrap(),
             info.directory_table_base
         );
+    }
+
+    /// A processor the dump captured no context for has no registers to
+    /// read, rather than zeroes; one with a context reads as before.
+    #[test]
+    fn a_processor_without_a_context_has_no_registers() {
+        let mut info = make_test_info();
+        info.number_processors = 2;
+        let mut backend = DmpBackend::new(&info);
+        assert!(backend.read_registers().is_ok());
+        backend.set_current_thread("p1.2").unwrap();
+        assert!(backend.read_registers().is_err());
     }
 
     #[test]

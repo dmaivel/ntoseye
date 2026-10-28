@@ -477,12 +477,12 @@ fn refused_breakpoint(message: String, line: Option<i64>) -> Value {
 }
 
 /// Answer a `set*Breakpoints` request without installing anything: every
-/// breakpoint it names is unverified, for `reason`.
+/// breakpoint it names is unverified, for `reason`. An exception request
+/// names its breakpoints as filters, plain and with options.
 pub fn unverified(args: &Value, reason: &str) -> Handled {
-    let rows: Vec<Value> = args
-        .get("breakpoints")
-        .and_then(Value::as_array)
+    let rows: Vec<Value> = ["breakpoints", "filters", "filterOptions"]
         .into_iter()
+        .filter_map(|field| args.get(field).and_then(Value::as_array))
         .flatten()
         .map(|entry| refused_breakpoint(reason.to_string(), arg_i64(entry, "line")))
         .collect();

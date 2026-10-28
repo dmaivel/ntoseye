@@ -28,13 +28,21 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// The layout for `arch` over a transport whose registers `map` names.
-    pub fn new(arch: Arch, map: &RegisterMap) -> Self {
+    /// The layout for `arch` over a transport whose registers `map` names,
+    /// in the first `held` bytes of its register file: a user-mode
+    /// minidump holds only its `CONTEXT` record, not the system registers
+    /// a kernel debugger keeps past it.
+    pub fn new(arch: Arch, map: &RegisterMap, held: usize) -> Self {
         let mut registers = match arch {
             Arch::Amd64 => amd64(),
             Arch::Arm64 => arm64(),
         };
-        registers.retain(|register| !register.optional || map.info(&register.name).is_some());
+        registers.retain(|register| {
+            !register.optional
+                || map
+                    .info(&register.name)
+                    .is_some_and(|info| info.offset + info.size <= held)
+        });
         let target_xml = target_xml(arch.gdb_architecture(), &registers);
         Self {
             registers,
@@ -47,21 +55,34 @@ impl Layout {
     }
 
     /// The register file in `g` order. Bytes of a register the transport does
-    /// not carry are `None`, which the protocol sends as `xx`.
-    pub fn encode(&self, map: &RegisterMap, file: &[u8]) -> Vec<Option<u8>> {
+    /// not carry, or that `known` says this file does not record, are
+    /// `None`, which the protocol sends as `xx`.
+    pub fn encode(
+        &self,
+        map: &RegisterMap,
+        file: &[u8],
+        known: impl Fn(&str) -> bool,
+    ) -> Vec<Option<u8>> {
         let mut wire = Vec::new();
         for register in &self.registers {
-            encode_into(register, map, file, &mut wire);
+            encode_into(register, map, file, &known, &mut wire);
         }
         wire
     }
 
     /// One register by its position in the target description, or `None`
-    /// when there is no such register or the transport does not carry it.
-    pub fn encode_one(&self, regnum: usize, map: &RegisterMap, file: &[u8]) -> Option<Vec<u8>> {
+    /// when there is no such register, the transport does not carry it, or
+    /// `known` says this file does not record it.
+    pub fn encode_one(
+        &self,
+        regnum: usize,
+        map: &RegisterMap,
+        file: &[u8],
+        known: impl Fn(&str) -> bool,
+    ) -> Option<Vec<u8>> {
         let register = self.registers.get(regnum)?;
         let mut wire = Vec::with_capacity(register.bytes);
-        encode_into(register, map, file, &mut wire);
+        encode_into(register, map, file, &known, &mut wire);
         wire.into_iter().collect()
     }
 
@@ -123,14 +144,16 @@ fn source_range(
 }
 
 /// Append `register` to `wire`: its bytes zero-extended to the wire width, or
-/// all `None` when the transport does not carry it.
+/// all `None` when the transport does not carry it or `known` says the file
+/// does not record it.
 fn encode_into(
     register: &WireRegister,
     map: &RegisterMap,
     file: &[u8],
+    known: impl Fn(&str) -> bool,
     wire: &mut Vec<Option<u8>>,
 ) {
-    match source_range(register, map, file.len()) {
+    match source_range(register, map, file.len()).filter(|_| known(&register.name)) {
         Some((offset, len)) => {
             wire.extend(file[offset..offset + len].iter().copied().map(Some));
             wire.extend(std::iter::repeat_n(Some(0), register.bytes - len));
@@ -327,7 +350,10 @@ fn arm64() -> Vec<WireRegister> {
 #[cfg(test)]
 mod tests {
     use super::Layout;
-    use crate::arch::{Arch, amd64::REGISTER_BUFFER_SIZE};
+    use crate::arch::{
+        Arch,
+        amd64::{CONTEXT_SIZE, REGISTER_BUFFER_SIZE},
+    };
 
     /// Byte offset of a register on the wire: its position in the AMD64
     /// description (rax..r15, rip, eflags, six segments, eight x87 stack
@@ -383,8 +409,8 @@ mod tests {
         map.write_u64("xmm0l", &mut file, 0x1122_3344_5566_7788)
             .unwrap();
 
-        let layout = Layout::new(Arch::Amd64, map);
-        let wire = layout.encode(map, &file);
+        let layout = Layout::new(Arch::Amd64, map, REGISTER_BUFFER_SIZE);
+        let wire = layout.encode(map, &file, |_| true);
 
         let rip = wire_offset("rip");
         let rip_bytes: Vec<u8> = wire[rip..rip + 8].iter().map(|b| b.unwrap()).collect();
@@ -415,10 +441,10 @@ mod tests {
         let mut file = vec![0u8; REGISTER_BUFFER_SIZE];
         map.write_u64("rsp", &mut file, 0xffff_8000_0000_1000)
             .unwrap();
-        let layout = Layout::new(Arch::Amd64, map);
+        let layout = Layout::new(Arch::Amd64, map, REGISTER_BUFFER_SIZE);
 
         let mut wire: Vec<u8> = layout
-            .encode(map, &file)
+            .encode(map, &file, |_| true)
             .into_iter()
             .map(|byte| byte.unwrap_or(0xAA))
             .collect();
@@ -439,12 +465,35 @@ mod tests {
     #[test]
     fn optional_registers_the_transport_lacks_are_not_described() {
         let map = Arch::Amd64.register_map();
-        let xml = Layout::new(Arch::Amd64, map).target_xml().to_string();
+        let xml = Layout::new(Arch::Amd64, map, REGISTER_BUFFER_SIZE)
+            .target_xml()
+            .to_string();
         for absent in ["\"fs_base\"", "\"gs_base\"", "\"k_gs_base\""] {
             assert!(!xml.contains(absent), "{absent} described");
         }
         for present in ["\"dr7\"", "\"cr3\"", "\"st0\"", "\"rip\""] {
             assert!(xml.contains(present), "{present} missing");
         }
+    }
+
+    /// A user-mode minidump holds only a `CONTEXT` record: the system
+    /// registers past it are not described, and a register its flags leave
+    /// out reads as unavailable rather than zero.
+    #[test]
+    fn a_context_record_describes_and_reads_only_what_it_holds() {
+        let map = Arch::Amd64.register_map();
+        let layout = Layout::new(Arch::Amd64, map, CONTEXT_SIZE);
+        let xml = layout.target_xml();
+        for absent in ["\"cr0\"", "\"cr3\"", "\"efer\""] {
+            assert!(!xml.contains(absent), "{absent} described");
+        }
+        assert!(xml.contains("\"dr7\""), "dr7 missing");
+
+        let file = vec![0u8; REGISTER_BUFFER_SIZE];
+        let wire = layout.encode(map, &file, |name| name != "ds");
+        let ds = wire_offset("ds");
+        assert!(wire[ds..ds + 4].iter().all(Option::is_none));
+        let rip = wire_offset("rip");
+        assert!(wire[rip..rip + 8].iter().all(Option::is_some));
     }
 }

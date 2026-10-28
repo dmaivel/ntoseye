@@ -169,9 +169,13 @@ fn drive(target: &mut GdbTarget<'_>, client: Client) -> Result<&'static str> {
                     let client = idle.borrow_conn();
                     let (body, raw) = client.read_packet().map_err(connection_error)?;
                     trace_packet("client", "<-", &raw);
-                    match body.strip_prefix(THREADS_XFER) {
-                        Some(window) => {
-                            let reply = target.threads_xfer(window, client.multiprocess);
+                    let reply = match body.strip_prefix(THREADS_XFER) {
+                        Some(window) => Some(target.threads_xfer(window, client.multiprocess)),
+                        None if body == b"?" => target.halt_reply(client.multiprocess),
+                        None => None,
+                    };
+                    match reply {
+                        Some(reply) => {
                             client.reply(&reply).map_err(connection_error)?;
                             GdbStubStateMachine::Idle(idle)
                         }
@@ -371,7 +375,12 @@ impl<'a> GdbTarget<'a> {
         terminating: Arc<AtomicBool>,
     ) -> Self {
         let arch = session.target.arch();
-        let layout = Layout::new(arch, &session.register_map);
+        let held = if session.target.user_dump().is_some() {
+            arch.context_size()
+        } else {
+            arch.register_buffer_size()
+        };
+        let layout = Layout::new(arch, &session.register_map, held);
         let debug_seq = session.read_debug_output(u64::MAX).next_seq;
         let mut target = Self {
             session,

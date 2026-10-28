@@ -52,8 +52,8 @@ const RUN_POLL: Duration = Duration::from_millis(50);
 /// Why a request that needs a target cannot be served.
 const NO_TARGET: &str = "no target is attached; send a launch or attach request";
 
-/// Why a user-mode minidump refuses to run, step, or change.
-const SNAPSHOT: &str = "a user-mode minidump is a static snapshot";
+/// Why a crash dump, kernel or user-mode, refuses to run, step, or change.
+const SNAPSHOT: &str = "a crash dump is a static snapshot";
 
 /// Whether the guest is running, halted, or the client has detached.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -510,25 +510,34 @@ impl Server {
             .is_some_and(|session| session.target.user_dump().is_some())
     }
 
-    /// Refuse `operation` (running, stepping, or a write) on a user-mode
-    /// minidump.
-    fn refuse_on_user_dump(&self, operation: &str) -> result::Result<(), String> {
-        if self.user_dump() {
+    /// Whether the target is a crash dump, kernel or user-mode, which never
+    /// runs or changes.
+    fn dump(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.target.phys.is_dump())
+    }
+
+    /// Refuse `operation` (running, stepping, or a write) on a crash dump.
+    fn refuse_on_dump(&self, operation: &str) -> result::Result<(), String> {
+        if self.dump() {
             return Err(format!("{SNAPSHOT}; {operation} is not available"));
         }
         Ok(())
     }
 
     fn dispatch(&mut self, request: Request) {
-        // A user dump never runs, so no breakpoint can verify; each one the
-        // client asks for is answered unverified, with the reason.
-        if self.user_dump()
+        // A dump never runs, so no breakpoint can verify; each one the
+        // client asks for is answered unverified, with the reason, and the
+        // session's `sx` policy is left as it is.
+        if self.dump()
             && matches!(
                 request.command.as_str(),
                 "setBreakpoints"
                     | "setFunctionBreakpoints"
                     | "setInstructionBreakpoints"
                     | "setDataBreakpoints"
+                    | "setExceptionBreakpoints"
             )
         {
             let result = breakpoints::unverified(
@@ -582,7 +591,7 @@ impl Server {
             "disassemble" => self.on_disassemble(&request.arguments),
             "modules" => self.on_modules(&request.arguments),
             "setExpression" => self
-                .refuse_on_user_dump("setting an expression")
+                .refuse_on_dump("setting an expression")
                 .and(Err("unsupported request 'setExpression'".to_string())),
             other => Err(format!("unsupported request '{other}'")),
         };
@@ -606,7 +615,7 @@ impl Server {
         self.supports_invalidated = arg_bool(args, "supportsInvalidatedEvent").unwrap_or(false);
         let mut capabilities = capabilities();
         // A target named on the command line is already open.
-        if self.user_dump() {
+        if self.dump() {
             merge(&mut capabilities, snapshot_capabilities());
         }
         Ok(Some(capabilities))
@@ -631,7 +640,7 @@ impl Server {
         self.debug_seq = 0;
         // `initialize` advertised a kernel target's capabilities before the
         // target was named.
-        if self.user_dump() {
+        if self.dump() {
             self.send_event(
                 "capabilities",
                 json!({"capabilities": snapshot_capabilities()}),
@@ -791,7 +800,7 @@ fn capabilities() -> Value {
     })
 }
 
-/// What a user-mode minidump changes in [`capabilities`]: it never runs and
+/// What a crash dump changes in [`capabilities`]: it never runs and
 /// cannot be written, so no breakpoint, step granularity, write, or
 /// exception filter applies.
 fn snapshot_capabilities() -> Value {
@@ -827,7 +836,10 @@ fn share_cancel(session: &mut Session, cancel: &Arc<AtomicBool>) {
 /// Build a target spec from `launch`/`attach` arguments. Kernel debugging has
 /// no process to launch, so both requests mean the same thing.
 fn target_spec(args: &Value) -> result::Result<TargetSpec, String> {
-    if let Some(dump) = arg_str(args, "dump") {
+    if let Some(dump) = args.get("dump") {
+        let dump = dump
+            .as_str()
+            .ok_or_else(|| "dump must be the path of a dump file".to_string())?;
         if args.get("kdHandshakeTimeout").is_some() {
             return Err("dump does not use 'kdHandshakeTimeout'".to_string());
         }

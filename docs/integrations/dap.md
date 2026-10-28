@@ -213,6 +213,8 @@ With a Windows [user-mode minidump](../using/dumps.md#user-mode-minidumps), the 
 
 A user-mode minidump never runs and is read-only, so continue and the step requests fail, breakpoints of every type stay unverified, and writes to memory, registers, and variables fail. With `ntoseye dap --dump <file>`, the `initialize` response already leaves out these capabilities; a dump opened by `launch` or `attach` withdraws them with a `capabilities` event.
 
+A kernel crash dump is a static snapshot too, and the adapter treats it the same way: run control fails before it starts, every breakpoint type, exception filters included, stays unverified without changing the {command}`sx` settings, and the same capabilities are withdrawn.
+
 ### Locals, registers, and watches
 
 When the compiler inlines a call, ntoseye shows it as a frame named `[Inline Frame] module!function`, as Visual Studio does. That frame is at the source line of the inlined function, and the frame that contains the inlined call is at the line of the call.

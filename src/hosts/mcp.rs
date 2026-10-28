@@ -39,13 +39,22 @@ use crate::base::error::Error;
 use crate::hosts::repl::{
     RemoteClient, ReplStore, StopWaitBudget, open_session, run_remote_command,
 };
-use crate::session::{RunStatus, Session};
+use crate::session::{COMMAND_THREAD_STACK, RunStatus, Session};
 use crate::{Backend, TargetSpec};
 
 use self::output::OutputStore;
 
 /// The long results of one client's `command` calls, for its `output` calls.
 type SharedOutputs = Arc<std::sync::Mutex<OutputStore>>;
+
+/// The kept outputs, still usable after a call panicked while holding them:
+/// each change to the store leaves it whole, so a poisoned lock holds nothing
+/// half-written.
+fn lock_outputs(outputs: &std::sync::Mutex<OutputStore>) -> std::sync::MutexGuard<'_, OutputStore> {
+    outputs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// The session actor's state: the (`!Send`) session plus the REPL state the
 /// `command` tool keeps between calls (built on first use).
@@ -131,7 +140,8 @@ fn spawn_session(
     let service_pending = Arc::new(AtomicBool::new(false));
     let service_pending_actor = service_pending.clone();
 
-    std::thread::spawn(move || {
+    let actor_thread = std::thread::Builder::new().stack_size(COMMAND_THREAD_STACK);
+    actor_thread.spawn(move || {
         let is_dump = matches!(spec, TargetSpec::Dump(_));
         let mut actor = match open_session(&spec, &mut |line| eprintln!("{line}")) {
             Ok(mut ctx) => {
@@ -164,7 +174,21 @@ fn spawn_session(
         loop {
             match rx.blocking_recv() {
                 Some(Command::Run { job, reply }) => {
-                    let _ = reply.send(job(&mut actor));
+                    // A bug in one tool call must fail that call, not end the
+                    // session and leave its target uncleaned.
+                    let result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&mut actor)))
+                            .unwrap_or_else(|payload| {
+                                let message = payload
+                                    .downcast_ref::<&str>()
+                                    .map(|message| (*message).to_string())
+                                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                                    .unwrap_or_else(|| "unknown panic".to_string());
+                                Err(ToolError::Internal(format!(
+                                    "the request failed: {message}"
+                                )))
+                            });
+                    let _ = reply.send(result);
                 }
                 Some(Command::Service) => {
                     service_pending_actor.store(false, Ordering::Release);
@@ -182,7 +206,7 @@ fn spawn_session(
                 }
             }
         }
-    });
+    })?;
 
     match ready_rx.recv() {
         Ok(Ok(contexts)) => Ok((tx, service_pending, contexts)),
@@ -498,7 +522,7 @@ fn run_command(
     for line in &page.lines {
         text.push_str(&format!("[dbgprint] {}\n", line.text));
     }
-    let mut text = outputs.lock().unwrap().fit(&text);
+    let mut text = lock_outputs(outputs).fit(&text);
     let trailer = user_dump_trailer(&actor.ctx, &remote.status)
         .unwrap_or_else(|| status_trailer(&remote.status));
     text.push_str(&trailer);
@@ -625,10 +649,7 @@ impl NtoseyeMcp {
         }): Parameters<OutputArgs>,
     ) -> Result<CallToolResult, McpError> {
         let to_usize = |value: u64| usize::try_from(value).unwrap_or(usize::MAX);
-        let text = self
-            .outputs
-            .lock()
-            .unwrap()
+        let text = lock_outputs(&self.outputs)
             .read(
                 id,
                 offset.map_or(0, to_usize),
