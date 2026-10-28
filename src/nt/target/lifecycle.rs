@@ -405,9 +405,11 @@ impl Target {
         };
         let memory = guest.ntoskrnl.memory();
         let mut signature = [0u8; 2];
-        memory
-            .read_bytes(guest.ntoskrnl.base_address, &mut signature)
-            .is_ok_and(|()| signature == *b"MZ")
+        kernel_image_still_mapped(
+            memory
+                .read_bytes(guest.ntoskrnl.base_address, &mut signature)
+                .map(|()| signature),
+        )
     }
 
     pub fn rediscovered_kernel_identity_changed(&self) -> Result<bool> {
@@ -449,5 +451,54 @@ impl Target {
             base_address,
             loaded_module_list,
         })
+    }
+}
+
+/// Whether `read`, the first two bytes at the kernel's base, leaves the
+/// image mapped where the session found it. Only the page tables or the
+/// target saying the bytes are not there, or bytes that are not `MZ`, show
+/// it gone. A read the transport did not finish (a KD request that timed
+/// out while a flood of stops kept the target busy, a target that runs)
+/// says nothing about the kernel; taken for a reboot, it rebuilt the
+/// session and forgot the breakpoints still planted in guest memory.
+fn kernel_image_still_mapped(read: Result<[u8; 2]>) -> bool {
+    match read {
+        Ok(signature) => signature == *b"MZ",
+        Err(
+            Error::BadVirtualAddress(_)
+            | Error::BadPhysicalAddress(_)
+            | Error::AddressNotInDump(_)
+            | Error::NotCaptured { .. }
+            | Error::PartialRead(_)
+            | Error::KdStatus { .. },
+        ) => false,
+        Err(_) => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_memory_evidence_shows_the_kernel_image_gone() {
+        assert!(kernel_image_still_mapped(Ok(*b"MZ")));
+        assert!(!kernel_image_still_mapped(Ok([0, 0])));
+        assert!(!kernel_image_still_mapped(Err(Error::BadVirtualAddress(
+            VirtAddr(0xfffff800_00000000)
+        ))));
+        assert!(!kernel_image_still_mapped(Err(Error::BadPhysicalAddress(
+            0x1_0000_0000
+        ))));
+        assert!(!kernel_image_still_mapped(Err(Error::KdStatus {
+            ntstatus: 0xc000_0001,
+            api: 0x3130,
+        })));
+        assert!(kernel_image_still_mapped(Err(Error::Kd(
+            "KD request timed out after 5s".into()
+        ))));
+        assert!(kernel_image_still_mapped(Err(Error::TargetRunning(
+            "a read"
+        ))));
     }
 }

@@ -106,6 +106,7 @@ Keeping this file:
 - On ARM64, `p`, `gu`, `pa`, `pc`, `pt` and `wt` over a call to `__security_push_cookie`, which nearly every function with a stack cookie makes in its prologue, end where they should, where they ran on until interrupted, and `wt` no longer nests the caller's later calls under it.
 - On the `gdb` backend, a deferred `bu /p` is refused with the user-space reason that suggests `ba e1`, where it said the backend could not plant breakpoints at all.
 - On the `gdb` backend, `ba e` in a WOW64 process's 32-bit code is refused: when such a breakpoint fired while the other vCPUs ran, QEMU paused the VM with an internal error and the guest had to be reset.
+- A KD request that times out while the session checks the kernel image (as during a Ctrl+C into a flood of breakpoint hits) no longer reads as a guest reboot, which rebuilt the session, forgot the step's breakpoint still planted in guest memory, and left the guest halted at exit.
 
 ## v0.52.0 (2026-10-25)
 
