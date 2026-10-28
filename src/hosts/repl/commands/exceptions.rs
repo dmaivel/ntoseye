@@ -134,8 +134,11 @@ fn module_event_label(mode: ExceptionPolicyMode) -> &'static str {
 /// continue with no output. A named filter has precedence over bare `ld` or
 /// `ud`. The load filters apply to the user-mode images processes map too:
 /// while one can name a DLL, ntoseye traps nt!PsCallImageNotifyRoutines,
-/// which runs for every image a process maps. Over KD with the ksl global
-/// flag set (!gflag +ksl), the unload filters apply to user-mode images.
+/// which runs for every image a process maps. On ARM64 the kernel reaches it
+/// only for a new process's executable and ntdll, so set !gflag +ksl there
+/// for later DLL loads (Windows then reports each image's first mapping).
+/// Over KD with the ksl global flag set, the unload filters apply to
+/// user-mode images.
 // The forms are SDK-only: the line's grammar (`-c`, `-f` and the event in
 // any order, `ld:<module>`) has no form words, so `sxe` parses it and calls
 // the operation the event names.

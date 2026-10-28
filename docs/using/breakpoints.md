@@ -184,6 +184,10 @@ On the `gdb` backend, `ntoseye` plants an unload trap the same way as the load t
 
 `sxe ld:mydll` stops when a process maps `mydll.dll`, and `sxn ld` shows a `ModLoad:` line for each user-mode image as well as each kernel image. Windows reports user-mode images to a kernel debugger only while the `ksl` global flag is set, and then only for the first process that maps each image. `ntoseye` therefore sets its own trap, the user-image trap, at `nt!PsCallImageNotifyRoutines`, which the kernel runs for every image that it maps into every process. The trap works on KD, KDNET, and the `gdb` backend.
 
+:::{note}
+On ARM64 (seen on Windows 11 22631), the kernel calls the image-load notify routines inline when it maps a DLL and reaches `nt!PsCallImageNotifyRoutines` only for the images a new process starts with: its executable and `ntdll.dll`. The trap therefore does not see later DLL loads there, and neither `sxe ld:mydll` nor a deferred `bu /p <pid> mydll!...` fires for them. Set {command}`!gflag` `+ksl` instead: Windows then reports user-mode images itself, and the `ld` filters and deferred breakpoints apply to its reports as they do to the trap's. It reports only the first process that maps each image, so a DLL that some process already has loaded is not reported again; load it from a path no process uses yet, or start the process before the DLL is loaded anywhere. Clear the flag afterwards with {command}`!gflag` `-ksl`.
+:::
+
 The trap is in place only while something waits for a user-mode load: a deferred breakpoint scoped to a process, or an `ld` filter that can name a DLL, which is bare `ld` or a filter for any module that is not a `.sys` driver. `ntoseye` sets the trap when the target resumes and says so, and it removes the trap at the first resume after which nothing waits. While the trap is in place, every image that any process maps halts the target briefly, so starting a process takes noticeably longer.
 
 Windows maps some images more than once: the loader can map a DLL again, and an image can be mapped for its resources. `ntoseye` reports each mapping.
