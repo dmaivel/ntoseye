@@ -416,12 +416,14 @@ pub struct PendingWalk {
     pub sites: Vec<(VirtAddr, Option<StepFrame>)>,
 }
 
-/// A run to an address that followed a thread and was handed back running
-/// (see [`Session::run_to_any`]): its later waits still check that the
-/// thread can reach its sites, as the run itself did.
+/// A run to an address that was handed back running (see
+/// [`Session::run_to_any`]): the stop a later wait collects ends it and
+/// takes its sites out, and while it runs on, the waits still check that
+/// the thread it follows can reach them, as the run itself did.
 #[derive(Debug, Clone)]
 pub struct HandedBackRun {
-    pub thread: ThreadScope,
+    /// The thread it follows, if any.
+    pub thread: Option<ThreadScope>,
     /// The temporary sites it armed.
     pub sites: Vec<u32>,
     /// When the thread was last found alive.

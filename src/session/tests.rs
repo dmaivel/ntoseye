@@ -4331,7 +4331,8 @@ fn a_cancelled_run_to_is_an_interrupt_stop() {
 }
 
 /// The same run handed back running (a remote client's budget) leaves its
-/// site armed, for a later wait to stop at.
+/// site armed, for a later wait to stop at; that stop ends the run and
+/// takes the site out, or it went on stopping the thread there for good.
 #[test]
 fn a_run_to_handed_back_running_leaves_its_site_armed() {
     let mut backend = MockBackend {
@@ -4341,6 +4342,8 @@ fn a_run_to_handed_back_running_leaves_its_site_armed() {
         ..MockBackend::default()
     };
     backend.set("rip", 0x1010);
+    backend.queue_interrupt(breakpoint_event(0x1040));
+    let sites = Arc::clone(&backend.site_writes);
     let mut session = stepping_session(&[0x90u8; 0x80], backend);
     session.current_thread = "p01.01".into();
 
@@ -4354,6 +4357,15 @@ fn a_run_to_handed_back_running_leaves_its_site_armed() {
         .unwrap();
     assert!(matches!(outcome, RunOutcome::Running));
     assert_eq!(session.breakpoints.list().len(), 1);
+
+    let RunOutcome::Stopped(_) = session
+        .run(Motion::Break, &Cancel::within(Duration::from_millis(50)))
+        .unwrap()
+    else {
+        panic!("the break-in reported Running");
+    };
+    assert!(session.breakpoints.list().is_empty());
+    assert_eq!(sites.lock().last(), Some(&(0x1040, false)));
 }
 
 /// A stop's report takes the module traps in its window out of the

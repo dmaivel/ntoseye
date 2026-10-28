@@ -1067,8 +1067,8 @@ impl Session {
         if matches!(outcome, Ok(ContinueOutcome::Running)) {
             if cancel.behavior == CancelBehavior::ReturnRunning {
                 // The waits that go on with it check on its thread instead.
-                self.handed_back_run = followed.map(|thread| HandedBackRun {
-                    thread,
+                self.handed_back_run = Some(HandedBackRun {
+                    thread: followed,
                     sites: temporary,
                     checked: Instant::now(),
                 });
@@ -1268,8 +1268,10 @@ impl Session {
         if run.checked.elapsed() < FOLLOW_CHECK {
             return Ok(());
         }
+        let Some(thread) = run.thread.clone() else {
+            return Ok(());
+        };
         run.checked = Instant::now();
-        let thread = run.thread.clone();
         let now = self.target.thread_info_from_ethread(thread.ethread);
         if !now.is_ok_and(|now| thread.exited(&now)) {
             return Ok(());
@@ -1288,6 +1290,17 @@ impl Session {
         }
         self.remove_temporary(&sites);
         Err(followed_thread_exited(&thread))
+    }
+
+    /// End a run handed back running (see [`HandedBackRun`]) at the stop a
+    /// later wait surfaced, which is its own (one of its sites fired) or one
+    /// that ended it elsewhere: its sites come out, as a run waited on to
+    /// the end takes them out. Left armed, a site went on stopping the
+    /// thread at the return of every later call there.
+    pub(super) fn end_handed_back_run(&mut self) {
+        if let Some(run) = self.handed_back_run.take() {
+            self.remove_temporary(&run.sites);
+        }
     }
 
     /// Enable `sites` (`armed`) or disable them.

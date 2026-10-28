@@ -110,6 +110,7 @@ Keeping this file:
 - On the `gdb` backend, `p` over a call, `gu` and the other runs to an address in user code take a free hardware breakpoint slot for the run, where they ended with an error.
 - `r` shows pseudo-registers (`r $proc`, `r $peb, rip`), as WinDbg does, where only `$t0`-`$t19` worked and the rest were "not found".
 - GDB server: a reply that takes longer than gdb's `remotetimeout` (a `monitor` command loading symbols) no longer drops the client: gdb's `-` for the late reply is ignored, as the protocol requires in no-acknowledgment mode, where gdbstub ended the session.
+- A run to an address handed back running (MCP `gu` or `p` over a call past `timeout_ms`, a DAP step) takes its temporary breakpoint out at the stop a later call collects, where it stayed in `bl` as a breakpoint on the thread and stopped it at that return again on every later `g`.
 
 ## v0.52.0 (2026-10-25)
 

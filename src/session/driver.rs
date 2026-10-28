@@ -483,11 +483,14 @@ impl Session {
                 self.check_handed_back_run()?;
                 return Ok(RunOutcome::Running);
             }
-            self.handed_back_run = None;
             if !fresh {
-                return Ok(RunOutcome::Stopped(self.current_snapshot(outcome)));
+                let stop = self.current_snapshot(outcome);
+                self.end_handed_back_run();
+                return Ok(RunOutcome::Stopped(stop));
             }
             self.note_stop(&outcome);
+            // Described (a site of the run's own reads as a step) before the
+            // run's sites come out.
             let stop = self.current_snapshot(outcome);
             // The action runs for every breakpoint stop. A halt that was
             // asked for (`Motion::Break`, a cancellation that halts, Ctrl+C)
@@ -504,6 +507,7 @@ impl Session {
                 motion = self.decline(motion, &stepping)?;
                 continue;
             }
+            self.end_handed_back_run();
             return Ok(RunOutcome::Stopped(stop));
         }
     }

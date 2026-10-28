@@ -27,7 +27,7 @@ The `command` tool works like a WinDbg prompt, with one difference: a call never
 - {command}`break` interrupts a running target. On a halted target it does nothing and says so, so `break; bp ...; g` works in either state.
 - A command that reports an error ends its line: the rest does not run, and the result names it. This keeps `bp ...; g` from resuming the guest when the breakpoint failed. A result that contains an error, or a command that ntoseye did not run, is marked as an error (`isError`).
 - A stop can occur between calls, for example when the guest hits a breakpoint while the agent thinks, and the next result shows that stop at the top. If that next call is a resuming command, ntoseye does not run it in this call, so the agent sees the stop before the target continues past it.
-- A multi-step command ({command}`pa`, {command}`pt`, {command}`gu`, {command}`wt`) can take longer than the time limit. The target then keeps running to its next stop, and the next command that needs a halted target collects that stop.
+- A command can take longer than the time limit. A run to an address ({command}`gu`, {command}`p` over a call, `g <address>`) then keeps the target running to its next stop, and the next command that needs a halted target collects that stop, which ends the run and removes its temporary breakpoint. A walk that steps one instruction at a time ({command}`pa`, {command}`pt`, {command}`pc`, {command}`tc`, {command}`wt`) instead stops where it got to and reports that stop; {command}`wt` lists the calls it traced so far.
 - An empty `line` runs no command and only waits.
 
 ### How stops look
