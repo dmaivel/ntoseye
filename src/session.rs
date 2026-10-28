@@ -445,10 +445,16 @@ pub enum StepStack {
 /// Architecture-neutral summary of the instruction at the program counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CurrentInstruction {
+    /// The program counter.
+    pub ip: u64,
     /// Whether the instruction is a call (`call` on AMD64, `bl`/`blr` on ARM64).
     pub is_call: bool,
+    /// A direct call's target.
+    pub call_target: Option<u64>,
     /// Address of the following instruction.
     pub next_ip: u64,
+    /// The page-table root the code was read through.
+    pub code_dtb: u64,
 }
 
 /// How a stop landed relative to our breakpoints, decided by

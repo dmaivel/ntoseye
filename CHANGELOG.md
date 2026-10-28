@@ -102,6 +102,7 @@ Keeping this file:
 - DAP: `next`, `stepIn` and `stepOut` are answered at once with a `continued` event, so the editor shows the thread running, other requests are answered and Pause ends a long step; a step whose thread exits ends with a `step` stop that says so.
 - GDB server: when a client leaves and one of its breakpoints cannot be removed, the guest stays halted and the failure is reported, as with `q` and a DAP disconnect, where it resumed the guest.
 - On ARM64 over KD, `ba` stops: its controls asked for matching that a processor without EL2 never does, the breakpoint exception Windows raises for a hardware hit was resumed as a stale breakpoint, and the slots offered were the eight the CONTEXT holds rather than the processor's own (six execute slots on a typical guest).
+- On ARM64, `p`, `gu`, `pa`, `pc`, `pt` and `wt` over a call to `__security_push_cookie`, which nearly every function with a stack cookie makes in its prologue, end where they should, where they ran on until interrupted, and `wt` no longer nests the caller's later calls under it.
 
 ## v0.52.0 (2026-10-25)
 

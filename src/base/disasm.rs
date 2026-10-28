@@ -83,6 +83,17 @@ pub fn instruction_length(bytes: &[u8], machine: CodeMachine) -> Option<usize> {
     decode_first(bytes, machine).map(|(length, _)| length)
 }
 
+/// The target of a direct jump or call whose only operand is its target
+/// (`jne`, `call`, `b`, `bl`), from its `operands`.
+pub fn direct_branch_target(operands: &[DisasmOperand]) -> Option<u64> {
+    match operands {
+        [operand] if operand.kind == OperandKind::Branch => {
+            operand.immediate.map(|target| target as u64)
+        }
+        _ => None,
+    }
+}
+
 /// End of a branch-free instruction range starting at `start`.
 /// Input bytes must have debugger breakpoint opcodes masked out.
 pub fn fallthrough_run_end(

@@ -5,7 +5,9 @@
 
 use owo_colors::OwoColorize;
 
-use crate::base::disasm::{AsmKind, DisasmRow, OperandKind, decode_code, decode_preceding};
+use crate::base::disasm::{
+    AsmKind, DisasmRow, decode_code, decode_preceding, direct_branch_target,
+};
 use crate::base::memory::{MemoryOps, read_page_chunks};
 use crate::base::output::strip_ansi;
 use crate::base::types::VirtAddr;
@@ -121,7 +123,7 @@ pub fn listing_lines(
         .enumerate()
         .map(|(index, row)| {
             let away = away[index];
-            match (direct_target(row), row.jump()) {
+            match (direct_branch_target(&row.operands()), row.jump()) {
                 (Some(target), Some(_)) => {
                     let label = match away {
                         Some(_) => format!("{} {}", arrow(index, target), symbol(target)),
@@ -377,18 +379,6 @@ fn gutter(arcs: &[Arc], rows: usize, max_lanes: usize) -> (Vec<String>, Vec<Stri
         .collect();
     let between = gaps.iter().map(|gap| lanes_text(gap) + " ").collect();
     (lines, between, unplaced)
-}
-
-/// The target of a direct jump or call whose only operand is its target
-/// (`jne`, `call`, `b`, `bl`), the instructions whose text can name it in
-/// place of its address.
-fn direct_target(row: &DisasmRow) -> Option<u64> {
-    match row.operands().as_slice() {
-        [operand] if operand.kind == OperandKind::Branch => {
-            operand.immediate.map(|target| target as u64)
-        }
-        _ => None,
-    }
 }
 
 /// The instruction's mnemonic and prefixes, styled, with the spacing before

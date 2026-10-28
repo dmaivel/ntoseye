@@ -15,7 +15,7 @@ use crate::backend::dbg_backend::{
     ContinueDisposition, DebugBackend, STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent, clear_trap_flag,
     processor_index_from_backend_thread_id,
 };
-use crate::base::disasm::{ControlFlow, classify, decode_first};
+use crate::base::disasm::{ControlFlow, classify, decode_first, direct_branch_target};
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::notice::Notice;
@@ -343,9 +343,15 @@ impl Session {
         let machine = self.target.executing_machine(VirtAddr(pc));
         let (length, flow) = decode_first(&bytes, machine)
             .ok_or_else(|| Error::DebugInfo(format!("failed to decode instruction at {pc:#x}")))?;
+        let is_call = flow == ControlFlow::Call;
         Ok(CurrentInstruction {
-            is_call: flow == ControlFlow::Call,
+            ip: pc,
+            is_call,
+            call_target: is_call
+                .then(|| direct_branch_target(&machine.instruction_set().operands(&bytes, pc)))
+                .flatten(),
             next_ip: machine.code_address(pc.wrapping_add(length as u64)),
+            code_dtb,
         })
     }
 
@@ -830,8 +836,10 @@ impl Session {
         let walked = windows_thread_on_backend_thread(&self.target, &self.current_thread)
             .map(|thread| ThreadScope::new(&thread));
         let run_cancel = cancel.with_behavior(CancelBehavior::Halt);
-        // Each open frame with the stack pointer it was entered with.
-        let mut stack = vec![(frame(name(&self.target, &current)), current.sp)];
+        // Each open frame with the stack pointer it was entered with: none
+        // for one of the [`STACK_MOVING_HELPERS`], whose `ret` closes it
+        // wherever it leaves the stack.
+        let mut stack = vec![(frame(name(&self.target, &current)), Some(current.sp))];
         let mut instructions = 0usize;
         let arch = self.target.arch();
         // The user breakpoint the trace ended at, whose action runs then.
@@ -895,15 +903,19 @@ impl Session {
             let (open, entry_sp) = stack.last_mut().expect("the traced function's frame");
             open.instructions += 1;
             if current.flow == ControlFlow::Call {
-                stack.push((frame(name(&self.target, &next)), next.sp));
+                let callee = name(&self.target, &next);
+                let entry_sp = (!is_stack_moving_helper(&callee)).then_some(next.sp);
+                stack.push((frame(callee), entry_sp));
             } else if current.flow == ControlFlow::Ret
-                && (next.sp > *entry_sp || (!arch.return_pops_address() && next.sp >= *entry_sp))
+                && entry_sp.is_none_or(|entry_sp| {
+                    next.sp > entry_sp || (!arch.return_pops_address() && next.sp >= entry_sp)
+                })
             {
                 let (completed, _) = stack.pop().expect("an open frame");
                 match stack.last_mut() {
                     Some((parent, _)) => parent.children.push(completed),
                     None => {
-                        stack.push((completed, 0));
+                        stack.push((completed, None));
                         break CallTraceEnd::Returned;
                     }
                 }
@@ -963,19 +975,33 @@ impl Session {
             // frame. No floor then tells the call's return from a recursive
             // call's, and the thread alone decides.
             StepStack::CallReturn if self.pc_runs_x86()? => None,
+            // So does a call to one of the [`STACK_MOVING_HELPERS`], and a
+            // return from inside one.
             StepStack::CallReturn | StepStack::FunctionReturn => {
-                let registers = self.read_registers()?;
-                stack_pointer(self.target.arch(), &self.register_map, &registers).map(|sp| {
-                    // A popping `ret` leaves the stack above where the callee
-                    // found it; a register `ret` leaves it in place.
-                    if stack == StepStack::FunctionReturn
-                        && self.target.arch().return_pops_address()
-                    {
-                        sp + 1
-                    } else {
-                        sp
-                    }
-                })
+                let instruction = self.current_instruction()?;
+                let helper = match stack {
+                    StepStack::CallReturn => instruction.call_target,
+                    _ => Some(instruction.ip),
+                };
+                if helper.is_some_and(|address| {
+                    try_format_symbol_at(&self.target, instruction.code_dtb, address)
+                        .is_some_and(|symbol| is_stack_moving_helper(&symbol))
+                }) {
+                    None
+                } else {
+                    let registers = self.read_registers()?;
+                    stack_pointer(self.target.arch(), &self.register_map, &registers).map(|sp| {
+                        // A popping `ret` leaves the stack above where the
+                        // callee found it; a register `ret` leaves it in place.
+                        if stack == StepStack::FunctionReturn
+                            && self.target.arch().return_pops_address()
+                        {
+                            sp + 1
+                        } else {
+                            sp
+                        }
+                    })
+                }
             }
         };
         Ok(Some(StepFrame {
@@ -1547,6 +1573,22 @@ pub struct FollowWatch {
 /// Running. A state that could not be read counts, so the sites stay armed.
 fn about_to_run(state: Option<u8>) -> bool {
     state.is_none_or(|state| matches!(state, KTHREAD_STATE_RUNNING | KTHREAD_STATE_STANDBY))
+}
+
+/// Helpers a call returns from with the stack pointer below where the call
+/// left it, so their return cannot be told from a recursive call's by the
+/// stack pointer: ARM64's `__security_push_cookie` stores the caller's
+/// stack cookie on the stack, where the caller's epilogue
+/// (`__security_pop_cookie`) takes it back.
+const STACK_MOVING_HELPERS: &[&str] = &["__security_push_cookie"];
+
+/// Whether `symbol` (`module!name+offset`) is in one of the
+/// [`STACK_MOVING_HELPERS`], under its own name or, in an ARM64X image, as
+/// the `#`-prefixed name of its native ARM64 code.
+fn is_stack_moving_helper(symbol: &str) -> bool {
+    let name = symbol.split_once('!').map_or(symbol, |(_, name)| name);
+    let name = name.split_once('+').map_or(name, |(name, _)| name);
+    STACK_MOVING_HELPERS.contains(&name.strip_prefix('#').unwrap_or(name))
 }
 
 /// The error a run following `thread` ends with when the thread exited.
@@ -2730,5 +2772,17 @@ mod tests {
         assert!(!spent.gives_up(false, true), "a handler in the hypervisor");
         let late = release_that_ran(RELEASE_BUDGET + RELEASE_GRACE);
         assert!(late.gives_up(false, true), "past the grace");
+    }
+
+    /// A call to `__security_push_cookie` returns with the stack moved,
+    /// in the kernel and, under its native-code name, in an ARM64X DLL.
+    #[test]
+    fn the_cookie_helper_is_known_by_its_names_and_offsets() {
+        assert!(is_stack_moving_helper("nt!__security_push_cookie"));
+        assert!(is_stack_moving_helper("nt!__security_push_cookie+0x8"));
+        assert!(is_stack_moving_helper("kernelbase!#__security_push_cookie"));
+        assert!(!is_stack_moving_helper("nt!__security_pop_cookie"));
+        assert!(!is_stack_moving_helper("nt!__security_push_cookie_ex"));
+        assert!(!is_stack_moving_helper("nt!NtQueryFullAttributesFile+0x14"));
     }
 }
