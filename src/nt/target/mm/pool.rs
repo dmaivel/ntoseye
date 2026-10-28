@@ -53,7 +53,12 @@ impl Target {
             .iter()
             .enumerate()
             .map(|(block_index, block)| {
-                pool_block_detail(block, index == Some(block_index), address)
+                pool_block_detail(
+                    block,
+                    index == Some(block_index),
+                    address,
+                    layout.header_pool,
+                )
             })
             .collect::<Vec<_>>();
         let big = if index.is_none() {
@@ -151,7 +156,7 @@ impl Target {
                 .iter()
                 .map(|block| {
                     let marked = (block.header.0..block.header.0 + block.size).contains(&address.0);
-                    pool_block_detail(block, marked, address)
+                    pool_block_detail(block, marked, address, layout.header_pool)
                 })
                 .collect(),
             problem,
@@ -231,8 +236,9 @@ impl Target {
                             size: block.size,
                             tag: block.tag,
                             tag_name: tag_string(block.tag),
-                            allocated: pool_block_state(&block) != PoolBlockState::Free,
-                            state: pool_block_state(&block),
+                            allocated: pool_block_state(&block, layout.header_pool)
+                                != PoolBlockState::Free,
+                            state: pool_block_state(&block, layout.header_pool),
                             pool_type: layout
                                 .header_pool
                                 .and_then(|encoding| header_pool_type(block.pool_type, encoding)),
@@ -500,8 +506,13 @@ fn segment_heap_header(header: &PoolHeader) -> bool {
         && tag_looks_printable(header.tag)
 }
 
-fn pool_block_detail(block: &PoolHeader, marked: bool, target: VirtAddr) -> PoolBlockDetail {
-    let state = pool_block_state(block);
+fn pool_block_detail(
+    block: &PoolHeader,
+    marked: bool,
+    target: VirtAddr,
+    encoding: Option<HeaderPoolEncoding>,
+) -> PoolBlockDetail {
+    let state = pool_block_state(block, encoding);
     PoolBlockDetail {
         header: block.header,
         body: block.body,

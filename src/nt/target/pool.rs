@@ -1120,12 +1120,17 @@ pub fn plausible_pool_tag(tag: u32) -> bool {
 
 /// A block's state: an LFH block's as its subsegment's bitmap has it; any
 /// other's from its header, free where the scan found none or the tag says
-/// `Free`, and allocated where the tag reads (unverified where it does not).
-pub fn pool_block_state(h: &PoolHeader) -> PoolBlockState {
+/// `Free` or where `encoding` holds the pool type plus one and the header's
+/// is 0 (which names no pool, so the block was freed), and allocated where
+/// the tag reads (unverified where it does not).
+pub fn pool_block_state(h: &PoolHeader, encoding: Option<HeaderPoolEncoding>) -> PoolBlockState {
     match h.lfh_busy {
         Some(true) => PoolBlockState::Allocated,
         Some(false) => PoolBlockState::Free,
         None if h.synthetic_free || h.tag == POOL_FREE_TAG => PoolBlockState::Free,
+        None if h.pool_type == 0 && encoding.is_some_and(|encoding| encoding.plus_one) => {
+            PoolBlockState::Free
+        }
         None if tag_looks_printable(h.tag) => PoolBlockState::Allocated,
         None => PoolBlockState::AllocatedUnverified,
     }
@@ -1265,6 +1270,26 @@ fn pool_tag_in(layout: &PoolLayout, bytes: &[u8]) -> Option<u32> {
 }
 
 pub fn pool_header_plausible(layout: &PoolLayout, h: &PoolHeader) -> bool {
+    pool_header_fits(layout, h) && pool_header_tagged(h)
+}
+
+/// Whether `h`'s tag reads as one, or its header is a cleared free one.
+fn pool_header_tagged(h: &PoolHeader) -> bool {
+    plausible_pool_tag(h.tag) || (h.pool_type == 0 && h.previous_size == 0)
+}
+
+/// Whether `h` is the header of the block that follows `before`, by its
+/// PreviousSize. A free fragment too small for a list entry keeps stale
+/// bytes where its tag goes (Windows XP x64 splits them off an allocation's
+/// tail), so this is what vouches for it.
+fn pool_header_chained(before: &PoolHeader, h: &PoolHeader) -> bool {
+    h.previous_size != 0
+        && h.previous_size == before.size
+        && before.header.0.checked_add(before.size) == Some(h.header.0)
+}
+
+/// Whether `h`'s block is at least a header long and ends on its page.
+fn pool_header_fits(layout: &PoolLayout, h: &PoolHeader) -> bool {
     let Some(end) = h
         .header
         .0
@@ -1276,7 +1301,6 @@ pub fn pool_header_plausible(layout: &PoolLayout, h: &PoolHeader) -> bool {
     h.size >= layout.header_size
         && h.size <= POOL_PAGE_SIZE
         && (h.header.0 & !(POOL_PAGE_SIZE - 1)) == (end & !(POOL_PAGE_SIZE - 1))
-        && (plausible_pool_tag(h.tag) || (h.pool_type == 0 && h.previous_size == 0))
 }
 
 pub fn try_pool_header_lax(
@@ -1299,11 +1323,16 @@ pub fn walk_pool_page_lax(
     let mut blocks = Vec::new();
     let mut addr = base;
     while addr.0 < page_end && !debugger.interrupted() {
-        if let Some(h) = try_pool_header_lax(debugger, layout, addr).filter(|h| {
-            h.header
-                .0
-                .checked_add(h.size)
-                .is_some_and(|end| end <= page_end)
+        if let Some(h) = parse_pool_header(debugger, layout, addr).filter(|h| {
+            pool_header_fits(layout, h)
+                && (pool_header_tagged(h)
+                    || blocks
+                        .last()
+                        .is_some_and(|before| pool_header_chained(before, h)))
+                && h.header
+                    .0
+                    .checked_add(h.size)
+                    .is_some_and(|end| end <= page_end)
         }) {
             let Some(next) = addr.0.checked_add(h.size) else {
                 break;
@@ -1371,18 +1400,27 @@ pub fn pool_header_candidates(layout: &PoolLayout, base: VirtAddr, page: &[u8]) 
     let Some(page_end) = base.0.checked_add(page.len() as u64) else {
         return Vec::new();
     };
-    (0..page.len() as u64)
+    let mut candidates: Vec<PoolHeader> = Vec::new();
+    for h in (0..page.len() as u64)
         .step_by(POOL_ALIGN as usize)
-        .filter_map(|offset| {
-            pool_header_in(layout, base + offset, &page[offset as usize..]).filter(|h| {
-                pool_header_plausible(layout, h)
-                    && h.header
-                        .0
-                        .checked_add(h.size)
-                        .is_some_and(|end| end <= page_end)
-            })
+        .filter_map(|offset| pool_header_in(layout, base + offset, &page[offset as usize..]))
+        .filter(|h| {
+            pool_header_fits(layout, h)
+                && h.header
+                    .0
+                    .checked_add(h.size)
+                    .is_some_and(|end| end <= page_end)
         })
-        .collect()
+    {
+        if pool_header_tagged(&h)
+            || candidates
+                .iter()
+                .any(|before| pool_header_chained(before, &h))
+        {
+            candidates.push(h);
+        }
+    }
+    candidates
 }
 
 /// [`scan_pool_page_lax`] of the page at `base` already read into `page`.
@@ -2089,6 +2127,56 @@ mod tests {
         );
     }
 
+    /// Windows XP x64 splits a 16-byte free fragment off an allocation's
+    /// tail without a tag (the bytes there are stale), and clears a freed
+    /// block's pool type to 0, which in its plus-one encoding names no pool.
+    /// The fragment's PreviousSize chains it to the block before, so it is a
+    /// block of the page, and both read as free.
+    #[test]
+    fn a_tagless_fragment_chained_to_the_block_before_is_a_free_block() {
+        let mut page = vec![0u8; POOL_PAGE_SIZE as usize];
+        put_header(&mut page, 0, 0x450, 5, b"Thre");
+        page[0x450..0x458].copy_from_slice(&[0x45, 0, 1, 0, 0xd0, 0x64, 0xdd, 0x01]);
+        put_header(&mut page, 0x460, 0x60, 5, b"Vad ");
+        page[0x460] = 1;
+        put_header(&mut page, 0x4c0, 0x20, 0, b"Wait");
+        page[0x4c0] = 6;
+        let xp = PoolLayout {
+            header_pool: Some(HeaderPoolEncoding {
+                paged_pool: 1,
+                plus_one: true,
+            }),
+            ..layout(None)
+        };
+        let listed: Vec<(u64, u64, PoolBlockState)> = pool_page_blocks(&xp, BASE, &page)
+            .iter()
+            .take(4)
+            .map(|block| {
+                (
+                    block.header.0 - BASE.0,
+                    block.size,
+                    pool_block_state(block, xp.header_pool),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (0, 0x450, PoolBlockState::Allocated),
+                (0x450, 0x10, PoolBlockState::Free),
+                (0x460, 0x60, PoolBlockState::Allocated),
+                (0x4c0, 0x20, PoolBlockState::Free),
+            ]
+        );
+        // Unchained, the same bytes are data, not a header.
+        page[0x450] = 0x44;
+        assert!(
+            pool_page_blocks(&xp, BASE, &page)
+                .iter()
+                .all(|block| block.header.0 - BASE.0 != 0x450 || block.synthetic_free)
+        );
+    }
+
     /// A page that begins an LFH subsegment: its header and bitmap, whose
     /// counts can read as a header, are no block; the blocks run from the
     /// first one, each busy or free as the bitmap says, though a freed one
@@ -2119,7 +2207,13 @@ mod tests {
         let listed = |subsegment: &PoolLfhSubsegment| -> Vec<(u64, u64, PoolBlockState)> {
             lfh_page_blocks(&layout(None), subsegment, BASE, &page)
                 .iter()
-                .map(|block| (block.header.0 - BASE.0, block.size, pool_block_state(block)))
+                .map(|block| {
+                    (
+                        block.header.0 - BASE.0,
+                        block.size,
+                        pool_block_state(block, None),
+                    )
+                })
                 .collect()
         };
         let expected: Vec<(u64, u64, PoolBlockState)> = starts

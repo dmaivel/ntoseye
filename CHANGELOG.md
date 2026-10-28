@@ -83,6 +83,7 @@ Keeping this file:
 - `!vm` on Windows 8.1 and older reads the system-PTE counts the build keeps (XP x64 showed 868605598094041 free PTEs), lists each paging file's size and use, and leaves out the counters a build lacks instead of listing them as not found.
 - `!process <process> 7` shows `VadRoot`'s root VAD and the number of VADs on Windows 7, Vista and XP x64, and quota usage on Vista and XP x64, where they showed `-`; `!peb` leaves out fields the build lacks instead of listing them as unavailable.
 - `!heap -x` gives a free block's user size without its header, and `!vad` names large-page section, physical and rotate views, where it showed `vad:7`.
+- `!pool` and `!poolval` on Windows XP x64 take a 16-byte free fragment whose PreviousSize chains it to the block before as a block, though its tag holds stale bytes, and list a block whose pool type is 0 as free; `!poolval` called a third of nonpaged pages invalid.
 
 ## v0.52.0 (2026-10-25)
 
