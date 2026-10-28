@@ -113,10 +113,16 @@ impl EprocessSpan {
 
 impl Guest {
     pub fn enumerate_processes(&self) -> Result<Vec<ProcessInfo>> {
-        self.memoized(|memo| &mut memo.processes, || self.walk_processes())
+        self.memoized(
+            |memo| &mut memo.processes,
+            || self.walk_processes().map(|(processes, _)| processes),
+        )
     }
 
-    fn walk_processes(&self) -> Result<Vec<ProcessInfo>> {
+    /// The active processes, and whether the walk read the whole list: a
+    /// process that cannot be read, or a root of 0 that ends the walk early,
+    /// leaves processes out of a list that is still returned.
+    fn walk_processes(&self) -> Result<(Vec<ProcessInfo>, bool)> {
         let memory = self.ntoskrnl.memory();
         let mut span = EprocessSpan::new(self)?;
 
@@ -134,6 +140,7 @@ impl Guest {
         let mut processes = Vec::new();
         let mut reached = HashSet::new();
         let mut broken = None;
+        let mut complete = true;
 
         // Cycle detection handles a corrupt list that loops; the cap handles
         // one that wanders through unrelated memory without repeating.
@@ -145,6 +152,7 @@ impl Guest {
                 break;
             }
             if span.dtb() == 0 {
+                complete = false;
                 break;
             }
             reached.insert(current_eprocess + span.active_process_links_offset);
@@ -161,6 +169,7 @@ impl Guest {
         // A process that cannot be read ends the walk forward; the ones past
         // it are found backward from the list head, and only its is missing.
         if let Some(error) = broken {
+            complete = false;
             if let Some(head) = ps_active_process_head {
                 let tail = links_back_to(head, &reached, PROCESS_WALK_LIMIT, |link| {
                     memory.read_pointer(link + blink_offset)
@@ -177,7 +186,7 @@ impl Guest {
             }
         }
 
-        Ok(processes)
+        Ok((processes, complete))
     }
 
     /// The process whose `_EPROCESS` at `eprocess` `span` has just read.
@@ -206,9 +215,12 @@ impl Guest {
     /// `ExitTime` set, its threads gone and its user address space torn down
     /// or about to be. An error when the list or the process cannot be read,
     /// which says nothing either way; an empty list was not read either,
-    /// since every system has its System process.
+    /// since every system has its System process. Absence counts only from
+    /// a list read whole, so this walks the list afresh rather than taking
+    /// the halt's cached one, which a walk with an unreadable process left
+    /// short.
     pub fn process_exited(&self, pid: u64, dtb: Dtb) -> Result<bool> {
-        let processes = self.enumerate_processes()?;
+        let (processes, complete) = self.walk_processes()?;
         if processes.is_empty() {
             return Ok(false);
         }
@@ -216,7 +228,13 @@ impl Guest {
             .into_iter()
             .find(|process| process.pid == pid && process.dtb == dtb)
         else {
-            return Ok(true);
+            return if complete {
+                Ok(true)
+            } else {
+                Err(Error::DebugInfo(format!(
+                    "process {pid} is not on the part of the process list that could be read"
+                )))
+            };
         };
         let exit_time: u64 = self
             .ntoskrnl

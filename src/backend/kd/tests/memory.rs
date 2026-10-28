@@ -325,7 +325,13 @@ const SMSS_EPROCESS: u64 = 0xffff_e000_0002_0000;
 /// A halted guest whose process list is System (root `0x1ad000`) and
 /// smss.exe (`SMSS_EPROCESS`, root `0x2be000`, KVA-shadow user root
 /// `0x2bf000` stored with PCID bits), whose `ExitTime` is `smss_exit_time`.
-fn two_process_guest(smss_exit_time: u64) -> (Guest, Arc<Mutex<KdBackend>>, JoinHandle<usize>) {
+/// System and smss on the active process list, smss with `ExitTime`
+/// `smss_exit_time`; with `zero_root_between`, a process whose root reads 0
+/// sits between them, which ends a walk of the list before smss.
+fn process_list_guest(
+    smss_exit_time: u64,
+    zero_root_between: bool,
+) -> (Guest, Arc<Mutex<KdBackend>>, JoinHandle<usize>) {
     const PID: u32 = 0x440;
     const LINKS: u32 = 0x448;
     const NAME: u32 = 0x5a8;
@@ -370,9 +376,15 @@ fn two_process_guest(smss_exit_time: u64) -> (Guest, Arc<Mutex<KdBackend>>, Join
         bytes[NAME as usize..NAME as usize + name.len()].copy_from_slice(name);
         bytes
     };
-    let regions = vec![
+    let between = 0xffff_e000_0002_0000u64;
+    let after_system = if zero_root_between {
+        between
+    } else {
+        SMSS_EPROCESS
+    };
+    let mut regions = vec![
         (FAKE_KERNEL_BASE, nt),
-        (system, process(4, 0x1ad000, 0, b"System", 0, SMSS_EPROCESS)),
+        (system, process(4, 0x1ad000, 0, b"System", 0, after_system)),
         (
             SMSS_EPROCESS,
             process(
@@ -385,6 +397,9 @@ fn two_process_guest(smss_exit_time: u64) -> (Guest, Arc<Mutex<KdBackend>>, Join
             ),
         ),
     ];
+    if zero_root_between {
+        regions.push((between, process(0x2f0, 0, 0, b"Starting", 0, SMSS_EPROCESS)));
+    }
     synthetic_guest(
         regions,
         vec![eprocess, kprocess],
@@ -397,7 +412,7 @@ fn two_process_guest(smss_exit_time: u64) -> (Guest, Arc<Mutex<KdBackend>>, Join
 
 #[test]
 fn process_walk_reads_one_span_per_process_and_memoizes_per_halt() {
-    let (guest, backend, worker) = two_process_guest(0);
+    let (guest, backend, worker) = process_list_guest(0, false);
 
     let first = guest.enumerate_processes().unwrap();
     let names: Vec<_> = first.iter().map(|p| (p.name.as_str(), p.pid)).collect();
@@ -428,7 +443,7 @@ fn process_walk_reads_one_span_per_process_and_memoizes_per_halt() {
 /// is that field without its PCID bits; a process without one has none.
 #[test]
 fn kva_shadow_user_root_resolves_to_its_process() {
-    let (guest, backend, worker) = two_process_guest(0);
+    let (guest, backend, worker) = process_list_guest(0, false);
     let mask = Arch::Amd64.dtb_page_mask();
 
     let owner = guest.process_for_user_root(0x2bf000, mask).unwrap();
@@ -449,7 +464,7 @@ fn kva_shadow_user_root_resolves_to_its_process() {
 /// with `ExitTime` set (a process object something still references).
 #[test]
 fn a_process_has_exited_once_off_the_list_or_its_exit_time_is_set() {
-    let (guest, backend, worker) = two_process_guest(0);
+    let (guest, backend, worker) = process_list_guest(0, false);
     assert!(!guest.process_exited(0x1d8, 0x2be000).unwrap());
     assert!(guest.process_exited(0x1d8, 0x3c0000).unwrap());
     assert!(guest.process_exited(0x2a4, 0x2be000).unwrap());
@@ -457,8 +472,16 @@ fn a_process_has_exited_once_off_the_list_or_its_exit_time_is_set() {
     drop(backend);
     worker.join().unwrap();
 
-    let (guest, backend, worker) = two_process_guest(0x01db_2f3a_6c1e_0000);
+    let (guest, backend, worker) = process_list_guest(0x01db_2f3a_6c1e_0000, false);
     assert!(guest.process_exited(0x1d8, 0x2be000).unwrap());
+    drop(guest);
+    drop(backend);
+    worker.join().unwrap();
+
+    // A walk that stops short of smss says nothing about it: an error, which
+    // keeps its breakpoint site, not "exited", which would drop it.
+    let (guest, backend, worker) = process_list_guest(0, true);
+    assert!(guest.process_exited(0x1d8, 0x2be000).is_err());
     drop(guest);
     drop(backend);
     worker.join().unwrap();
