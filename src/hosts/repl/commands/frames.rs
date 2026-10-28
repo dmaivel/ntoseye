@@ -40,6 +40,12 @@ fn register_list(tail: &str) -> Vec<String> {
         .collect()
 }
 
+/// The value of the pseudo-register `name` (`$proc`, `$peb`, `$ra`, ...),
+/// which `r` shows as WinDbg does, read the way an expression reads it.
+fn pseudo_register_value(state: &ReplState<'_>, name: &str) -> Result<u64> {
+    Expr::eval_with_radix(&format!("@{name}"), &state.ctx.target, state.radix).map(|value| value.0)
+}
+
 /// A recovered trace, the registers its walk was seeded from, and whether
 /// that seed is the live vCPU file (a `.cxr`/`.trap` context is not).
 type SeededTrace = (RecoveredStackTrace, HashMap<String, u64>, bool);
@@ -702,6 +708,13 @@ fn registers(
         let Some((name, expression)) = tail.split_once('=') else {
             let mut shown = Vec::new();
             for name in register_list(tail) {
+                if name.starts_with('$') {
+                    match pseudo_register_value(state, &name) {
+                        Ok(value) => shown.push(format!("{name}={}", ui::addr(value))),
+                        Err(e) => error!("{e}"),
+                    }
+                    continue;
+                }
                 match state.ctx.register_map.read_u64(&name, &regs) {
                     Ok(value) => shown.push(format!("{name}={}", ui::addr(value))),
                     Err(Error::RegisterTooWide(_)) => {
