@@ -44,12 +44,7 @@ fn arm64_capabilities_include_debug_breakpoints() {
         DebugCapability::UserModeBreakpoints,
         DebugCapability::Watchpoints,
     ] {
-        assert!(
-            backend
-                .capabilities()
-                .iter()
-                .any(|entry| { entry.capability == capability && entry.supported })
-        );
+        assert!(backend.supports(capability));
     }
 }
 

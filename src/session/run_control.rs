@@ -116,9 +116,7 @@ impl Session {
         &mut self,
         edit: impl FnOnce(&mut Session) -> Result<T>,
     ) -> Result<T> {
-        let interrupt_supported = self.backend.capabilities().iter().any(|capability| {
-            capability.capability == DebugCapability::InterruptTarget && capability.supported
-        });
+        let interrupt_supported = self.backend.supports(DebugCapability::InterruptTarget);
         if !self.backend.is_running() || !interrupt_supported {
             return edit(self);
         }

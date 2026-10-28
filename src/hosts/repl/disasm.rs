@@ -8,7 +8,6 @@ use crate::base::error::Error;
 use crate::base::memory::MemoryOps;
 use crate::base::types::{CodeMachine, VirtAddr};
 use crate::hosts::repl::listing::{self, Listing};
-use crate::hosts::repl::supports_capability;
 use crate::hosts::ui;
 use crate::nt::bugchecks::looks_like_kernel_pointer;
 use crate::nt::symbols::{LocalSourceState, SourceLocation};
@@ -420,7 +419,7 @@ pub fn disasm_context_rows(
         Err(_) => code_memory.read_bytes(VirtAddr(rip), &mut bytes),
     };
     if let Err(error) = read {
-        let runs = supports_capability(&session.capabilities(), DebugCapability::SingleStep);
+        let runs = session.backend.supports(DebugCapability::SingleStep);
         return Err(non_resident_note(rip, &error, runs));
     }
 

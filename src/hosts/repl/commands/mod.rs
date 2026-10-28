@@ -390,9 +390,7 @@ impl ReplState<'_> {
                 && digits.bytes().all(|byte| byte.is_ascii_digit())
                 && body.len() <= digits.len() + 1;
             let never_halts = self.ctx.backend.is_running()
-                && !self.ctx.backend.capabilities().iter().any(|entry| {
-                    entry.capability == DebugCapability::ExecutionControl && entry.supported
-                });
+                && !self.ctx.backend.supports(DebugCapability::ExecutionControl);
             if !(selection && never_halts)
                 && let Some(spec) = command_registry().get("~")
                 && let Some(flow) = self.admit(spec, "~")?

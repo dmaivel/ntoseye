@@ -390,10 +390,7 @@ impl Session {
 
         // Seed the selected thread from the backend when it exposes register
         // context; otherwise the first processor it lists.
-        let has_register_context = backend
-            .capabilities()
-            .iter()
-            .any(|c| c.capability == DebugCapability::ReadRegisters && c.supported);
+        let has_register_context = backend.supports(DebugCapability::ReadRegisters);
         let first_listed = |backend: &mut Box<dyn DebugBackend>| {
             backend
                 .thread_list()

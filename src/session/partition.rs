@@ -309,11 +309,7 @@ impl Session {
             ))
         })?;
         let host = view.backend.as_mut();
-        if !host
-            .capabilities()
-            .iter()
-            .any(|entry| entry.capability == DebugCapability::WriteRegisters && entry.supported)
-        {
+        if !host.supports(DebugCapability::WriteRegisters) {
             return Err(Error::RegisterWriteUnsupported);
         }
         let register_map = &self.register_map;

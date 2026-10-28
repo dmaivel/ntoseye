@@ -7,7 +7,6 @@ use serde_json::{Value, json};
 
 use crate::arch::HardwareWatch;
 use crate::backend::dbg_backend::{DebugCapability, WatchpointAccess};
-use crate::hosts::repl::supports_capability;
 use crate::nt::expr::{Expr, ExprType, ExprValue};
 use crate::nt::layout::{ParsedType, find_field};
 use crate::session::Session;
@@ -21,11 +20,10 @@ use super::{Handled, Server, VarRef, arg_i64, arg_str, parse_address};
 impl Server {
     pub(super) fn on_data_breakpoint_info(&mut self, args: &Value) -> Handled {
         let name = arg_str(args, "name").ok_or_else(|| "missing name".to_string())?;
-        let watchpoints = {
-            let session = self.session()?;
-            let capabilities = session.capabilities();
-            supports_capability(&capabilities, DebugCapability::Watchpoints)
-        };
+        let watchpoints = self
+            .session()?
+            .backend
+            .supports(DebugCapability::Watchpoints);
         if !watchpoints {
             return Ok(Some(json!({
                 "dataId": Value::Null,

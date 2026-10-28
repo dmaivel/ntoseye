@@ -415,8 +415,7 @@ fn show_kdfiles(state: &mut ReplState<'_>) {
 }
 
 fn warn_if_file_io_unsupported(state: &mut ReplState<'_>) {
-    let capabilities = state.ctx.capabilities();
-    if !supports_capability(&capabilities, DebugCapability::TargetFileIo) {
+    if !state.ctx.backend.supports(DebugCapability::TargetFileIo) {
         print_warning(format!(
             "the {} backend cannot serve target file requests; the map will never be consulted",
             state.ctx.backend.name()

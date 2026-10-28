@@ -50,7 +50,7 @@ use crate::arch::Arch;
 use crate::backend::dbg_backend::DebugCapability;
 use crate::backend::gdb::{append_packet, trace_packet};
 use crate::base::error::{Error, Result};
-use crate::hosts::repl::{ReplStore, open_session, supports_capability};
+use crate::hosts::repl::{ReplStore, open_session};
 use crate::hosts::termination;
 use crate::session::{Cancel, Motion, Session, Stop};
 
@@ -142,7 +142,7 @@ fn serve_client(
     // resumes anything. A passive backend cannot stop the guest, so its
     // client inspects memory live.
     if session.backend.is_running()
-        && supports_capability(&session.capabilities(), DebugCapability::InterruptTarget)
+        && session.backend.supports(DebugCapability::InterruptTarget)
         && let Err(error) = session.run(Motion::Break, &Cancel::NEVER)
     {
         eprintln!("ntoseye-gdbserver: could not halt the target for the client: {error}");
@@ -460,10 +460,11 @@ impl<'a> GdbTarget<'a> {
         // Not `Session::run`: the driver resumes to reach and report the
         // next stop, and returns a parked stop instead of resuming. A detach
         // reports nothing and must leave the guest running either way.
-        if supports_capability(
-            &self.session.capabilities(),
-            DebugCapability::ExecutionControl,
-        ) && let Err(error) = self.session.resume()
+        if self
+            .session
+            .backend
+            .supports(DebugCapability::ExecutionControl)
+            && let Err(error) = self.session.resume()
         {
             eprintln!("ntoseye-gdbserver: could not resume the guest: {error}");
         }

@@ -221,15 +221,6 @@ pub fn print_backend_capabilities(capabilities: &[BackendCapability], note: Opti
     outln!();
 }
 
-pub fn supports_capability(
-    capabilities: &[BackendCapability],
-    capability: DebugCapability,
-) -> bool {
-    capabilities
-        .iter()
-        .any(|entry| entry.capability == capability && entry.supported)
-}
-
 pub fn print_backend_capability_warning(capabilities: &[BackendCapability]) {
     if capabilities.iter().all(|capability| capability.supported) {
         return;
@@ -1013,12 +1004,11 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool, startup: &Startup) -> Re
         };
         print_target(&target);
     }
-    let capabilities = client.capabilities();
     if !startup.batch {
-        print_backend_capability_warning(&capabilities);
+        print_backend_capability_warning(&client.capabilities());
     }
 
-    let has_register_context = supports_capability(&capabilities, DebugCapability::ReadRegisters);
+    let has_register_context = client.supports(DebugCapability::ReadRegisters);
 
     if has_register_context && !startup.batch {
         // A user dump written for an exception stops on the thread that
@@ -1088,7 +1078,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool, startup: &Startup) -> Re
     }
     let edit_mode = Box::new(Emacs::new(keybindings));
 
-    let initial_vcpus = if supports_capability(&capabilities, DebugCapability::ThreadList) {
+    let initial_vcpus = if client.supports(DebugCapability::ThreadList) {
         client.thread_list().unwrap_or_default()
     } else {
         Vec::new()

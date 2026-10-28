@@ -252,9 +252,7 @@ impl Session {
         let runner = self.run_backend();
         if effects.run != RunEffect::None
             && !running
-            && !runner.capabilities().iter().any(|entry| {
-                entry.capability == DebugCapability::ExecutionControl && entry.supported
-            })
+            && !runner.supports(DebugCapability::ExecutionControl)
         {
             return Err(Refusal::NoExecutionControl {
                 backend: runner.name(),
@@ -264,7 +262,7 @@ impl Session {
             return Err(Refusal::StaticDump);
         }
         if let Some(capability) = effects.capability
-            && !self.supports(capability)
+            && !self.backend.supports(capability)
         {
             return Err(Refusal::Unsupported {
                 capability,
@@ -309,11 +307,5 @@ impl Session {
         } else {
             Vtl1Refusal::LiveStop
         })
-    }
-
-    fn supports(&self, capability: DebugCapability) -> bool {
-        self.capabilities()
-            .iter()
-            .any(|entry| entry.capability == capability && entry.supported)
     }
 }

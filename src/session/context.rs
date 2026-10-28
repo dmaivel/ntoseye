@@ -490,12 +490,7 @@ impl Session {
                 self.current_thread
             )));
         }
-        if !self
-            .backend
-            .capabilities()
-            .iter()
-            .any(|entry| entry.capability == DebugCapability::WriteRegisters && entry.supported)
-        {
+        if !self.backend.supports(DebugCapability::WriteRegisters) {
             return Err(Error::RegisterWriteUnsupported);
         }
         let mut regs = self.read_registers()?;

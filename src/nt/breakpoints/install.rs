@@ -301,11 +301,7 @@ impl BreakpointManager {
         } else {
             DebugCapability::UserModeBreakpoints
         };
-        if client
-            .capabilities()
-            .iter()
-            .any(|c| c.capability == capability && c.supported)
-        {
+        if client.supports(capability) {
             Ok(())
         } else if capability == DebugCapability::UserModeBreakpoints
             && client.supports_watchpoints()

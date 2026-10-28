@@ -491,10 +491,7 @@ impl Server {
             return;
         };
         // A dump or passive memory view was never halted, so nothing resumes.
-        let resumable = session
-            .capabilities()
-            .iter()
-            .any(|entry| entry.capability == DebugCapability::ExecutionControl && entry.supported);
+        let resumable = session.backend.supports(DebugCapability::ExecutionControl);
         match session.cleanup_for_exit() {
             Ok(()) if resumable => {
                 self.emit_output("console", "ntoseye: detached; guest resumed\n")

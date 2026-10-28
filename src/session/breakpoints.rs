@@ -290,14 +290,6 @@ impl Session {
         }
     }
 
-    /// Whether the backend reports `capability` as supported.
-    fn backend_supports(&self, capability: DebugCapability) -> bool {
-        self.backend
-            .capabilities()
-            .iter()
-            .any(|entry| entry.capability == capability && entry.supported)
-    }
-
     /// Arm an automatic breakpoint on `nt!KeBugCheckEx` when the backend
     /// cannot recognize a bugcheck on its own.
     ///
@@ -306,7 +298,7 @@ impl Session {
     /// enters the bugcheck.
     fn arm_bugcheck_trap(&mut self) {
         // A target that reports its own bugchecks needs no trap.
-        if self.bugcheck_trap.is_some() || self.backend_supports(DebugCapability::BugcheckDetection)
+        if self.bugcheck_trap.is_some() || self.backend.supports(DebugCapability::BugcheckDetection)
         {
             return;
         }
@@ -330,7 +322,7 @@ impl Session {
     /// one with no debugger to take it.
     fn sync_module_traps(&mut self) {
         self.sync_user_image_trap();
-        if self.backend_supports(DebugCapability::ModuleLoadEvents) {
+        if self.backend.supports(DebugCapability::ModuleLoadEvents) {
             return;
         }
         for event in [ModuleEvent::Load, ModuleEvent::Unload] {
@@ -468,7 +460,7 @@ impl Session {
             .iter()
             .any(|trap| trap.event == event && !trap.user)
             && self.module_event_awaited(event)
-            && !self.backend_supports(DebugCapability::ModuleLoadEvents);
+            && !self.backend.supports(DebugCapability::ModuleLoadEvents);
         let user_trap_wanted = !self.user_image_trap_planted() && self.user_image_load_awaited();
         if kernel_trap_wanted || user_trap_wanted {
             self.with_target_halted(|session| {
@@ -491,7 +483,7 @@ impl Session {
     /// it. `None` when the backend cannot hold a breakpoint, the kernel
     /// symbol is not known yet, or planting failed.
     fn plant_trap(&mut self, symbol: &str, what: &str, needs: &str) -> Option<TrapSite> {
-        if !self.backend_supports(DebugCapability::KernelBreakpoints) {
+        if !self.backend.supports(DebugCapability::KernelBreakpoints) {
             return None;
         }
         let kernel_dtb = self.target.guest.as_ref()?.ntoskrnl.dtb();

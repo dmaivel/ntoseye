@@ -438,11 +438,8 @@ impl BackendCapability {
 /// Without execution control a backend reports `is_running()` forever, so
 /// "the VM is running, break in first" names a state the user cannot reach.
 pub fn halt_unreachable_reason(backend: &dyn DebugBackend) -> Option<String> {
-    let controllable = backend
-        .capabilities()
-        .iter()
-        .any(|entry| entry.capability == DebugCapability::ExecutionControl && entry.supported);
-    (!controllable).then(|| format!("the {} backend cannot halt the target", backend.name()))
+    (!backend.supports(DebugCapability::ExecutionControl))
+        .then(|| format!("the {} backend cannot halt the target", backend.name()))
 }
 
 /// Single-step residue a resume has to clear: RFLAGS.TF and the DR6 B0-B3
@@ -734,6 +731,13 @@ pub trait DebugBackend {
         ];
         capabilities.extend(self.optional_capabilities());
         capabilities
+    }
+
+    /// Whether [`Self::capabilities`] reports `capability` as supported.
+    fn supports(&self, capability: DebugCapability) -> bool {
+        self.capabilities()
+            .iter()
+            .any(|entry| entry.capability == capability && entry.supported)
     }
 
     /// Notify the backend about a breakpoint patched outside `set_breakpoint`

@@ -976,9 +976,7 @@ impl Session {
 
     /// Whether the backend delivers debug output itself, as KD does.
     pub fn backend_streams_debug_output(&self) -> bool {
-        self.backend.capabilities().iter().any(|capability| {
-            capability.capability == DebugCapability::DebugOutput && capability.supported
-        })
+        self.backend.supports(DebugCapability::DebugOutput)
     }
 
     /// Record what the kernel printed to its DbgPrint buffer since the last
