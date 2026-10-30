@@ -54,15 +54,6 @@ fn embedded_layout(
     Ok((u64::from(field.offset), layout_of(bare(type_name))?))
 }
 
-/// What [`VadTreeOffsets::resolve`] does with an offset the PDB lacks.
-#[derive(Clone, Copy, Debug)]
-pub enum MissingOffset {
-    /// Fail with the PDB's error.
-    Fail,
-    /// Take the x64 layout's: `VadNode` and `Left` at 0, `Right` at 8.
-    Default,
-}
-
 /// The offsets a VAD tree walk follows: the tree node inside a VAD
 /// (`VadNode`, or the VAD itself before Windows 8) and that node's children.
 #[derive(Clone, Copy, Debug)]
@@ -74,11 +65,11 @@ pub struct VadTreeOffsets {
 
 impl VadTreeOffsets {
     /// The offsets for VADs laid out as `vad` (`_MMVAD_SHORT` or `_MMVAD`).
-    pub fn resolve(types: Types<'_>, vad: &TypeInfo, missing: MissingOffset) -> Result<Self> {
-        Self::resolve_with(&|name| types.layout(name), vad, missing)
+    pub fn resolve(types: Types<'_>, vad: &TypeInfo) -> Result<Self> {
+        Self::resolve_with(&|name| types.layout(name), vad)
     }
 
-    fn resolve_with(layout: LayoutOf<'_>, vad: &TypeInfo, missing: MissingOffset) -> Result<Self> {
+    fn resolve_with(layout: LayoutOf<'_>, vad: &TypeInfo) -> Result<Self> {
         // Before Windows 8 a VAD is the tree's node itself.
         if let (Ok(left), Ok(right)) = (
             vad.field_offset("LeftChild"),
@@ -93,29 +84,19 @@ impl VadTreeOffsets {
         // From Windows 8 its node is `VadNode`: an `_MM_AVL_NODE` on 8
         // (`LeftChild`, `RightChild`), an `_RTL_BALANCED_NODE` from 8.1
         // (`Left`, `Right`).
-        let resolved = embedded_layout(layout, vad, "VadNode").and_then(|(vad_node, node)| {
-            let (left, right) = match (node.field_offset("Left"), node.field_offset("Right")) {
-                (Ok(left), Ok(right)) => (left, right),
-                _ => (
-                    node.field_offset("LeftChild")?,
-                    node.field_offset("RightChild")?,
-                ),
-            };
-            Ok(Self {
-                vad_node,
-                left,
-                right,
-            })
-        });
-        match (resolved, missing) {
-            (Ok(offsets), _) => Ok(offsets),
-            (Err(error), MissingOffset::Fail) => Err(error),
-            (Err(_), MissingOffset::Default) => Ok(Self {
-                vad_node: vad_node_offset(vad),
-                left: 0,
-                right: 8,
-            }),
-        }
+        let (vad_node, node) = embedded_layout(layout, vad, "VadNode")?;
+        let (left, right) = match (node.field_offset("Left"), node.field_offset("Right")) {
+            (Ok(left), Ok(right)) => (left, right),
+            _ => (
+                node.field_offset("LeftChild")?,
+                node.field_offset("RightChild")?,
+            ),
+        };
+        Ok(Self {
+            vad_node,
+            left,
+            right,
+        })
     }
 }
 
@@ -135,7 +116,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use super::{MissingOffset, VadTreeOffsets, root_offset};
+    use super::{VadTreeOffsets, root_offset};
     use crate::base::error::{Error, Result};
     use crate::nt::layout::{FieldInfo, ParsedType, TypeInfo};
 
@@ -245,7 +226,7 @@ mod tests {
             };
             let eprocess = layout("_EPROCESS", &[("VadRoot", root_at, Some(root_type))]);
             assert_eq!(root_offset(&lookup, &eprocess).unwrap(), root, "{release}");
-            let offsets = VadTreeOffsets::resolve_with(&lookup, &vad, MissingOffset::Fail).unwrap();
+            let offsets = VadTreeOffsets::resolve_with(&lookup, &vad).unwrap();
             assert_eq!(
                 (offsets.vad_node, offsets.left, offsets.right),
                 links,

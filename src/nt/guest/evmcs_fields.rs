@@ -157,6 +157,29 @@ pub const EVMCS_FIELDS: &[(&str, u16, u8)] = &[
     ("host_ia32_int_ssp_table_addr", 0x3f0, 8),
 ];
 
+/// The offset of the field `name`, looked up in [`EVMCS_FIELDS`] when
+/// evaluated in a const, so the parser and the field display share one
+/// layout. An unknown name fails the build.
+pub const fn evmcs_offset(name: &str) -> usize {
+    let name = name.as_bytes();
+    let mut index = 0;
+    while index < EVMCS_FIELDS.len() {
+        let (field, offset, _) = EVMCS_FIELDS[index];
+        let field = field.as_bytes();
+        if field.len() == name.len() {
+            let mut byte = 0;
+            while byte < name.len() && field[byte] == name[byte] {
+                byte += 1;
+            }
+            if byte == name.len() {
+                return offset as usize;
+            }
+        }
+        index += 1;
+    }
+    panic!("no such eVMCS field")
+}
+
 /// The value of each field of the eVMCS `page`, in offset order.
 pub fn field_values(page: &[u8]) -> Vec<(&'static str, u16, u8, u64)> {
     EVMCS_FIELDS

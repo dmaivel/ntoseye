@@ -160,6 +160,7 @@ fn loads(instruction: &Instruction) -> bool {
             | Op::LDARH
             | Op::LDP
             | Op::LDPSW
+            | Op::LDNP
     ) && destinations(instruction)
         .iter()
         .all(|r| slot(*r).is_some() || is_zero(*r))

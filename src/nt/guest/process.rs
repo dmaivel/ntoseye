@@ -119,9 +119,11 @@ impl Guest {
         )
     }
 
-    /// The active processes, and whether the walk read the whole list: a
-    /// process that cannot be read, or a root of 0 that ends the walk early,
-    /// leaves processes out of a list that is still returned.
+    /// The active processes, and whether the walk read the whole list, which
+    /// it did only if it got back to `PsActiveProcessHead`. Anything else
+    /// that ends it (a process that cannot be read, a root of 0, a null
+    /// link, a loop that misses the head, the entry cap, no head symbol to
+    /// recognise) can leave processes out of a list that is still returned.
     fn walk_processes(&self) -> Result<(Vec<ProcessInfo>, bool)> {
         let memory = self.ntoskrnl.memory();
         let mut span = EprocessSpan::new(self)?;
@@ -140,7 +142,7 @@ impl Guest {
         let mut processes = Vec::new();
         let mut reached = HashSet::new();
         let mut broken = None;
-        let mut complete = true;
+        let mut complete = false;
 
         // Cycle detection handles a corrupt list that loops; the cap handles
         // one that wanders through unrelated memory without repeating.
@@ -152,7 +154,6 @@ impl Guest {
                 break;
             }
             if span.dtb() == 0 {
-                complete = false;
                 break;
             }
             reached.insert(current_eprocess + span.active_process_links_offset);
@@ -161,7 +162,11 @@ impl Guest {
             // PsActiveProcessHead is not embedded in an EPROCESS, so reaching
             // it ends the walk before the link becomes a record address.
             let flink = span.active_process_links_flink();
-            if flink.is_zero() || Some(flink) == ps_active_process_head {
+            if flink.is_zero() {
+                break;
+            }
+            if Some(flink) == ps_active_process_head {
+                complete = true;
                 break;
             }
             cursor.advance(Ok(flink - span.active_process_links_offset));
@@ -169,7 +174,6 @@ impl Guest {
         // A process that cannot be read ends the walk forward; the ones past
         // it are found backward from the list head, and only its is missing.
         if let Some(error) = broken {
-            complete = false;
             if let Some(head) = ps_active_process_head {
                 let tail = links_back_to(head, &reached, PROCESS_WALK_LIMIT, |link| {
                     memory.read_pointer(link + blink_offset)

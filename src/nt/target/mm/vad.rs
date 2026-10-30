@@ -10,7 +10,7 @@ use super::{
 use crate::base::error::Result;
 use crate::base::memory::MemoryOps;
 use crate::base::types::VirtAddr;
-use crate::nt::guest::vad::{MissingOffset, VadTreeOffsets, vad_root_offset, vad_tree_link};
+use crate::nt::guest::vad::{VadTreeOffsets, vad_root_offset, vad_tree_link};
 use crate::nt::guest::{ModuleInfo, ProcessInfo};
 use crate::nt::layout::{ParsedType, TypeInfo, bitfield_value};
 use crate::nt::pe::section_name_at;
@@ -170,7 +170,7 @@ impl Target {
         let vad_layout = types
             .layout("_MMVAD_SHORT")
             .or_else(|_| types.layout("_MMVAD"))?;
-        let offsets = VadTreeOffsets::resolve(types, &vad_layout, MissingOffset::Default)?;
+        let offsets = VadTreeOffsets::resolve(types, &vad_layout)?;
         let flags_layout = types.layout("_MMVAD_FLAGS").ok();
         let flags1_layout = types.layout("_MMVAD_FLAGS1").ok();
         let modules = guest.process_modules(process).unwrap_or_default();

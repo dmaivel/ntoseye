@@ -1,7 +1,7 @@
 //! Loader-list walks: a process's native and WOW64 module lists, the
 //! kernel's `PsLoadedModuleList`, and module version population.
 
-use super::vad::{MissingOffset, VadTreeOffsets, vad_root_offset, vad_tree_link};
+use super::vad::{VadTreeOffsets, vad_root_offset, vad_tree_link};
 use super::{Guest, ModuleInfo, ProcessInfo, ProcessModulesDetail};
 use crate::{
     base::{
@@ -349,7 +349,7 @@ impl Guest {
             vad_node,
             left,
             right,
-        } = VadTreeOffsets::resolve(types, &short, MissingOffset::Default).ok()?;
+        } = VadTreeOffsets::resolve(types, &short).ok()?;
         let read_node = |node: VirtAddr| {
             let vad = types.struct_with_layout(Arc::clone(&short), node - vad_node);
             let vpn = |low: &str, high: &str| -> Option<u64> {
@@ -364,7 +364,24 @@ impl Guest {
             })
         };
         let node = find_vad_starting_at(root, base.0 >> 12, read_node)?;
-        let path = self.vad_file_path(info.dtb, node - vad_node)?;
+        let vad = node - vad_node;
+        // A private VAD is an `_MMVAD_SHORT`: the `_MMVAD` fields the file
+        // path follows lie past its end. The flags are 8 bytes before
+        // Windows 8 and 4 after, with the bits read always below their end.
+        let private = types
+            .layout("_MMVAD_FLAGS")
+            .ok()?
+            .field("PrivateMemory")
+            .ok()?
+            .decode(
+                memory
+                    .read::<u64>(vad + short.field_offset("u").ok()?)
+                    .ok()?,
+            );
+        if private != 0 {
+            return None;
+        }
+        let path = self.vad_file_path(info.dtb, vad)?;
         let name = path.rsplit(['\\', '/']).next()?;
         (!name.is_empty()).then(|| name.to_string())
     }

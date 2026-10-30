@@ -27,7 +27,7 @@ use std::sync::{
     Arc, Mutex, MutexGuard, OnceLock, PoisonError,
     atomic::{AtomicBool, Ordering},
 };
-use vad::{MissingOffset, VadTreeOffsets, vad_root_offset};
+use vad::{VadTreeOffsets, vad_root_offset};
 
 mod discovery;
 pub mod ept;
@@ -634,8 +634,9 @@ impl Guest {
     ) -> Result<Self> {
         let is_triage = kernel_dtb == DTB_IDENTITY;
 
-        // Dumps carry the machine type; live sessions reach this only from
-        // discovery, which already resolved the arch.
+        // Dumps carry the machine type. The other caller is the partition
+        // view over eVMCS state, whose physical memory has no dump header;
+        // eVMCS exists only on x64, so AMD64 is right there.
         let arch = phys
             .dmp_info()
             .and_then(DmpInfo::arch)
@@ -841,7 +842,7 @@ fn kernel_file(kernel: &Image, mapped: &[u8]) -> Option<Arc<PeImage>> {
 }
 
 /// The layout of the kernel's memory-compression store, from its code
-/// (AMD64, 1703 and later): the kernel file's when [`kernel_file`] finds
+/// (AMD64 or ARM64): the kernel file's when [`kernel_file`] finds
 /// it, at the file's own base as the corpus test reads it, else the mapped
 /// image's.
 fn store_layout_of(kernel: &mut Image, interrupt: &AtomicBool) -> Option<StoreLayout> {
@@ -965,7 +966,7 @@ fn section_layout(kernel: &Image) -> Option<SectionLayout> {
     let eprocess = types.layout("_EPROCESS").ok()?;
     let kprocess = types.layout("_KPROCESS").ok()?;
     let short = types.layout("_MMVAD_SHORT").ok()?;
-    let links = VadTreeOffsets::resolve(types, &short, MissingOffset::Fail).ok()?;
+    let links = VadTreeOffsets::resolve(types, &short).ok()?;
     let vad = types.layout("_MMVAD").ok()?;
     let flags = types.layout("_MMVAD_FLAGS").ok()?;
     let ParsedType::Bitfield { pos, .. } = flags.fields.get("PrivateMemory")?.type_data else {
