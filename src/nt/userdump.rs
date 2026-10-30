@@ -172,7 +172,6 @@ pub struct UserException {
     /// Where the exception was raised.
     #[record(hex)]
     pub address: u64,
-    #[record(hex)]
     pub parameters: Vec<u64>,
     /// The raw CONTEXT at the exception, or why it is unusable. It is stored
     /// in the dump file, not in the process's memory.

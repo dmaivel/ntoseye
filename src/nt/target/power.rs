@@ -180,7 +180,7 @@ impl PowerState {
 #[derive(PartialEq, Eq)]
 pub struct DeviceDriver {
     pub driver_object: VirtAddr,
-    /// `\\Driver\\viostor`; empty when the driver object has no name.
+    /// `\Driver\viostor`; empty when the driver object has no name.
     pub name: String,
     pub driver_start: VirtAddr,
     /// The loaded module that holds `driver_start`, such as `viostor.sys`.

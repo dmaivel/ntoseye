@@ -268,7 +268,6 @@ pub struct ExceptionRecord {
     #[record(hex, rename = "exception_address")]
     pub address: u64,
     /// The exception's `ExceptionInformation` parameters.
-    #[record(hex)]
     pub parameters: Vec<u64>,
 }
 

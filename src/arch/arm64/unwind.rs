@@ -760,7 +760,6 @@ pub struct Arm64EpilogScope {
 pub struct Arm64UnwindCode {
     /// The index of its first byte in the code bytes.
     pub index: usize,
-    #[record(hex)]
     pub bytes: Vec<u8>,
     /// Its name and the prolog instruction that it represents.
     pub description: String,

@@ -6,10 +6,11 @@ use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
     Attribute, Error, Expr, Ident, ImplItem, Item, ItemImpl, ItemStruct, LitInt, LitStr, Meta,
-    Path, Result, Token, Type, braced, bracketed,
+    Path, Result, Token, braced, bracketed,
 };
 
-use crate::record::snake_case;
+use crate::record::{snake_case, unraw};
+use crate::syntax::self_name;
 
 pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     match syn::parse2::<Item>(item)? {
@@ -37,8 +38,8 @@ struct Config {
     /// record key matches it, and it is the handle's identity unless
     /// `identity` says otherwise.
     key: Ident,
-    /// Where the record is: a field of the handle (`info`, the default),
-    /// or a method `fn(&self, Python) -> PyResult<R>` that reads it now.
+    /// Where the record is: the handle's `info` field, or a method
+    /// `fn(&self, Python) -> PyResult<R>` that reads it now.
     source: Source,
     /// A method `fn(&self) -> impl Hash + Eq`: the identity, when it is
     /// not the key (a breakpoint's serial).
@@ -55,7 +56,8 @@ struct Config {
 }
 
 enum Source {
-    Field(Ident),
+    /// The handle's `info` field.
+    Field,
     Fetch(Path),
 }
 
@@ -64,7 +66,6 @@ impl Config {
         let span = attr.span();
         let mut record = None;
         let mut key = None;
-        let mut info = None;
         let mut fetch = None;
         let mut identity = None;
         let mut context = None;
@@ -82,7 +83,6 @@ impl Config {
                     match name.to_string().as_str() {
                         "record" => record = Some(input.parse()?),
                         "key" => key = Some(input.parse()?),
-                        "info" => info = Some(input.parse()?),
                         "fetch" => fetch = Some(input.parse()?),
                         "identity" => identity = Some(input.parse()?),
                         "context" => context = Some(input.parse()?),
@@ -91,8 +91,8 @@ impl Config {
                         _ => {
                             return Err(Error::new(
                                 name.span(),
-                                "expected `record`, `key`, `info`, `fetch`, `identity`, \
-                                 `context`, `refuse`, `prepare` or `impl`",
+                                "expected `record`, `key`, `fetch`, `identity`, `context`, \
+                                 `refuse`, `prepare` or `impl`",
                             ));
                         }
                     }
@@ -104,13 +104,7 @@ impl Config {
             Ok(())
         };
         syn::parse::Parser::parse2(parser, attr)?;
-        let source = match (info, fetch) {
-            (Some(_), Some(fetch)) => {
-                return Err(Error::new_spanned(fetch, "give one of `info` and `fetch`"));
-            }
-            (_, Some(fetch)) => Source::Fetch(fetch),
-            (info, None) => Source::Field(info.unwrap_or_else(|| Ident::new("info", span))),
-        };
+        let source = fetch.map_or(Source::Field, Source::Fetch);
         if let (Source::Fetch(fetch), None) = (&source, &identity) {
             return Err(Error::new_spanned(
                 fetch,
@@ -182,10 +176,10 @@ fn structure(config: Config, attr: TokenStream, item: ItemStruct) -> Result<Toke
     // a fetched one would need the session.
     let what = snake_case(name).replace('_', " ");
     let bind = match &config.source {
-        Source::Field(info) => Some(quote! {
+        Source::Field => Some(quote! {
             impl #command::Bind<#record> for #name {
                 fn bind(&self) -> #record {
-                    ::std::clone::Clone::clone(&self.#info)
+                    ::std::clone::Clone::clone(&self.info)
                 }
             }
 
@@ -195,7 +189,7 @@ fn structure(config: Config, attr: TokenStream, item: ItemStruct) -> Result<Toke
                 type Py = pyo3::Py<#name>;
 
                 fn from_py(value: pyo3::Py<#name>) -> Self {
-                    ::std::clone::Clone::clone(&value.get().#info)
+                    ::std::clone::Clone::clone(&value.get().info)
                 }
 
                 fn from_py_in(
@@ -205,7 +199,7 @@ fn structure(config: Config, attr: TokenStream, item: ItemStruct) -> Result<Toke
                 ) -> pyo3::PyResult<Self> {
                     let handle = value.get();
                     handle.owner.require_argument_of(py, owner, #what)?;
-                    ::std::result::Result::Ok(::std::clone::Clone::clone(&handle.#info))
+                    ::std::result::Result::Ok(::std::clone::Clone::clone(&handle.info))
                 }
             }
         }),
@@ -249,12 +243,7 @@ fn implementation(item: ItemImpl) -> Result<TokenStream> {
             "#[handle] applies to an inherent impl block",
         ));
     }
-    let name = match &*item.self_ty {
-        Type::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
-            path.path.segments[0].ident.clone()
-        }
-        other => return Err(Error::new_spanned(other, "expected the handle's own name")),
-    };
+    let name = self_name(&item, "expected the handle's own name")?;
     let methods = methods_macro(&name);
     let items = &item.items;
     Ok(quote!(#methods! { #(#items)* }))
@@ -345,8 +334,12 @@ fn python_name(item: &ImplItem) -> Result<Option<String>> {
         }
         if attr.path().is_ident("getter") {
             getter = true;
+            // PyO3 takes the name as an identifier or a string.
             if let Meta::List(list) = &attr.meta {
-                name = Some(list.parse_args::<Ident>()?.to_string());
+                name = Some(match list.parse_args::<LitStr>() {
+                    Ok(text) => text.value(),
+                    Err(_) => unraw(&list.parse_args::<Ident>()?),
+                });
             }
         }
         if attr.path().is_ident("pyo3") {
@@ -369,7 +362,7 @@ fn python_name(item: &ImplItem) -> Result<Option<String>> {
             })?;
         }
     }
-    let ident = method.sig.ident.to_string();
+    let ident = unraw(&method.sig.ident);
     Ok(Some(name.unwrap_or_else(
         || match ident.strip_prefix("get_") {
             Some(stripped) if getter => stripped.to_string(),
@@ -459,11 +452,11 @@ pub fn methods(input: TokenStream) -> Result<TokenStream> {
     let (key_ty, key_mode) = field(key);
     let key_value = read(key);
     let (source, record_body) = match &config.source {
-        Source::Field(info) => (
-            quote!(self.#info),
+        Source::Field => (
+            quote!(self.info),
             quote! {
                 self.owner.check(py)?;
-                ::std::result::Result::Ok(::std::borrow::Cow::Borrowed(&self.#info))
+                ::std::result::Result::Ok(::std::borrow::Cow::Borrowed(&self.info))
             },
         ),
         Source::Fetch(fetch) => (
@@ -476,7 +469,7 @@ pub fn methods(input: TokenStream) -> Result<TokenStream> {
         None => {
             let key = &config.key;
             let other_source = match &config.source {
-                Source::Field(info) => quote!(other.#info),
+                Source::Field => quote!(other.info),
                 Source::Fetch(_) => unreachable!("validated"),
             };
             (quote!(&#source.#key), quote!(&#other_source.#key))

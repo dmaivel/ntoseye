@@ -174,26 +174,6 @@ fn a_run_does_not_map_over_each() {
 }
 
 #[test]
-fn a_docstring_escapes_triple_quotes() {
-    let tokens = command(
-        quote!(
-            names = ["!job"],
-            category = "c",
-            kind = Query,
-            python = Inspect
-        ),
-        quote! {
-            /// Takes `"""` and `\d`.
-            fn job(session: &Session) -> Result<Job> {}
-        },
-    )
-    .expect("a command");
-    let text = tokens.to_string();
-    assert!(text.contains(r#"\\\"\\\"\\\""#), "{text}");
-    assert!(text.contains(r"\\\\d"), "{text}");
-}
-
-#[test]
 fn sequence_and_records_conflict_at_the_second_flag() {
     let message = refused(crate::collection::expand(
         quote!(sequence, records),

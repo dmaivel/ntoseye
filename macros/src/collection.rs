@@ -4,11 +4,12 @@ use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, Error, FnArg, GenericArgument, Ident, ImplItem, ImplItemFn, ItemImpl, Pat,
-    PathArguments, Result, ReturnType, Token, Type,
+    Attribute, Error, FnArg, Ident, ImplItem, ImplItemFn, ItemImpl, Pat, Result, ReturnType, Token,
+    Type,
 };
 
-use crate::docstring::python_doc;
+use crate::docstring::docs;
+use crate::syntax::first_type_argument;
 
 pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let flags = Flags::parse(attr)?;
@@ -339,36 +340,15 @@ impl Matcher {
     }
 }
 
-fn docs(attrs: &[Attribute]) -> Vec<Attribute> {
-    attrs
-        .iter()
-        .filter(|attr| attr.path().is_ident("doc"))
-        .map(python_doc)
-        .collect()
-}
-
 /// The `T` of `fn enumerate(...) -> PyResult<Vec<T>>`.
 fn element(enumerate: &ImplItemFn) -> Result<Type> {
     let error = || Error::new_spanned(&enumerate.sig, "`enumerate` returns `PyResult<Vec<Item>>`");
     let ReturnType::Type(_, ty) = &enumerate.sig.output else {
         return Err(error());
     };
-    let vec = first_argument(ty).ok_or_else(error)?;
-    first_argument(vec).cloned().ok_or_else(error)
-}
-
-/// `A` of `Path<A, ...>`.
-fn first_argument(ty: &Type) -> Option<&Type> {
-    let Type::Path(path) = ty else {
-        return None;
-    };
-    let PathArguments::AngleBracketed(arguments) = &path.path.segments.last()?.arguments else {
-        return None;
-    };
-    arguments.args.iter().find_map(|argument| match argument {
-        GenericArgument::Type(ty) => Some(ty),
-        _ => None,
-    })
+    let (_, vec) = first_type_argument(ty).ok_or_else(error)?;
+    let (_, item) = first_type_argument(vec).ok_or_else(error)?;
+    Ok(item.clone())
 }
 
 /// The `K` of `fn lookup(&self, py, key: &K) -> PyResult<Option<Item>>`.

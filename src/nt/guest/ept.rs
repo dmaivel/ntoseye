@@ -54,7 +54,6 @@ pub struct EptMapping {
     /// The memory type of the leaf entry (0 UC, 1 WC, 4 WT, 5 WP, 6 WB).
     pub memory_type: u8,
     /// The entry of each level, from the PML4 down.
-    #[record(hex)]
     pub entries: Vec<u64>,
 }
 

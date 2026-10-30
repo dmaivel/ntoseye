@@ -8,6 +8,7 @@ mod docstring;
 mod grammar;
 mod handle;
 mod record;
+mod syntax;
 #[cfg(test)]
 mod tests;
 
@@ -24,13 +25,14 @@ use proc_macro::TokenStream;
 /// - `<Name>Py`, a frozen `ntoseye.<Name>` class extending `BaseRecord`, with
 ///   a typed property per field (the struct's and fields' doc comments become
 ///   its docstrings) and `__match_args__` (the properties, in order), which
-///   `build.rs` exports from the SDK module;
-/// - `Name::into_class`, the record as its class.
+///   `build.rs` exports from the SDK module.
 ///
 /// Field attributes, `#[record(...)]`:
 ///
-/// - `hex`: integers in the field render as hex (`repr`), through any
-///   `Option`, `Vec`, `Box`, `DiagnosticValue`, `DiagnosticMetric` or `Keyed`;
+/// - `hex`: the record's `repr` shows the field's integer in hex, through any
+///   `Option`, `Box`, `DiagnosticValue` or `DiagnosticMetric`. A `repr` shows
+///   a list by its length and a `Keyed` dict as Python prints it, so the flag
+///   would change nothing on a `Vec` or `Keyed` field;
 /// - `bytes`: a `Vec<u8>` (possibly wrapped) is Python `bytes`;
 /// - `skip`: Rust only; Python does not see the field;
 /// - `rename = "key"`: the record key. The property takes the key too,
@@ -281,9 +283,9 @@ pub fn grammar(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `record = Path` (required): the `#[record]` struct;
 /// - `key = field` (required): the record property that names the object;
 ///   also the identity, unless `identity` is given;
-/// - `info = field`: where the record is held (default `info`); or
-///   `fetch = path`, a `fn(&Self, Python) -> PyResult<Record>` that reads
-///   it now (a breakpoint's state), for which `identity` is required;
+/// - `fetch = path`: a `fn(&Self, Python) -> PyResult<Record>` that reads
+///   the record now (a breakpoint's state) instead of the `info` field; it
+///   requires `identity`;
 /// - `identity = path`: a `fn(&Self) -> impl Hash + Eq`;
 /// - `context = expr`: the `Context` its commands run in, an expression of
 ///   `self` and `py` (`?` may be used), else the kernel's; `refuse = expr`
