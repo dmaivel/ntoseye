@@ -172,6 +172,7 @@ Keeping this file:
 - `!pci` reads its arguments in hex, as its help says, and needs a halted target; `.hh <name>` finds aliases and Python commands; `ds` and `dS` refuse a descriptor that runs past the top of the address space; `!analyze -hang` says how many processors it left out; and `!cpuinfo` on a triage dump shows the dump's metadata when any field is missing.
 - `!hvu`, `u` and `ub` take an `L?<count>` range, `.dump` on a user-mode minidump gives the usual kernel-target refusal, `.process /i` and `attach` on a running target no longer claim that no processor runs the process, and `!dbgprint`'s count follows the radix.
 - The StorPort adapter and class-device overviews say when a unit or packet walk stopped early, `!rcdrkd.rcdrloglist` and `!rcdrkd.rcdrlogdump` take the context address as any expression, `lm` reports a malformed `m`, `u` or `k` option, and `!drvobj` takes `\Driver\` in any case.
+- Python `help()` shows SDK docstrings as written, `\Driver\ACPI`, where command docstrings showed each backslash doubled.
 
 ## v0.52.0 (2026-10-25)
 

@@ -58,7 +58,9 @@ PyO3 introspection generates `ntoseye/_ntoseye.pyi` from the extension, taking
 the signatures from the Rust types and the docstrings from the doc comments.
 
 CI fails when the stub in the repository differs from a newly generated one, so
-after you change the Rust surface, regenerate the stub and commit the result:
+after you change the Rust surface, regenerate the stub and commit the result.
+CI uses the latest maturin, and the stub needs 1.16 or later, which escapes
+docstrings itself:
 
 ```sh
 maturin develop --release --generate-stubs

@@ -7,11 +7,10 @@
 //! - `[text](target)` and `[text][label]` become `text`, unless the target
 //!   is a URL (`https://...`), which stays a markdown link.
 //!
-//! A docstring also doubles each backslash and escapes `"""`: the stub
-//! writes it verbatim into a `"""` literal, where `\R` would be an invalid
-//! escape and `"""` would end it. PyO3 gives the runtime `__doc__` the same
-//! text it gives the stub, so `help()` shows those escapes; only a separate
-//! build for the stub could tell the two apart.
+//! Nothing else is escaped: PyO3 gives the runtime `__doc__` the same text
+//! it gives the stub, and the stub writer (pyo3-introspection 0.30, in
+//! maturin 1.16) escapes backslashes and `"""` itself, so `help()` shows
+//! the doc comment as written.
 
 use syn::{Attribute, Expr, ExprLit, Lit, LitStr, Meta};
 
@@ -24,8 +23,8 @@ pub fn docs(attrs: &[Attribute]) -> Vec<Attribute> {
         .collect()
 }
 
-/// `attr` as a docstring line (see [`docstring_line`]). A `#[doc]` that is
-/// not a string literal is returned as it is.
+/// `attr` with its intra-doc links as plain text (see [`plain_links`]). A
+/// `#[doc]` that is not a string literal is returned as it is.
 fn python_doc(attr: &Attribute) -> Attribute {
     if let Meta::NameValue(value) = &attr.meta
         && let Expr::Lit(ExprLit {
@@ -34,21 +33,13 @@ fn python_doc(attr: &Attribute) -> Attribute {
         }) = &value.value
     {
         let line = text.value();
-        let docstring = docstring_line(&line);
+        let docstring = plain_links(&line);
         if docstring != line {
             let docstring = LitStr::new(&docstring, text.span());
             return syn::parse_quote!(#[doc = #docstring]);
         }
     }
     attr.clone()
-}
-
-/// Doc comment `line` as the docstring has it: intra-doc links as plain
-/// text, backslashes doubled and `"""` escaped.
-fn docstring_line(line: &str) -> String {
-    plain_links(line)
-        .replace('\\', "\\\\")
-        .replace("\"\"\"", "\\\"\\\"\\\"")
 }
 
 /// `line` with each intra-doc link as plain text. A `[` after a backslash
@@ -122,17 +113,7 @@ fn item_name(code: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{docstring_line, plain_links};
-
-    /// The stub writes each line into a `"""` literal, which must read back
-    /// as the doc comment.
-    #[test]
-    fn a_docstring_line_escapes_backslashes_and_triple_quotes() {
-        assert_eq!(
-            docstring_line(r#"`\Driver\ACPI`, `"""`, [`a::Name`]"#),
-            r#"`\\Driver\\ACPI`, `\"\"\"`, `Name`"#
-        );
-    }
+    use super::plain_links;
 
     #[test]
     fn intra_doc_links_become_their_text() {
