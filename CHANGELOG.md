@@ -118,6 +118,7 @@ Keeping this file:
 - Over KD, a stop the transport absorbs on its own (a breakpoint reported again after it was retired) no longer leaves the breakpoint entries that stop freed recorded as the session's, where a later `bc` could delete an entry that had reused the handle.
 - With `!gflag +ksl`, Windows' own report of a user-mode DLL load stops at an `sxe ld:` filter and resolves deferred `bu /p` breakpoints while the user-image trap is planted, where it was dropped for the trap to report: on ARM64, where the trap never sees a DLL loaded after its process starts, those loads were lost.
 - `da` and `du` on a user-mode minidump show a string whose end the dump holds when it stops capturing later in the page, a mapped view's pages no longer stay unreadable for a whole session when first read before their process was listed, and a compressed page that fails to decode reports why, not a bad address.
+- ARM64 stacks unwind through functions with a 512-byte local frame in packed unwind data, where the unwinder restored x19 and x20 instead.
 
 ## v0.52.0 (2026-10-25)
 

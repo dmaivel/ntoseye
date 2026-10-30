@@ -179,6 +179,17 @@ fn push2(codes: &mut Vec<u8>, code: u32) -> Option<()> {
     push1(codes, code & 0xff)
 }
 
+/// Encodes a stack allocation of up to 4080 bytes in the shortest code that
+/// holds it: `alloc_s` covers only sizes below 512, since its 5-bit field
+/// overflows into the `save_r19r20_x` opcode at 512.
+fn push_alloc(codes: &mut Vec<u8>, size: u32) -> Option<()> {
+    if size < 512 {
+        push1(codes, size / 16) // alloc_s
+    } else {
+        push2(codes, 0xc000 | (size / 16)) // alloc_m
+    }
+}
+
 /// The fields of a packed `.pdata` entry.
 struct Packed {
     flag: u32,
@@ -238,12 +249,10 @@ impl Packed {
             }
         }
         if (self.cr <= 1 && local_size > 0) || local_size > 512 {
-            if local_size <= 512 {
-                push1(&mut codes, local_size / 16)?; // alloc_s
-            } else if local_size <= 4080 {
-                push2(&mut codes, 0xc000 | (local_size / 16))?; // alloc_m
+            if local_size <= 4080 {
+                push_alloc(&mut codes, local_size)?;
             } else {
-                push1(&mut codes, (local_size - 4080) / 16)?; // alloc_s
+                push_alloc(&mut codes, local_size - 4080)?;
                 push2(&mut codes, 0xc000 | (4080 / 16))?; // alloc_m
             }
         }
@@ -1004,6 +1013,21 @@ mod tests {
             (context.regs[19], context.regs[20]),
             (Some(0x19), Some(0x20))
         );
+    }
+
+    /// A leaf with no saved registers and a 512-byte frame: one `sub sp`,
+    /// which must decode as `alloc_m`, not as the `save_r19r20_x` opcode
+    /// that `alloc_s` would overflow into.
+    #[test]
+    fn packed_data_unwinds_a_512_byte_local_frame() {
+        let program = packed(4, 0, 0, 32);
+        let mut context = frame(SP, 0xf00d, 0xca11e4);
+        assert_eq!(
+            program.unwind(2, &mut context, &stack(&[])),
+            Some(Resume::Return)
+        );
+        assert_eq!(context.sp, SP + 512);
+        assert_eq!((context.regs[19], context.regs[20]), (None, None));
     }
 
     #[test]
