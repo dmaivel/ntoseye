@@ -290,6 +290,7 @@ pub fn serial_kd_instructions(
 /// The steps for the transports `backend` selects on a hypervisor that
 /// serves serial KD at the default socket, on the guest port `kd_port`
 /// reports, and the GDB stub at the default address.
+#[cfg(any(target_os = "linux", test))]
 pub fn transport_instructions(
     backend: ConfigureBackend,
     kd_port: impl FnOnce() -> usize,
