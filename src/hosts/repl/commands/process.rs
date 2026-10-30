@@ -190,7 +190,7 @@ enum ProcessContext {
     Process(ProcessInfo),
 }
 
-#[grammar(usage = "[eprocess|pid|0]", complete = [Process])]
+#[grammar(usage = "[eprocess|pid|name|0]", complete = [Process])]
 fn process_context_selector(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -211,16 +211,16 @@ fn process_context_selector(
         state.ctx.target.matching_processes(None).map_err(|error| {
             ArgError::Message(format!("failed to enumerate processes: {error}"))
         })?;
-    match state.process_for_selector(&selector, &processes) {
-        Some(process) => Ok(Some(ProcessContext::Process(process))),
-        None => Err(ArgError::Message(format!(
-            "no process matches '{selector}'"
-        ))),
-    }
+    state
+        .process_for_selector_or_name(&selector, &processes)
+        .map(|process| Some(ProcessContext::Process(process)))
+        .map_err(|error| ArgError::Message(error.to_string()))
 }
 
 /// Select a process address space to inspect.
 ///
+/// The process is named by its EPROCESS address, its PID, or its image
+/// name, as for `!process`; a name several processes share is refused.
 /// In this debugger, `/i` is the same as attach: it also selects a thread
 /// of the process, one a processor runs if there is one, else its first, so
 /// `!teb`, `!gle`, and `k` show that thread. `/p` and `/r` select the same

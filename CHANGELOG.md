@@ -30,6 +30,7 @@ Keeping this file:
 - `sx` aliases follow WinDbg's event table: `cc` is Ctrl+C (0x40010005), where it named the C++ exception (`eh`); `asrt` is an assertion failure (0xC0000420); the breakpoint exception is `bpe`, where it was `bp`; and `bpec`, `ssec`, `cce`, `ch`, `hc`, `wkd`, `aph`, `dbce`, `vcpp`, `clr` and `clrn` are added.
 - `bp`, `ba` and `bm` with `/p <pid>` evaluate the address or pattern in that process, as after `.process /p` and without changing the current process context, so `ba e1 /p <pid> kernelbase!GetFileAttributesExW+0x60` works from a break-in in the System process or the hypervisor; the SDK's `breakpoints.add(hardware=True, process=...)` and `breakpoints.watch(..., process=...)` do the same.
 - `dt -a` counts above 16 and `dl` sizes above 64 are errors, where they were cut silently, and `dt`'s help says arrays show their first 16 elements.
+- `.process` takes a process's image name, as `!process` does (`.process /p /r explorer.exe`), besides its EPROCESS address and PID; a name several processes share is refused with a hint to give the PID.
 
 ### Fixed
 
