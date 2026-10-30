@@ -490,9 +490,6 @@ pub struct DtField {
     /// The decoded value, when `dt` has an address and the field is not a
     /// nested structure or array.
     pub value: Option<String>,
-    /// The value is a number (an integer or a bitfield), not a pointer,
-    /// an enum or a string.
-    pub numeric: bool,
     /// A nested structure's fields or an array's elements.
     pub children: Vec<DtEntry>,
 }
@@ -602,7 +599,6 @@ impl ReplState<'_> {
             type_name: field.type_data.to_string(),
             size: (offset.is_some() && options.verbose).then(|| self.type_view().field_size(field)),
             value: None,
-            numeric: false,
             children: Vec::new(),
         };
         match &field.type_data {
@@ -638,11 +634,6 @@ impl ReplState<'_> {
             _ => {
                 if options.show_values {
                     entry.value = Some(self.type_view().value_text(address, field));
-                    entry.numeric = matches!(
-                        field.type_data,
-                        ParsedType::Primitive(_) | ParsedType::Bitfield { .. }
-                    ) && !named_type(&field.type_data, "_UNICODE_STRING")
-                        && !named_type(&field.type_data, "_LIST_ENTRY");
                 }
             }
         }
@@ -943,7 +934,7 @@ impl ReplState<'_> {
         }
         let address = address_text
             .as_deref()
-            .and_then(|text| Expr::eval_with_radix(text, &self.ctx.target, self.radix).ok());
+            .and_then(|text| Expr::eval_with_radix(text, &self.ctx.target, self.ctx.radix).ok());
         let base = address.filter(|address| !address.is_zero());
         parsed.options.show_values = base.is_some();
         // A word that is neither a field nor an expression is still tried
@@ -1070,10 +1061,12 @@ impl ReplState<'_> {
         let Some(address) = self.eval_or_report(&positional[0]) else {
             return Ok(());
         };
-        let limit = match self.eval_or_report(&positional[1]) {
-            Some(count) => count.0.min(MAX_LIST_ENTRIES as u64) as usize,
+        let requested = match self.eval_or_report(&positional[1]) {
+            Some(count) => count.0,
             None => return Ok(()),
         };
+        let capped = requested > MAX_LIST_ENTRIES as u64;
+        let limit = requested.min(MAX_LIST_ENTRIES as u64) as usize;
         let display_words = match positional.get(2) {
             Some(size) => match self.eval_or_report(size) {
                 Some(size) if size.0 > 0 => size.0.min(MAX_DL_WORDS as u64) as usize,
@@ -1111,8 +1104,10 @@ impl ReplState<'_> {
         }
         match cursor.finish() {
             // A closed ring or the requested count is the normal stop, and an
-            // unreadable link was already reported against its address.
-            ListTermination::Head | ListTermination::Bound | ListTermination::Corrupt(_) => {}
+            // unreadable link was already reported against its address; the
+            // entry cap cutting a longer request short is reported.
+            ListTermination::Bound if !capped => {}
+            ListTermination::Head | ListTermination::Corrupt(_) => {}
             stop => {
                 if let Some(stop) = stop.diagnostic() {
                     outln!("dl: list walk stopped: {stop}");

@@ -149,7 +149,17 @@ impl Session {
     /// `layout_error` while thread metadata still remains usable.
     pub fn inspect_apcs(&self, selector: ApcSelector) -> Result<ApcQueues> {
         let (selector, threads) = self.select_apc_threads(selector)?;
-        let layout = self.target.apc_layout();
+        // Without the `_KAPC` field the queues link through, a walk would
+        // decode each link as the record it sits in.
+        let layout = self
+            .target
+            .apc_layout()
+            .and_then(|layout| match layout.link_offset {
+                Some(link_offset) => Ok((layout, link_offset)),
+                None => Err(Error::DebugInfo(
+                    "the kernel's _KAPC names no list link (ApcListEntry or ListEntry)".into(),
+                )),
+            });
         let layout_error = layout.as_ref().err().map(ToString::to_string);
         let trace = resolve_thread_trace_context(&self.target, self.target.kernel_dtb());
         let selected_count = threads.len();
@@ -161,7 +171,7 @@ impl Session {
             let (mut kernel_termination, mut user_termination) =
                 (ListTermination::Head, ListTermination::Head);
             let mut state_error = None;
-            if let Ok(layout) = &layout {
+            if let Ok((layout, link_offset)) = &layout {
                 let state_base = if layout.state_is_pointer {
                     match self
                         .target
@@ -196,12 +206,8 @@ impl Session {
                         let head =
                             state_base + layout.heads_offset + index as u64 * layout.head_stride;
                         let remaining = MAX_LIST_ENTRIES - total;
-                        let (apcs, stop) = walk_list_records(
-                            &self.target,
-                            head,
-                            layout.link_offset.unwrap_or(0),
-                            remaining,
-                        );
+                        let (apcs, stop) =
+                            walk_list_records(&self.target, head, *link_offset, remaining);
                         *termination = stop;
                         for apc in apcs {
                             entries.push(self.decode_apc(apc, layout, &trace));

@@ -40,7 +40,7 @@ use crate::base::output::{
     self, drop_leading_blank_lines, log_input_line, prompting, separate_prompt,
 };
 #[cfg(feature = "cli")]
-use crate::base::time::filetime_to_iso;
+use crate::base::time::unix_time_to_iso;
 #[cfg(feature = "cli")]
 use crate::base::types::VirtAddr;
 #[cfg(feature = "python")]
@@ -125,7 +125,7 @@ pub use commands::{ReplActions, command_reference_json, json_string, open_sessio
 pub use completion::*;
 pub use disasm::*;
 #[cfg(feature = "cli")]
-use line_editor::{CustomPrompt, MyCompleter, TrackingHighlighter};
+use line_editor::{CaretContext, CustomPrompt, MyCompleter, TrackingHighlighter, caret_context};
 pub use memory_view::*;
 pub use remote::*;
 pub use stop::*;
@@ -278,8 +278,9 @@ pub struct ReplState<'a> {
     pub ctx: &'a mut Session,
     pub caches: ReplCaches,
     pub aliases: UserAliases,
-    /// Nested automatic exception-command executions. Bounded so an event
-    /// command that resumes into the same exception cannot recurse forever.
+    /// Breakpoint actions and exception commands being dispatched, one
+    /// inside another: a command loop inside one leaves Ctrl+C to the stop
+    /// loop that ran it.
     pub event_command_depth: usize,
     /// Nested command loops (`.foreach`, `!for_each_*`). Bounded so an alias
     /// that loops over itself ends with an error instead of the stack.
@@ -291,7 +292,6 @@ pub struct ReplState<'a> {
     /// Whether the innermost command loop is a `.for`/`.while`/`.do`, the
     /// loops `.break` and `.continue` steer.
     pub breakable_loop: bool,
-    pub radix: NumberRadix,
     pub line: String,
     /// Who is dispatching; decides which [`RunEffect`]s a command may have.
     pub context: DispatchContext,
@@ -399,14 +399,12 @@ pub enum RemoteClient {
 
 /// Everything a [`ReplState`] owns besides its session borrow. A host that
 /// runs commands one at a time against a session it owns (MCP or the Python
-/// SDK) keeps one of these between calls, so completion caches, aliases,
-/// exception policies, and the radix persist exactly as in the interactive
-/// REPL, and rebuilds the borrowing `ReplState` per call with
-/// [`ReplState::attach`].
+/// SDK) keeps one of these between calls, so completion caches, aliases, and
+/// the `ls` and `u` cursors persist exactly as in the interactive REPL, and
+/// rebuilds the borrowing `ReplState` per call with [`ReplState::attach`].
 pub struct ReplStore {
     caches: ReplCaches,
     aliases: UserAliases,
-    radix: NumberRadix,
     context: DispatchContext,
     source_cursor: Option<(PathBuf, u32)>,
     disasm_search: DisasmSearch,
@@ -416,7 +414,7 @@ pub struct ReplStore {
 
 impl ReplStore {
     /// Fresh REPL state for `ctx`: caches seeded from the current symbol
-    /// context, persisted aliases loaded, default exception policies and radix.
+    /// context, persisted aliases loaded.
     /// The symbol and type indexes are built when a search first reads them.
     pub fn new(ctx: &Session, context: DispatchContext) -> Self {
         let caches = ReplCaches {
@@ -442,20 +440,12 @@ impl ReplStore {
         Self {
             caches,
             aliases,
-            radix: NumberRadix::Hexadecimal,
             context,
             source_cursor: None,
             disasm_search: DisasmSearch::default(),
             disasm_cursor: None,
             virtio_seen: Default::default(),
         }
-    }
-
-    /// The session's current default radix. A host that evaluates expressions
-    /// outside `dispatch_line` (DAP watch/hover requests) shares it so `n 10`
-    /// typed in the console applies there too.
-    pub fn radix(&self) -> NumberRadix {
-        self.radix
     }
 
     /// Type names matching `query`, best first, from the index `dt`
@@ -534,7 +524,6 @@ impl<'a> ReplState<'a> {
             event_command_depth: 0,
             command_loop_depth: 0,
             command_loop_interrupts: 0,
-            radix: store.radix,
             breakable_loop: false,
             line: String::new(),
             context: store.context,
@@ -556,7 +545,6 @@ impl<'a> ReplState<'a> {
         ReplStore {
             caches: self.caches,
             aliases: self.aliases,
-            radix: self.radix,
             context: self.context,
             source_cursor: self.source_cursor,
             disasm_search: self.disasm_search,
@@ -892,7 +880,7 @@ fn user_dump_summary(target: &Target) -> Option<UserDumpSummary> {
     Some(UserDumpSummary {
         process: info.process_label(),
         system: version,
-        written: filetime_to_iso((u64::from(info.time_date_stamp) + 11_644_473_600) * 10_000_000),
+        written: unix_time_to_iso(u64::from(info.time_date_stamp)),
         threads: info.threads.len(),
         modules: info.modules.len(),
         memory: format!(
@@ -1172,7 +1160,6 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool, startup: &Startup) -> Re
         event_command_depth: 0,
         command_loop_depth: 0,
         command_loop_interrupts: 0,
-        radix: NumberRadix::Hexadecimal,
         breakable_loop: false,
         line: String::new(),
         context: DispatchContext::Interactive,
@@ -1312,44 +1299,8 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool, startup: &Startup) -> Re
     })();
 
     terminal::end();
-    // The breakpoints, traps and backend to clean up are the target's, which
-    // a partition view keeps aside while it is shown.
-    state.ctx.leave_partition();
-    let was_running_on_exit = state.ctx.backend.is_running();
-    let mut resume_on_exit = !was_running_on_exit;
-    if was_running_on_exit && state.ctx.has_installed_sites() {
-        match state.ctx.halt_for_exit() {
-            Ok(()) => resume_on_exit = true,
-            Err(error) => {
-                error!("failed to halt cleanly during exit: {error}");
-                resume_on_exit = false;
-            }
-        }
-    }
-
-    // Restore every debugger-owned site before allowing the guest to resume.
-    // A failed removal remains managed and forces an explicitly halted exit;
-    // resuming with an orphaned int3 would turn cleanup failure into a guest
-    // crash after the debugger disconnects.
-    let removed = state
-        .ctx
-        .breakpoints
-        .edit()
-        .remove_all(&mut *state.ctx.backend, &state.ctx.target);
-    let breakpoint_cleanup_succeeded = match removed.and_then(|()| state.ctx.disarm_traps()) {
-        Ok(()) => true,
-        Err(error) => {
-            error!("failed to uninstall breakpoints on exit: {error}");
-            false
-        }
-    };
-
-    let leave_running_on_exit =
-        breakpoint_cleanup_succeeded && (resume_on_exit || state.ctx.backend.is_running());
-    match state.ctx.backend.prepare_for_exit(leave_running_on_exit) {
-        Ok(()) if leave_running_on_exit => state.ctx.mark_kd_debugger_absent(),
-        Ok(()) => {}
-        Err(e) => error!("failed to prepare backend for exit: {e}"),
+    if let Err(error) = state.ctx.cleanup_for_exit() {
+        error!("debugger cleanup failed; target was not resumed: {error}");
     }
 
     prompt
@@ -1699,19 +1650,31 @@ mod tests {
         session.service_idle();
         assert!(!session.backend.is_running(), "the stop was not parked");
         let mut state = remote_state(&mut session, 5_000);
-        let (begin, _) = capture(|| state.begin_remote_line("bd; g"));
+        let (begin, _) = capture(|| state.begin_remote_line(".echo earlier; g"));
         assert!(begin.is_none());
-        let (result, text) = capture(|| state.dispatch_line("bd; g"));
-        assert_eq!(result.unwrap(), Flow::Denied);
+        let (result, text) = capture(|| state.dispatch_line(".echo earlier; g"));
+        assert_eq!(result.unwrap(), Flow::Denied, "{text:?}");
         assert!(
-            text.contains(HALTED_PROBE_RAN),
-            "bd before the refused g did not run: {text:?}"
+            text.contains("earlier"),
+            "the command before the refused g did not run: {text:?}"
         );
         assert!(text.contains("not run"), "{text:?}");
         assert!(
             !state.ctx.backend.is_running(),
             "the parked stop was continued past"
         );
+    }
+
+    /// A command missing its argument prints its help and counts as an
+    /// error, so the `;` list stops there instead of resuming the target.
+    #[test]
+    fn missing_argument_stops_a_command_list() {
+        let mut session = session_with_mock(MockBackend::default());
+        let mut state = remote_state(&mut session, 5_000);
+        let (result, text) = capture(|| state.dispatch_line("bd; g"));
+        result.unwrap();
+        assert!(text.contains(HALTED_PROBE_RAN), "{text:?}");
+        assert!(!state.ctx.backend.is_running(), "g ran after bd failed");
     }
 
     /// `.pagein` resumes the target for the guest's worker, so every context
@@ -1907,7 +1870,7 @@ mod tests {
             vcpu_at(0x1020).runs_stopping_at(&[(0x1000, STACK, THREAD), (0x1010, STACK, THREAD)]);
         let continues = backend.continue_count();
         let mut session = session_running_code(&[0x90; 0x40], backend);
-        session.set_action_runner(Box::new(ReplActions));
+        session.set_action_runner(Box::new(ReplActions::default()));
         let mut state = remote_state(&mut session, 5_000);
 
         let (result, text) =
@@ -1918,6 +1881,24 @@ mod tests {
         assert!(text.contains("├─ breakpoint #1"), "{text:?}");
         assert_eq!(rip(&mut state), 0x1010);
         assert_eq!(continues.load(Ordering::Relaxed), 2);
+    }
+
+    /// A `do` action reads its numbers in the radix `n` set at the prompt,
+    /// as the same text typed there would, at every hit.
+    #[test]
+    fn a_do_action_reads_numbers_in_the_radix_n_set() {
+        let backend =
+            vcpu_at(0x1020).runs_stopping_at(&[(0x1000, STACK, THREAD), (0x1010, STACK, THREAD)]);
+        let mut session = session_running_code(&[0x90; 0x40], backend);
+        session.set_action_runner(Box::new(ReplActions::default()));
+        let mut state = remote_state(&mut session, 5_000);
+
+        let (result, text) = capture(|| {
+            state.dispatch_line(r#"n 10; bp 0x1000 do "? 42; gc"; bp 0x1010 do "? 42"; g"#)
+        });
+        assert_eq!(result.unwrap(), Flow::Continue, "{text:?}");
+        assert_eq!(text.matches("000000000000002a").count(), 2, "{text:?}");
+        assert!(!text.contains("0000000000000042"), "{text:?}");
     }
 
     /// `bl` lists each breakpoint with its state, site, condition and
@@ -1980,7 +1961,7 @@ mod tests {
             ..breakpoint_event(0x1020)
         });
         let mut session = session_running_code(&[0x90; 0x40], backend);
-        session.set_action_runner(Box::new(ReplActions));
+        session.set_action_runner(Box::new(ReplActions::default()));
         let mut state = remote_state(&mut session, 5_000);
 
         let (result, text) = capture(|| state.dispatch_line(r#"sxe -c ".echo seen" -f break av"#));

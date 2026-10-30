@@ -621,29 +621,66 @@ fn loader_list_rows(value: &DiagnosticValue<LoaderLists>) -> Vec<(&'static str, 
     }
 }
 
+/// The rows `_PEB` and `_PEB32` share. The two are separate records with
+/// the same field names, so a macro serves both.
+macro_rules! peb_common_rows {
+    ($detail:expr) => {{
+        let detail = $detail;
+        let mut rows = vec![
+            ("ImageBaseAddress", pointer_cell(&detail.image_base_address)),
+            ("Ldr", pointer_cell(&detail.ldr)),
+        ];
+        rows.extend(loader_list_rows(&detail.loader_lists));
+        rows.extend([
+            (
+                "ProcessParameters",
+                pointer_cell(&detail.process_parameters),
+            ),
+            ("ProcessHeap", pointer_cell(&detail.process_heap)),
+            ("NumberOfHeaps", number(&detail.number_of_heaps)),
+            ("ProcessHeaps", pointer_cell(&detail.process_heaps)),
+            ("BeingDebugged", number(&detail.being_debugged)),
+            ("OSMajorVersion", number(&detail.os_major_version)),
+            ("OSMinorVersion", number(&detail.os_minor_version)),
+            ("OSBuildNumber", number(&detail.os_build_number)),
+            ("SessionId", number(&detail.session_id)),
+            ("NumberOfProcessors", number(&detail.number_of_processors)),
+        ]);
+        rows
+    }};
+}
+
+/// The rows `_TEB` and `_TEB32` share, as `peb_common_rows!` does for the
+/// PEB.
+macro_rules! teb_common_rows {
+    ($detail:expr) => {{
+        let detail = $detail;
+        vec![
+            ("StackBase", pointer_cell(&detail.stack_base)),
+            ("StackLimit", pointer_cell(&detail.stack_limit)),
+            ("TlsPointer", pointer_cell(&detail.tls_pointer)),
+            (
+                "ClientId.UniqueProcess",
+                id_cell(&detail.client_id_unique_process),
+            ),
+            (
+                "ClientId.UniqueThread",
+                id_cell(&detail.client_id_unique_thread),
+            ),
+            ("PEB", pointer_cell(&detail.peb)),
+            ("LastErrorValue", number(&detail.last_error_value)),
+            ("LastStatusValue", status_cell(&detail.last_status_value)),
+            (
+                "CountOfOwnedCriticalSections",
+                number(&detail.count_of_owned_critical_sections),
+            ),
+        ]
+    }};
+}
+
 fn print_peb32(detail: &Peb32) {
     outln!("PEB32 {}", ui::addr(detail.address.0));
-    let mut rows = vec![
-        ("ImageBaseAddress", pointer_cell(&detail.image_base_address)),
-        ("Ldr", pointer_cell(&detail.ldr)),
-    ];
-    rows.extend(loader_list_rows(&detail.loader_lists));
-    rows.extend([
-        (
-            "ProcessParameters",
-            pointer_cell(&detail.process_parameters),
-        ),
-        ("ProcessHeap", pointer_cell(&detail.process_heap)),
-        ("NumberOfHeaps", number(&detail.number_of_heaps)),
-        ("ProcessHeaps", pointer_cell(&detail.process_heaps)),
-        ("BeingDebugged", number(&detail.being_debugged)),
-        ("OSMajorVersion", number(&detail.os_major_version)),
-        ("OSMinorVersion", number(&detail.os_minor_version)),
-        ("OSBuildNumber", number(&detail.os_build_number)),
-        ("SessionId", number(&detail.session_id)),
-        ("NumberOfProcessors", number(&detail.number_of_processors)),
-    ]);
-    print_fields(2, &rows);
+    print_fields(2, &peb_common_rows!(detail));
     print_process_parameters(
         &detail.process_parameters,
         &detail.process_parameters_detail,
@@ -652,26 +689,7 @@ fn print_peb32(detail: &Peb32) {
 
 fn print_peb(detail: &Peb) {
     outln!("PEB {}", ui::addr(detail.address.0));
-    let mut rows = vec![
-        ("ImageBaseAddress", pointer_cell(&detail.image_base_address)),
-        ("Ldr", pointer_cell(&detail.ldr)),
-    ];
-    rows.extend(loader_list_rows(&detail.loader_lists));
-    rows.extend([
-        (
-            "ProcessParameters",
-            pointer_cell(&detail.process_parameters),
-        ),
-        ("ProcessHeap", pointer_cell(&detail.process_heap)),
-        ("NumberOfHeaps", number(&detail.number_of_heaps)),
-        ("ProcessHeaps", pointer_cell(&detail.process_heaps)),
-        ("BeingDebugged", number(&detail.being_debugged)),
-        ("OSMajorVersion", number(&detail.os_major_version)),
-        ("OSMinorVersion", number(&detail.os_minor_version)),
-        ("OSBuildNumber", number(&detail.os_build_number)),
-        ("SessionId", number(&detail.session_id)),
-        ("NumberOfProcessors", number(&detail.number_of_processors)),
-    ]);
+    let mut rows = peb_common_rows!(detail);
     if let Some(api_set_map) = &detail.api_set_map {
         rows.push(("ApiSetMap", pointer_cell(api_set_map)));
     }
@@ -688,29 +706,7 @@ fn print_peb(detail: &Peb) {
 
 fn print_teb32(detail: &Teb32) {
     outln!("TEB32 {}", ui::addr(detail.address.0));
-    print_fields(
-        2,
-        &[
-            ("StackBase", pointer_cell(&detail.stack_base)),
-            ("StackLimit", pointer_cell(&detail.stack_limit)),
-            ("TlsPointer", pointer_cell(&detail.tls_pointer)),
-            (
-                "ClientId.UniqueProcess",
-                id_cell(&detail.client_id_unique_process),
-            ),
-            (
-                "ClientId.UniqueThread",
-                id_cell(&detail.client_id_unique_thread),
-            ),
-            ("PEB", pointer_cell(&detail.peb)),
-            ("LastErrorValue", number(&detail.last_error_value)),
-            ("LastStatusValue", status_cell(&detail.last_status_value)),
-            (
-                "CountOfOwnedCriticalSections",
-                number(&detail.count_of_owned_critical_sections),
-            ),
-        ],
-    );
+    print_fields(2, &teb_common_rows!(detail));
 }
 
 fn print_teb(detail: &Teb) {
@@ -721,36 +717,17 @@ fn print_teb(detail: &Teb) {
         DiagnosticValue::Available(offset) => ("WowTebOffset", Ok(format!("{offset:#x}"))),
         DiagnosticValue::Unavailable(_) => ("WOW32Reserved", pointer_cell(&detail.wow64_reserved)),
     };
-    print_fields(
-        2,
-        &[
-            ("StackBase", pointer_cell(&detail.stack_base)),
-            ("StackLimit", pointer_cell(&detail.stack_limit)),
-            ("TlsPointer", pointer_cell(&detail.tls_pointer)),
-            (
-                "ClientId.UniqueProcess",
-                id_cell(&detail.client_id_unique_process),
-            ),
-            (
-                "ClientId.UniqueThread",
-                id_cell(&detail.client_id_unique_thread),
-            ),
-            ("PEB", pointer_cell(&detail.peb)),
-            ("LastErrorValue", number(&detail.last_error_value)),
-            ("LastStatusValue", status_cell(&detail.last_status_value)),
-            (
-                "CountOfOwnedCriticalSections",
-                number(&detail.count_of_owned_critical_sections),
-            ),
-            wow64,
-            (
-                "ActivationContext",
-                read(&detail.activation_context, |address| {
-                    display_pointer(*address)
-                }),
-            ),
-        ],
-    );
+    let mut rows = teb_common_rows!(detail);
+    rows.extend([
+        wow64,
+        (
+            "ActivationContext",
+            read(&detail.activation_context, |address| {
+                display_pointer(*address)
+            }),
+        ),
+    ]);
+    print_fields(2, &rows);
     if let Some(teb32) = &detail.teb32 {
         outln!();
         print_teb32(teb32);
@@ -990,13 +967,13 @@ fn print_image_check(detail: &ImageCheck, no_spec: bool, verbose: bool) {
         outln!("{}: no section was compared", detail.module);
         return;
     }
-    let mismatched = if no_spec {
-        detail.total_mismatched_bytes
+    let (mismatched, kind) = if no_spec {
+        (detail.total_mismatched_bytes, "")
     } else {
-        detail.genuine_mismatched_bytes
+        (detail.genuine_mismatched_bytes, "genuine ")
     };
     outln!(
-        "{}: {} genuine mismatched byte{}",
+        "{}: {} {kind}mismatched byte{}",
         detail.module,
         mismatched,
         if mismatched == 1 { "" } else { "s" }

@@ -238,29 +238,36 @@ impl Session {
     }
 
     /// Step the current thread past the debugger site its PC is on: one of
-    /// the manager's breakpoints, a module trap, or both at one address;
-    /// `None` when it is on neither. The trap is lifted for the step and
-    /// planted again, as a breakpoint is; one that cannot be planted again is
-    /// dropped, and the next resume arms it anew. Callers must have selected
-    /// the current thread on the backend.
+    /// the manager's breakpoints, the bugcheck trap or a module trap, or a
+    /// breakpoint and a trap at one address; `None` when it is on none. The
+    /// trap is lifted for the step and planted again, as a breakpoint is;
+    /// one that cannot be planted again is dropped, and the next resume arms
+    /// it anew. Callers must have selected the current thread on the backend.
     pub fn step_over_site_at_pc(&mut self) -> Result<Option<RunPast>> {
-        if self.module_traps.is_empty() {
+        if self.module_traps.is_empty() && self.bugcheck_trap.is_none() {
             return self.step_over_breakpoint_at_pc();
         }
         let regs = self.backend.read_registers()?;
         let rip = self
             .register_map
             .read_u64(self.target.arch().pc_register(), &regs)?;
-        let Some(index) = self
+        // The module trap's index and identity; `None` for the bugcheck trap.
+        let (module, trap) = if let Some(trap) = self
+            .bugcheck_trap
+            .as_ref()
+            .filter(|trap| trap.address.0 == rip)
+        {
+            (None, trap.clone())
+        } else if let Some(index) = self
             .module_traps
             .iter()
             .position(|trap| trap.site.address.0 == rip)
-        else {
+        {
+            let ModuleTrap { event, user, site } = self.module_traps[index].clone();
+            (Some((index, event, user)), site)
+        } else {
             return self.step_over_breakpoint_at_pc();
         };
-        let ModuleTrap {
-            event, site: trap, ..
-        } = self.module_traps[index].clone();
         let cr3 = self
             .register_map
             .read_u64(self.target.arch().dtb_register(), &regs)
@@ -285,18 +292,29 @@ impl Session {
         if let Err(error) =
             plant_target_site(self.backend.as_mut(), &self.target, trap.address, original)
         {
-            self.module_traps.edit().remove(index);
+            let what = match module {
+                Some((index, event, _)) => {
+                    self.module_traps.edit().remove(index);
+                    format!("module-{}", event_word(event))
+                }
+                None => {
+                    *self.bugcheck_trap.edit() = None;
+                    "bugcheck".to_string()
+                }
+            };
             self.notices.push(Notice::warning(format!(
-                "failed to re-arm the module-{} trap: {error}",
-                event_word(event)
+                "failed to re-arm the {what} trap: {error}"
             )));
         }
         // Interrupted on the trap itself, the thread returns to it and hits
-        // it again; that hit is this event, not a new one.
-        if matches!(stepped, Ok(RunPast::Diverted | RunPast::Kept)) {
+        // it again; that hit is this event, not a new one. A thread back on
+        // the bugcheck trap is reported as the bugcheck again, which it is.
+        if let Some((_, event, user)) = module
+            && matches!(stepped, Ok(RunPast::Diverted | RunPast::Kept))
+        {
             self.module_trap_interrupted =
                 interrupted_on(&self.target, &self.register_map, &regs, rip, cr3)
-                    .map(|stack| (event, stack));
+                    .map(|stack| (event, user, stack));
         }
         stepped.map(Some)
     }
@@ -959,10 +977,6 @@ impl Session {
         })
     }
 
-    /// The stepping thread's [`StepFrame`] for a run-to whose arrival must
-    /// find its stack per `stack`. `None` when the thread cannot be
-    /// identified (a VTL1 stop, no kernel symbols): the run-to then stops for
-    /// any thread.
     /// Whether the instruction at the stepping thread's PC is x86 code: a
     /// WOW64 program's, in compatibility mode.
     fn pc_runs_x86(&mut self) -> Result<bool> {
@@ -973,6 +987,10 @@ impl Session {
         Ok(self.target.executing_machine(VirtAddr(pc)) == CodeMachine::X86)
     }
 
+    /// The stepping thread's [`StepFrame`] for a run-to whose arrival must
+    /// find its stack per `stack`. `None` when the thread cannot be
+    /// identified (a VTL1 stop, no kernel symbols): the run-to then stops for
+    /// any thread.
     pub fn step_frame(&mut self, stack: StepStack) -> Result<Option<StepFrame>> {
         let Some(thread) = windows_thread_on_backend_thread(&self.target, &self.current_thread)
         else {

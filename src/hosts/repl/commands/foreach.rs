@@ -816,7 +816,7 @@ impl ReplState<'_> {
         let Some(text) = text else {
             return Some(0);
         };
-        match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
+        match Expr::eval_with_radix(text, &self.ctx.target, self.ctx.radix) {
             Ok(value) => match usize::try_from(value.0) {
                 Ok(count) => Some(count),
                 Err(_) => {

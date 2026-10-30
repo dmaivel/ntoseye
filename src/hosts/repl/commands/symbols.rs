@@ -202,7 +202,7 @@ fn ev(
         return Ok(());
     }
 
-    let value = match Expr::parse_with_radix(&expression, state.radix)
+    let value = match Expr::parse_with_radix(&expression, state.ctx.radix)
         .and_then(|expr| expr.evaluate(&state.ctx.target))
     {
         Ok(value) => value,
@@ -895,9 +895,11 @@ fn lmv(
 fn list_modules(target: &Target, filter: &ModuleFilter) -> Result<Vec<ModuleListing>> {
     let mut kernel = filter.kernel;
     // An address names its own list: a kernel address is in a kernel
-    // module even while a process is selected, as in WinDbg.
+    // module even while a process is selected, as in WinDbg. In the secure
+    // address space the current list is already the secure kernel's.
     if let Some(address) = filter.containing
         && !filter.user
+        && !target.in_secure_address_space()
     {
         kernel |= target.arch().paging().is_kernel_address(address);
     }
@@ -1039,7 +1041,7 @@ fn set(
         return Ok(());
     }
     let source = rhs.trim().to_string();
-    match Expr::eval_with_radix(&source, &state.ctx.target, state.radix) {
+    match Expr::eval_with_radix(&source, &state.ctx.target, state.ctx.radix) {
         Ok(v) => {
             state
                 .ctx

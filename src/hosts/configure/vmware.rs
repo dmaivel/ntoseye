@@ -12,9 +12,9 @@ use crate::{
 };
 
 use super::{
-    ApplyResult, BackendSelection, ConfigurationPlan, Configurator, ConfigureBackend,
-    ConfigureRequest, ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus,
-    atomic_replace, backup_file, command_detail, kdnet_instructions,
+    ApplyResult, BackendSelection, ConfigurationPlan, Configurator, ConfigureRequest,
+    ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus, atomic_replace,
+    backup_file, command_detail, transport_instructions,
 };
 
 const BACKENDS: &[BackendSelection] = &[
@@ -227,28 +227,9 @@ fn vmware_instructions(request: ConfigureRequest, debug_port: Option<usize>) -> 
     let ConfigureRequest::Configure { backend, .. } = request else {
         return Instructions::default();
     };
-    let selected = backend.selection();
-    let mut instructions = Instructions::default();
-    if let ConfigureBackend::KdNet { host } = backend {
-        instructions = kdnet_instructions(host, false);
-    }
-    if selected.kd() {
-        let debug_port = debug_port.expect("KD configuration has a serial port");
-        instructions.guest = vec![
-            "bcdedit /debug on".to_string(),
-            format!("bcdedit /dbgsettings serial debugport:{debug_port} baudrate:115200"),
-            "Restart-Computer".to_string(),
-        ];
-        instructions
-            .run
-            .push(ConfiguredTarget::kd(KD_SOCKET, debug_port, false).run_command());
-    }
-    if selected.gdb() {
-        instructions
-            .run
-            .push(ConfiguredTarget::gdb(DEFAULT_GDB_ADDR).run_command());
-    }
-    instructions
+    transport_instructions(backend, || {
+        debug_port.expect("KD configuration has a serial port")
+    })
 }
 
 #[derive(Debug)]
@@ -435,7 +416,7 @@ fn first_free_serial(editor: &VmxEditor) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hosts::configure::Action;
+    use crate::hosts::configure::{Action, ConfigureBackend};
 
     const BASE_VMX: &str = r#".encoding = "UTF-8"
 displayName = "Windows 11"

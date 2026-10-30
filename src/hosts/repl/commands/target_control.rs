@@ -159,10 +159,18 @@ fn write_minidump(session: &mut Session, path: String) -> Result<MinidumpWrite> 
     let interrupt = Arc::clone(&session.target.interrupt);
     interrupt.store(false, Ordering::SeqCst);
     let memory = session.target.address_space(process.dtb);
+    let target = &session.target;
     let result = write_minidump_file(
         Path::new(&path),
         &model,
-        |address, page| memory.read_bytes(VirtAddr(address), page).is_ok(),
+        |address, page| {
+            // Planted breakpoints are this session's, not the process's code.
+            let readable = memory.read_bytes(VirtAddr(address), page).is_ok();
+            if readable {
+                target.mask_breakpoints(process.dtb, VirtAddr(address), page);
+            }
+            readable
+        },
         || interrupt.swap(false, Ordering::SeqCst),
         || progress.inc(1),
     );
@@ -359,7 +367,8 @@ fn kdfiles_change(
             host: word(2).unwrap_or_default(),
         },
         (Some("-c" | "-d" | "-m"), _) => return Err(ArgError::Missing),
-        (Some(path), _) => KdFilesChange::Load(path.to_string()),
+        (Some(path), 1) => KdFilesChange::Load(path.to_string()),
+        (Some(_), _) => return Err(ArgError::Missing),
     })
 }
 
@@ -391,7 +400,6 @@ fn show_kdfiles(state: &mut ReplState<'_>) {
             "{}",
             ui::muted("no driver replacement map; `.kdfiles -m <target> <host>` adds a mapping")
         );
-        return;
     }
     let width = mappings
         .iter()

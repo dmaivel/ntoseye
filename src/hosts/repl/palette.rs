@@ -5,7 +5,9 @@
 use reedline::{EditCommand, Reedline, SearchDirection, SearchQuery};
 
 use super::native::palette::{self, Catalog, CommandEntry, Tab};
-use super::{CompletionStrategy, ReplState, command_registry};
+use super::{
+    CaretContext, CompletionStrategy, ReplCaches, ReplState, caret_context, command_registry,
+};
 use crate::nt::target::TargetKind;
 
 /// The host command Alt+P sends the REPL loop.
@@ -20,7 +22,7 @@ impl ReplState<'_> {
     pub fn open_palette(&mut self, line_editor: &mut Reedline) {
         let buffer = line_editor.current_buffer_contents().to_owned();
         let catalog = self.palette_catalog(recent_lines(line_editor));
-        if let Some(line) = palette::run(catalog, &buffer, initial_tab(&buffer)) {
+        if let Some(line) = palette::run(catalog, &buffer, initial_tab(&buffer, &self.caches)) {
             line_editor.run_edit_commands(&[EditCommand::Clear, EditCommand::InsertString(line)]);
         }
     }
@@ -33,17 +35,7 @@ impl ReplState<'_> {
             commands: self.palette_commands(),
             symbols: self.caches.symbols.clone(),
             types: self.caches.types.clone(),
-            processes: self
-                .ctx
-                .target
-                .matching_processes(None)
-                .map(|processes| {
-                    processes
-                        .into_iter()
-                        .map(|process| (process.name, process.pid))
-                        .collect()
-                })
-                .unwrap_or_default(),
+            processes: self.caches.processes_for_completion(Some(&self.ctx.target)),
         }
     }
 
@@ -111,24 +103,19 @@ fn recent_lines(line_editor: &Reedline) -> Vec<String> {
 }
 
 /// The tab for what is being typed: commands for the command word, and
-/// for an argument what that argument of the command completes as.
-pub fn initial_tab(buffer: &str) -> Tab {
-    let buffer = buffer.trim_start();
-    let words: Vec<&str> = buffer.split_whitespace().collect();
-    if !buffer.contains(char::is_whitespace) {
-        return Tab::Commands;
-    }
-    let argument = if buffer.ends_with(char::is_whitespace) {
-        words.len() - 1
-    } else {
-        words.len() - 2
-    };
-    let strategy = command_registry()
-        .get(words[0])
-        .map(|spec| spec.completion.strategy_for_arg(argument));
-    match strategy {
-        Some(CompletionStrategy::Process) => Tab::Processes,
-        Some(CompletionStrategy::Type) => Tab::Types,
+/// for an argument what that argument completes as, judged as Tab
+/// completion judges it.
+pub fn initial_tab(buffer: &str, caches: &ReplCaches) -> Tab {
+    match caret_context(caches, buffer) {
+        Some(CaretContext::Command { .. }) => Tab::Commands,
+        Some(CaretContext::Argument {
+            strategy: CompletionStrategy::Process,
+            ..
+        }) => Tab::Processes,
+        Some(CaretContext::Argument {
+            strategy: CompletionStrategy::Type,
+            ..
+        }) => Tab::Types,
         _ => Tab::Symbols,
     }
 }

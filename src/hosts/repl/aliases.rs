@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ntoseye_macros::command;
 
@@ -10,6 +11,17 @@ use crate::base::diagnostics;
 use crate::base::error::Result;
 use crate::hosts::repl::*;
 use crate::nt::symbols::ntoseye_home;
+
+/// Counts the changes to the saved aliases this process made (`as`, `ad`)
+/// or read back in (`.reload`), so a REPL state kept between uses can tell
+/// that the aliases it loaded are out of date. See [`alias_generation`].
+static ALIAS_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// The current [`ALIAS_GENERATION`]: aliases loaded at one value are the
+/// saved ones until it changes.
+pub fn alias_generation() -> u64 {
+    ALIAS_GENERATION.load(Ordering::Acquire)
+}
 
 #[derive(Clone, Default)]
 pub struct UserAliases {
@@ -91,17 +103,34 @@ impl UserAliases {
             .collect()
     }
 
-    fn insert(&mut self, name: String, expansion: String) -> io::Result<()> {
-        self.map.insert(name, expansion);
-        self.save()
+    pub fn contains(&self, name: &str) -> bool {
+        self.map.contains_key(name)
     }
 
-    fn remove(&mut self, name: &str) -> io::Result<bool> {
-        let removed = self.map.remove(name).is_some();
-        if removed {
-            self.save()?;
+    /// Define `name`, keeping the previous set when it cannot be saved so the
+    /// aliases in use always match the file.
+    fn insert(&mut self, name: String, expansion: String) -> io::Result<()> {
+        let previous = self.map.insert(name.clone(), expansion);
+        let saved = self.save();
+        if saved.is_err() {
+            match previous {
+                Some(previous) => self.map.insert(name, previous),
+                None => self.map.remove(&name),
+            };
         }
-        Ok(removed)
+        saved
+    }
+
+    /// Remove `name`, keeping it when the smaller set cannot be saved.
+    fn remove(&mut self, name: &str) -> io::Result<bool> {
+        let Some(expansion) = self.map.remove(name) else {
+            return Ok(false);
+        };
+        if let Err(error) = self.save() {
+            self.map.insert(name.to_string(), expansion);
+            return Err(error);
+        }
+        Ok(true)
     }
 
     fn save(&self) -> io::Result<()> {
@@ -119,7 +148,9 @@ impl UserAliases {
             out.push_str(expansion);
             out.push('\n');
         }
-        fs::write(path, out)
+        fs::write(path, out)?;
+        ALIAS_GENERATION.fetch_add(1, Ordering::AcqRel);
+        Ok(())
     }
 
     pub fn expand(
@@ -274,7 +305,11 @@ pub fn splice_value(value: &str) -> Cow<'_, str> {
 }
 
 impl ReplState<'_> {
+    /// Read the saved aliases back in, which tells every other REPL state
+    /// kept between uses to read them too: the file may have changed under
+    /// all of them.
     pub fn reload_aliases(&mut self) -> AliasLoadReport {
+        ALIAS_GENERATION.fetch_add(1, Ordering::AcqRel);
         let (aliases, report) = UserAliases::load_with_report();
         self.aliases = aliases;
         self.refresh_alias_cache();
@@ -456,5 +491,23 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A definition or removal that cannot be saved leaves the aliases in
+    /// use as the file has them.
+    #[test]
+    fn failed_save_keeps_the_previous_aliases() {
+        // A directory where the file belongs makes every save fail.
+        let mut aliases = UserAliases {
+            map: BTreeMap::from([("ubp".to_string(), "bp ${1}".to_string())]),
+            path: Some(std::env::temp_dir()),
+        };
+        let before = aliases.entries();
+
+        assert!(aliases.insert("kx".into(), "k".into()).is_err());
+        assert!(aliases.insert("ubp".into(), "bp ${2}".into()).is_err());
+        assert!(aliases.remove("ubp").is_err());
+        assert!(!aliases.remove("kx").unwrap());
+        assert_eq!(aliases.entries(), before);
     }
 }

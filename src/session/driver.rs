@@ -20,6 +20,7 @@ use crate::backend::kd::trace_enabled;
 use crate::base::disasm::ControlFlow;
 use crate::base::error::Result;
 use crate::base::notice::Notice;
+use crate::base::ntstatus::exception_code_name;
 use crate::base::types::VirtAddr;
 use crate::nt::breakpoints::{BreakpointInfo, StepFrame};
 use crate::nt::guest::{ModuleInfo, ProcessInfo};
@@ -450,6 +451,51 @@ impl BreakpointHit {
             action: breakpoint.action.clone(),
             condition_error,
         }
+    }
+}
+
+impl ExceptionStop {
+    /// The one-line description a protocol host shows for this stop at `rip`.
+    pub fn describe(&self, rip: u64) -> String {
+        let code = self.code;
+        let chance = match self.first_chance {
+            Some(true) => " (first chance)",
+            Some(false) => " (second chance)",
+            None => "",
+        };
+        let name = exception_code_name(code);
+        format!("{name} ({code:#010x}){chance} at {rip:#x}")
+    }
+}
+
+impl ReloadStop {
+    /// The one-line notice a protocol host shows for this reboot.
+    pub fn describe(&self) -> String {
+        let base = self
+            .kernel_base
+            .map(|base| format!("{base:#x}"))
+            .unwrap_or_else(|| "unknown".to_string());
+        let early = if self.coherent {
+            ""
+        } else {
+            " (early boot: modules and processes are not available yet)"
+        };
+        format!("target rebooted; nt base {base}{early}")
+    }
+}
+
+/// The one-line description a protocol host shows for a bugcheck stop.
+pub fn describe_bugcheck(bugcheck: Option<&BugcheckInfo>) -> String {
+    match bugcheck {
+        Some(info) => format!(
+            "bugcheck {:#x} ({:#x}, {:#x}, {:#x}, {:#x})",
+            info.code,
+            info.parameters[0],
+            info.parameters[1],
+            info.parameters[2],
+            info.parameters[3]
+        ),
+        None => "bugcheck (code unavailable from the transport)".to_string(),
     }
 }
 

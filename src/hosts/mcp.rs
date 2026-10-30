@@ -69,12 +69,12 @@ struct Actor {
 /// A unit of work run on the actor thread. MCP handlers are async/`Send`
 /// but `Session` is not, so a dedicated thread owns it; handlers send
 /// closures and await one reply.
-type Job = Box<dyn FnOnce(&mut Actor) -> Result<CallToolResult, ToolError> + Send>;
+type Job = Box<dyn FnOnce(&mut Actor) -> CallToolResult + Send>;
 
 enum Command {
     Run {
         job: Job,
-        reply: oneshot::Sender<Result<CallToolResult, ToolError>>,
+        reply: oneshot::Sender<Result<CallToolResult, McpError>>,
     },
     /// Clean up the session and stop the actor. The guest resumes only after
     /// every debugger-owned breakpoint is restored; cleanup failure is reported
@@ -90,10 +90,10 @@ enum Command {
 const SERVICE_TICK: Duration = Duration::from_millis(20);
 
 const CONTINUE_DEFAULT_TIMEOUT_MS: u64 = 10_000;
-/// Capped well under common MCP client request timeouts (30 s is typical) so a
-/// resuming command hands control back with the target running and frees the
-/// single-session actor before the client gives up. No indefinite wait is
-/// offered over MCP.
+/// The longest wait a client may ask for. Bounded so a resuming command always
+/// hands control back with the target running and frees the single-session
+/// actor; a client that waits this long must raise its own request timeout
+/// past its default (30 s is typical). No indefinite wait is offered over MCP.
 const CONTINUE_MAX_TIMEOUT_MS: u64 = 300_000;
 
 fn cleanup_session(ctx: &mut Session) {
@@ -123,11 +123,9 @@ fn opened_contexts(ctx: &mut Session) -> Value {
 
 /// Spawn the actor thread that owns the session. The backend is constructed
 /// *on this thread* so the non-`Send` state never crosses a thread boundary.
-/// Returns the sender the handlers use to reach it, the ticker's coalescing
-/// flag, and [`opened_contexts`].
-fn spawn_session(
-    spec: TargetSpec,
-) -> anyhow::Result<(mpsc::UnboundedSender<Command>, Arc<AtomicBool>, Value)> {
+/// A live target that runs between calls also gets the service ticker.
+/// Returns the sender the handlers use to reach it and [`opened_contexts`].
+fn spawn_session(spec: TargetSpec) -> anyhow::Result<(mpsc::UnboundedSender<Command>, Value)> {
     // The contexts ride back with the ready signal because a processor count
     // can only be asked for while the target is halted, which it stops being
     // at the end of this function.
@@ -140,6 +138,15 @@ fn spawn_session(
     let service_pending = Arc::new(AtomicBool::new(false));
     let service_pending_actor = service_pending.clone();
 
+    // A dump never runs, and the memory backend has no guest to service.
+    let needs_ticker = !matches!(
+        spec,
+        TargetSpec::Dump(_)
+            | TargetSpec::Live {
+                backend: Backend::Memory,
+                ..
+            }
+    );
     let actor_thread = std::thread::Builder::new().stack_size(COMMAND_THREAD_STACK);
     actor_thread.spawn(move || {
         let is_dump = matches!(spec, TargetSpec::Dump(_));
@@ -178,15 +185,16 @@ fn spawn_session(
                     // session and leave its target uncleaned.
                     let result =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&mut actor)))
-                            .unwrap_or_else(|payload| {
+                            .map_err(|payload| {
                                 let message = payload
                                     .downcast_ref::<&str>()
                                     .map(|message| (*message).to_string())
                                     .or_else(|| payload.downcast_ref::<String>().cloned())
                                     .unwrap_or_else(|| "unknown panic".to_string());
-                                Err(ToolError::Internal(format!(
-                                    "the request failed: {message}"
-                                )))
+                                McpError::internal_error(
+                                    format!("the request failed: {message}"),
+                                    None,
+                                )
                             });
                     let _ = reply.send(result);
                 }
@@ -209,7 +217,12 @@ fn spawn_session(
     })?;
 
     match ready_rx.recv() {
-        Ok(Ok(contexts)) => Ok((tx, service_pending, contexts)),
+        Ok(Ok(contexts)) => {
+            if needs_ticker {
+                spawn_service_ticker(tx.downgrade(), service_pending);
+            }
+            Ok((tx, contexts))
+        }
         Ok(Err(e)) => Err(anyhow::anyhow!("failed to attach: {e}")),
         Err(_) => Err(anyhow::anyhow!("session thread exited before attaching")),
     }
@@ -363,47 +376,6 @@ struct OutputArgs {
     filter: Option<String>,
 }
 
-/// A tool failure from the session, classified so a guest memory fault stays
-/// distinguishable from an internal bug. Argument errors never reach the
-/// actor; handlers reject them as `McpError` params before dispatch.
-enum ToolError {
-    /// A guest memory access fault (unmapped page, partial read, ...).
-    Memory(String),
-    /// Anything else (internal error).
-    Internal(String),
-}
-
-impl From<Error> for ToolError {
-    fn from(e: Error) -> Self {
-        let msg = e.to_string();
-        match e {
-            Error::BadVirtualAddress(_)
-            | Error::AddressNotInDump(_)
-            | Error::NotCaptured { .. }
-            | Error::BadPhysicalAddress(_)
-            | Error::PartialRead(_)
-            | Error::PartialWrite(_)
-            | Error::BufferNotEnough
-            | Error::InvalidRange => ToolError::Memory(msg),
-            _ => ToolError::Internal(msg),
-        }
-    }
-}
-
-impl From<ToolError> for McpError {
-    fn from(e: ToolError) -> Self {
-        match e {
-            // No dedicated JSON-RPC code for a guest fault; surface it as an
-            // invalid request tagged with `kind` so a client can tell "this
-            // address isn't readable" apart from an internal bug.
-            ToolError::Memory(m) => {
-                McpError::invalid_request(m, Some(serde_json::json!({ "kind": "memory_access" })))
-            }
-            ToolError::Internal(m) => McpError::internal_error(m, None),
-        }
-    }
-}
-
 fn invalid_params(message: impl Into<String>) -> McpError {
     McpError::invalid_params(message.into(), None)
 }
@@ -548,7 +520,7 @@ impl NtoseyeMcp {
     /// Ship a job to the session actor and await its reply.
     async fn run<F>(&self, job: F) -> Result<CallToolResult, McpError>
     where
-        F: FnOnce(&mut Actor) -> Result<CallToolResult, ToolError> + Send + 'static,
+        F: FnOnce(&mut Actor) -> CallToolResult + Send + 'static,
     {
         let tx = {
             let guard = self.session.lock().unwrap();
@@ -577,7 +549,6 @@ impl NtoseyeMcp {
         reply_rx
             .await
             .map_err(|_| McpError::internal_error("debugger session dropped the request", None))?
-            .map_err(McpError::from)
     }
 
     #[tool(
@@ -624,7 +595,7 @@ impl NtoseyeMcp {
         let result = self
             .run(move |actor| {
                 let budget = StopWaitBudget::new(Duration::from_millis(timeout_ms), cancel);
-                Ok(run_command(actor, &line, budget, &outputs))
+                run_command(actor, &line, budget, &outputs)
             })
             .await;
         watcher.abort();
@@ -715,32 +686,16 @@ impl NtoseyeMcp {
             Error::InvalidArgument(message) => invalid_params(message),
             other => invalid_params(other.to_string()),
         })?;
-        let label = match &spec {
-            TargetSpec::Dump(_) => "dump".to_string(),
-            TargetSpec::Live { backend, .. } => backend.to_string(),
-        };
-        let needs_ticker = !matches!(
-            spec,
-            TargetSpec::Dump(_)
-                | TargetSpec::Live {
-                    backend: Backend::Memory,
-                    ..
-                }
-        );
+        let label = spec_label(&spec);
 
         let opening = OpeningGuard::claim(&self.session)?;
-        let (tx, service_pending, contexts) =
-            tokio::task::spawn_blocking(move || spawn_session(spec))
-                .await
-                .map_err(|e| McpError::internal_error(format!("spawn_blocking failed: {e}"), None))?
-                .map_err(|e| {
-                    McpError::internal_error(format!("failed to open ({label}): {e}"), None)
-                })?;
-        let tx_for_ticker = tx.clone();
+        let (tx, contexts) = tokio::task::spawn_blocking(move || spawn_session(spec))
+            .await
+            .map_err(|e| McpError::internal_error(format!("spawn_blocking failed: {e}"), None))?
+            .map_err(|e| {
+                McpError::internal_error(format!("failed to open ({label}): {e}"), None)
+            })?;
         opening.promote(tx)?;
-        if needs_ticker {
-            spawn_service_ticker(tx_for_ticker, service_pending);
-        }
 
         let mut result = json!({
             "status": "connected",
@@ -985,18 +940,9 @@ pub fn run(
     let session: SharedSession = Arc::new(std::sync::Mutex::new(SessionSlot::Vacant));
     match spec {
         Some(spec) => {
-            let (label, needs_ticker) = match &spec {
-                TargetSpec::Dump(_) => ("dump".to_string(), false),
-                TargetSpec::Live { backend, .. } => {
-                    (backend.to_string(), *backend != Backend::Memory)
-                }
-            };
-            eprintln!("ntoseye-mcp: attaching ({label})...");
-            let (tx, service_pending, _contexts) = spawn_session(spec)?;
-            *session.lock().unwrap() = SessionSlot::Active(tx.clone());
-            if needs_ticker {
-                spawn_service_ticker(tx, service_pending);
-            }
+            eprintln!("ntoseye-mcp: attaching ({})...", spec_label(&spec));
+            let (tx, _contexts) = spawn_session(spec)?;
+            *session.lock().unwrap() = SessionSlot::Active(tx);
         }
         None => eprintln!("ntoseye-mcp: starting without a session (use open to attach)"),
     }
@@ -1090,18 +1036,32 @@ async fn termination_signal() -> &'static str {
 /// guest while idle (see [`Command::Service`]). `service_pending` keeps at
 /// most one `Service` queued even if the actor is busy in a long wait; the
 /// thread exits once the actor's channel closes (send fails).
-fn spawn_service_ticker(tx: mpsc::UnboundedSender<Command>, service_pending: Arc<AtomicBool>) {
+/// The ticker holds the sender weakly so it never keeps the channel open: an
+/// open the client canceled drops the last real sender, and the actor then
+/// cleans up and exits, which ends the ticker too.
+fn spawn_service_ticker(tx: mpsc::WeakUnboundedSender<Command>, service_pending: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(SERVICE_TICK);
             if service_pending.swap(true, Ordering::AcqRel) {
                 continue;
             }
+            let Some(tx) = tx.upgrade() else {
+                break;
+            };
             if tx.send(Command::Service).is_err() {
                 break;
             }
         }
     });
+}
+
+/// How `open` and the startup log name the target.
+fn spec_label(spec: &TargetSpec) -> String {
+    match spec {
+        TargetSpec::Dump(_) => "dump".to_string(),
+        TargetSpec::Live { backend, .. } => backend.to_string(),
+    }
 }
 
 /// Serve the Streamable HTTP transport on `addr`, mounting the MCP service at

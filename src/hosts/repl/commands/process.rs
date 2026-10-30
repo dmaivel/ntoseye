@@ -377,7 +377,7 @@ fn detach(state: &mut ReplState<'_>) -> Result<()> {
 )]
 fn context(state: &mut ReplState<'_>, #[arg(complete = Expression)] dtb: String) -> Result<()> {
     let text = dtb.as_str();
-    let dtb = match Expr::eval_with_radix(text, &state.ctx.target, state.radix) {
+    let dtb = match Expr::eval_with_radix(text, &state.ctx.target, state.ctx.radix) {
         Ok(value) => value,
         Err(error) => {
             error!("invalid translation base '{}': {}", text, error);
@@ -557,7 +557,7 @@ impl ReplState<'_> {
         {
             return Some(process.clone());
         }
-        let address = Expr::eval_with_radix(selector, &self.ctx.target, self.radix).ok();
+        let address = Expr::eval_with_radix(selector, &self.ctx.target, self.ctx.radix).ok();
         if let Some(address) = address
             && let Some(process) = processes.iter().find(|process| process.eprocess == address)
         {

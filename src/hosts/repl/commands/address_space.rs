@@ -142,8 +142,9 @@ fn vad(
 impl Render<Option<String>> for AddressMap {
     fn render(&self, repl: &mut ReplState<'_>, filter: Option<String>) {
         let filter = filter.as_deref();
-        let filter_address = filter
-            .and_then(|filter| Expr::eval_with_radix(filter, &repl.ctx.target, repl.radix).ok());
+        let filter_address = filter.and_then(|filter| {
+            Expr::eval_with_radix(filter, &repl.ctx.target, repl.ctx.radix).ok()
+        });
         match self {
             Self::Regions {
                 process,

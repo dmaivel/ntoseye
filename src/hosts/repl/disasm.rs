@@ -399,6 +399,33 @@ pub fn print_disasm_lines(
     }
 }
 
+/// Read the code at `address` as `trace`'s thread sees it, falling back to
+/// the address space of the module holding it when the thread's can't
+/// translate it. The debugger's breakpoints are masked out as the space that
+/// read the bytes places them: a process-scoped breakpoint in another
+/// process is only visible through that process's space.
+pub fn read_code(
+    debugger: &Target,
+    trace: &ThreadTraceContext,
+    address: VirtAddr,
+    buf: &mut [u8],
+) -> std::result::Result<(), Error> {
+    let code_dtb = preferred_code_dtb(trace, address.0);
+    let dtb = match debugger
+        .address_space(trace.active_dtb)
+        .read_bytes(address, buf)
+    {
+        Ok(()) => trace.active_dtb,
+        Err(error) if code_dtb == trace.active_dtb => return Err(error),
+        Err(_) => {
+            debugger.address_space(code_dtb).read_bytes(address, buf)?;
+            code_dtb
+        }
+    };
+    debugger.mask_code(address, buf, dtb);
+    Ok(())
+}
+
 /// The instructions a stop shows from `rip`, or the note saying why they
 /// can't be read.
 pub fn disasm_context_rows(
@@ -407,25 +434,11 @@ pub fn disasm_context_rows(
     rip: u64,
 ) -> std::result::Result<Vec<DisasmRow>, String> {
     let debugger = &session.target;
-
-    let active_memory = debugger.address_space(trace.active_dtb);
-    let code_dtb = preferred_code_dtb(trace, rip);
-    let code_memory = debugger.address_space(code_dtb);
     let mut bytes = [0u8; DISASM_CONTEXT_BYTES];
-
-    let read = match active_memory.read_bytes(VirtAddr(rip), &mut bytes) {
-        Ok(()) => Ok(()),
-        Err(active_error) if code_dtb == trace.active_dtb => Err(active_error),
-        Err(_) => code_memory.read_bytes(VirtAddr(rip), &mut bytes),
-    };
-    if let Err(error) = read {
+    if let Err(error) = read_code(debugger, trace, VirtAddr(rip), &mut bytes) {
         let runs = session.backend.supports(DebugCapability::SingleStep);
         return Err(non_resident_note(rip, &error, runs));
     }
-
-    session
-        .target
-        .mask_code(VirtAddr(rip), &mut bytes, trace.active_dtb);
 
     let resolve = |target: u64| format_symbol(debugger, trace, target);
     Ok(decode_disasm_context(

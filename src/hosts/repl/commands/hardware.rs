@@ -62,7 +62,7 @@ fn processor_filter(
     let Some(text) = text else {
         return Ok(None);
     };
-    let value = Expr::eval_with_radix(&text, &cx.state.ctx.target, cx.state.radix)
+    let value = Expr::eval_with_radix(&text, &cx.state.ctx.target, cx.state.ctx.radix)
         .map_err(|error| ArgError::Message(format!("invalid processor '{text}': {error}")))?
         .0;
     u16::try_from(value)
@@ -336,7 +336,9 @@ fn ib(session: &mut Session, #[arg(invoked)] name: &str, port: u64) -> Result<Po
     category = "memory and disassembly",
     kind = Action,
     target = Kernel,
+    state = Halted,
     writes = [Hardware],
+    capability = IoPorts,
     python = none,
 )]
 fn ob(session: &mut Session, #[arg(invoked)] name: &str, port: u64, value: u64) -> Result<()> {
@@ -377,7 +379,9 @@ fn iw(session: &mut Session, #[arg(invoked)] name: &str, port: u64) -> Result<Po
     category = "memory and disassembly",
     kind = Action,
     target = Kernel,
+    state = Halted,
     writes = [Hardware],
+    capability = IoPorts,
     python = none,
 )]
 fn ow(session: &mut Session, #[arg(invoked)] name: &str, port: u64, value: u64) -> Result<()> {
@@ -418,7 +422,9 @@ fn id(session: &mut Session, #[arg(invoked)] name: &str, port: u64) -> Result<Po
     category = "memory and disassembly",
     kind = Action,
     target = Kernel,
+    state = Halted,
     writes = [Hardware],
+    capability = IoPorts,
     python = none,
 )]
 fn od(session: &mut Session, #[arg(invoked)] name: &str, port: u64, value: u64) -> Result<()> {
@@ -683,16 +689,17 @@ const STATUS_LETTERS: [(u16, char); 5] = [
 fn print_pci_scan(request: &PciRequest, functions: &[PciFunction]) {
     if functions.is_empty() {
         let query = &request.query;
+        let buses = if query.first_bus == query.last_bus {
+            format!("bus 0x{:x}", query.last_bus)
+        } else {
+            format!("buses 0x{:x}-0x{:x}", query.first_bus, query.last_bus)
+        };
         let place = match (query.device, query.function) {
-            (Some(device), Some(function)) => format!(
-                "at bus 0x{:x} device 0x{device:x} function 0x{function:x}",
-                query.last_bus
-            ),
-            (Some(device), None) => {
-                format!("at bus 0x{:x} device 0x{device:x}", query.last_bus)
+            (Some(device), Some(function)) => {
+                format!("at {buses} device 0x{device:x} function 0x{function:x}")
             }
-            _ if query.first_bus == query.last_bus => format!("on bus 0x{:x}", query.last_bus),
-            _ => format!("on buses 0x{:x}-0x{:x}", query.first_bus, query.last_bus),
+            (Some(device), None) => format!("at {buses} device 0x{device:x}"),
+            _ => format!("on {buses}"),
         };
         outln!("no PCI function responds {place}");
         return;

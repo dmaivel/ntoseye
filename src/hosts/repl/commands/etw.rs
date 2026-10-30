@@ -396,7 +396,7 @@ fn next_logger(
     let text = cursor.word().ok_or(ArgError::Missing)?;
     Ok(EtwLoggerRef {
         text: text.into_owned(),
-        radix: cx.state.radix,
+        radix: cx.state.ctx.radix,
     })
 }
 
@@ -446,7 +446,7 @@ fn logdump_logger(
     let text = cursor.word_at(index).ok_or(ArgError::Missing)?;
     Ok(EtwLoggerRef {
         text: text.into_owned(),
-        radix: cx.state.radix,
+        radix: cx.state.ctx.radix,
     })
 }
 

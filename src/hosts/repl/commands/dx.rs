@@ -176,9 +176,15 @@ fn parse_dx_args(raw: &str) -> std::result::Result<DxArgs<'_>, String> {
 fn split_format(text: &str) -> std::result::Result<(&str, DxFormat), String> {
     let mut nesting = 0i32;
     let mut quoted = false;
+    let mut escaped = false;
     let mut comma = None;
     for (index, ch) in text.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
         match ch {
+            '\\' if quoted => escaped = true,
             '"' => quoted = !quoted,
             '(' | '[' | '{' if !quoted => nesting += 1,
             ')' | ']' | '}' if !quoted => nesting -= 1,
@@ -405,6 +411,13 @@ fn number_text(raw: u64, name: &str, size: usize) -> String {
 
 fn unreadable(address: VirtAddr) -> String {
     format!("Unable to read memory at Address {:#x}", address.0)
+}
+
+/// A signed bitfield's `len` bits as the number they hold: the top bit is
+/// the field's sign, not the underlying type's.
+fn signed_bitfield(bits: u64, len: u8) -> i64 {
+    let shift = 64u32.saturating_sub(u32::from(len));
+    ((bits << shift) as i64).checked_shr(shift).unwrap_or(0)
 }
 
 /// Where a value is: in memory, or held as a number (a register, a cast).
@@ -770,7 +783,9 @@ impl ReplState<'_> {
                 let bits = bitfield_value(raw, *pos, *len);
                 line.value = Some(match underlying.as_ref() {
                     ParsedType::Enum(name) => self.dx_enum(view, name, bits, size),
-                    ParsedType::Primitive(name) if is_signed_primitive(name) => bits.to_string(),
+                    ParsedType::Primitive(name) if is_signed_primitive(name) => {
+                        signed_bitfield(bits, *len).to_string()
+                    }
                     _ => format!("{bits:#x}"),
                 });
             }
@@ -1032,6 +1047,22 @@ fn decode_string(bytes: &[u8], unit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A signed bitfield's top bit is its sign: three set bits are -1.
+    #[test]
+    fn signed_bitfields_extend_their_own_sign() {
+        assert_eq!(signed_bitfield(0b111, 3), -1);
+        assert_eq!(signed_bitfield(0b011, 3), 3);
+        assert_eq!(signed_bitfield(u64::MAX, 64), -1);
+    }
+
+    /// An escaped quote does not close a string, so a comma after it is
+    /// still the string's.
+    #[test]
+    fn dx_format_ignores_commas_after_escaped_quotes() {
+        let parsed = parse_dx_args(r#"@$curprocess.Name == "a\", b""#).map(|args| args.text);
+        assert_eq!(parsed, Ok(r#"@$curprocess.Name == "a\", b""#));
+    }
 
     /// `-r<n>` sets the depth (1 without it, and for a bare `-r`), `-g` asks
     /// for a grid, `-nv` changes nothing, a `-` before a digit begins the

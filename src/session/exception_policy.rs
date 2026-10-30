@@ -3,11 +3,8 @@ use std::collections::BTreeMap;
 use ntoseye_macros::record;
 
 use crate::backend::dbg_backend::{ContinueDisposition, ModuleEvent, StopEvent};
+use crate::base::ntstatus::{STATUS_BREAKPOINT, STATUS_SINGLE_STEP};
 use crate::nt::symbols::glob_matches;
-
-const STATUS_BREAKPOINT: u32 = 0x8000_0003;
-const STATUS_SINGLE_STEP: u32 = 0x8000_0004;
-pub const EXCEPTION_COMMAND_RECURSION_LIMIT: usize = 4;
 
 /// An exception or module-event filter's mode: `break`, `second_chance`,
 /// `notify`, or `ignore`.

@@ -62,7 +62,14 @@ fn resolve_range(start: VirtAddr, end: RangeEnd, item_size: u64) -> Result<Addre
             )
         }
         RangeEnd::Value(length) if length < start.0 => (start, length),
-        RangeEnd::Value(end) => (start, bytes((end - start.0) / item_size + 1)?),
+        RangeEnd::Value(end) => (
+            start,
+            bytes(
+                ((end - start.0) / item_size)
+                    .checked_add(1)
+                    .ok_or(Error::InvalidRange)?,
+            )?,
+        ),
     };
     let end = start
         .0
@@ -140,7 +147,13 @@ pub fn eval_range_arg(
     start: VirtAddr,
     item_size: u64,
 ) -> Result<AddressRange> {
-    eval_range(end, &cx.state.ctx.target, cx.state.radix, start, item_size)
+    eval_range(
+        end,
+        &cx.state.ctx.target,
+        cx.state.ctx.radix,
+        start,
+        item_size,
+    )
 }
 
 impl AddressRange {
@@ -240,11 +253,7 @@ pub fn parse_byte_pattern(pattern: &str) -> Option<Vec<u8>> {
             .strip_prefix("\\x")
             .or_else(|| rest.strip_prefix("\\X"))
         {
-            if stripped.len() < 2 {
-                return None;
-            }
-
-            let byte = u8::from_str_radix(&stripped[..2], 16).ok()?;
+            let byte = u8::from_str_radix(stripped.get(..2)?, 16).ok()?;
             bytes.push(byte);
             rest = &stripped[2..];
         }
@@ -734,7 +743,7 @@ pub fn hex_ascii_row(bytes: &[u8], case: HexCase) -> (String, String) {
 mod tests {
     use crate::base::types::VirtAddr;
 
-    use super::{RangeEnd, SearchKind, resolve_range, windbg_count_expression};
+    use super::{RangeEnd, SearchKind, parse_byte_pattern, resolve_range, windbg_count_expression};
 
     /// A value searched as a word or dword is stored little-endian in that
     /// width, and one that does not fit is refused rather than truncated;
@@ -802,5 +811,15 @@ mod tests {
         assert_eq!(span(RangeEnd::Value(0x20), 1), (0x1000, 0x20));
         assert!(resolve_range(VirtAddr(0x1000), RangeEnd::Count(u64::MAX), 8).is_err());
         assert!(resolve_range(VirtAddr(0x10), RangeEnd::CountBack(0x20), 1).is_err());
+        assert!(resolve_range(VirtAddr(0), RangeEnd::Value(u64::MAX), 1).is_err());
+    }
+
+    /// An escape cut short by a multi-byte character is a malformed
+    /// pattern, not a panic.
+    #[test]
+    fn byte_pattern_rejects_non_ascii_escapes() {
+        assert_eq!(parse_byte_pattern("\\x4d\\x5a"), Some(vec![0x4d, 0x5a]));
+        assert_eq!(parse_byte_pattern("\\x€"), None);
+        assert_eq!(parse_byte_pattern("\\x4é"), None);
     }
 }

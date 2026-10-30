@@ -1034,6 +1034,21 @@ fn ssdt(session: &Session) -> Result<Vec<SsdtTable>> {
     session.target.dump_ssdt()
 }
 
+/// Whether `module` is where a service table's entries belong: the kernel's
+/// image for the native table, a win32k image for the shadow table.
+fn ssdt_owner(module: &str, shadow: bool) -> bool {
+    let starts = |prefix: &str| {
+        module
+            .get(..prefix.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+    };
+    if shadow {
+        starts("win32k")
+    } else {
+        module.eq_ignore_ascii_case("nt") || starts("ntoskrnl") || starts("ntkrnl")
+    }
+}
+
 impl Render for Vec<SsdtTable> {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         for (i, t) in self.iter().enumerate() {
@@ -1046,11 +1061,7 @@ impl Render for Vec<SsdtTable> {
                 ui::addr(t.base.0),
                 t.limit
             );
-            let expected = if t.label.contains("win32k") {
-                "win32k"
-            } else {
-                "nt"
-            };
+            let shadow = t.label.contains("win32k");
             let mut hooks = 0;
             for e in &t.entries {
                 let display = e
@@ -1058,11 +1069,12 @@ impl Render for Vec<SsdtTable> {
                     .as_deref()
                     .map(ui::symbol)
                     .unwrap_or_else(|| ui::addr(e.target.0));
-                let hooked = e
+                // A target in no module (pool shellcode) is as suspect as
+                // one in the wrong module.
+                let hooked = !e
                     .module
                     .as_deref()
-                    .map(|m| !m.to_lowercase().contains(expected))
-                    .unwrap_or(false);
+                    .is_some_and(|module| ssdt_owner(module, shadow));
                 let mark = if hooked {
                     hooks += 1;
                     "  [HOOK]".red().to_string()

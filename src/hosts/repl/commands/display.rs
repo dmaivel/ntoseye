@@ -5,6 +5,7 @@
 use crate::base::error::Result;
 use crate::base::output::strip_ansi;
 use crate::nt::expr::Expr;
+use crate::nt::layout::ParsedType;
 use ntoseye_macros::command;
 
 use crate::hosts::repl::args::words;
@@ -44,7 +45,7 @@ fn display(
         print(&shown);
         return Ok(());
     }
-    if let Err(error) = Expr::parse_with_radix(expr, state.radix) {
+    if let Err(error) = Expr::parse_with_radix(expr, state.ctx.radix) {
         error!("{error}");
         return Ok(());
     }
@@ -58,12 +59,13 @@ fn display(
     state.ctx.displays.push(Display {
         id,
         expr: expr.to_owned(),
-        radix: state.radix,
+        radix: state.ctx.radix,
         last: None,
     });
     // Its value now, which the next stop compares with.
-    let shown = evaluate(state.ctx, true);
-    print(&shown[shown.len() - 1..]);
+    let index = state.ctx.displays.len() - 1;
+    let shown = evaluate_one(state.ctx, index, true);
+    print(std::slice::from_ref(&shown));
     Ok(())
 }
 
@@ -130,26 +132,29 @@ pub enum Value {
 /// Evaluate every display. At a stop, `record` keeps each value for the
 /// next stop's change marks; a listing only compares with them.
 pub fn evaluate(session: &mut Session, record: bool) -> Vec<Shown> {
-    let mut shown = Vec::with_capacity(session.displays.len());
-    for index in 0..session.displays.len() {
-        let display = &session.displays[index];
-        let (value, number) = match value(session, display) {
-            Ok((value, number)) => (Ok(value), number),
-            Err(error) => (Err(error), None),
-        };
-        let display = &session.displays[index];
-        let changed = matches!((display.last, number), (Some(last), Some(now)) if last != now);
-        shown.push(Shown {
-            id: display.id,
-            expr: display.expr.clone(),
-            value,
-            changed,
-        });
-        if record {
-            session.displays[index].last = number;
-        }
+    (0..session.displays.len())
+        .map(|index| evaluate_one(session, index, record))
+        .collect()
+}
+
+/// Evaluate the display at `index`, as [`evaluate`] does each.
+fn evaluate_one(session: &mut Session, index: usize, record: bool) -> Shown {
+    let display = &session.displays[index];
+    let (value, number) = match value(session, display) {
+        Ok((value, number)) => (Ok(value), number),
+        Err(error) => (Err(error), None),
+    };
+    let display = &mut session.displays[index];
+    let changed = matches!((display.last, number), (Some(last), Some(now)) if last != now);
+    if record {
+        display.last = number;
     }
-    shown
+    Shown {
+        id: display.id,
+        expr: display.expr.clone(),
+        value,
+        changed,
+    }
 }
 
 /// A display's value and the number its change is judged by.
@@ -180,6 +185,14 @@ fn value(
             Ok((Value::Typed { type_name, text }, Some(scalar.0)))
         }
         Err(scalar_error) => {
+            // Only an aggregate has no number; a scalar that does not read
+            // is an error, not an address.
+            if !matches!(
+                type_data,
+                ParsedType::Struct(_) | ParsedType::Union(_) | ParsedType::Array(..)
+            ) {
+                return Err(scalar_error.to_string());
+            }
             let address = value.address().map_err(|_| scalar_error.to_string())?;
             Ok((
                 Value::Aggregate {

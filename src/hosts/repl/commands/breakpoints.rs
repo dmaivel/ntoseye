@@ -105,7 +105,7 @@ fn code_breakpoint(
         .require_software_breakpoints()
         .map_err(invalid)?;
     let words = breakpoint_words(cursor);
-    parse_breakpoint_arguments(&words, cx.state.radix, cx.name, false).map_err(invalid)
+    parse_breakpoint_arguments(&words, cx.state.ctx.radix, cx.name, false).map_err(invalid)
 }
 
 /// `bm`'s line: [`code_breakpoint`]'s, whose target is a symbol pattern
@@ -132,7 +132,7 @@ fn hardware_breakpoint(
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<ParsedBreakpointArgs, ArgError> {
     let words = breakpoint_words(cursor);
-    parse_breakpoint_arguments(&words, cx.state.radix, cx.name, true).map_err(invalid)
+    parse_breakpoint_arguments(&words, cx.state.ctx.radix, cx.name, true).map_err(invalid)
 }
 
 /// `!hvbp`'s and `!hvexit`'s line.
@@ -145,7 +145,7 @@ fn hypervisor_breakpoint(
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<ParsedHypercallArgs, ArgError> {
     let words = breakpoint_words(cursor);
-    parse_hypercall_arguments(&words, cx.state.radix, cx.name).map_err(invalid)
+    parse_hypercall_arguments(&words, cx.state.ctx.radix, cx.name).map_err(invalid)
 }
 
 /// `bc`/`bd`/`be`'s IDs: `id`, `first-last`, or `*`.
@@ -183,7 +183,7 @@ fn pass_count(
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<u64, ArgError> {
     let text = cursor.word().ok_or(ArgError::Missing)?;
-    parse_radix_u64_text(&text, cx.state.radix, "pass count").map_err(invalid)
+    parse_radix_u64_text(&text, cx.state.ctx.radix, "pass count").map_err(invalid)
 }
 
 /// `bsc`'s condition and commands: a quoted last word is the commands, and
@@ -234,7 +234,7 @@ fn set_breakpoint(
 ) -> Result<BreakpointsSet> {
     let spec = args.target.clone();
     let config = state.breakpoint_config(args)?;
-    let radix = state.radix;
+    let radix = state.ctx.radix;
     let address = match state
         .ctx
         .resolve_in_breakpoint_scope(config.scope.as_ref(), |target| {
@@ -348,7 +348,7 @@ fn set_hardware_breakpoint(
     let target = args.target.clone();
     let condition = args.condition.clone();
     let config = state.breakpoint_config(args)?;
-    let radix = state.radix;
+    let radix = state.ctx.radix;
     let address = state
         .ctx
         .resolve_in_breakpoint_scope(config.scope.as_ref(), |context| {
@@ -400,7 +400,7 @@ fn set_hypercall_breakpoint(
     state: &mut ReplState<'_>,
     #[arg(parse = hypervisor_breakpoint, name = "code|name")] args: ParsedHypercallArgs,
 ) -> Result<BreakpointsSet> {
-    let code = hypercall_code_text(&args.call, state.radix)?;
+    let code = hypercall_code_text(&args.call, state.ctx.radix)?;
     let (vp, config) = state.hypervisor_breakpoint_config(&args)?;
     let id = state.ctx.add_hypercall_breakpoint(
         HypercallFilter {
@@ -848,7 +848,7 @@ fn set_condition(
     let (condition, expr) = if condition.eq_ignore_ascii_case("clear") {
         (None, None)
     } else {
-        let expr = compile_repl_condition(Some(&condition), state.radix)?;
+        let expr = compile_repl_condition(Some(&condition), state.ctx.radix)?;
         (Some(condition), expr)
     };
     state
@@ -880,7 +880,7 @@ fn set_condition_and_commands(
 ) -> Result<()> {
     let BreakpointId(id) = id;
     let (condition, action) = update;
-    let expr = compile_repl_condition(Some(&condition), state.radix)?;
+    let expr = compile_repl_condition(Some(&condition), state.ctx.radix)?;
     let mut breakpoints = state.ctx.breakpoints.edit();
     breakpoints.set_condition(id, Some(condition), expr)?;
     breakpoints.set_action(id, action)?;
@@ -1587,7 +1587,7 @@ impl ReplState<'_> {
     }
 
     fn breakpoint_config(&mut self, parsed: ParsedBreakpointArgs) -> Result<BreakpointConfig> {
-        let condition_expr = compile_repl_condition(parsed.condition.as_deref(), self.radix)?;
+        let condition_expr = compile_repl_condition(parsed.condition.as_deref(), self.ctx.radix)?;
         let scope = parsed
             .pid
             .map(|pid| self.ctx.breakpoint_scope_for_pid(pid))
@@ -1628,7 +1628,7 @@ impl ReplState<'_> {
             })
             .transpose()?;
         let config = BreakpointConfig {
-            condition_expr: compile_repl_condition(parsed.condition.as_deref(), self.radix)?,
+            condition_expr: compile_repl_condition(parsed.condition.as_deref(), self.ctx.radix)?,
             condition: parsed.condition.clone(),
             one_shot: parsed.one_shot,
             action: parsed.action.clone(),

@@ -1504,7 +1504,14 @@ fn hvvmcs(
     else {
         return Ok(());
     };
-    let level = values.get(2).map_or(vp.vtl, |&level| level as u8);
+    let level = match values.get(2).map(|&level| u8::try_from(level)) {
+        None => vp.vtl,
+        Some(Ok(level)) => level,
+        Some(Err(_)) => {
+            error!("VTL {:#x} is out of range", values[2]);
+            return Ok(());
+        }
+    };
     let Some(page) = vp
         .vtls
         .iter()
@@ -1605,7 +1612,7 @@ fn hvd(
     };
     let start = VirtAddr(address.0);
     let range = match arguments.get(1) {
-        Some(text) => eval_range(text, &repl.ctx.target, repl.radix, start, item),
+        Some(text) => eval_range(text, &repl.ctx.target, repl.ctx.radix, start, item),
         None => eval_range("L80", &repl.ctx.target, NumberRadix::Hexadecimal, start, 1),
     };
     let range = match range {
@@ -1711,7 +1718,7 @@ fn hvu(
                 }
                 None => return Ok(()),
             },
-            None => match eval_range(text, &repl.ctx.target, repl.radix, address, 1) {
+            None => match eval_range(text, &repl.ctx.target, repl.ctx.radix, address, 1) {
                 Ok(range) if range.len() <= MAX_DISPLAY_BYTES => CodeExtent::Before(range.end.0),
                 Ok(_) => {
                     error!("range exceeds the maximum of {MAX_DISPLAY_BYTES:#x} bytes");

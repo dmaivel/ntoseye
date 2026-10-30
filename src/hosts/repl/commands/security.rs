@@ -367,6 +367,7 @@ fn print_descriptor_component(
     value: &DiagnosticValue<Option<Acl>>,
     control: &DiagnosticValue<u16>,
     bit: u16,
+    null_meaning: &str,
     annotate_well_known: bool,
     notes: &mut Vec<String>,
 ) {
@@ -383,7 +384,7 @@ fn print_descriptor_component(
     match available(value, label, notes) {
         None => outln!("  {label:8} : -"),
         Some(None) => {
-            outln!("  {label:8} : - (a NULL DACL grants everyone full access)");
+            outln!("  {label:8} : - ({null_meaning})");
         }
         Some(Some(acl)) => {
             outln!(
@@ -435,6 +436,7 @@ fn print_security_descriptor(detail: &SecurityDescriptor, annotate_well_known: b
         &detail.dacl,
         &detail.control,
         0x0004,
+        "a NULL DACL grants everyone full access",
         annotate_well_known,
         &mut notes,
     );
@@ -443,6 +445,7 @@ fn print_security_descriptor(detail: &SecurityDescriptor, annotate_well_known: b
         &detail.sacl,
         &detail.control,
         0x0010,
+        "a NULL SACL audits nothing",
         annotate_well_known,
         &mut notes,
     );

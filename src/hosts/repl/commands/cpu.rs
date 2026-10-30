@@ -26,7 +26,6 @@ use super::diagnostics::{UnavailableNotes, yes_no};
 
 const IDT_VECTOR_COUNT: u16 = 256;
 const MSR_SWITCH: &str = "/p";
-const MAX_PROCESSOR_SELECTION: usize = 256;
 
 /// What a `~` command names: one processor by number, one vCPU by the id
 /// `~` lists, or every processor (`~*`).
@@ -336,11 +335,25 @@ fn print_idt(detail: &Idt) {
         "Vector", "Selector", "IST", "Type", "DPL", "Present", "Handler",
     ]);
     let mut gaps = Gaps::default();
-    for entry in &detail.entries {
+    // Gates past the IDTR limit are memory the processor never reads.
+    let covered = detail.limit.saturating_add(1) / 16;
+    for entry in detail
+        .entries
+        .iter()
+        .filter(|entry| u64::from(entry.vector) < covered)
+    {
         push_idt_entry(&mut builder, &mut gaps, entry);
     }
     print_padded_table(builder);
     gaps.print("");
+    if detail.truncated {
+        outln!(
+            "{}",
+            ui::muted(&format!(
+                "the IDT limit covers only {covered} vectors; vectors past it are not shown"
+            ))
+        );
+    }
 }
 
 /// One descriptor's row of the `!gdt` table.
@@ -1030,7 +1043,7 @@ fn vcpu(
         .thread_list()
         .map_err(|e| Error::DebugInfo(format!("failed to list the processors: {e}")))?;
 
-    let thread_id = Expr::eval_with_radix(&requested, &state.ctx.target, state.radix)
+    let thread_id = Expr::eval_with_radix(&requested, &state.ctx.target, state.ctx.radix)
         .ok()
         .and_then(|value| u16::try_from(value.0).ok())
         .and_then(|number| {
@@ -1077,7 +1090,7 @@ impl ReplState<'_> {
                 return Ok(Flow::Continue);
             }
             let selector =
-                match Expr::eval_with_radix(&body[..digits], &self.ctx.target, self.radix) {
+                match Expr::eval_with_radix(&body[..digits], &self.ctx.target, self.ctx.radix) {
                     Ok(value) => TildeSelector::Number(value.0),
                     Err(_) => {
                         error!("processor {} out of range", &body[..digits]);
@@ -1124,11 +1137,7 @@ impl ReplState<'_> {
                 }
                 resolve(number).into_iter().collect::<Vec<_>>()
             }
-            TildeSelector::All => ids
-                .iter()
-                .take(MAX_PROCESSOR_SELECTION)
-                .cloned()
-                .collect::<Vec<_>>(),
+            TildeSelector::All => ids.clone(),
         };
         if selected.is_empty() {
             error!("processor not found");

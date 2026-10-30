@@ -310,9 +310,9 @@ pub struct BreakpointManager {
 }
 
 #[derive(Debug)]
-pub enum BreakpointHitResult {
+pub enum BreakpointHitResult<'a> {
     /// Breakpoint hit
-    Hit(BreakpointInfo),
+    Hit(&'a BreakpointInfo),
     /// Program counter does not match any breakpoint.
     NotBreakpoint,
 }

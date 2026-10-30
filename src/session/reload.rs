@@ -52,15 +52,25 @@ impl Session {
         !self.reload_module_list_pending && self.target.current_kernel_mapping_is_valid()
     }
 
-    /// Rebuild guest state, auto-discovering the kernel base.
+    /// Rebuild guest state, auto-discovering the kernel base. A guest that
+    /// has not rebooted (its kernel image is still mapped) still holds the
+    /// breakpoint sites planted in it, so they are lifted first; a reboot
+    /// took them with the old memory.
     pub fn reload(&mut self) -> Result<()> {
         self.target.last_exception_code = None;
         self.module_refresh_report = None;
+        let lifted = if self.target.current_kernel_mapping_is_valid() {
+            self.breakpoints
+                .lift_sites_for_reload(self.backend.as_mut(), &self.target)
+        } else {
+            Ok(())
+        };
         let outcome = self.perform_target_reload(None);
         if let Some(error) = outcome.breakpoint_error {
             return Err(error);
         }
-        outcome.report.map(|_| ())
+        outcome.report?;
+        lifted
     }
 
     /// If a module-list reload is pending and the loaded-module list has now

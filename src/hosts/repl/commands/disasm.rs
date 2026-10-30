@@ -17,7 +17,7 @@ use crate::nt::target::MemoryKind;
 use crate::nt::unwind::{format_symbol, resolve_thread_trace_context};
 use crate::session::Session;
 
-use super::memory::MAX_DISASSEMBLY_INSTRUCTIONS;
+use super::memory::{MAX_DISASSEMBLY_INSTRUCTIONS, MAX_DISPLAY_BYTES};
 
 /// Instructions `u` and `ub` list without a count.
 const DEFAULT_INSTRUCTIONS: u64 = 8;
@@ -94,6 +94,11 @@ fn disassemble(
                 value.checked_add(1)
             }
             .ok_or(Error::InvalidRange)?;
+            if end - address.0 > MAX_DISPLAY_BYTES as u64 {
+                return Err(Error::DebugInfo(format!(
+                    "range exceeds the maximum of {MAX_DISPLAY_BYTES:#x} bytes"
+                )));
+            }
             // The last instruction may run past the end.
             (end - address.0 + max_instruction_bytes - 1, None, Some(end))
         }
@@ -102,15 +107,13 @@ fn disassemble(
     // An instruction window may run past the end of the mapped image;
     // keep what is readable up to the first unreadable page.
     let mut bytes: Vec<u8> = vec![0u8; byte_len as usize];
-    if session.target.read_masked(address, &mut bytes).is_err() {
-        let page_end = address
-            .0
-            .checked_add(PAGE_SIZE as u64 - address.page_offset())
-            .ok_or(Error::InvalidRange)?;
-        let readable = page_end.saturating_sub(address.0).min(byte_len) as usize;
-        bytes.truncate(readable);
-        // Not even the first page reads: say it is not resident, as the
-        // stop's disassembly does, rather than call the address bad.
+    let readable = session.read_masked_partial(address, &mut bytes);
+    if readable == 0 {
+        // Not even the first page reads: read it again for the error, and
+        // say it is not resident, as the stop's disassembly does, rather
+        // than call the address bad.
+        let first_page = (PAGE_SIZE as u64 - address.page_offset()).min(byte_len) as usize;
+        bytes.truncate(first_page);
         session
             .target
             .read_masked(address, &mut bytes)
@@ -124,6 +127,7 @@ fn disassemble(
                 error => error,
             })?;
     }
+    bytes.truncate(readable);
 
     let target = &session.target;
     let trace = resolve_thread_trace_context(target, target.current_dtb());

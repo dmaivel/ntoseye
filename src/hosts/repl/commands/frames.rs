@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::analysis::triage_report::user::exception_flag_names;
 use crate::arch::{Arch, RegisterMap, ShownRegister};
 use crate::backend::dbg_backend::processor_index_from_backend_thread_id;
 use crate::base::diagnostics;
@@ -43,7 +44,8 @@ fn register_list(tail: &str) -> Vec<String> {
 /// The value of the pseudo-register `name` (`$proc`, `$peb`, `$ra`, ...),
 /// which `r` shows as WinDbg does, read the way an expression reads it.
 fn pseudo_register_value(state: &ReplState<'_>, name: &str) -> Result<u64> {
-    Expr::eval_with_radix(&format!("@{name}"), &state.ctx.target, state.radix).map(|value| value.0)
+    Expr::eval_with_radix(&format!("@{name}"), &state.ctx.target, state.ctx.radix)
+        .map(|value| value.0)
 }
 
 /// A recovered trace, the registers its walk was seeded from, and whether
@@ -1231,21 +1233,7 @@ fn print_exception_record(record: &ExceptionRecord) {
 /// `ExceptionFlags` as a flag set: the value, then the `EXCEPTION_*` names
 /// of its bits.
 fn exception_flags(flags: u32) -> String {
-    const NAMES: &[(u32, &str)] = &[
-        (0x1, "EXCEPTION_NONCONTINUABLE"),
-        (0x2, "EXCEPTION_UNWINDING"),
-        (0x4, "EXCEPTION_EXIT_UNWIND"),
-        (0x8, "EXCEPTION_STACK_INVALID"),
-        (0x10, "EXCEPTION_NESTED_CALL"),
-        (0x20, "EXCEPTION_TARGET_UNWIND"),
-        (0x40, "EXCEPTION_COLLIDED_UNWIND"),
-        (0x80, "EXCEPTION_SOFTWARE_ORIGINATE"),
-    ];
-    let names: Vec<&str> = NAMES
-        .iter()
-        .filter(|(bit, _)| flags & bit != 0)
-        .map(|(_, name)| *name)
-        .collect();
+    let names = exception_flag_names(flags);
     if names.is_empty() {
         format!("{flags:#x}")
     } else {

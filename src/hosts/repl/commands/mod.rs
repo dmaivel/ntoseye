@@ -9,51 +9,73 @@ use crate::session::effects::Refusal;
 use crate::session::{ActionRunner, Session};
 
 const ALIAS_RECURSION_LIMIT: usize = 16;
-const BREAKPOINT_ACTION_RECURSION_LIMIT: usize = 4;
 
 /// Open a session for a host: [`Session::open_with_progress`], with the REPL
 /// dispatcher installed to run its stops' breakpoint actions and filter
 /// commands. Every host opens its sessions here.
 pub fn open_session(spec: &TargetSpec, progress: &mut dyn FnMut(&str)) -> Result<Session> {
     let mut session = Session::open_with_progress(spec, progress)?;
-    session.set_action_runner(Box::new(ReplActions));
+    session.set_action_runner(Box::new(ReplActions::default()));
     Ok(session)
 }
 
 /// The REPL dispatcher as every session's [`ActionRunner`]: breakpoint `do`
 /// actions and filter `-c` commands run in a REPL of their own over the
-/// session, with the user's saved aliases and the session's pseudo-registers,
-/// whichever host drives the run. Output goes where the host's output goes.
-pub struct ReplActions;
+/// session, with the user's saved aliases and the session's pseudo-registers
+/// and radix, whichever host drives the run. Output goes where the host's
+/// output goes.
+#[derive(Default)]
+pub struct ReplActions {
+    /// The REPL state the actions run in, made at the first one and kept, so
+    /// a log point does not load the saved aliases and build the completion
+    /// caches again at every hit.
+    store: Option<ReplStore>,
+    /// The [`alias_generation`] the store's aliases were loaded at.
+    aliases_at: u64,
+}
 
 impl ReplActions {
-    fn with_state<T>(session: &mut Session, line: &str, f: impl FnOnce(&mut ReplState) -> T) -> T {
-        let store = ReplStore::new(session, DispatchContext::BreakpointAction);
+    fn with_state<T>(
+        &mut self,
+        session: &mut Session,
+        line: &str,
+        f: impl FnOnce(&mut ReplState) -> T,
+    ) -> T {
+        let generation = alias_generation();
+        let store = match self.store.take() {
+            Some(store) => store,
+            None => {
+                self.aliases_at = generation;
+                ReplStore::new(session, DispatchContext::BreakpointAction)
+            }
+        };
         let mut state = ReplState::attach(session, store);
+        // An alias defined or removed since the last hit applies to this one.
+        if self.aliases_at != generation {
+            state.reload_aliases();
+            self.aliases_at = alias_generation();
+        }
+        // Each hit lists from its own stop: `ls` and `#` without an address
+        // do not go on from where the last hit's left off.
+        state.source_cursor = None;
+        state.disasm_search = DisasmSearch::default();
         state.line = line.to_string();
         let result = f(&mut state);
-        drop(state.detach());
+        self.store = Some(state.detach());
         result
     }
 }
 
 impl ActionRunner for ReplActions {
     fn breakpoint_action(&mut self, session: &mut Session, action: &str) -> bool {
-        Self::with_state(session, action, |state| {
-            state
-                .dispatch_breakpoint_action(action)
-                .unwrap_or_else(|error| {
-                    error!("breakpoint action failed: {error}");
-                    false
-                })
+        self.with_state(session, action, |state| {
+            state.dispatch_breakpoint_action(action)
         })
     }
 
     fn event_command(&mut self, session: &mut Session, command: &str) {
-        Self::with_state(session, command, |state| {
-            if let Err(error) = state.dispatch_exception_command(command) {
-                error!("exception command failed: {error}");
-            }
+        self.with_state(session, command, |state| {
+            state.dispatch_exception_command(command)
         })
     }
 }
@@ -130,7 +152,7 @@ impl ReplState<'_> {
     /// Evaluate a command's expression argument in the current radix. A
     /// failure is reported here, so the command only has to stop on `None`.
     fn eval_or_report(&self, text: &str) -> Option<VirtAddr> {
-        match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
+        match Expr::eval_with_radix(text, &self.ctx.target, self.ctx.radix) {
             Ok(value) => Some(value),
             Err(error) => {
                 error!("{error}");
@@ -139,95 +161,75 @@ impl ReplState<'_> {
         }
     }
 
-    /// Execute frontend-owned breakpoint commands while keeping the core free
-    /// of REPL state. A WinDbg-style `gc` or plain `g` requests automatic
-    /// resume; it ends the action wherever it runs, so `j (cond) ''; 'g'`
-    /// resumes too.
-    /// Recursive actions are bounded even when an alias resumes into another
-    /// command breakpoint.
-    pub fn dispatch_breakpoint_action(&mut self, line: &str) -> Result<bool> {
-        if self.event_command_depth >= BREAKPOINT_ACTION_RECURSION_LIMIT {
-            error!("breakpoint action recursion limit reached");
-            return Ok(false);
-        }
-        let commands = match split_command_list(line) {
-            Ok(commands) => commands,
-            Err(error) => {
-                report_command_parse_error(line, error);
-                return Ok(false);
-            }
-        };
-        self.event_command_depth += 1;
-        let outer = std::mem::replace(&mut self.context, DispatchContext::BreakpointAction);
-        // A loop the stop interrupted is not the action's to break.
-        let breakable = std::mem::replace(&mut self.breakable_loop, false);
-        let result = (|| {
-            for command in commands {
-                // A failing action command is reported and abandons the rest
-                // of the list. Propagating would end the session, and a log
-                // point whose argument is briefly unreadable must not take
-                // the debugger down with it.
-                let flow = match self.dispatch_one(command, 0) {
-                    Ok(flow) => flow,
-                    Err(error) => {
-                        error!("breakpoint action failed: {}", error);
-                        return Ok(false);
-                    }
-                };
-                match flow {
-                    Flow::Jump(Jump::Resume) => return Ok(true),
-                    Flow::Quit | Flow::Denied | Flow::Jump(_) => return Ok(false),
-                    Flow::Continue => {}
-                }
-                self.caches.refresh_expression_context(&self.ctx.target);
-            }
-            Ok(false)
-        })();
-        self.context = outer;
-        self.breakable_loop = breakable;
-        self.event_command_depth -= 1;
-        result
+    /// Run a breakpoint action. A WinDbg-style `gc` or plain `g` requests
+    /// automatic resume; it ends the action wherever it runs, so
+    /// `j (cond) ''; 'g'` resumes too. Returns whether the action resumes.
+    pub fn dispatch_breakpoint_action(&mut self, line: &str) -> bool {
+        self.dispatch_event_commands(line, DispatchContext::BreakpointAction, |flow| match flow {
+            Flow::Jump(Jump::Resume) => Some(true),
+            Flow::Quit | Flow::Denied | Flow::Jump(_) => Some(false),
+            Flow::Continue => None,
+        })
     }
 
-    /// Execute a policy-owned exception command without allowing the command
-    /// text to choose run control. The policy's typed final action (`break`,
-    /// `gh`, or `gn`) is applied by the caller after this returns.
-    pub fn dispatch_exception_command(&mut self, line: &str) -> Result<()> {
-        if self.event_command_depth >= EXCEPTION_COMMAND_RECURSION_LIMIT {
-            error!("exception command recursion limit reached");
-            return Ok(());
-        }
+    /// Run a policy-owned exception command without letting its text choose
+    /// run control: the caller applies the policy's typed final action
+    /// (`break`, `gh`, or `gn`) after this returns.
+    pub fn dispatch_exception_command(&mut self, line: &str) {
+        self.dispatch_event_commands(line, DispatchContext::ExceptionCommand, |flow| match flow {
+            Flow::Denied | Flow::Jump(_) => Some(()),
+            Flow::Quit => {
+                error!("quit is ignored inside an exception command");
+                Some(())
+            }
+            Flow::Continue => None,
+        })
+    }
+
+    /// Run an event's command list in `context`, the REPL side of the core's
+    /// [`ActionRunner`]. `end` maps a command's flow to the list's result, or
+    /// to `None` to go on with the next command; a list that runs out, fails,
+    /// or does not parse gives the default.
+    fn dispatch_event_commands<T: Default>(
+        &mut self,
+        line: &str,
+        context: DispatchContext,
+        mut end: impl FnMut(Flow) -> Option<T>,
+    ) -> T {
         let commands = match split_command_list(line) {
             Ok(commands) => commands,
             Err(error) => {
                 report_command_parse_error(line, error);
-                return Ok(());
+                return T::default();
             }
         };
         self.event_command_depth += 1;
-        let outer = std::mem::replace(&mut self.context, DispatchContext::ExceptionCommand);
+        let outer = std::mem::replace(&mut self.context, context);
+        // A loop the stop interrupted is not the event's to break.
         let breakable = std::mem::replace(&mut self.breakable_loop, false);
-        let result = (|| {
-            for command in commands {
-                let flow = match self.dispatch_one(command, 0) {
-                    Ok(flow) => flow,
-                    Err(error) => {
-                        error!("exception command failed: {}", error);
-                        return Ok(());
-                    }
-                };
-                match flow {
-                    Flow::Denied | Flow::Jump(_) => return Ok(()),
-                    Flow::Quit => {
-                        error!("quit is ignored inside an exception command");
-                        return Ok(());
-                    }
-                    Flow::Continue => {}
+        let mut result = T::default();
+        for command in commands {
+            // A failing command is reported and abandons the rest of the
+            // list. Propagating would end the session, and a log point whose
+            // argument is briefly unreadable must not take the debugger down
+            // with it.
+            let flow = match self.dispatch_one(command, 0) {
+                Ok(flow) => flow,
+                Err(error) => {
+                    let what = match context {
+                        DispatchContext::BreakpointAction => "breakpoint action",
+                        _ => "exception command",
+                    };
+                    error!("{what} failed: {error}");
+                    break;
                 }
-                self.caches.refresh_expression_context(&self.ctx.target);
+            };
+            if let Some(value) = end(flow) {
+                result = value;
+                break;
             }
-            Ok(())
-        })();
+            self.caches.refresh_expression_context(&self.ctx.target);
+        }
         self.context = outer;
         self.breakable_loop = breakable;
         self.event_command_depth -= 1;

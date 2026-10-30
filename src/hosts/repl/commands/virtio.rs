@@ -362,40 +362,62 @@ impl LookTime {
         }
     }
 
-    /// Seconds from `self` to `now`, in the guest's time when both have it.
-    fn seconds_until(self, now: Self) -> f64 {
+    /// The time from `self` to `now`, or `None` when the two looks were
+    /// timed by different clocks, which cannot be compared.
+    fn interval_until(self, now: Self) -> Option<Interval> {
         match (self, now) {
-            (Self::Guest(before), Self::Guest(after)) => {
-                after.saturating_sub(before) as f64 / 10_000_000.0
-            }
-            (Self::Host(before), _) => before.elapsed().as_secs_f64(),
-            (Self::Guest(_), Self::Host(after)) => after.elapsed().as_secs_f64(),
+            (Self::Guest(before), Self::Guest(after)) => Some(Interval {
+                seconds: after.saturating_sub(before) as f64 / 10_000_000.0,
+                guest: true,
+            }),
+            (Self::Host(before), Self::Host(after)) => Some(Interval {
+                seconds: after.duration_since(before).as_secs_f64(),
+                guest: false,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// The time between two looks, and whether the guest's clock measured it.
+#[derive(Clone, Copy)]
+struct Interval {
+    seconds: f64,
+    guest: bool,
+}
+
+impl Interval {
+    fn clock(self) -> &'static str {
+        if self.guest {
+            "guest time"
+        } else {
+            "host time"
         }
     }
 }
 
 /// How long ago the last look at a queue was, and what moved since.
-type Movement = (f64, QueueMovement);
+type Movement = (Interval, QueueMovement);
 
 impl VirtioSeen {
     /// Look at `queue` at `now`, recording this look for the next, and say
     /// what moved since the last one. A stall needs the guest to have run
-    /// between the looks.
+    /// between the looks. A last look timed by another clock counts as none.
     fn look(&mut self, queue: &VirtQueue, now: LookTime) -> Option<Movement> {
         let progress = QueueProgress::of(queue)?;
         let (at, before) = self.0.insert(ring_key(queue), (now, progress))?;
-        let seconds = at.seconds_until(now);
+        let interval = at.interval_until(now)?;
         let mut moved = queue_movement(
             &before,
             &progress,
             queue.role,
             queue.interrupt_due(),
-            seconds,
+            interval.seconds,
         );
-        if seconds < MIN_STALL_SECONDS {
+        if interval.seconds < MIN_STALL_SECONDS {
             moved.stall = None;
         }
-        Some((seconds, moved))
+        Some((interval, moved))
     }
 }
 
@@ -486,8 +508,8 @@ fn print_driver_header(driver: &VirtioDriver) {
 
 /// After a device's queues, how long ago the look that Moved compares
 /// with was.
-fn print_moved_note(since: Option<f64>, packed: bool) {
-    if let Some(seconds) = since {
+fn print_moved_note(since: Option<Interval>, packed: bool) {
+    if let Some(interval) = since {
         let counts = if packed {
             "positions filled/taken back"
         } else {
@@ -496,7 +518,9 @@ fn print_moved_note(since: Option<f64>, packed: bool) {
         outln!(
             "  {}",
             ui::muted(&format!(
-                "Moved: {counts} since the last look, {seconds:.1} s of guest time ago"
+                "Moved: {counts} since the last look, {:.1} s of {} ago",
+                interval.seconds,
+                interval.clock()
             ))
         );
     }
@@ -509,12 +533,12 @@ fn print_queues(
     with_rings: bool,
     seen: &mut VirtioSeen,
     now: LookTime,
-) -> Option<f64> {
+) -> Option<Interval> {
     if queues.is_empty() {
         outln!("  {}", ui::muted("no queues set up"));
         return None;
     }
-    let mut since = None::<f64>;
+    let mut since = None::<Interval>;
     let mut builder = Builder::default();
     let mut header = vec![
         "  #",
@@ -570,8 +594,11 @@ fn print_queues(
         let queue = &queues[index];
         index += 1;
         let movement = seen.look(queue, now);
-        if let Some((seconds, _)) = movement {
-            since = Some(since.map_or(seconds, |since| since.max(seconds)));
+        if let Some((interval, _)) = movement {
+            since = Some(match since {
+                Some(since) if since.seconds >= interval.seconds => since,
+                _ => interval,
+            });
         }
         let mut row = vec![
             format!("  {}", queue.index),
@@ -718,7 +745,7 @@ fn field(label: &str, value: impl Display) {
 
 /// What moved since the last look at the queue, for a detail view.
 fn print_movement(movement: Option<&Movement>, packed: bool) {
-    let Some((seconds, moved)) = movement else {
+    let Some((interval, moved)) = movement else {
         field(
             "moved",
             ui::muted("- (this is the first look; run `!vring` again to see what moves)"),
@@ -737,8 +764,10 @@ fn print_movement(movement: Option<&Movement>, packed: bool) {
     field(
         "moved",
         format!(
-            "{}  (since the last look {seconds:.1} s of guest time ago)",
-            parts.join(", ")
+            "{}  (since the last look {:.1} s of {} ago)",
+            parts.join(", "),
+            interval.seconds,
+            interval.clock()
         ),
     );
     if let Some(stall) = &moved.stall {

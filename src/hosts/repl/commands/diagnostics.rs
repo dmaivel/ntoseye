@@ -336,12 +336,15 @@ fn owner_label(repl: &ReplState<'_>, owner: &ResourceOwner) -> String {
 /// How `resource` is owned: exclusively, or shared.
 fn ownership(resource: &ExecutiveResource) -> &'static str {
     match (&resource.flags, resource_held(resource)) {
-        (_, false) => "-",
-        (DiagnosticValue::Available(flags), true) if flags & RESOURCE_OWNED_EXCLUSIVE != 0 => {
+        (_, Some(false)) => "-",
+        (_, None) => "?",
+        (DiagnosticValue::Available(flags), Some(true))
+            if flags & RESOURCE_OWNED_EXCLUSIVE != 0 =>
+        {
             "exclusive"
         }
-        (DiagnosticValue::Available(_), true) => "shared",
-        (DiagnosticValue::Unavailable(_), true) => "?",
+        (DiagnosticValue::Available(_), Some(true)) => "shared",
+        (DiagnosticValue::Unavailable(_), Some(true)) => "?",
     }
 }
 
@@ -872,9 +875,13 @@ enum Locks {
     List { list: ResourceList, all: bool },
 }
 
-/// Whether a thread owns `resource`.
-fn resource_held(resource: &ExecutiveResource) -> bool {
-    !matches!(resource.active_count, DiagnosticValue::Available(0))
+/// Whether a thread owns `resource`, or `None` when its active count does
+/// not read.
+fn resource_held(resource: &ExecutiveResource) -> Option<bool> {
+    match &resource.active_count {
+        DiagnosticValue::Available(count) => Some(*count != 0),
+        DiagnosticValue::Unavailable(_) => None,
+    }
 }
 
 impl Render for Locks {
@@ -903,9 +910,15 @@ impl Render for Locks {
                 let shown: Vec<&ExecutiveResource> = list
                     .resources
                     .iter()
-                    .filter(|resource| *all || resource_held(resource))
+                    // A resource whose state does not read is shown, as it
+                    // may be held, but not counted as held.
+                    .filter(|resource| *all || resource_held(resource) != Some(false))
                     .collect();
-                let held = list.resources.iter().filter(|r| resource_held(r)).count();
+                let held = list
+                    .resources
+                    .iter()
+                    .filter(|r| resource_held(r) == Some(true))
+                    .count();
                 outln!(
                     "executive resources: list head {}, {walk}, {held} held",
                     ui::addr(list.head.0)

@@ -10,9 +10,11 @@ use crate::arch::Arch;
 use crate::base::bytes::utf16le_lossy;
 use crate::base::error::{Error, Result, best_effort};
 use crate::base::memory::{
-    MemoryOps, TerminatedRead, for_each_page_chunk, pattern_offsets, read_page_chunks,
+    MemoryOps, PAGE_SIZE, TerminatedRead, for_each_page_chunk, read_page_chunks,
 };
-use crate::base::time::days_to_ymd;
+use crate::base::time::{
+    FILETIME_TICKS_PER_SECOND, FILETIME_UNIX_EPOCH_SECONDS, unix_seconds_to_iso,
+};
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::hosts::repl::*;
@@ -30,8 +32,6 @@ use crate::session::Session;
 
 pub const MAX_DISPLAY_BYTES: usize = 1024 * 1024;
 pub const MAX_DISASSEMBLY_INSTRUCTIONS: usize = 4096;
-const FILETIME_UNIX_MIN_SECONDS: i64 = -62_135_596_800;
-const FILETIME_UNIX_MAX_SECONDS: i64 = 253_402_300_799;
 /// Characters `d*a`/`d*u` show of each string, as `da`/`du` do by default.
 const POINTER_STRING_CHARS: usize = 256;
 /// Characters `da`/`du` show without a count.
@@ -1630,24 +1630,23 @@ fn writemem(
     let mut file = File::create(&path)
         .map_err(|error| Error::DebugInfo(format!("failed to create '{path}': {error}")))?;
     let mut unreadable = 0usize;
-    let mut write_error = None;
-    for_each_page_chunk(range.start, range.len(), |_, address, len| {
-        if write_error.is_some() {
-            return;
+    // Read in display-sized slices so a large range is never held whole.
+    let mut offset = 0usize;
+    while offset < range.len() {
+        let len = (range.len() - offset).min(MAX_DISPLAY_BYTES);
+        let (mut bytes, valid) =
+            read_page_chunks(range.start + offset as u64, len, |address, buf| {
+                session.target.read_masked(address, buf)
+            })?;
+        for (byte, valid) in bytes.iter_mut().zip(&valid) {
+            if !valid {
+                *byte = 0;
+                unreadable += 1;
+            }
         }
-        let mut bytes = vec![0u8; len];
-        if session.target.read_masked(address, &mut bytes).is_err() {
-            bytes.fill(0);
-            unreadable += len;
-        }
-        if let Err(error) = file.write_all(&bytes) {
-            write_error = Some(error.to_string());
-        }
-    });
-    if let Some(error) = write_error {
-        return Err(Error::DebugInfo(format!(
-            "failed to write '{path}': {error}"
-        )));
+        file.write_all(&bytes)
+            .map_err(|error| Error::DebugInfo(format!("failed to write '{path}': {error}")))?;
+        offset += len;
     }
     Ok(MemoryToFile {
         path,
@@ -1707,16 +1706,17 @@ fn readmem(
         unwritten: 0,
         read_error: None,
     };
+    let mut bytes = [0u8; PAGE_SIZE];
     for_each_page_chunk(range.start, range.len(), |offset, address, len| {
         if loaded.read_error.is_some() {
             return;
         }
-        let mut bytes = vec![0u8; len];
-        if let Err(error) = file.read_exact(&mut bytes) {
+        let bytes = &mut bytes[..len];
+        if let Err(error) = file.read_exact(bytes) {
             loaded.read_error = Some((offset, error.to_string()));
             return;
         }
-        if let Err(error) = session.write_memory(MemoryKind::Virtual, address.0, &bytes) {
+        if let Err(error) = session.write_memory(MemoryKind::Virtual, address.0, bytes) {
             loaded.failed.push((address, error));
             loaded.unwritten += len;
         }
@@ -1800,32 +1800,20 @@ impl Render for NumberFormats {
         field("float", format_float(f32::from_bits(value as u32)));
         field("double", format_float(f64::from_bits(value)));
 
-        const FILETIME_UNIX_OFFSET_SECONDS: i64 = 11_644_473_600;
-        const FILETIME_MAX_TICKS: u64 = 265_046_774_400_000_000;
-        let filetime_seconds = value / 10_000_000;
-        let filetime_unix_seconds =
-            (filetime_seconds as i64).saturating_sub(FILETIME_UNIX_OFFSET_SECONDS);
-        if value <= FILETIME_MAX_TICKS
-            && (FILETIME_UNIX_MIN_SECONDS..=FILETIME_UNIX_MAX_SECONDS)
-                .contains(&filetime_unix_seconds)
-        {
-            let ticks = (value % 10_000_000) as u32;
-            field(
-                "time (FILETIME)",
-                format_unix_timestamp(filetime_unix_seconds, ticks),
-            );
-        } else {
-            field("time (FILETIME)", "out of range".to_string());
-        }
-        let unix_seconds = value as i64;
-        if (FILETIME_UNIX_MIN_SECONDS..=FILETIME_UNIX_MAX_SECONDS).contains(&unix_seconds) {
-            field(
-                "time (Unix seconds)",
-                format_unix_timestamp(unix_seconds, 0),
-            );
-        } else {
-            field("time (Unix seconds)", "out of range".to_string());
-        }
+        // Every u64 FILETIME's seconds fit an i64; the sign matters for
+        // the ones before 1970.
+        let filetime_seconds =
+            (value / FILETIME_TICKS_PER_SECOND) as i64 - FILETIME_UNIX_EPOCH_SECONDS as i64;
+        let filetime_ticks = (value % FILETIME_TICKS_PER_SECOND) as u32;
+        field(
+            "time (FILETIME)",
+            unix_seconds_to_iso(filetime_seconds, filetime_ticks)
+                .unwrap_or_else(|| "out of range".to_string()),
+        );
+        field(
+            "time (Unix seconds)",
+            unix_seconds_to_iso(value as i64, 0).unwrap_or_else(|| "out of range".to_string()),
+        );
     }
 }
 
@@ -1864,7 +1852,7 @@ fn search_pattern(
 ) -> std::result::Result<Vec<u8>, ArgError> {
     let words: Vec<&str> = words.iter().map(AsRef::as_ref).collect();
     kind.pattern(&words, |value| {
-        Expr::eval_with_radix(value, &cx.state.ctx.target, cx.state.radix).map(|value| value.0)
+        Expr::eval_with_radix(value, &cx.state.ctx.target, cx.state.ctx.radix).map(|value| value.0)
     })
     .map_err(|error| ArgError::Message(error.to_string()))
 }
@@ -2147,9 +2135,9 @@ fn search(
 }
 
 /// Find matches, including overlapping ones, with symbol/module/VAD
-/// context. In a virtual space, the search skips pages that it cannot read,
-/// the breakpoints of this session read as the code that they replaced, and
-/// the search returns a maximum of 4096 matches.
+/// context. The search skips pages that it cannot read and returns a
+/// maximum of 4096 matches; in a virtual space, the breakpoints of this
+/// session read as the code that they replaced.
 #[command(form_of = search, python = Memory, python_name = "search")]
 fn memory_search(
     session: &Session,
@@ -2169,17 +2157,16 @@ fn memory_search(
     }
     let target = &session.target;
     let SearchSpace::Virtual(undescribed) = space else {
-        // The range in one read, as `!search` does not chunk it.
-        let mut bytes = vec![0; length];
-        target.read_physical(start, &mut bytes)?;
-        return Ok(pattern_offsets(&bytes, &pattern)
-            .map(|offset| {
-                MemorySearchMatch::undescribed(
-                    start.wrapping_add(offset as u64),
-                    offset as u64,
-                    None,
-                    AddressKind::Physical,
-                )
+        let hits = target
+            .search(VirtAddr(start), &pattern, length, |address, buf| {
+                target.read_physical(address.0, buf)
+            })?
+            .matches;
+        return Ok(hits
+            .into_iter()
+            .map(|address| {
+                let offset = address.wrapping_sub(start);
+                MemorySearchMatch::undescribed(address, offset, None, AddressKind::Physical)
             })
             .collect());
     };
@@ -2262,23 +2249,6 @@ fn checked_display_string_count(max_chars: u64, char_size: usize) -> Result<usiz
 
 fn format_characters(value: u64) -> String {
     value.to_le_bytes().into_iter().map(ascii_char).collect()
-}
-
-/// Format a proleptic-Gregorian UTC timestamp in ISO 8601 (`…Z`) without
-/// pulling a date/time dependency into the debugger. `seconds` is Unix time
-/// and `ticks` the fractional second in FILETIME's 100 ns units.
-fn format_unix_timestamp(seconds: i64, ticks: u32) -> String {
-    let days = seconds.div_euclid(86_400);
-    let day_seconds = seconds.rem_euclid(86_400);
-    let hour = day_seconds / 3_600;
-    let minute = (day_seconds % 3_600) / 60;
-    let second = day_seconds % 60;
-    let (year, month, day) = days_to_ymd(days);
-    if ticks == 0 {
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-    } else {
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{ticks:07}Z")
-    }
 }
 
 #[cfg(test)]

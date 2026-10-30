@@ -112,7 +112,7 @@ fn analyze_options(
 ) -> std::result::Result<AnalyzeOptions, ArgError> {
     let argv: Vec<String> = cursor.words().map(str::to_string).collect();
     while cursor.word().is_some() {}
-    parse_analyze_options(&argv, &cx.state.ctx.target, cx.state.radix).map_err(|error| {
+    parse_analyze_options(&argv, &cx.state.ctx.target, cx.state.ctx.radix).map_err(|error| {
         outln!("{}\n", command_help(cx.name));
         ArgError::Message(error.to_string())
     })

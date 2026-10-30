@@ -658,10 +658,16 @@ impl Session {
         running_on: Option<&str>,
         limit: usize,
     ) -> Result<ThreadStackTrace> {
-        if let Some(vcpu) = running_on
-            && let Some(trace) = self.running_thread_stack(vcpu, thread, limit)?
-        {
-            return Ok(trace);
+        if let Some(vcpu) = running_on {
+            // Its saved kernel stack is stale while it runs, so a thread on a
+            // processor whose registers do not read has no stack to show.
+            return self
+                .running_thread_stack(vcpu, thread, limit)?
+                .ok_or_else(|| {
+                    Error::DebugInfo(format!(
+                        "the thread runs on {vcpu}, whose registers cannot be read (the target runs)"
+                    ))
+                });
         }
         build_parked_thread_stack(&self.target, thread, limit)
     }

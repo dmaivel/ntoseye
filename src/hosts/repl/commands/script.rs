@@ -278,15 +278,11 @@ fn j(
     // `*` in an expression multiplies; a comment is never Command1.
     let is_command = |word: &str| {
         (command_registry().get(word).is_some() && !is_comment(word))
-            || state
-                .aliases
-                .entries()
-                .iter()
-                .any(|(alias, _)| alias == word)
+            || state.aliases.contains(word)
             || word.starts_with('~')
             || script_file_token(word).is_some()
     };
-    let command = match parse_j(&tail, state.radix, is_command) {
+    let command = match parse_j(&tail, state.ctx.radix, is_command) {
         Ok(command) => command,
         Err(error) => return malformed("j", error),
     };
@@ -671,7 +667,7 @@ impl ReplState<'_> {
     /// Whether `condition` holds; `None` (reported) when it cannot be
     /// evaluated.
     fn condition_holds(&self, name: &str, condition: &str) -> Option<bool> {
-        match Expr::eval_with_radix(condition, &self.ctx.target, self.radix) {
+        match Expr::eval_with_radix(condition, &self.ctx.target, self.ctx.radix) {
             Ok(value) => Some(value.0 != 0),
             Err(error) => {
                 error!("{name}: condition '{condition}': {error}");
@@ -1007,18 +1003,18 @@ mod tests {
         let mut state = ReplState::for_oneshot(&mut session);
         let action = "j (@$t0 == 0) 'r $t0 = 1' ; '.echo second; gc'";
         let (first, _) = capture(|| state.dispatch_breakpoint_action(action));
-        assert!(!first.unwrap());
+        assert!(!first);
         let (second, text) = capture(|| state.dispatch_breakpoint_action(action));
-        assert!(second.unwrap());
+        assert!(second);
         assert_eq!(text, "second\n");
         // WinDbg scripts write a plain `g` for the same resume; one with an
         // address is still run control the action may not take.
         let (resumed, text) =
             capture(|| state.dispatch_breakpoint_action("j (1) '.echo x; g; .echo not' ; 'g'"));
-        assert!(resumed.unwrap());
+        assert!(resumed);
         assert_eq!(text, "x\n");
         let (resumed, text) = capture(|| state.dispatch_breakpoint_action("g 1000"));
-        assert!(!resumed.unwrap());
+        assert!(!resumed);
         assert!(text.contains("error:"), "{text}");
         // Outside an action, gc has nothing to resume.
         let (flow, _) = capture(|| state.dispatch_line("gc"));
@@ -1033,7 +1029,7 @@ mod tests {
         let mut state = ReplState::for_oneshot(&mut session);
         state.ctx.target.interrupt_requester().raise();
         let (resumed, _) = capture(|| state.dispatch_breakpoint_action("j (1) 'gc' ; ''"));
-        assert!(resumed.unwrap());
+        assert!(resumed);
         assert!(state.ctx.target.interrupt.load(Ordering::SeqCst));
     }
 

@@ -24,7 +24,7 @@ use crate::base::bytes::{
 };
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
-use crate::base::time::filetime_to_iso;
+use crate::base::time::filetime_to_iso_precise;
 use crate::base::types::VirtAddr;
 use crate::nt::bugchecks::looks_like_kernel_pointer;
 use crate::nt::expr::{Expr, NumberRadix};
@@ -235,9 +235,8 @@ pub fn parse_guid(text: &str) -> Option<[u8; 16]> {
 
 /// A FILETIME as `YYYY-MM-DD HH:MM:SS.fffffff` UTC, to the 100 ns tick.
 pub fn format_filetime_precise(filetime: u64) -> Option<String> {
-    let iso = filetime_to_iso(filetime)?;
-    let (date, time) = iso.trim_end_matches('Z').split_once('T')?;
-    Some(format!("{date} {time}.{:07}", filetime % 10_000_000))
+    let iso = filetime_to_iso_precise(filetime)?;
+    Some(iso.trim_end_matches('Z').replacen('T', " ", 1))
 }
 
 /// What an ETW timestamp counts, from `_WMI_LOGGER_CONTEXT.ClockType`

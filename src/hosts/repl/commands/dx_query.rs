@@ -724,6 +724,20 @@ impl Evaluator<'_> {
         result
     }
 
+    /// Whether `lambda` holds for the element under `key`.
+    fn matches(
+        &self,
+        lambda: &Node,
+        key: u64,
+        element: &ModelValue,
+        scope: &mut Scope,
+    ) -> Result<bool> {
+        let result = self
+            .apply(lambda, element.clone(), scope)
+            .map_err(|error| invalid(format!("[{key:#x}]: {}", message(&error))))?;
+        self.truth(&result)
+    }
+
     fn query(
         &self,
         elements: Vec<(u64, ModelValue)>,
@@ -801,43 +815,58 @@ impl Evaluator<'_> {
             }
             "First" | "Last" => {
                 arity(&[0, 1])?;
-                let candidates = if lambda.is_some() {
-                    let mut kept = Vec::new();
-                    for (key, element, result) in mapped(elements)? {
-                        if self.truth(&result)? {
-                            kept.push((key, element));
-                        }
+                // The search stops at the first element that matches, so a
+                // later element the lambda fails on does not fail it.
+                let mut elements = elements;
+                let len = elements.len();
+                let mut found = None;
+                for step in 0..len {
+                    let index = if method == "First" {
+                        step
+                    } else {
+                        len - 1 - step
+                    };
+                    let (key, element) = &elements[index];
+                    let matches = match lambda {
+                        Some(lambda) => self.matches(lambda, *key, element, scope)?,
+                        None => true,
+                    };
+                    if matches {
+                        found = Some(index);
+                        break;
                     }
-                    kept
-                } else {
-                    elements
-                };
-                let found = if method == "First" {
-                    candidates.into_iter().next()
-                } else {
-                    candidates.into_iter().last()
-                };
-                found
-                    .map(|(_, element)| element)
-                    .ok_or_else(|| invalid(format!(".{method}() found no element")))?
+                }
+                let index =
+                    found.ok_or_else(|| invalid(format!(".{method}() found no element")))?;
+                elements.swap_remove(index).1
             }
             "Any" | "All" | "Count" => {
                 arity(&[0, 1])?;
-                let matches = if lambda.is_some() {
-                    let mut matches = 0;
-                    for (_, _, result) in mapped(elements.clone())? {
-                        matches += usize::from(self.truth(&result)?);
-                    }
-                    matches
-                } else if method == "All" {
-                    return Err(invalid(".All() takes a lambda"));
-                } else {
-                    elements.len()
+                let Some(lambda) = lambda else {
+                    return match method {
+                        "All" => Err(invalid(".All() takes a lambda")),
+                        "Any" => Ok(ModelValue::Bool(!elements.is_empty())),
+                        _ => Ok(ModelValue::unsigned(elements.len() as u64)),
+                    };
                 };
+                // Any and All stop at the first element that decides them.
+                let mut count = 0u64;
+                let mut decided = None;
+                for (key, element) in elements {
+                    let matches = self.matches(lambda, key, &element, scope)?;
+                    match method {
+                        "Any" if matches => decided = Some(true),
+                        "All" if !matches => decided = Some(false),
+                        _ => count += u64::from(matches),
+                    }
+                    if decided.is_some() {
+                        break;
+                    }
+                }
                 match method {
-                    "Any" => ModelValue::Bool(matches > 0),
-                    "All" => ModelValue::Bool(matches == elements.len()),
-                    _ => ModelValue::unsigned(matches as u64),
+                    "Any" => ModelValue::Bool(decided.unwrap_or(false)),
+                    "All" => ModelValue::Bool(decided.unwrap_or(true)),
+                    _ => ModelValue::unsigned(count),
                 }
             }
             "OrderBy" | "OrderByDescending" => {

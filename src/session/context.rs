@@ -379,16 +379,15 @@ impl Session {
         Ok(())
     }
 
-    /// Align the inspection context to the currently selected thread's address
-    /// space: when halted, read that thread's registers and set
+    /// Make the current vCPU the inspection context: read its registers, set
     /// `target.registers` and `context_dtb_override` from its CR3 (or ARM64
-    /// TTBR0), so reads,
-    /// steps, and breakpoint installs scope to the focused thread rather than
-    /// an earlier stop on another thread. Called from the thread-selection entry
-    /// points; `continue_until_break` establishes the same context inline. Best-
-    /// effort and a no-op while the guest runs (no coherent register file).
-    /// Make the current vCPU the inspection context: its registers, and the
-    /// Windows thread it is running (what `!thread` and `$thread` read).
+    /// TTBR0), and select the Windows thread it is running (what `!thread`
+    /// and `$thread` read), so reads, steps, and breakpoint installs scope to
+    /// the focused thread rather than an earlier stop on another thread.
+    /// Called from the thread-selection entry points;
+    /// [`Self::classify_stop_event`] establishes the same context inline for a
+    /// stop. Best-effort and a no-op while the guest runs (no coherent
+    /// register file).
     pub(super) fn refresh_context_for_current_thread(&mut self) {
         self.parked_windows_thread = None;
         self.target.clear_current_windows_thread_context();

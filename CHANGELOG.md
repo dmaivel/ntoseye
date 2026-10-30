@@ -131,6 +131,23 @@ Keeping this file:
 - `$peb` on a user-mode minidump reads the PEB pointer by the PDB's `_TEB` layout and works before a thread is selected, and a minidump module with a zero timestamp is fetched by its image's timestamp.
 - `!cpuinfo` on a triage dump gives the CPU family (6, not 0x106) and only for the processor the dump holds.
 - A truncated triage dump is reported as such, where its integrity check passed.
+- On the `gdb` backend, a breakpoint set or cleared from DAP or the GDB server while the target runs leaves it running, where the edit's own break-in was kept as a stop and the target stayed halted.
+- On the `gdb` backend, `g` from a bugcheck lets Windows write its dump and restart, where it hit `ntoseye`'s trap at `nt!KeBugCheckEx` again.
+- The SDK's `Debugger.reload()` on a target that did not reboot removes the breakpoints it planted before reloading, where address breakpoints were forgotten with their int3 left in the guest and symbolic ones saved their own int3 as the code they replaced.
+- Breakpoint actions and exception commands read numbers in the radix `n` set, as the prompt does, and no longer reload the saved aliases at every hit.
+- A command list stops after a command that is missing an argument, so `bc; g` no longer resumes the target, and MCP reports that command as failed; MCP's status line says the target is running when a stop's breakpoint action resumed it.
+- Quitting the REPL when the target cannot be halted leaves the breakpoints alone and says so, where it removed them from the running target and resumed it.
+- The prompt no longer crashes while you type an argument that starts with a non-ASCII character, and `s` and `f` refuse a byte pattern with a non-ASCII character after `\x` instead of crashing.
+- `ntoseye configure` for libvirt recognises vmcoreinfo as libvirt writes it (`state='on'`), where every change it applied ended in "libvirt did not retain vmcoreinfo", and turns on a vmcoreinfo element that is off.
+- `u` with an end address refuses a range over 1 MiB, where a mistyped one could exhaust memory, and shows every readable page up to the first unreadable one, where it stopped after the first page.
+- `.writemem` refuses a running target and keeps the captured part of a partly captured page, where it wrote zeros, and `.dump /u` writes the code under planted user-mode breakpoints, not the breakpoints; the SDK's physical `search` stops at 4096 matches and skips unreadable pages.
+- `!idt` lists only the vectors the IDT's limit covers, `~*` selects every processor past the first 256, and `!pci` names the buses it scanned when no function responds.
+- `dx` shows a signed bitfield's negative values, accepts an escaped quote in a string before the format, and `.First`, `.Any` and `.All` stop at the element that decides, so a later element that fails no longer fails the query; adding a `display` evaluates only it, and an unreadable scalar shows its error.
+- `!locks` shows a resource whose count cannot be read as unknown, where it counted it as held.
+- `!thread` on a running target says the stack of a thread on a processor is unavailable, where it showed the stale stack it was switched in from; `lm a` after `.vtl 1` finds the secure kernel's modules; `!apc <name>` refuses a name several processes share, where it took the first.
+- `ssdt` marks an entry that points into a driver whose name contains `nt`, or into no module, as hooked.
+- `dl` says when it stopped at its 4096-entry limit, `!acl` describes a null SACL as auditing nothing, `!chkimg -nospec` no longer calls its total genuine, `.kdfiles` refuses extra words and shows its statistics with an empty map, and `!hvvmcs` refuses a VTL over 255.
+- `.formats` converts FILETIMEs after the year 2440, where it said they were out of range.
 
 ## v0.52.0 (2026-10-25)
 

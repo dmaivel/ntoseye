@@ -12,9 +12,9 @@ use crate::{
 };
 
 use super::{
-    ApplyResult, BackendSelection, ConfigurationPlan, Configurator, ConfigureBackend,
-    ConfigureRequest, ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus,
-    backup_file, command_detail, kdnet_instructions, sanitize_filename, shell_quote,
+    ApplyResult, BackendSelection, ConfigurationPlan, Configurator, ConfigureRequest,
+    ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus, backup_file,
+    command_detail, sanitize_filename, shell_quote, transport_instructions,
 };
 
 const QEMU_NS: &str = "http://libvirt.org/schemas/domain/qemu/1.0";
@@ -207,27 +207,9 @@ fn libvirt_instructions(xml: &str, request: ConfigureRequest, domain: &str) -> I
     else {
         return Instructions::default();
     };
-    let selected = backend.selection();
-    let mut instructions = Instructions::default();
-    if let ConfigureBackend::KdNet { host } = backend {
-        instructions = kdnet_instructions(host, false);
-    }
-    if selected.kd() {
-        let debug_port = debug_port_for_socket(xml, KD_SOCKET).unwrap_or(1);
-        instructions.guest = vec![
-            "bcdedit /debug on".to_string(),
-            format!("bcdedit /dbgsettings serial debugport:{debug_port} baudrate:115200"),
-            "Restart-Computer".to_string(),
-        ];
-        instructions
-            .run
-            .push(ConfiguredTarget::kd(KD_SOCKET, debug_port, false).run_command());
-    }
-    if selected.gdb() {
-        instructions
-            .run
-            .push(ConfiguredTarget::gdb(DEFAULT_GDB_ADDR).run_command());
-    }
+    let mut instructions = transport_instructions(backend, || {
+        debug_port_for_socket(xml, KD_SOCKET).unwrap_or(1)
+    });
     if vmcoreinfo {
         instructions.notes.push(
             "Install the virtio-win 'fwcfg' driver in the guest for crash dumps.".to_string(),
@@ -266,7 +248,7 @@ fn verify_applied_config(xml: &str, request: ConfigureRequest) -> Result<()> {
                     "libvirt did not retain the KDNET Hyper-V vendor override".to_string(),
                 ));
             }
-            if vmcoreinfo && !xml.contains("<vmcoreinfo state=\"on\"") {
+            if vmcoreinfo && !vmcoreinfo_enabled(xml) {
                 return Err(Error::DebugInfo(
                     "libvirt did not retain vmcoreinfo".to_string(),
                 ));
@@ -426,13 +408,28 @@ fn kdnet_vendor_ready_block(hyperv: &str) -> bool {
             .is_some_and(|value| !value.is_empty() && value != "Microsoft Hv")
 }
 
+/// Whether the domain enables `vmcoreinfo`. libvirt serializes attributes
+/// with single quotes, so the check must not depend on quote style.
+fn vmcoreinfo_enabled(xml: &str) -> bool {
+    find_tag_block(xml, 0, "vmcoreinfo")
+        .is_some_and(|(start, end)| tag_attr(&xml[start..end], "state").as_deref() == Some("on"))
+}
+
 /// Enable the domain's `vmcoreinfo` feature, which QEMU's Windows crash-dump
 /// writer (`virsh dump --format=win-dmp`) requires. The guest half is the
 /// virtio-win `fwcfg` driver; without either, QEMU reports "invalid vmcoreinfo
 /// note size".
 fn ensure_vmcoreinfo(xml: &str, changes: &mut Vec<String>) -> Result<String> {
-    if xml.contains("<vmcoreinfo") {
-        return Ok(xml.to_string());
+    if let Some((start, end)) = find_tag_block(xml, 0, "vmcoreinfo") {
+        if tag_attr(&xml[start..end], "state").as_deref() == Some("on") {
+            return Ok(xml.to_string());
+        }
+        let mut out = String::with_capacity(xml.len());
+        out.push_str(&xml[..start]);
+        out.push_str("<vmcoreinfo state=\"on\"/>");
+        out.push_str(&xml[end..]);
+        changes.push("enable vmcoreinfo (crash-dump generation)".to_string());
+        return Ok(out);
     }
 
     if let Some(close) = xml.find("</features>") {
@@ -727,6 +724,7 @@ fn escape_attr(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hosts::configure::ConfigureBackend;
 
     const BASE_XML: &str = r#"<domain type="kvm">
   <name>windows</name>
@@ -980,6 +978,27 @@ mod tests {
         let declined =
             apply_transport_config(&once.xml, &[DebugTransport::Kd], KD_SOCKET, false).unwrap();
         assert!(declined.xml.contains(r#"<vmcoreinfo state="on"/>"#));
+    }
+
+    #[test]
+    fn vmcoreinfo_recognizes_libvirt_single_quoted_state() {
+        let xml = "<domain type='kvm'>\n  <features>\n    <vmcoreinfo state='on'/>\n  </features>\n</domain>\n";
+        let mut changes = Vec::new();
+        assert_eq!(ensure_vmcoreinfo(xml, &mut changes).unwrap(), xml);
+        assert!(changes.is_empty());
+        assert!(vmcoreinfo_enabled(xml));
+    }
+
+    #[test]
+    fn vmcoreinfo_disabled_element_is_enabled() {
+        let xml = "<domain type='kvm'>\n  <features>\n    <vmcoreinfo state='off'/>\n  </features>\n</domain>\n";
+        assert!(!vmcoreinfo_enabled(xml));
+        let mut changes = Vec::new();
+        let out = ensure_vmcoreinfo(xml, &mut changes).unwrap();
+        assert!(out.contains("    <vmcoreinfo state=\"on\"/>\n  </features>"));
+        assert_eq!(out.matches("<vmcoreinfo").count(), 1);
+        assert!(vmcoreinfo_enabled(&out));
+        assert_eq!(changes, ["enable vmcoreinfo (crash-dump generation)"]);
     }
 
     #[test]

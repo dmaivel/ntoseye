@@ -88,8 +88,10 @@ impl Session {
         }
     }
 
-    /// Whether an interrupt's stop is the break-in it requested. The KD rule
-    /// is the same status/non-managed-address split used by
+    /// Whether an interrupt's stop is the break-in it requested. A backend
+    /// that tells break-ins apart (gdb's `SIGINT`) reports `break_in`. KD
+    /// reports a break-in as a STATUS_BREAKPOINT, so there the rule is the
+    /// same status/non-managed-address split used by
     /// `stop_is_assisted_refresh_breakin`: a STATUS_BREAKPOINT that classified
     /// as an ordinary stop and is not on one of our sites. A stop the backend
     /// already had pending (`candidate` false) wins even with the same status.
@@ -98,10 +100,11 @@ impl Session {
             return false;
         };
         candidate
-            && event.exception_code == Some(STATUS_BREAKPOINT)
-            && event
-                .program_counter
-                .is_none_or(|pc| self.breakpoints.breakpoint_id_at_address(pc).is_none())
+            && (event.break_in
+                || (event.exception_code == Some(STATUS_BREAKPOINT)
+                    && event
+                        .program_counter
+                        .is_none_or(|pc| self.breakpoints.breakpoint_id_at_address(pc).is_none())))
     }
 
     /// Run `edit` with the target halted, restoring the previous run state.
@@ -203,7 +206,7 @@ impl Session {
             self.refresh_context_for_current_thread();
         }
         // The VM is moving on, so any stop `service_idle` parked for the host to
-        // observe is now spent; drop it so a later `wait_for_stop` doesn't replay
+        // observe is now spent; drop it so a later `wait_stop` doesn't replay
         // a stale event.
         self.parked_stop = None;
         self.set_current_stop(None);
@@ -215,7 +218,9 @@ impl Session {
         // A kept stop is this resume's (see `DebugBackend::keep_last_stop`):
         // nothing runs before the wait reports it, so no vCPU steps off a
         // site, which would take that stop for its own.
-        if (self.breakpoints.has_enabled_breakpoints() || !self.module_traps.is_empty())
+        if (self.breakpoints.has_enabled_breakpoints()
+            || !self.module_traps.is_empty()
+            || self.bugcheck_trap.is_some())
             && !self.backend.stop_kept()
         {
             self.backend.set_current_thread(&self.current_thread)?;

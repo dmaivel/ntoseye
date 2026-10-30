@@ -17,7 +17,8 @@ use crate::nt::target::sched::{
 };
 use crate::nt::target::workqueue::{WorkItem, WorkQueueTypes, WorkQueues};
 use crate::nt::target::{
-    DiagnosticValue, ListTermination, ThreadInfo, kthread_state_name, wait_reason_name,
+    DiagnosticValue, ListTermination, ThreadInfo, kthread_state_name, process_by_name,
+    wait_reason_name,
 };
 use crate::nt::unwind::StackFrame;
 use crate::session::Session;
@@ -408,7 +409,7 @@ fn timer_address(
         return Ok(None);
     }
     let expression = cursor.rest();
-    Expr::eval_with_radix(&expression, &cx.state.ctx.target, cx.state.radix)
+    Expr::eval_with_radix(&expression, &cx.state.ctx.target, cx.state.ctx.radix)
         .map(Some)
         .map_err(|error| {
             ArgError::Message(format!("invalid timer address '{expression}': {error}"))
@@ -494,17 +495,11 @@ fn apc_selector(
             return Ok(ApcSelector::All);
         }
         let target = &cx.state.ctx.target;
-        if let Ok(value) = Expr::eval_with_radix(argument, target, cx.state.radix) {
+        if let Ok(value) = Expr::eval_with_radix(argument, target, cx.state.ctx.radix) {
             return Ok(ApcSelector::Number(value.0));
         }
-        let needle = argument.to_ascii_lowercase();
         let processes = target.guest()?.enumerate_processes()?;
-        let process = processes
-            .iter()
-            .find(|process| process.name.to_ascii_lowercase().contains(&needle))
-            .ok_or_else(|| {
-                Error::DebugInfo(format!("no process or thread matches '{argument}'"))
-            })?;
+        let process = process_by_name(&processes, argument)?;
         Ok(ApcSelector::Process(process.pid))
     };
     select().map_err(|error| ArgError::Message(format!("failed to select APC threads: {error}")))

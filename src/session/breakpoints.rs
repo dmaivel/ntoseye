@@ -523,9 +523,9 @@ impl Session {
             }
         }
         *self.module_traps.edit() = kept;
-        // The other event's trap stays planted, and so does its marker.
+        // The other traps stay planted, and so do their markers.
         self.module_trap_interrupted
-            .take_if(|(interrupted, _)| *interrupted == event);
+            .take_if(|(interrupted, trap_user, _)| *interrupted == event && *trap_user == user);
     }
 
     /// Set an `sx* ld` or `sx* ud` filter.
@@ -1193,6 +1193,11 @@ impl Session {
     }
 }
 
+/// The kernel function every user-mode image map runs, with the image's
+/// name, the mapping process's ID and its `IMAGE_INFO` as its first three
+/// arguments, as image-load notify routines get them.
+pub const USER_IMAGE_TRAP: &str = "nt!PsCallImageNotifyRoutines";
+
 /// The kernel functions that report a module `event`, each taking the image
 /// base as its second argument. The kernel calls `DbgLoadImageSymbols` for
 /// every kernel image it maps, with the image listed in `PsLoadedModuleList`
@@ -1201,11 +1206,6 @@ impl Session {
 /// reported by `DbgUnLoadImageSymbolsUnicode` (current builds) or
 /// `DbgUnLoadImageSymbols`, after the driver's unload routine and before the
 /// image leaves the module list.
-/// The kernel function every user-mode image map runs, with the image's
-/// name, the mapping process's ID and its `IMAGE_INFO` as its first three
-/// arguments, as image-load notify routines get them.
-pub const USER_IMAGE_TRAP: &str = "nt!PsCallImageNotifyRoutines";
-
 fn module_trap_symbols(event: ModuleEvent) -> &'static [&'static str] {
     match event {
         ModuleEvent::Load => &["nt!DbgLoadImageSymbols"],

@@ -7,7 +7,6 @@ use crate::backend::dbg_backend::{
     ContinueDisposition, DebugBackend, LastEvent, ModuleEvent, StopEvent, clear_trap_flag,
     processor_index_from_backend_thread_id,
 };
-use crate::base::bytes::utf16le_lossy;
 use crate::base::error::Result;
 use crate::base::memory::MemoryOps;
 use crate::base::notice::Notice;
@@ -697,24 +696,6 @@ impl Session {
             .is_ok_and(|()| bytes != opcode)
     }
 
-    /// Block until the backend produces a meaningful stop, routing every raw
-    /// event through [`Self::classify_stop_event`]. Filtered breakpoint hits and
-    /// debugger noise are resumed internally.
-    pub fn wait_for_stop(&mut self) -> Result<StopEvent> {
-        loop {
-            let event = self.backend.wait_for_stop()?;
-            match self.classify_stop_event(event)? {
-                StopResolution::Resumed | StopResolution::ModulesChanged => continue,
-                StopResolution::Breakpoint { event, .. }
-                | StopResolution::Bugcheck { event }
-                | StopResolution::ModuleLoad { event, .. }
-                | StopResolution::ModuleUnload { event, .. }
-                | StopResolution::TargetReloaded { event, .. }
-                | StopResolution::Stopped { event, .. } => return Ok(event),
-            }
-        }
-    }
-
     /// A stop on a module trap for `kind` ([`Self::sync_module_traps`]), at
     /// the first instruction of the kernel function that reports it, with
     /// the image base in its second argument. The event is a module change
@@ -734,7 +715,9 @@ impl Session {
         let stack = self.target.register_value(self.target.arch().sp_register());
         let repeated = self
             .module_trap_interrupted
-            .take_if(|(event, interrupted)| *event == kind && Some(*interrupted) == stack)
+            .take_if(|(event, user, interrupted)| {
+                *event == kind && !*user && Some(*interrupted) == stack
+            })
             .is_some();
         self.unreported_module_change = self.refresh_modules_on_stop();
         let module = self
@@ -765,8 +748,8 @@ impl Session {
         let stack = self.target.register_value(self.target.arch().sp_register());
         let repeated = self
             .module_trap_interrupted
-            .take_if(|(event, interrupted)| {
-                *event == ModuleEvent::Load && Some(*interrupted) == stack
+            .take_if(|(event, user, interrupted)| {
+                *event == ModuleEvent::Load && *user && Some(*interrupted) == stack
             })
             .is_some();
         let module = (!repeated)
@@ -829,15 +812,14 @@ impl Session {
         if properties & IMAGE_INFO_SYSTEM_MODE_IMAGE != 0 {
             return None;
         }
-        // `UNICODE_STRING`: its `Buffer` follows the lengths, a pointer in.
-        let length: u16 = kernel.read(VirtAddr(name)).ok()?;
-        let buffer = kernel.read_pointer(VirtAddr(name + pointer)).ok()?;
-        let mut bytes = vec![0u8; usize::from(length)];
-        kernel.read_bytes(buffer, &mut bytes).ok()?;
+        let path = self
+            .target
+            .read_kernel_unicode_string(VirtAddr(name))
+            .ok()?;
         Some((
             VirtAddr(base),
             u32::try_from(size).unwrap_or(u32::MAX),
-            utf16le_lossy(&bytes),
+            path,
             process,
         ))
     }
@@ -1213,7 +1195,7 @@ pub fn module_event_line(kind: ModuleEvent, module: &ModuleInfo) -> String {
 /// managed step-over's single-step that leaked out because KD single-steps the
 /// whole machine and another processor's break was reported first. The loop
 /// absorbs it (clear `TF`, resume) rather than surfacing it as a stop. Used by
-/// [`Session::continue_until_break`] and the REPL's continue loop.
+/// [`Session::classify_stop_event`], which every wait goes through.
 pub fn stop_is_stray_single_step(event: &StopEvent, breakpoints: &BreakpointManager) -> bool {
     event.exception_code == Some(STATUS_SINGLE_STEP)
         && !event.is_bugcheck

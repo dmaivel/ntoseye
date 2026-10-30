@@ -8,6 +8,7 @@ use std::borrow::Cow;
 
 use ntoseye_macros::grammar;
 
+use crate::base::diagnostics::note_error;
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::{
     CommandInvocation, CompletionStrategy, ReplState, command_help, error, usage_error,
@@ -27,7 +28,7 @@ pub struct ArgCx<'s, 'a> {
 impl ArgCx<'_, '_> {
     /// `text` as an expression in the current radix.
     pub fn eval(&self, text: &str) -> Result<VirtAddr, ArgError> {
-        Expr::eval_with_radix(text, &self.state.ctx.target, self.state.radix)
+        Expr::eval_with_radix(text, &self.state.ctx.target, self.state.ctx.radix)
             .map_err(|error| ArgError::Message(error.to_string()))
     }
 }
@@ -50,7 +51,12 @@ impl ArgError {
 
     pub fn report(&self, name: &str) {
         match self {
-            Self::Missing => outln!("{}", command_help(name)),
+            // The help stands in for the error message, but a `;` list must
+            // still stop here and MCP must still flag the line as failed.
+            Self::Missing => {
+                outln!("{}", command_help(name));
+                note_error();
+            }
             Self::Message(message) => error!("{message}"),
         }
     }
@@ -119,7 +125,8 @@ impl FromArg for GlobalFlagChange {
 
     fn from_arg(cx: &mut ArgCx<'_, '_>, text: &str) -> Result<Self, ArgError> {
         Self::parse(text, |text| {
-            Expr::eval_with_radix(text, &cx.state.ctx.target, cx.state.radix).map(|value| value.0)
+            Expr::eval_with_radix(text, &cx.state.ctx.target, cx.state.ctx.radix)
+                .map(|value| value.0)
         })
         .map_err(|error| ArgError::Message(error.to_string()))
     }

@@ -2030,10 +2030,10 @@ class BugcheckAnalysis(BaseRecord):
     @property
     def source(self, /) -> str |None:
         """
-        Set only when the data was not where it should have been, naming
-        where it was instead: `nt!KiBugCheckData` holding a pointer to the
-        real slots rather than the slots themselves. `None` is the normal
-        case, including every bugcheck the target reported itself.
+        Where the data came from when not `nt!KiBugCheckData`'s own slots:
+        `"dump header"` for a dump's recorded bugcheck, or a note that
+        `nt!KiBugCheckData` held a pointer to the real slots. `None` when it
+        was read from those slots, or the target reported the bugcheck itself.
         """
     @property
     def trap_frames(self, /) -> list[BugcheckTrapFrame]:
@@ -10977,9 +10977,9 @@ class Memory:
     def search(self, /, pattern: bytes, start: int |str |Process |Thread |Module |Driver |Device |Heap, length: int) -> list[MemorySearchMatch]:
         """
         Find matches, including overlapping ones, with symbol/module/VAD
-        context. In a virtual space, the search skips pages that it cannot read,
-        the breakpoints of this session read as the code that they replaced, and
-        the search returns a maximum of 4096 matches.
+        context. The search skips pages that it cannot read and returns a
+        maximum of 4096 matches; in a virtual space, the breakpoints of this
+        session read as the code that they replaced.
         """
     def translate(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap) -> int |None:
         """
@@ -14255,16 +14255,11 @@ class PoolFindDetail(BaseRecord):
     """
     A pool-tag search (`!poolfind`).
     """
-    __match_args__: Final[tuple[Literal["tag"], Literal["pool_type"], Literal["matches"], Literal["found"], Literal["ranges"], Literal["big_status"], Literal["truncated"], Literal["interrupted"]]]
+    __match_args__: Final[tuple[Literal["tag"], Literal["pool_type"], Literal["matches"], Literal["ranges"], Literal["big_status"], Literal["truncated"], Literal["interrupted"]]]
     @property
     def big_status(self, /) -> str |None:
         """
         The read status of the big-pool table, if the search included it.
-        """
-    @property
-    def found(self, /) -> int:
-        """
-        The number of matches found, including those past the listing limit.
         """
     @property
     def interrupted(self, /) -> bool:
@@ -19810,7 +19805,10 @@ class TriagePrcbInfo(BaseRecord):
     """
     __match_args__: Final[tuple[Literal["current_thread"], Literal["processor_number"], Literal["mhz"], Literal["cpu_type"], Literal["vendor_string"]]]
     @property
-    def cpu_type(self, /) -> int: ...
+    def cpu_type(self, /) -> int:
+        """
+        `_KPRCB.CpuType`, the processor family.
+        """
     @property
     def current_thread(self, /) -> int:
         """
@@ -21308,10 +21306,11 @@ class VerifierDriver(BaseRecord):
         The signing level of the image (`SE_SIGNING_LEVEL`).
         """
     @property
-    def suspect(self, /) -> VerifierSuspectDriver |None:
+    def suspect(self, /) -> Diagnostic[VerifierSuspectDriver] |None:
         """
         The suspect-list entry of the driver, with its load history.
-        `None` if the driver has no entry.
+        `None` if the driver has no entry; unavailable if its entry does not
+        read.
         """
     @property
     def synchronize_executions(self, /) -> int: ...

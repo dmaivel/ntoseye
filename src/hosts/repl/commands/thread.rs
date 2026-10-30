@@ -445,13 +445,12 @@ impl Render<Option<String>> for WindowsThreads {
         // Unfiltered, the attached process's; `*`, every thread.
         let attached = repl.ctx.target.attached_process().cloned();
         let scope = attached.as_ref().filter(|_| filter.is_none());
-        let number =
-            filter
-                .as_deref()
-                .and_then(|filter| match Expr::parse_with_radix(filter, repl.radix) {
-                    Ok(Expr::Literal(number)) => Some(number.0),
-                    _ => None,
-                });
+        let number = filter.as_deref().and_then(|filter| {
+            match Expr::parse_with_radix(filter, repl.ctx.radix) {
+                Ok(Expr::Literal(number)) => Some(number.0),
+                _ => None,
+            }
+        });
         let threads: Vec<&ThreadInfo> = self
             .threads
             .iter()

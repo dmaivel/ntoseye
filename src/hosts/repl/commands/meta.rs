@@ -5,7 +5,7 @@ use crate::base::bytes::utf16le_nul_terminated;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::output;
-use crate::base::time::filetime_to_iso;
+use crate::base::time::{FILETIME_UNIX_EPOCH_TICKS, filetime_to_iso};
 use crate::base::types::{CodeMachine, VirtAddr};
 #[cfg(feature = "python")]
 use crate::hosts::python::embed;
@@ -85,7 +85,7 @@ fn reload_scripts(state: &mut ReplState<'_>) -> Result<()> {
 )]
 fn radix(state: &mut ReplState<'_>, #[arg(name = "8|10|16")] radix: Option<String>) -> Result<()> {
     if let Some(value) = radix {
-        state.radix = match value.as_str() {
+        state.ctx.radix = match value.as_str() {
             "8" => NumberRadix::Octal,
             "10" => NumberRadix::Decimal,
             "16" => NumberRadix::Hexadecimal,
@@ -97,12 +97,12 @@ fn radix(state: &mut ReplState<'_>, #[arg(name = "8|10|16")] radix: Option<Strin
         };
     }
 
-    let name = match state.radix {
+    let name = match state.ctx.radix {
         NumberRadix::Octal => "octal",
         NumberRadix::Decimal => "decimal",
         NumberRadix::Hexadecimal => "hexadecimal",
     };
-    outln!("radix {} ({name})", state.radix.value());
+    outln!("radix {} ({name})", state.ctx.radix.value());
     Ok(())
 }
 
@@ -185,12 +185,11 @@ fn echo(_state: &mut ReplState<'_>, #[arg(raw, usage = "[text]")] text: String) 
 /// Print the current date and time of the host in UTC.
 #[command(names = [".echotime"], category = "session", kind = Host, python = none)]
 fn echotime(_state: &mut ReplState<'_>) -> Result<()> {
-    const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
         .and_then(|since| u64::try_from(since.as_nanos() / 100).ok())
-        .and_then(|ticks| filetime_to_iso(ticks.checked_add(FILETIME_UNIX_EPOCH)?))
+        .and_then(|ticks| filetime_to_iso(ticks.checked_add(FILETIME_UNIX_EPOCH_TICKS)?))
         .ok_or_else(|| {
             Error::DebugInfo("the host clock is outside the representable range".to_string())
         })?;
@@ -222,7 +221,7 @@ fn printf(
     // An unreadable argument is reported (the REPL prints the error), not
     // propagated: `.printf` is the body of a log point, and a single bad read
     // must not tear down the session that is running it.
-    let text = format_printf(&format, &args, &state.ctx.target, state.radix)?;
+    let text = format_printf(&format, &args, &state.ctx.target, state.ctx.radix)?;
     // WinDbg's `.printf` emits exactly the format's characters, which is
     // why its examples end in `\n`; appending one here would double it.
     out!("{text}");

@@ -12,9 +12,10 @@ use pelite::image::{IMAGE_DEBUG_TYPE_CODEVIEW, IMAGE_DIRECTORY_ENTRY_DEBUG};
 use crate::arch::Arch;
 use crate::backend::dbg_backend::processor_index_from_backend_thread_id;
 use crate::backend::phys::PhysMem;
-use crate::base::bytes::{utf16le_lossy, utf16le_nul_terminated};
+use crate::base::bytes::utf16le_nul_terminated;
 use crate::base::error::Result;
 use crate::base::memory::{AddressSpace, MemoryOps, PAGE_SIZE};
+use crate::base::time::{FILETIME_TICKS_PER_SECOND, FILETIME_UNIX_EPOCH_TICKS};
 use crate::base::types::{PhysAddr, VirtAddr};
 use crate::nt::bugchecks::current_bugcheck;
 use crate::nt::cpu_state::{prcb_context_address, processor_count};
@@ -50,9 +51,6 @@ const USER_FRAME_SEARCH: usize = 256;
 /// not touched; a larger one (a reservation such as the CFG bitmap) only
 /// where its pages are present or in the memory-compression store.
 const PAGE_BY_PAGE_REGION: u64 = 64 << 20;
-/// FILETIME (100 ns units since 1601) at the Unix epoch.
-const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
-const FILETIME_SECOND: u64 = 10_000_000;
 /// `NT_TIB.StackBase`, in pointers from the TEB's start.
 const NT_TIB_STACK_BASE_SLOT: u64 = 1;
 /// The most handles a minidump lists: far more than any process holds.
@@ -278,8 +276,8 @@ pub fn collect_dump_metadata(session: &mut Session) -> Result<DumpMetadata> {
 /// Seconds since 1970 of a FILETIME.
 fn unix_seconds(filetime: u64) -> Option<u32> {
     filetime
-        .checked_sub(FILETIME_UNIX_EPOCH)
-        .and_then(|since| u32::try_from(since / FILETIME_SECOND).ok())
+        .checked_sub(FILETIME_UNIX_EPOCH_TICKS)
+        .and_then(|since| u32::try_from(since / FILETIME_TICKS_PER_SECOND).ok())
 }
 
 /// The registers of the first frame of `trace` in user mode, with its
@@ -473,19 +471,6 @@ fn stop_exception(
             address: record.address,
             parameters: record.parameters,
         })
-}
-
-/// A `UNICODE_STRING` at `address` in the kernel's space.
-fn kernel_unicode_string(target: &Target, address: VirtAddr) -> Option<String> {
-    let kernel = target.kernel_address_space();
-    let length: u16 = kernel.read(address).ok()?;
-    // `Buffer` follows the lengths, a pointer in.
-    let buffer = kernel
-        .read_pointer(address + kernel.arch().pointer_size())
-        .ok()?;
-    let mut bytes = vec![0u8; usize::from(length)];
-    kernel.read_bytes(buffer, &mut bytes).ok()?;
-    Some(utf16le_lossy(&bytes))
 }
 
 /// `GetPriorityClass`'s value for `EPROCESS.PriorityClass`
@@ -746,7 +731,7 @@ pub fn collect_process_minidump(
                     .map(|offset| pcb + offset)
             })
             .and_then(|offset| kernel.read::<u32>(process.eprocess + offset).ok())
-            .map(|ticks| (u64::from(ticks) * tick / FILETIME_SECOND) as u32)
+            .map(|ticks| (u64::from(ticks) * tick / FILETIME_TICKS_PER_SECOND) as u32)
     };
     let times = create_time.and_then(unix_seconds).map(|create| {
         (
@@ -842,7 +827,7 @@ pub fn collect_process_minidump(
             name: thread_name_offset
                 .and_then(|offset| kernel.read_pointer(thread.ethread + offset).ok())
                 .filter(|pointer| !pointer.is_zero())
-                .and_then(|pointer| kernel_unicode_string(&session.target, pointer))
+                .and_then(|pointer| session.target.read_kernel_unicode_string(pointer).ok())
                 .filter(|name| !name.is_empty()),
         });
     }

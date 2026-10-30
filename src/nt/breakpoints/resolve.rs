@@ -160,6 +160,37 @@ impl BreakpointManager {
         before - self.breakpoints.len()
     }
 
+    /// Take every planted software site back out of a target that is
+    /// rebuilt without having rebooted, before [`Self::prepare_target_reload`]
+    /// forgets them: its memory still holds them, and a site planted again
+    /// over one left in would take the breakpoint instruction for the code it
+    /// displaced. Hardware slots are released by that function. A site that
+    /// cannot be lifted is named in the error; the others are lifted anyway.
+    pub fn lift_sites_for_reload(
+        &self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+    ) -> Result<()> {
+        let mut failures = Vec::new();
+        for bp in self.breakpoints.values() {
+            if bp.enabled
+                && bp.resolved
+                && bp.hardware.is_none()
+                && let Err(error) = Self::uninstall_breakpoint(client, debugger, bp)
+            {
+                failures.push(format!("#{}: {error}", bp.id));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Breakpoint(format!(
+                "failed to lift breakpoints before the reload: {}",
+                failures.join("; ")
+            )))
+        }
+    }
+
     /// Resolve every symbolic breakpoint against the current symbol store.
     /// IDs, counters, conditions, actions, and enabled state survive address
     /// changes. Unavailable symbols remain deferred without backend state.
@@ -472,5 +503,28 @@ mod tests {
             manager.check_breakpoint_hit(0x3000, 0, Arch::Amd64),
             BreakpointHitResult::NotBreakpoint
         ));
+    }
+
+    /// A rebuild of a guest that did not reboot takes the planted sites
+    /// out, symbolic or not, so none is left in its memory and none is
+    /// planted again over its own breakpoint instruction.
+    #[test]
+    fn a_reload_without_a_reboot_lifts_every_planted_site() {
+        let session = session_over_memory(0x1000, &[0u8; 0x80]);
+        let mut manager = BreakpointManager::new();
+        manager.insert_for_test(1, VirtAddr(0x1000), true, None);
+        manager.insert_for_test(3, VirtAddr(0x1020), true, None);
+        manager.breakpoints.get_mut(&3).unwrap().spec = Some(BreakpointSpec::Symbol {
+            name: "driver!Entry".into(),
+            skip_prologue: false,
+        });
+        let mut backend = SlotRecorder::accepting();
+        backend.installed = vec![0x1000, 0x1020];
+
+        manager
+            .lift_sites_for_reload(&mut backend, &session.target)
+            .unwrap();
+
+        assert!(backend.installed.is_empty(), "{:x?}", backend.installed);
     }
 }

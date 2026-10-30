@@ -256,33 +256,7 @@ pub fn split_command_list(line: &str) -> std::result::Result<Vec<&str>, CommandP
             return Ok(commands);
         }
 
-        if command_style_at(&line[start..]) == Some(CommandStyle::RawTail) {
-            commands.push(line[start..].trim());
-            return Ok(commands);
-        }
-
-        let mut depth = 0usize;
-        let scan = scan_unquoted(&line[start..], |_, ch| {
-            match ch {
-                '(' | '[' | '{' => depth += 1,
-                ')' | ']' | '}' => depth = depth.saturating_sub(1),
-                ';' if depth == 0 => return true,
-                _ => {}
-            }
-            false
-        });
-        let split = match scan {
-            Unquoted::Stopped(offset) => Some(start + offset),
-            Unquoted::End => None,
-            Unquoted::OpenQuote(offset) => {
-                let quote_start = start + offset;
-                return Err(CommandParseError::new(
-                    quote_start..quote_start + 1,
-                    "unterminated quoted argument",
-                ));
-            }
-        };
-
+        let split = command_separator(line, start)?;
         let end = split.unwrap_or(line.len());
         let command = line[start..end].trim();
         if !command.is_empty() {
@@ -293,6 +267,52 @@ pub fn split_command_list(line: &str) -> std::result::Result<Vec<&str>, CommandP
             return Ok(commands);
         };
         start = split + 1;
+    }
+}
+
+/// Where the last command of `line` starts, as [`split_command_list`]
+/// splits it: the command a caret at the end of `line` is in. An
+/// unterminated quote belongs to that command.
+pub fn last_command_start(line: &str) -> usize {
+    let mut start = 0;
+    while let Ok(Some(split)) = command_separator(line, start) {
+        start = split + 1;
+    }
+    start
+}
+
+/// The `;` that ends the command starting at `start`, outside quotes and
+/// brackets; none when it runs to the end of `line`, as a raw-tail command
+/// always does.
+fn command_separator(
+    line: &str,
+    start: usize,
+) -> std::result::Result<Option<usize>, CommandParseError> {
+    let start = skip_ws(line, start);
+    if start >= line.len() || command_style_at(&line[start..]) == Some(CommandStyle::RawTail) {
+        return Ok(None);
+    }
+
+    let mut depth = 0usize;
+    let scan = scan_unquoted(&line[start..], |_, ch| {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ';' if depth == 0 => return true,
+            _ => {}
+        }
+        false
+    });
+    match scan {
+        Unquoted::Stopped(offset) => Ok(Some(start + offset)),
+        Unquoted::End => Ok(None),
+        Unquoted::OpenQuote(offset) => {
+            let quote_start = start + offset;
+            Err(CommandParseError::new(
+                quote_start..quote_start + 1,
+                "unterminated quoted argument",
+            ))
+        }
     }
 }
 

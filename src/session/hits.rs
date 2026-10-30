@@ -30,8 +30,9 @@ impl Session {
     /// stop) and returns its details. The caller must have read registers and
     /// established (`rip`, `cr3`) for the stopped thread first.
     ///
-    /// Shared by [`Self::continue_until_break`] and the REPL's continue loop so
-    /// they can't drift on which int3 hits surface and which are silently resumed.
+    /// Only [`Self::classify_stop_event`] calls it, so every wait
+    /// ([`Self::run`], [`Self::wait_stop`]) agrees on which int3 hits surface
+    /// and which are silently resumed.
     pub fn resolve_breakpoint_stop(&mut self, rip: u64, cr3: u64) -> Result<BreakpointStopAction> {
         if self.returned_to_interrupted_hit(rip)? {
             return self.decline_hit();
@@ -41,6 +42,7 @@ impl Session {
             .check_breakpoint_hit(rip, cr3, self.target.arch())
         {
             BreakpointHitResult::Hit(bp) => {
+                let bp = bp.clone();
                 // A thread filter is resolved here rather than in the hit
                 // predicate: the predicate matches on the address space,
                 // which is known from the registers, while the Windows thread
@@ -138,8 +140,6 @@ impl Session {
             .is_none_or(|sp| sp >= min)
     }
 
-    /// Silently continue past the breakpoint at the PC: step over it, rewrite
-    /// whatever sites the stop dropped, and resume without surfacing anything.
     /// Pass a hit no filter accepts: step over its site and resume; or,
     /// while a break-in's last try holds declined hits, stay on it.
     fn decline_hit(&mut self) -> Result<BreakpointStopAction> {
@@ -150,6 +150,8 @@ impl Session {
         Ok(BreakpointStopAction::Resumed)
     }
 
+    /// Silently continue past the breakpoint at the PC: step over it, rewrite
+    /// whatever sites the stop dropped, and resume without surfacing anything.
     fn step_over_and_resume(&mut self) -> Result<()> {
         self.step_over_site_at_pc()?;
         self.breakpoints
@@ -188,15 +190,6 @@ impl Session {
     }
 }
 
-/// Parse a backend vCPU/thread id into a zero-based processor index. Returns
-/// `None` for ids that aren't processor contexts. Shared by the REPL
-/// (re-exported from `repl::stop`) and `Session`.
-///
-/// KD synthesizes its ids as `p1.<one-based-hex>`. A GDB stub prints its own,
-/// and QEMU pads both fields: its first vCPU is `p01.01`. Both are the same
-/// `p<pid>.<tid>` syntax, so the process field is skipped rather than matched
-/// against a literal. The qualifier is still required: an unqualified id is
-/// bare hex, which would make any hex-shaped string name a processor.
 /// Whether a hit reported on `stopped` belongs to the processor a `/c`
 /// breakpoint names.
 ///
@@ -336,7 +329,7 @@ pub fn hardware_breakpoint_hit(
         event.watchpoint_address,
         event.program_counter,
     ) {
-        return Ok(Some(hit));
+        return Ok(Some(hit.clone()));
     }
 
     // Debug-register evidence only means anything on the debug exception, and
@@ -374,7 +367,8 @@ pub fn hardware_breakpoint_hit(
     };
     let hit = debug_registers
         .fired_slot(register_map, &regs, pc, &armed)
-        .and_then(|slot| breakpoints.hardware_breakpoint_for_slot(slot));
+        .and_then(|slot| breakpoints.hardware_breakpoint_for_slot(slot))
+        .cloned();
 
     let mut dirty = debug_registers.clear_status(register_map, &mut regs);
     if hit
@@ -400,7 +394,7 @@ pub fn reported_watch_hit(
     slots: usize,
     watch: Option<u64>,
     pc: Option<u64>,
-) -> Option<BreakpointInfo> {
+) -> Option<&BreakpointInfo> {
     let hit = watchpoint_covering(breakpoints, slots, watch?)?;
     (!pc.is_some_and(|pc| execute_site_at(breakpoints, slots, pc))).then_some(hit)
 }
@@ -411,7 +405,7 @@ fn watchpoint_covering(
     breakpoints: &BreakpointManager,
     slots: usize,
     address: u64,
-) -> Option<BreakpointInfo> {
+) -> Option<&BreakpointInfo> {
     (0..slots)
         .filter_map(|slot| breakpoints.hardware_breakpoint_for_slot(slot))
         .find(|bp| {
@@ -471,7 +465,8 @@ fn execute_breakpoint_at_pc(
                 && bp
                     .hardware
                     .is_some_and(|hw| hw.access == HwBreakpointAccess::Execute)
-        });
+        })
+        .cloned();
 
     if hit.is_some()
         && arch
@@ -672,7 +667,7 @@ pub fn rewind_thread_off_breakpoint(
         Family::X86 => {}
         Family::Arm => return,
     }
-    let Ok(regs) = backend.read_registers() else {
+    let Ok(mut regs) = backend.read_registers() else {
         return;
     };
     let rip = register_map
@@ -690,12 +685,11 @@ pub fn rewind_thread_off_breakpoint(
     ) {
         return;
     }
-    let mut adjusted = regs.clone();
     if register_map
-        .write_u64(arch.pc_register(), &mut adjusted, prev)
+        .write_u64(arch.pc_register(), &mut regs, prev)
         .is_err()
     {
         return;
     }
-    let _ = backend.write_registers(&adjusted);
+    let _ = backend.write_registers(&regs);
 }

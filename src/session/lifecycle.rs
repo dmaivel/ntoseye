@@ -21,6 +21,7 @@ use crate::nt::breakpoints::{BreakpointManager, Published, SiteFrames, SiteJourn
 use crate::nt::bugchecks::plausible_bugcheck_code;
 use crate::nt::cpu_state;
 use crate::nt::dmp::{DmpBackend, DmpInfo};
+use crate::nt::expr::NumberRadix;
 use crate::nt::symbols::ntoseye_home;
 use crate::nt::target::hang::bugcheck_processor_from_freeze_states;
 use crate::nt::target::{Target, TargetKind};
@@ -450,6 +451,7 @@ impl Session {
             shown_stop: None,
             compact_stops: false,
             brief_stops: false,
+            radix: NumberRadix::Hexadecimal,
             displays: Vec::new(),
             kernel_prints: Default::default(),
             _instance_guard: None,
@@ -510,8 +512,9 @@ impl Session {
     }
 
     /// Bring the target to a real halt before teardown: consume a stop that is
-    /// already pending if it is meaningful, else break in. The REPL's ^D path.
-    pub fn halt_for_exit(&mut self) -> Result<()> {
+    /// already pending if it is meaningful, else break in, so the exit does
+    /// not stack a break-in on a stop that already landed.
+    fn halt_for_exit(&mut self) -> Result<()> {
         if let Some(event) = self.backend.try_wait_for_stop(EXIT_STOP_POLL)?
             && !matches!(
                 self.classify_stop_event(event)?,
@@ -534,7 +537,7 @@ impl Session {
         // Halting is only for restoring sites; with none to restore a passive
         // backend (which cannot interrupt) exits cleanly too.
         let halted = if self.backend.is_running() && self.has_installed_sites() {
-            self.interrupt().map(|_| ())
+            self.halt_for_exit()
         } else {
             Ok(())
         };

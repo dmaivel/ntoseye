@@ -1060,6 +1060,30 @@ fn with_target_halted_resumes_after_edit_error() {
     assert!(session.backend.is_running());
 }
 
+/// The gdb backend reports its `SIGINT` break-in with no exception code,
+/// which is still the edit's own break-in and so is resumed, not parked.
+#[test]
+fn with_target_halted_resumes_a_gdb_shaped_break_in() {
+    let mut backend = MockBackend::default().running();
+    backend.set("rip", 0x2000);
+    let continues = Arc::clone(&backend.continues);
+    backend.queue_interrupt(StopEvent {
+        exception_code: None,
+        first_chance: None,
+        exception_address: None,
+        program_counter: None,
+        break_in: true,
+        ..breakpoint_event(0x2000)
+    });
+    let mut session = session_with_mock(backend);
+
+    session.with_target_halted(|_| Ok(())).unwrap();
+
+    assert_eq!(continues.load(Ordering::Relaxed), 1);
+    assert!(session.backend.is_running());
+    assert!(session.parked_stop.is_none());
+}
+
 #[test]
 fn with_target_halted_parks_a_genuine_pending_breakpoint() {
     let mut backend = MockBackend::default().running();
@@ -2924,7 +2948,8 @@ fn exiting_takes_the_bugcheck_trap_back_out_of_the_guest() {
     // The trap is not one of the manager's breakpoints, so it is the only
     // reason to halt here, and the only site left to restore. A guest that
     // keeps it executes an int3 at nt!KeBugCheckEx with nothing attached.
-    let mut backend = MockBackend::default().running();
+    // No stop is pending, so the exit breaks in.
+    let mut backend = MockBackend::default().running().halts_only_on_interrupt();
     backend.allow_breakpoints = true;
     backend.queue_interrupt(breakpoint_event(0x2000));
     let sites = Arc::clone(&backend.site_writes);
@@ -2940,6 +2965,33 @@ fn exiting_takes_the_bugcheck_trap_back_out_of_the_guest() {
     assert_eq!(*sites.lock(), [(0x1_4000, false)]);
     assert_eq!(interrupts.load(Ordering::Relaxed), 1);
     assert!(!session.has_installed_sites());
+}
+
+/// Resuming from a bugcheck stop on a backend that needs the trap steps
+/// the thread past it first: resumed on it, a stub reports the trap again
+/// at once, and Windows never gets to write its dump and reboot.
+#[test]
+fn resuming_from_the_bugcheck_trap_steps_past_it() {
+    let mut backend = MockBackend {
+        allow_breakpoints: true,
+        one_vcpu: true,
+        ..MockBackend::default()
+    };
+    backend.set("rip", 0x1_4000);
+    let sites = Arc::clone(&backend.site_writes);
+    let continues = Arc::clone(&backend.continues);
+    let mut session = session_with_mock(backend);
+    session.current_thread = "p01.01".into();
+    *session.bugcheck_trap.edit() = Some(TrapSite {
+        address: VirtAddr(0x1_4000),
+        original: vec![0x48],
+    });
+
+    session.resume().unwrap();
+
+    assert_eq!(*sites.lock(), [(0x1_4000, false), (0x1_4000, true)]);
+    assert_eq!(continues.load(Ordering::Relaxed), 1);
+    assert!(session.bugcheck_trap.is_some());
 }
 
 /// A session that exits while a partition view is shown cleans up the
@@ -3365,10 +3417,43 @@ fn lifting_the_unload_traps_keeps_the_load_traps_interrupted_hit() {
     );
     let regs = session.backend.read_registers().unwrap();
     let stack = session.register_map.read_u64("rsp", &regs).unwrap();
-    session.module_trap_interrupted = Some((ModuleEvent::Load, stack));
+    session.module_trap_interrupted = Some((ModuleEvent::Load, false, stack));
 
     session.arm_traps();
     assert!(!has_module_trap(&session, ModuleEvent::Unload));
+
+    let resolution = session
+        .classify_stop_event(breakpoint_event(LOAD_TRAP))
+        .unwrap();
+    assert!(
+        matches!(resolution, StopResolution::ModulesChanged),
+        "the returning thread was reported as a new load: {resolution:?}"
+    );
+}
+
+/// The user-image trap is a load trap too; lifting it, because no user
+/// image load is awaited any more, must not take the kernel load trap's
+/// marker with it.
+#[test]
+fn lifting_the_user_image_trap_keeps_the_load_traps_interrupted_hit() {
+    let (mut session, _, _, _) = session_at_module_trap(ModuleEvent::Load);
+    session.module_traps.edit().push(ModuleTrap {
+        user: true,
+        ..module_trap(ModuleEvent::Load, UNLOAD_TRAP)
+    });
+    // A filter naming a driver awaits no user-mode image.
+    session.exception_policies.set_module_event(
+        ModuleEvent::Load,
+        Some("driver.sys".into()),
+        ExceptionPolicyMode::Break,
+        None,
+    );
+    let regs = session.backend.read_registers().unwrap();
+    let stack = session.register_map.read_u64("rsp", &regs).unwrap();
+    session.module_trap_interrupted = Some((ModuleEvent::Load, false, stack));
+
+    session.arm_traps();
+    assert!(!session.user_image_trap_planted());
 
     let resolution = session
         .classify_stop_event(breakpoint_event(LOAD_TRAP))

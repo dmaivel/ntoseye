@@ -8,14 +8,12 @@ use owo_colors::OwoColorize;
 use crate::base::disasm::{
     AsmKind, DisasmRow, decode_code, decode_preceding, direct_branch_target,
 };
-use crate::base::memory::{MemoryOps, read_page_chunks};
+use crate::base::memory::read_page_chunks;
 use crate::base::output::strip_ansi;
 use crate::base::types::VirtAddr;
-use crate::hosts::repl::disasm_context_rows;
+use crate::hosts::repl::{disasm_context_rows, read_code};
 use crate::hosts::ui;
-use crate::nt::unwind::{
-    SymbolName, ThreadTraceContext, format_symbol, preferred_code_dtb, symbol_name,
-};
+use crate::nt::unwind::{SymbolName, ThreadTraceContext, format_symbol, symbol_name};
 use crate::session::Session;
 
 /// The widest the instruction column grows before its notes.
@@ -434,17 +432,9 @@ pub fn code_window(
         _ => rip.saturating_sub(PRECEDING_BYTES),
     };
     let to = rip + FOLLOWING_BYTES;
-    let active = debugger.address_space(trace.active_dtb);
-    let code_dtb = preferred_code_dtb(trace, rip);
-    let code = debugger.address_space(code_dtb);
-    let Ok((mut bytes, valid)) =
+    let Ok((bytes, valid)) =
         read_page_chunks(VirtAddr(from), (to - from) as usize, |address, buf| {
-            active
-                .read_bytes(address, buf)
-                .or_else(|error| match code_dtb == trace.active_dtb {
-                    true => Err(error),
-                    false => code.read_bytes(address, buf),
-                })
+            read_code(debugger, trace, address, buf)
         })
     else {
         return classic();
@@ -453,9 +443,6 @@ pub fn code_window(
     if !valid[at] {
         return classic();
     }
-    session
-        .target
-        .mask_code(VirtAddr(from), &mut bytes, trace.active_dtb);
     let lo = valid[..at]
         .iter()
         .rposition(|valid| !valid)

@@ -7,13 +7,9 @@ use ntoseye_macros::record;
 
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
+use crate::base::time::{FILETIME_TICKS_PER_SECOND, FILETIME_UNIX_EPOCH_TICKS};
 use crate::nt::kuser_shared::KuserSharedData;
 use crate::nt::target::{KTHREAD_STATE_TERMINATED, Target, ThreadInfo};
-
-/// FILETIME (100 ns units since 1601) at the Unix epoch.
-const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
-/// 100 ns units in a second.
-const FILETIME_SECOND: u64 = 10_000_000;
 
 /// The times of one thread, in 100 ns units.
 #[record]
@@ -58,8 +54,8 @@ impl Target {
         match self.user_dump_info() {
             Some(info) => {
                 // MINIDUMP_HEADER.TimeDateStamp is in seconds since 1970.
-                let written =
-                    FILETIME_UNIX_EPOCH + u64::from(info.time_date_stamp) * FILETIME_SECOND;
+                let written = FILETIME_UNIX_EPOCH_TICKS
+                    + u64::from(info.time_date_stamp) * FILETIME_TICKS_PER_SECOND;
                 let threads = info
                     .threads
                     .iter()

@@ -199,11 +199,10 @@ impl BreakpointManager {
     }
 
     /// Find the enabled breakpoint in backend slot `slot`.
-    pub fn hardware_breakpoint_for_slot(&self, slot: usize) -> Option<BreakpointInfo> {
+    pub fn hardware_breakpoint_for_slot(&self, slot: usize) -> Option<&BreakpointInfo> {
         self.breakpoints
             .values()
             .find(|bp| bp.enabled && bp.hardware.is_some_and(|hw| hw.slot == slot))
-            .cloned()
     }
 
     /// Best-effort release of every backend slot held by a hardware breakpoint

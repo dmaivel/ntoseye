@@ -60,7 +60,7 @@ impl BreakpointManager {
         self.remove_ids(client, debugger, fired)
     }
 
-    pub fn check_breakpoint_hit(&self, rip: u64, dtb: u64, arch: Arch) -> BreakpointHitResult {
+    pub fn check_breakpoint_hit(&self, rip: u64, dtb: u64, arch: Arch) -> BreakpointHitResult<'_> {
         for bp in self.breakpoints.values() {
             if !self.one_shot_hits.contains(&bp.id)
                 && bp.resolved
@@ -69,7 +69,7 @@ impl BreakpointManager {
                 && bp.enabled
                 && bp.scope.matches_dtb(dtb, arch)
             {
-                return BreakpointHitResult::Hit(bp.clone());
+                return BreakpointHitResult::Hit(bp);
             }
         }
 
