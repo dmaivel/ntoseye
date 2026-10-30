@@ -888,12 +888,11 @@ def test_a_hypercall_condition_reads_the_callers_memory(halted: Debugger) -> Non
 
 def test_a_hypercall_callback_reads_its_caller(halted: Debugger) -> None:
     """In a `when=` callback, `Cpu.hypercall_caller()` reads the caller at
-    its VMCALL: the call's bytes at its RIP, and for a slow call the input
-    GPA in its RDX. A vCPU that runs NT, not the hypervisor, has no caller."""
+    its VMCALL: the call's bytes at its RIP. A vCPU that runs NT, not the
+    hypervisor, has no caller."""
     root = hypervisor_root(halted)
     callers: list[ntoseye.HypercallCaller | None] = []
     code: list[bytes] = []
-    inputs: list[tuple[int, int | None]] = []
     in_nt: list[ntoseye.HypercallCaller | None] = []
 
     def check(stop: Stop) -> bool:
@@ -903,12 +902,9 @@ def test_a_hypercall_callback_reads_its_caller(halted: Debugger) -> None:
         if caller is None or caller.hypercall is None:
             return True
         code.append(caller.read(caller.registers["rip"], len(VMCALL)))
-        if not caller.hypercall.fast:
-            inputs.append((caller.registers["rdx"], caller.hypercall.input_gpa))
-        # Most flushes are fast; a slow one can take a hundred hits.
         if len(in_nt) < ATTEMPTS:
             in_nt.extend(cpu.hypercall_caller() for cpu in halted.cpus if cpu.process is not None)
-        return len(code) >= ATTEMPTS and bool(inputs) and bool(in_nt)
+        return len(code) >= ATTEMPTS and bool(in_nt)
 
     bp = halted.breakpoints.add_hypercall(0x0003, root.id, when=check)
     try:
@@ -917,13 +913,41 @@ def test_a_hypercall_callback_reads_its_caller(halted: Debugger) -> None:
         halted.interrupt()
         bp.delete()
     assert isinstance(stop, Stop.Breakpoint) and stop.hit(bp), (
-        "no slow flush of the root, or no vCPU in NT at a flush, in 30 s"
+        f"{len(code)} flushes of the root, or no vCPU in NT at one, in 30 s"
     )
     assert stop.breakpoint.condition_error is None
     assert all(caller is not None and caller.partition_id == root.id and caller.root for caller in callers)
     assert set(code) == {VMCALL}
-    assert all(rdx == gpa for rdx, gpa in inputs)
     assert in_nt and all(caller is None for caller in in_nt)
+
+
+def test_a_slow_hypercall_callback_reads_its_input(halted: Debugger) -> None:
+    """For a slow call, `Cpu.hypercall_caller()` reads the input GPA the
+    caller passed in RDX. Most flushes are fast: a slow one took from 3 to
+    190 hits, and a quiet guest makes few flushes at all, so this waits
+    longer and skips when the guest made none."""
+    root = hypervisor_root(halted)
+    inputs: list[tuple[int, int | None]] = []
+
+    def slow(stop: Stop) -> bool:
+        assert stop.cpu is not None
+        caller = halted.cpus[stop.cpu].hypercall_caller()
+        if caller is None or caller.hypercall is None or caller.hypercall.fast:
+            return False
+        inputs.append((caller.registers["rdx"], caller.hypercall.input_gpa))
+        return True
+
+    bp = halted.breakpoints.add_hypercall(0x0003, root.id, when=slow)
+    try:
+        stop = halted.run(timeout=90.0)
+    finally:
+        halted.interrupt()
+        bp.delete()
+    if stop is None:
+        pytest.skip("the guest made no slow flush of the root in 90 s")
+    assert isinstance(stop, Stop.Breakpoint) and stop.hit(bp)
+    assert stop.breakpoint.condition_error is None
+    assert inputs and all(rdx == gpa for rdx, gpa in inputs)
 
 
 def test_secure_hardware_breakpoint_preserves_code_and_cpu_identity(halted: Debugger) -> None:
@@ -1150,6 +1174,10 @@ def test_dx_queries_agree_with_the_sdk(halted: Debugger) -> None:
     a `Where` on a name keeps their IDs as keys and a `Select` reads them,
     `FromListEntry` over `nt!PsActiveProcessHead` walks as many records as
     the session has processes."""
+    # A break-in under VBS often lands in the Windows hypervisor, whose page
+    # tables do not map NT's: stop in NT, where `&nt!PsActiveProcessHead`
+    # reads.
+    halted.run(timeout=10.0, address="nt!NtClose")
     name = "svchost.exe"
     pids = sorted(p.pid for p in halted.processes.find(name))
     assert pids, f"no {name}"
