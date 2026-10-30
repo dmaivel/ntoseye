@@ -31,8 +31,11 @@ impl Target {
     /// are retained separately when the address lies in one.
     pub fn inspect_pool(&self, address: VirtAddr) -> Result<PoolPageDetail> {
         let layout = pool_layout(self)?;
+        // A page-aligned address that the big-pool table does not settle is
+        // still decoded as a classic page below, which reports the table's
+        // error if no block holds it.
         if address.0 & (POOL_PAGE_SIZE - 1) == 0
-            && let Some(big) = find_big_pool(self, &layout, address)
+            && let Ok(Some(big)) = find_big_pool(self, &layout, address)
         {
             return Ok(PoolPageDetail {
                 target: address,
@@ -61,15 +64,24 @@ impl Target {
                 )
             })
             .collect::<Vec<_>>();
-        let big = if index.is_none() {
-            find_big_pool(self, &layout, address).map(|entry| big_pool_detail(address, &entry))
+        let (big, message) = if index.is_none() {
+            match find_big_pool(self, &layout, address) {
+                Ok(Some(entry)) => (Some(big_pool_detail(address, &entry)), None),
+                Ok(None) => (
+                    None,
+                    Some(
+                        "address does not lie inside a recognizable _POOL_HEADER block".to_string(),
+                    ),
+                ),
+                Err(error) => (
+                    None,
+                    Some(format!(
+                        "address does not lie inside a recognizable _POOL_HEADER block, and {error}"
+                    )),
+                ),
+            }
         } else {
-            None
-        };
-        let message = if index.is_none() && big.is_none() {
-            Some("address does not lie inside a recognizable _POOL_HEADER block".to_string())
-        } else {
-            None
+            (None, None)
         };
         let page_kind = if big.is_some() {
             "big"
@@ -111,7 +123,7 @@ impl Target {
     pub fn validate_pool(&self, address: VirtAddr) -> Result<PoolValidationDetail> {
         let layout = pool_layout(self)?;
         let page = VirtAddr(address.0 & !(POOL_PAGE_SIZE - 1));
-        if let Some(big) = find_big_pool(self, &layout, page) {
+        if let Some(big) = find_big_pool(self, &layout, page)? {
             return Err(Error::DebugInfo(format!(
                 "{:#x} is in a big-pool allocation ('{}', {:#x} bytes at {:#x}), which has no block headers",
                 address.0,

@@ -629,7 +629,6 @@ pub struct MdlDetail {
     pub capacity: u64,
     /// The start of the PFN array, immediately after the header.
     pub pfn_array: VirtAddr,
-    #[record(hex)]
     pub pfns: Vec<u64>,
     /// Whether the list has fewer PFNs than the buffer spans, which happens
     /// when a smaller count was requested.

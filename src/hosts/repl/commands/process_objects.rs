@@ -828,7 +828,7 @@ fn print_alpc_process_ports(ports: &AlpcProcessPorts) {
     }
     outln!();
     outln!(
-        "{}; scanned {} of {} handle slots{}",
+        "{}; scanned {} of {} handle slots{}{}",
         counted(
             ports.server_ports,
             "server communication port handle",
@@ -840,6 +840,11 @@ fn print_alpc_process_ports(ports: &AlpcProcessPorts) {
             String::new()
         } else {
             format!(", {} unreadable", ports.skipped_entries)
+        },
+        if ports.unreadable_ports == 0 {
+            String::new()
+        } else {
+            format!(", {} ALPC ports not decoded", ports.unreadable_ports)
         }
     );
 }

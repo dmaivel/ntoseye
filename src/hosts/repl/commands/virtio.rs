@@ -727,6 +727,7 @@ fn signal_text(signal: Signal, index: &str, off: &str) -> String {
         Signal::At { position, lap } => {
             format!("at position {position} in lap {}", u8::from(lap))
         }
+        Signal::Unknown => "? (the event index did not read)".into(),
     }
 }
 
@@ -938,11 +939,10 @@ fn print_ring(
         print_section("returned, not yet taken back");
         for buffer in returned {
             print_chain(
-                &format!(
-                    "used[{}] wrote {:#x}",
-                    buffer.position,
-                    buffer.written.unwrap_or_default()
-                ),
+                &match buffer.written {
+                    Some(written) => format!("used[{}] wrote {written:#x}", buffer.position),
+                    None => format!("used[{}] wrote ?", buffer.position),
+                },
                 buffer,
             );
             print_request(buffer);

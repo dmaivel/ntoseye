@@ -127,7 +127,7 @@ impl Render for PfnDetail {
 
 /// Translate a virtual address with an explicit directory base.
 ///
-/// The command shows each AMD64 page-table level and the final physical
+/// The command shows each page-table level and the final physical
 /// address. A directory base of zero uses the current context, and for a large
 /// page, the walk stops at its leaf level.
 #[command(
@@ -168,7 +168,8 @@ impl Render for VtopDetail {
 /// address.
 ///
 /// The command walks the page tables in reverse and detects cycles in them. The
-/// walk stops after 32 mappings or 65,536 table pages.
+/// walk stops after 32 mappings or 65,536 table pages. It works on AMD64
+/// targets only.
 #[command(
     names = ["!ptov", "ptov"],
     category = "memory manager",
@@ -1205,8 +1206,23 @@ fn lookaside_tag_cell(notes: &mut UnavailableNotes, detail: &LookasideDetail) ->
 }
 
 fn print_lookaside_lists(detail: &LookasideListsDetail) {
+    // A list cut short, or a root that did not read, is not an empty list.
+    let print_terminations = || {
+        for (list, termination) in [
+            ("nonpaged", &detail.nonpaged_termination),
+            ("paged", &detail.paged_termination),
+        ] {
+            if !matches!(termination.as_str(), "head" | "null link" | "interrupted") {
+                outln!(
+                    "{}",
+                    ui::muted(&format!("{list} walk ended: {termination}"))
+                );
+            }
+        }
+    };
     if detail.records.is_empty() {
         outln!("{}", ui::muted("no lookaside lists"));
+        print_terminations();
         return;
     }
     outln!(
@@ -1241,6 +1257,7 @@ fn print_lookaside_lists(detail: &LookasideListsDetail) {
     }
     print_padded_table(builder);
     notes.print("");
+    print_terminations();
     if detail.interrupted {
         outln!("lookaside walk interrupted");
     }

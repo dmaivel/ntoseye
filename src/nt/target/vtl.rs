@@ -850,6 +850,11 @@ impl Target {
             let Ok(table) = hv_layout::hypercall_table(&loaded.view()) else {
                 return Ok(None);
             };
+            // The RAM scan, not the partition walk `vm_exit_entry` uses:
+            // that walk names the addresses it finds, which comes back here
+            // while this root's names are being made. A stale page of a VTL
+            // that is gone adds at most one more entry name; the bound on
+            // its RVA below keeps it inside the image.
             let mut entries: Vec<u64> = match guest.any_evmcs_pages(&self.phys, &self.interrupt) {
                 Ok(pages) => pages
                     .all_states(&*self.phys)
@@ -866,7 +871,11 @@ impl Target {
             entries.dedup();
             let names = hypercalls::hypervisor_symbols(base, &table, &entries);
             let extents = hypercalls::symbol_extents(&names, &loaded.functions, &loaded.bytes);
-            let rva = |address: u64| u32::try_from(address.checked_sub(base)?).ok();
+            let rva = |address: u64| {
+                u32::try_from(address.checked_sub(base)?)
+                    .ok()
+                    .filter(|&rva| rva < image.size)
+            };
             let exit_entries: Vec<u32> = entries.iter().filter_map(|&entry| rva(entry)).collect();
             let mut starts = prolog::function_starts(&loaded.bytes, &loaded.code);
             starts.extend(loaded.functions.keys());
@@ -1026,7 +1035,9 @@ fn image_containing<B: MemoryOps<PhysAddr>>(
             && let Ok(view) = PeView::from_bytes(&headers)
         {
             let size = size_of_image(&view);
-            if rip - page >= u64::from(size) {
+            // A `SizeOfImage` past the search window is a corrupt header,
+            // and the image is later copied whole by it.
+            if rip - page >= u64::from(size) || u64::from(size) > IMAGE_SEARCH_BYTES {
                 return None;
             }
             let path = SymbolStore::codeview_pdb_path(memory, VirtAddr(page))

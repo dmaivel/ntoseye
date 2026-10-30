@@ -2099,25 +2099,18 @@ impl Target {
         let mut tables = vec![self.dump_ssdt_table("SSDT", base, limit, guest)];
 
         // Shadow table: [0] is the kernel SSDT, [1] is win32k. Only present once
-        // a GUI thread has initialized it.
-        if let Ok(sdt) = guest.ntoskrnl.symbol("KeServiceDescriptorTableShadow") {
-            let desc = guest.ntoskrnl.types().layout("_KSERVICE_TABLE_DESCRIPTOR");
-            let desc_size = desc.as_ref().ok().map(|l| l.size as u64).unwrap_or(0x20);
-            let base_off = desc
-                .as_ref()
-                .ok()
-                .and_then(|l| l.field_offset("Base").ok())
-                .unwrap_or(0);
-            let limit_off = desc
-                .as_ref()
-                .ok()
-                .and_then(|l| l.field_offset("Limit").ok())
-                .unwrap_or(0x10);
-            let win32k = sdt.address() + desc_size;
+        // a GUI thread has initialized it; skipped where the PDB lacks the
+        // descriptor's layout or its fields do not read.
+        if let Ok(sdt) = guest.ntoskrnl.symbol("KeServiceDescriptorTableShadow")
+            && let Ok(desc) = guest.ntoskrnl.types().layout("_KSERVICE_TABLE_DESCRIPTOR")
+            && let Ok(base_off) = desc.field_offset("Base")
+            && let Ok(limit_off) = desc.field_offset("Limit")
+        {
+            let win32k = sdt.address() + desc.size as u64;
             if let Ok(w_base) = mem.read_pointer(win32k + base_off)
                 && !w_base.is_zero()
+                && let Ok(w_limit) = mem.read::<u32>(win32k + limit_off)
             {
-                let w_limit = mem.read::<u32>(win32k + limit_off).unwrap_or(0);
                 tables.push(self.dump_ssdt_table("shadow SSDT (win32k)", w_base, w_limit, guest));
             }
         }

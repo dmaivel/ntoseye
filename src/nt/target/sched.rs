@@ -729,15 +729,16 @@ fn read_first_uint(root: &StructRef<'_>, paths: &[&[&str]]) -> Option<u64> {
 /// A handle table's open handles: its `HandleCount`, or on builds that
 /// count them per free list (`FreeLists[n].HandleCount`, 24H2), the sum.
 /// The PDB declares `FreeLists[1]`, but the kernel allocates
-/// `nt!ExpFreeListCount` lists, so
-/// `free_lists` overrides the declared length when known. Each list's count
+/// `nt!ExpFreeListCount` lists, so `free_lists` overrides the declared
+/// length: `Some(None)` where the build has no such symbol, `None` where it
+/// did not read, which leaves the sum unknown. Each list's count
 /// is a signed `LONG`: a handle opened on one list and closed on another
 /// leaves one negative and the other high, and only the wrapping sum is the
 /// table's count.
 fn handle_table_count(
     table: &StructRef<'_>,
     types: Types<'_>,
-    free_lists: Option<u32>,
+    free_lists: Option<Option<u32>>,
 ) -> Option<u64> {
     if let Ok(count) = table.read_uint("HandleCount") {
         return Some(count);
@@ -751,7 +752,12 @@ fn handle_table_count(
     };
     let layout = types.layout(name.as_str()).ok()?;
     let first = table.addr() + u64::from(field.offset);
-    let total = (0..u64::from(free_lists.unwrap_or(*lists))).try_fold(0i32, |total, index| {
+    let lists = free_lists?.unwrap_or(*lists);
+    // More lists than processors is a corrupt count, not a table to walk.
+    if lists > u32::from(MAX_PROCESSORS) {
+        return None;
+    }
+    let total = (0..u64::from(lists)).try_fold(0i32, |total, index| {
         let count = types
             .struct_with_layout(layout.clone(), first + index * layout.size as u64)
             .read_field::<i32>("HandleCount")
@@ -1682,14 +1688,14 @@ impl Target {
         };
 
         let object_table = pointer("ObjectTable");
-        let free_lists = self.guest().ok().and_then(|guest| {
-            guest
-                .ntoskrnl
-                .symbol("ExpFreeListCount")
-                .ok()?
-                .read::<u32>()
-                .ok()
-        });
+        let free_lists = match self
+            .guest()
+            .ok()
+            .and_then(|guest| guest.ntoskrnl.symbol("ExpFreeListCount").ok())
+        {
+            Some(symbol) => symbol.read::<u32>().ok().map(Some),
+            None => Some(None),
+        };
         let handle_count = object_table
             .and_then(|table| {
                 let table = types

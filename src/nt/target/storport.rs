@@ -1174,7 +1174,8 @@ impl Target {
     }
 
     /// A NUL-terminated wide string at `address`, read a page at a time so
-    /// a short string at the end of a page reads.
+    /// a short string at the end of a page reads. `None` when a page fails
+    /// to read before the NUL, rather than a prefix that looks complete.
     fn stor_wide_string(&self, address: VirtAddr) -> Option<String> {
         if address.is_zero() {
             return None;
@@ -1190,7 +1191,7 @@ impl Target {
             }
             let mut chunk = vec![0u8; len];
             if memory.read_bytes(at, &mut chunk).is_err() {
-                break;
+                return None;
             }
             let ended = chunk.as_chunks::<2>().0.contains(&[0, 0]);
             bytes.extend_from_slice(&chunk);

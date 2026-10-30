@@ -19,6 +19,10 @@ use crate::nt::symbols::ModuleSymbolStatus;
 use crate::nt::target::{DiagnosticValue, ListCursor, ListTermination, Target};
 use crate::nt::userdump::UserDumpInfo;
 
+/// Bounds on the verifier AVL walk, whose counts come from guest memory.
+const MAX_VERIFIER_TABLES: usize = 256;
+const MAX_VERIFIER_TABLE_ELEMENTS: usize = 1 << 16;
+
 const VERIFIER_LEVEL_FLAGS: &[(u64, &str)] = &[
     (0x0000_0001, "Special pool"),
     (0x0000_0002, "Force IRQL checking"),
@@ -421,7 +425,8 @@ fn walk_avl_table(
     let table = types.struct_at("_VF_AVL_TABLE", table_address)?;
     let rtl_table = table.embedded("RtlTable")?;
     let element_count = usize::try_from(rtl_table.read_uint("NumberGenericTableElements")?)
-        .map_err(|_| Error::DebugInfo("invalid verifier AVL element count".into()))?;
+        .map_err(|_| Error::DebugInfo("invalid verifier AVL element count".into()))?
+        .min(MAX_VERIFIER_TABLE_ELEMENTS);
     let root = rtl_table
         .embedded("BalancedRoot")?
         .read_pointer("RightChild")?;
@@ -476,9 +481,13 @@ fn walk_verified_drivers(guest: &Guest) -> Result<(Vec<VerifiedDriver>, bool)> {
     }
 
     let mut drivers = Vec::new();
-    let mut truncated = false;
-    for index in 0..tables_count {
-        let address = tables + (index as u64).wrapping_mul(table_layout.size as u64);
+    let mut truncated = tables_count > MAX_VERIFIER_TABLES;
+    for index in 0..tables_count.min(MAX_VERIFIER_TABLES) {
+        let address = (index as u64)
+            .checked_mul(table_layout.size as u64)
+            .and_then(|offset| tables.0.checked_add(offset))
+            .map(VirtAddr)
+            .ok_or_else(|| Error::DebugInfo("verifier AVL table address overflows".into()))?;
         let (table_drivers, table_truncated) = walk_avl_table(types, address, links_size)?;
         drivers.extend(table_drivers);
         truncated |= table_truncated;
@@ -524,9 +533,12 @@ fn suspect_detail(suspect: &SuspectDriver) -> VerifierSuspectDriver {
 fn loaded_suspect(suspect: &SuspectDriver, drivers: &[VerifiedDriver]) -> bool {
     let key = module_key(&suspect.base_name);
     drivers.iter().any(|driver| {
-        driver
-            .readable_suspect()
-            .is_some_and(|loaded| module_key(&loaded.base_name) == key)
+        // A loaded driver whose own suspect entry is unreadable still has the
+        // module name, which is enough to tell it is loaded.
+        module_key(&driver.module_name) == key
+            || driver
+                .readable_suspect()
+                .is_some_and(|loaded| module_key(&loaded.base_name) == key)
     })
 }
 
@@ -611,9 +623,20 @@ impl Target {
             Err(error) => (DiagnosticValue::unavailable(error.to_string()), None, false),
         };
         let (configured_but_unloaded, suspect_list_termination) = match read_suspect_list(guest) {
-            Ok((suspects, termination)) => {
-                let loaded = loaded_drivers.as_deref().unwrap_or(&[]);
-                (
+            Ok((suspects, termination)) => match loaded_drivers.as_deref() {
+                // Without the full loaded set, every unmatched suspect would
+                // be misreported as not loaded.
+                Some(_) if drivers_truncated => (
+                    DiagnosticValue::unavailable(
+                        "the verified driver walk was truncated".to_string(),
+                    ),
+                    termination,
+                ),
+                None => (
+                    DiagnosticValue::unavailable("the verified driver walk failed".to_string()),
+                    termination,
+                ),
+                Some(loaded) => (
                     DiagnosticValue::Available(
                         suspects
                             .iter()
@@ -622,8 +645,8 @@ impl Target {
                             .collect(),
                     ),
                     termination,
-                )
-            }
+                ),
+            },
             Err(error) => {
                 let error = error.to_string();
                 (
@@ -699,7 +722,6 @@ pub struct TargetDump {
     pub directory_table_base: VirtAddr,
     #[record(hex)]
     pub bugcheck_code: u32,
-    #[record(hex)]
     pub bugcheck_parameters: Vec<u64>,
     pub number_processors: u32,
     pub major_version: u32,

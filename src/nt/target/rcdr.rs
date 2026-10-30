@@ -256,7 +256,14 @@ impl Target {
     /// case, or the address of its context.
     pub fn rcdr_driver_named(&self, name: &str) -> Result<RcdrDriver> {
         let list = self.rcdr_drivers()?;
-        let wanted = name.trim_end_matches(".sys").trim_end_matches(".SYS");
+        let wanted = name
+            .len()
+            .checked_sub(4)
+            .filter(|&stem| {
+                name.get(stem..)
+                    .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".sys"))
+            })
+            .map_or(name, |stem| &name[..stem]);
         let parsed = u64::from_str_radix(name.trim_start_matches("0x"), 16).ok();
         let mut known = Vec::new();
         for driver in list.drivers {

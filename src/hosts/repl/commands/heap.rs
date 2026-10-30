@@ -550,36 +550,43 @@ impl ReplState<'_> {
 
     fn segment_detail(&self, detail: &SegmentHeapDetail, list_entries: bool) {
         let heap = &detail.heap;
+        // Guest counters: a corrupt heap must not overflow them.
+        let bytes = |pages: u64| pages.saturating_mul(0x1000);
         outln!("segment heap {}", ui::addr(heap.address.0));
         print_fields(
             2,
             &[
                 ("global flags", format!("{:#x}", heap.global_flags)),
-                ("reserved", format!("{:#x}", heap.reserved_pages * 0x1000)),
-                ("committed", format!("{:#x}", heap.committed_pages * 0x1000)),
+                ("reserved", format!("{:#x}", bytes(heap.reserved_pages))),
+                ("committed", format!("{:#x}", bytes(heap.committed_pages))),
                 (
                     "free committed",
                     match heap.vs_free_committed_pages {
                         Some(vs) => format!(
                             "{:#x} (LFH {:#x}, VS {:#x})",
-                            heap.free_committed_pages * 0x1000,
-                            heap.lfh_free_committed_pages * 0x1000,
-                            vs * 0x1000
+                            bytes(heap.free_committed_pages),
+                            bytes(heap.lfh_free_committed_pages),
+                            bytes(vs)
                         ),
                         None => format!(
                             "{:#x} (LFH {:#x})",
-                            heap.free_committed_pages * 0x1000,
-                            heap.lfh_free_committed_pages * 0x1000
+                            bytes(heap.free_committed_pages),
+                            bytes(heap.lfh_free_committed_pages)
                         ),
                     },
                 ),
                 (
                     "large allocations",
                     format!(
-                        "{} (reserved {:#x}, committed {:#x})",
+                        "{}{} (reserved {:#x}, committed {:#x})",
                         heap.large_allocations.len(),
-                        heap.large_reserved_pages * 0x1000,
-                        heap.large_committed_pages * 0x1000
+                        if heap.large_truncated {
+                            "+ (walk limit reached)"
+                        } else {
+                            ""
+                        },
+                        bytes(heap.large_reserved_pages),
+                        bytes(heap.large_committed_pages)
                     ),
                 ),
                 ("heap key", format!("{:#x}", heap.encoding_keys.heap_key)),
@@ -918,20 +925,23 @@ mod tests {
         assert!(matches!(parse(&["-s"]), Some(Request::Summary)));
         assert!(matches!(
             parse(&["0"]),
-            Some(Request::Detail { entries: false, .. })
+            Some(Request::Detail { heap, entries: false }) if heap == "0"
         ));
         assert!(matches!(
             parse(&["-h", "0x1190000"]),
-            Some(Request::Detail { entries: false, .. })
+            Some(Request::Detail { heap, entries: false }) if heap == "0x1190000"
         ));
         assert!(matches!(
             parse(&["-a", "0"]),
-            Some(Request::Detail { entries: true, .. })
+            Some(Request::Detail { heap, entries: true }) if heap == "0"
         ));
-        assert!(matches!(parse(&["-x", "@rcx"]), Some(Request::Find(_))));
+        assert!(matches!(
+            parse(&["-x", "@rcx"]),
+            Some(Request::Find(text)) if text == "@rcx"
+        ));
         assert!(matches!(
             parse(&["-p", "-a", "@rcx"]),
-            Some(Request::Find(_))
+            Some(Request::Find(text)) if text == "@rcx"
         ));
         for bad in [
             &["-h"][..],

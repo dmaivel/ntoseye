@@ -517,15 +517,15 @@ impl Target {
             .find_type_across_modules(dtb, "_EPROCESS")
             .ok_or(Error::ExpectedSymbols)?;
 
-        let pid = eprocess_layout
-            .field_offset("UniqueProcessId")
-            .ok()
-            .and_then(|off| {
-                let off = off as usize;
-                (off + pointer_size <= proc_snap.len())
-                    .then(|| arch.decode_pointer(&proc_snap[off..]).0)
-            })
-            .unwrap_or(0);
+        // 0 is the Idle process's PID, so an undecodable one cannot default
+        // to it.
+        let pid_offset = eprocess_layout.field_offset("UniqueProcessId")? as usize;
+        if pid_offset + pointer_size > proc_snap.len() {
+            return Err(Error::DebugInfo(
+                "the triage EPROCESS snapshot ends before UniqueProcessId".into(),
+            ));
+        }
+        let pid = arch.decode_pointer(&proc_snap[pid_offset..]).0;
 
         let name = eprocess_layout
             .field_offset("ImageFileName")

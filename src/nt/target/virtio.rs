@@ -207,6 +207,8 @@ pub enum Signal {
         position: u16,
         lap: bool,
     },
+    /// Not known: the event index the side signals by did not read.
+    Unknown,
 }
 
 /// A split queue's signalling: whether the device interrupts the driver
@@ -231,11 +233,14 @@ pub fn split_signals(
 ) -> SplitSignals {
     let interrupts = match (event_idx, ring.used_event) {
         (true, Some(event)) => Signal::After(event),
+        // The flags apply only without event indexes.
+        (true, None) => Signal::Unknown,
         _ if ring.avail_flags & VRING_AVAIL_F_NO_INTERRUPT != 0 => Signal::Off,
         _ => Signal::On,
     };
     let notifications = match (event_idx, ring.avail_event) {
         (true, Some(event)) => Signal::After(event),
+        (true, None) => Signal::Unknown,
         _ if ring.used_flags & VRING_USED_F_NO_NOTIFY != 0 => Signal::Off,
         _ => Signal::On,
     };
@@ -244,7 +249,7 @@ pub fn split_signals(
         returned != 0
             && match interrupts {
                 Signal::On => true,
-                Signal::Off | Signal::At { .. } => false,
+                Signal::Off | Signal::At { .. } | Signal::Unknown => false,
                 Signal::After(event) => {
                     ring.used_idx.wrapping_sub(event).wrapping_sub(1) < returned
                 }
@@ -828,8 +833,9 @@ pub fn indirect_table(table: &[u8], packed: bool) -> IndirectTable {
 pub struct ReturnedBuffer {
     /// Its position in the used ring.
     pub used_index: u16,
-    /// The bytes the device wrote into it.
-    pub written: u32,
+    /// The bytes the device wrote into it; `None` where its used element
+    /// did not read.
+    pub written: Option<u32>,
     /// Its descriptors, from the head the used element names.
     pub chain: DescChain,
 }
@@ -1597,23 +1603,30 @@ impl Target {
                 let used_index = last_used.wrapping_add(offset as u16);
                 let slot = u64::from(u32::from(used_index) % ring.size);
                 let mut element = [0u8; 8];
-                let read = memory.read_bytes(ring.used + (4 + slot * 8), &mut element);
+                let broken = |why: String| DescChain {
+                    avail_index: used_index,
+                    head: 0,
+                    descriptors: Vec::new(),
+                    broken: Some(why),
+                };
+                if let Err(error) = memory.read_bytes(ring.used + (4 + slot * 8), &mut element) {
+                    return ReturnedBuffer {
+                        used_index,
+                        written: None,
+                        chain: broken(format!("used element {used_index} did not read: {error}")),
+                    };
+                }
                 let id = u32::from_le_bytes([element[0], element[1], element[2], element[3]]);
                 let written = u32::from_le_bytes([element[4], element[5], element[6], element[7]]);
-                let chain = match (read, u16::try_from(id)) {
-                    (Ok(()), Ok(head)) => walk_chain(used_index, head, ring.size, |index| {
+                let chain = match u16::try_from(id) {
+                    Ok(head) => walk_chain(used_index, head, ring.size, |index| {
                         self.split_desc(ring, index)
                     }),
-                    _ => DescChain {
-                        avail_index: used_index,
-                        head: 0,
-                        descriptors: Vec::new(),
-                        broken: Some(format!("used element {used_index} names buffer {id}")),
-                    },
+                    Err(_) => broken(format!("used element {used_index} names buffer {id}")),
                 };
                 ReturnedBuffer {
                     used_index,
-                    written,
+                    written: Some(written),
                     chain,
                 }
             })
@@ -1703,9 +1716,7 @@ impl Target {
                 returned = self
                     .split_ring_returned(ring, driver.last_used, MAX_LISTED_CHAINS)
                     .iter()
-                    .map(|buffer| {
-                        split_buffer(&buffer.chain, buffer.used_index, Some(buffer.written))
-                    })
+                    .map(|buffer| split_buffer(&buffer.chain, buffer.used_index, buffer.written))
                     .collect();
             }
         } else if let Some(ring) = queue.as_ref().and_then(|queue| queue.packed_ring.as_ref()) {
@@ -2270,6 +2281,19 @@ mod tests {
             split_signals(&with_event(5), None, true).interrupts,
             Signal::After(5)
         );
+        let unread = SplitRing {
+            used_event: None,
+            avail_event: None,
+            ..ring(9, 7)
+        };
+        let signals = split_signals(&unread, Some(&driver(3)), true);
+        assert_eq!(
+            signals.interrupts,
+            Signal::Unknown,
+            "used_event did not read"
+        );
+        assert_eq!(signals.notifications, Signal::Unknown);
+        assert!(!signals.interrupt_due);
     }
 
     #[test]

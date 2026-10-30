@@ -13,6 +13,7 @@ use crate::base::error::{Error, Result};
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::hosts::repl::*;
 use crate::hosts::ui;
+use crate::nt::target::DiagnosticValue;
 use crate::nt::target::apic::{
     ApicLvt, HalController, HalControllerEntry, HalControllers, LVT_NAMES, LocalApic,
 };
@@ -169,8 +170,13 @@ fn print_controller(controller: &HalController) {
         controller.min_line,
         controller.max_line
     );
-    if !controller.resource_id.is_empty() {
-        title.push_str(&format!("  {}", ui::muted(&controller.resource_id)));
+    match &controller.resource_id {
+        DiagnosticValue::Available(id) if id.is_empty() => {}
+        DiagnosticValue::Available(id) => title.push_str(&format!("  {}", ui::muted(id))),
+        DiagnosticValue::Unavailable(error) => title.push_str(&format!(
+            "  {}",
+            ui::muted(&format!("resource ID unavailable: {error}"))
+        )),
     }
     outln!("{title}");
     if let Some(problem) = &controller.problem {

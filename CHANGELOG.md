@@ -152,6 +152,15 @@ Keeping this file:
 - When the GDB server or DAP cannot remove a client's breakpoint, it keeps track of it, and DAP says so, where the breakpoint went on firing unowned; a hit on the second address of a DAP source breakpoint reports the client's breakpoint.
 - `breakpoints.add_pattern` keeps its `when=` callback on the breakpoints it set when others failed, `module["name"]` in a process loads the process's symbols as `process.symbols["module!name"]` does, and `Symbols.source_location` and `Symbols.locals_at` take a symbol name in a process whose symbols are not loaded yet.
 - Tab completion works in the second and later commands of a `;` list, stops offering an unloaded module's symbols, and the command palette lists processes while the target runs, as Tab does; `nt!` and Tab lists `nt`'s symbols, where modules sorting before it could fill the list.
+- A corrupt heap no longer makes `!heap` allocate the size of a whole segment or panic on its unit size; `!heap -s` and `!heap -x` report a broken process heap list, where they quietly searched part of it; and `!heap` says when a segment heap's large-block walk stopped at its limit.
+- `!verifier` no longer lists every configured driver as not loaded when the verified-driver list cannot be read whole, and stops at a corrupt table count.
+- `!alpc /lpp` counts the ports it could not decode, `!filecache` says when its totals are partial, `!ca` shows a subsection's unused PTEs and file name as unavailable when they do not read, and an interrupt vector whose object cannot be read is reported as unavailable, not as unconnected.
+- `!gdt` decodes a long-mode call gate as the two-slot descriptor it is.
+- `!wdflogdump` and `!rcdrlogdump` no longer stop and call a log corrupt when writers racing each other left its records' sequence numbers out of order.
+- Memory-manager commands no longer read the visible state at a wrong address when the kernel's pointer to it cannot be read, and `!pool` and `!poolval` no longer take a big-pool allocation for classic pool when the big-pool table could not be read.
+- Corrupt guest data no longer makes ntoseye allocate gigabytes for a hypervisor image, or overflow on virtio descriptors and MDL frame numbers; virtio views show a returned buffer's length and a queue's interrupt signal as unknown when they did not read, where they showed 0 or off.
+- `!lookaside` says when a walk stopped at its limit or on a bad link, the registry shows a hive whose root path cannot be read as unavailable, not unmounted, and the shadow service table is skipped when its descriptor's layout is missing, where fixed offsets were assumed.
+- On a triage dump, the process list is refused when its layout names no process ID, where every process showed PID 0.
 
 ## v0.52.0 (2026-10-25)
 

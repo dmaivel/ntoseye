@@ -78,19 +78,20 @@ impl PteSelfMap {
 impl Target {
     /// The kernel's `_MI_VISIBLE_STATE`, `MiState.Vs`: where
     /// `nt!MiVisibleState`, the kernel's own pointer to it, points, else the
-    /// PDB's offset in `MiState`. They differ on 19045, whose `MiState` has
-    /// 0x40 bytes the PDB does not, between `Hardware` and `Partitions`.
+    /// PDB's offset in `MiState` where the build has no such symbol. They
+    /// differ on 19045, whose `MiState` has 0x40 bytes the PDB does not,
+    /// between `Hardware` and `Partitions`, so a pointer that does not read
+    /// is an error rather than a reason to trust the PDB.
     pub fn visible_state(&self) -> Result<VirtAddr> {
         let ntos = &self.guest()?.ntoskrnl;
-        if let Some(pointer) = ntos
-            .symbol("MiVisibleState")
-            .ok()
-            .and_then(|symbol| symbol.read_pointer().ok())
-            .filter(|pointer| !pointer.is_zero())
-        {
-            return Ok(pointer);
+        let Ok(symbol) = ntos.symbol("MiVisibleState") else {
+            return self.pdb_visible_state();
+        };
+        let pointer = symbol.read_pointer()?;
+        if pointer.is_zero() {
+            return Err(Error::DebugInfo("nt!MiVisibleState is null".into()));
         }
-        self.pdb_visible_state()
+        Ok(pointer)
     }
 
     /// `MiState.Vs` where the PDB places it.

@@ -308,6 +308,9 @@ pub struct AlpcProcessPorts {
     pub advertised_handles: usize,
     /// The number of handle-table entries that ntoseye could not read.
     pub skipped_entries: usize,
+    /// The number of ALPC port handles left out of `created` and `connected`
+    /// because ntoseye could not read the port's kind or its connection.
+    pub unreadable_ports: usize,
 }
 
 /// The pieces of an `_ALPC_PORT` every view needs.
@@ -679,6 +682,7 @@ impl Target {
         let mut created = Vec::new();
         let mut connected = Vec::new();
         let mut server_ports = 0;
+        let mut unreadable_ports = 0;
         for entry in &handles.entries {
             let (
                 DiagnosticValue::Available(port),
@@ -696,6 +700,7 @@ impl Target {
                 continue;
             }
             let Ok(core) = self.alpc_port_core(types, port) else {
+                unreadable_ports += 1;
                 continue;
             };
             match (core.kind, core.ends) {
@@ -735,7 +740,7 @@ impl Target {
                     });
                 }
                 (Some(AlpcPortKind::ServerCommunication), _) => server_ports += 1,
-                _ => {}
+                _ => unreadable_ports += 1,
             }
         }
         Ok(AlpcProcessPorts {
@@ -746,6 +751,7 @@ impl Target {
             scanned_handles: handles.scanned_handles,
             advertised_handles: handles.advertised_handles,
             skipped_entries: handles.skipped_entries,
+            unreadable_ports,
         })
     }
 }

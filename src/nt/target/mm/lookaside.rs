@@ -135,10 +135,16 @@ impl Target {
             };
             current_link = next;
         }
-        if records.len() >= MAX_LOOKASIDE_ENTRIES {
-            termination = "bound".to_string();
-        } else if self.interrupted() {
-            termination = "interrupted".to_string();
+        // The loop's own condition ended a walk that still had a link to
+        // follow: it reached `limit`, the entries left after the lists
+        // already walked, or was interrupted.
+        if termination == "null link" && !current_link.is_zero() {
+            termination = if records.len() >= limit {
+                "bound"
+            } else {
+                "interrupted"
+            }
+            .to_string();
         }
         (records, termination)
     }

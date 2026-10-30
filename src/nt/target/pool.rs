@@ -1954,14 +1954,19 @@ fn parse_big_pool_entry(
     })
 }
 
+/// The big-pool entry whose allocation holds `target`. A miss is an error,
+/// not `None`, when the walk failed or skipped unreadable pages of the
+/// table, since the entry could have been on one.
 pub fn find_big_pool(
     debugger: &Target,
     layout: &PoolLayout,
     target: VirtAddr,
-) -> Option<BigPoolEntry> {
-    let big_pool_type = layout.big_pool_type.as_deref()?;
+) -> Result<Option<BigPoolEntry>> {
+    let Some(big_pool_type) = layout.big_pool_type.as_deref() else {
+        return Ok(None);
+    };
     let mut found = None;
-    let _ = walk_big_pool_entries(
+    let walk = walk_big_pool_entries(
         debugger,
         big_pool_type,
         layout.big_pool_uses_struct,
@@ -1981,7 +1986,19 @@ pub fn find_big_pool(
             }
         },
     );
-    found
+    if found.is_some() {
+        return Ok(found);
+    }
+    match walk {
+        Err(why) => Err(Error::DebugInfo(format!(
+            "the big-pool table did not read: {why}"
+        ))),
+        Ok(report) if report.unreadable_pages != 0 => Err(Error::DebugInfo(format!(
+            "{} pages of the big-pool table did not read",
+            report.unreadable_pages
+        ))),
+        Ok(_) => Ok(None),
+    }
 }
 
 pub fn segment_heap_hint(debugger: &Target) -> Option<&'static str> {

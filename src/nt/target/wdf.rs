@@ -1207,8 +1207,9 @@ fn parse_ifr_record(
 /// there. It also ends at the first record ever written, the one at 0 whose
 /// `PrevOffset` is 0. Anything else inconsistent ends it as corrupt: a bad
 /// signature or length, a record that does not end where the newer one
-/// starts, a `PrevOffset` that does not lead back, or a sequence number that
-/// does not fall.
+/// starts, or a `PrevOffset` that does not lead back. Sequence numbers are
+/// not checked: KMDF links a record into the chain before it takes its
+/// sequence number, so racing writers leave valid chains out of order.
 pub fn walk_ifr(log: &[u8], current: usize, previous: usize, layout: &IfrRecordLayout) -> IfrWalk {
     let mut records: Vec<IfrRecord> = Vec::new();
     let finish = |mut records: Vec<IfrRecord>, end: IfrEnd| {
@@ -1246,14 +1247,6 @@ pub fn walk_ifr(log: &[u8], current: usize, previous: usize, layout: &IfrRecordL
             break IfrEnd::Corrupt(format!(
                 "record at {at:#x} is {:#x} bytes long but the next record starts at {end:#x}",
                 record.length
-            ));
-        }
-        if let Some(newer) = records.last()
-            && newer.sequence.wrapping_sub(record.sequence) <= 0
-        {
-            break IfrEnd::Corrupt(format!(
-                "record at {at:#x} has sequence {}, not below the newer record's {}",
-                record.sequence, newer.sequence
             ));
         }
         let prev = record.prev_offset;
@@ -3256,12 +3249,13 @@ mod tests {
     }
 
     #[test]
-    fn ifr_walk_rejects_sequences_that_do_not_fall() {
+    fn ifr_walk_follows_chains_whose_sequences_do_not_fall() {
         let mut log = vec![0u8; 0x100];
-        let second = put(&mut log, 0, 5, 0, 0, &[]);
+        let second = put(&mut log, 0, 6, 0, 0, &[]);
         let current = put(&mut log, second, 5, 0, 0, &[]);
         let walk = walk_ifr(&log, current, second, &LAYOUT);
-        assert!(matches!(&walk.end, IfrEnd::Corrupt(why) if why.contains("sequence 5")));
+        assert_eq!(walk.end, IfrEnd::FirstRecord);
+        assert_eq!(sequences(&walk), [6, 5]);
     }
 
     #[test]

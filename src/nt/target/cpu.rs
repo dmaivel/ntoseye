@@ -293,7 +293,8 @@ pub struct CpuInfo {
     /// The processor speed, in MHz.
     pub mhz: DiagnosticValue<u64>,
     pub feature_bits: Vec<CpuFeatureBits>,
-    /// The triage metadata, present if ntoseye could not find the KPRCB.
+    /// The triage metadata, present when the KPRCB was found but its vendor,
+    /// family or MHz did not read.
     pub triage_fallback: Option<CpuTriageFallback>,
 }
 
@@ -1013,12 +1014,12 @@ impl Target {
             )),
         })
         .collect();
+        // A partly captured `_KPRCB` can miss any of the fields the triage
+        // metadata also holds (vendor, family, MHz); each missing one is
+        // reason to show the metadata.
         let triage_fallback = if matches!(&vendor, DiagnosticValue::Unavailable(_))
-            && matches!(&vendor_id, DiagnosticValue::Unavailable(_))
-            && matches!(&family, DiagnosticValue::Unavailable(_))
-            && matches!(&model, DiagnosticValue::Unavailable(_))
-            && matches!(&stepping, DiagnosticValue::Unavailable(_))
-            && matches!(&mhz, DiagnosticValue::Unavailable(_))
+            || matches!(&family, DiagnosticValue::Unavailable(_))
+            || matches!(&mhz, DiagnosticValue::Unavailable(_))
         {
             self.phys
                 .dmp_info()
@@ -1063,7 +1064,7 @@ fn connected_interrupt(
     objects: Option<VirtAddr>,
     handler: u64,
     vector: u16,
-) -> Option<String> {
+) -> Result<Option<String>> {
     // `KiIsrThunkShadow` where the kernel shadows its address space
     // (KVA shadow), from the 2018 updates on.
     let in_thunks = ["nt!KiIsrThunk", "nt!KiIsrThunkShadow"].iter().any(|name| {
@@ -1074,19 +1075,27 @@ fn connected_interrupt(
             .flatten()
             .is_some_and(|(thunk, _)| handler >= thunk.0 && handler - thunk.0 < 0x1000)
     });
-    let memory = kernel(target).ok()?.memory();
+    let memory = kernel(target)?.memory();
     let interrupt = if in_thunks {
         let Some(objects) = objects else {
-            return Some("KiIsrThunk: the processor's interrupt object table is not known".into());
+            return Ok(Some(
+                "KiIsrThunk: the processor's interrupt object table is not known".into(),
+            ));
         };
-        memory
-            .read_pointer(objects + u64::from(vector) * 8)
-            .ok()
-            .filter(|interrupt| !interrupt.is_zero())?
+        // An unreadable slot is not an empty one: it must not say that
+        // nothing is connected.
+        let interrupt = memory.read_pointer(objects + u64::from(vector) * 8)?;
+        if interrupt.is_zero() {
+            return Ok(None);
+        }
+        interrupt
     } else {
         // Before the thunks (Windows 8.1), the gate points into the
         // interrupt object's own `DispatchCode`.
-        embedding_interrupt(target, handler)?
+        let Some(interrupt) = embedding_interrupt(target, handler) else {
+            return Ok(None);
+        };
+        interrupt
     };
     // A message-signalled interrupt's ServiceRoutine is the kernel's
     // KiInterruptMessageDispatch; the driver's is MessageServiceRoutine.
@@ -1107,7 +1116,7 @@ fn connected_interrupt(
                 .unwrap_or_else(|| format!("{:#x}", routine.0))
         })
         .unwrap_or_else(|| "-".into());
-    Some(format!("KINTERRUPT {:#x}  {routine}", interrupt.0))
+    Ok(Some(format!("KINTERRUPT {:#x}  {routine}", interrupt.0)))
 }
 
 /// The `_KINTERRUPT` whose `DispatchCode` holds `handler`: one whose
@@ -1185,7 +1194,17 @@ fn decode_idt_entry(target: &Target, base: u64, vector: u16, objects: Option<Vir
             .as_ref()
             .is_some_and(|module| !is_nt_module(&module.name))
             || symbol_module_is_hook;
-        let connected = connected_interrupt(target, objects, offset, vector);
+        let connected =
+            DiagnosticValue::from_result(connected_interrupt(target, objects, offset, vector));
+        // A gate into an interrupt object is the kernel's dispatch, not a
+        // hook, wherever the object lies; unknown when the object is.
+        let non_nt_hook = match &connected {
+            _ if !hook => DiagnosticValue::Available(false),
+            DiagnosticValue::Available(connected) => {
+                DiagnosticValue::Available(connected.is_none())
+            }
+            DiagnosticValue::Unavailable(error) => DiagnosticValue::unavailable(error.clone()),
+        };
         return IdtGate {
             vector,
             address,
@@ -1197,10 +1216,8 @@ fn decode_idt_entry(target: &Target, base: u64, vector: u16, objects: Option<Vir
             gate_name: DiagnosticValue::Available(gate_name.to_string()),
             dpl: DiagnosticValue::Available(dpl),
             present: DiagnosticValue::Available(present),
-            // A gate into an interrupt object is the kernel's dispatch, not
-            // a hook, wherever the object lies.
-            non_nt_hook: DiagnosticValue::Available(hook && connected.is_none()),
-            ki_isr_thunk: DiagnosticValue::Available(connected),
+            non_nt_hook,
+            ki_isr_thunk: connected,
         };
     };
     unavailable_idt_entry(vector, address, error.to_string())
@@ -1239,7 +1256,9 @@ pub fn decode_idt(
 fn is_system_descriptor(raw: u64) -> bool {
     let system = raw & (1 << 44) == 0;
     let typ = (raw >> 40) & 0xf;
-    system && matches!(typ, 0x2 | 0x9 | 0xb)
+    // LDT, available and busy TSS, and the long-mode call gate all take
+    // two slots.
+    system && matches!(typ, 0x2 | 0x9 | 0xb | 0xc)
 }
 
 fn unavailable_gdt_entry(index: usize, error: String) -> GdtDescriptor {
@@ -1345,15 +1364,17 @@ pub fn decode_gdt(target: &Target, processor: u16, descriptor: DescriptorRegiste
                 continue;
             }
         };
-        let high = if is_system_descriptor(raw) && index + 1 < entry_count {
+        let high = if !is_system_descriptor(raw) {
+            Ok(None)
+        } else if index + 1 >= entry_count {
+            Err(Error::DebugInfo("upper half past the GDT limit".into()))
+        } else {
             let next_address = VirtAddr(descriptor.base.0.wrapping_add(((index + 1) * 8) as u64));
             let mut next_bytes = [0u8; 8];
             match memory.read_bytes(next_address, &mut next_bytes) {
                 Ok(()) => Ok(Some(u64::from_le_bytes(next_bytes))),
                 Err(error) => Err(error),
             }
-        } else {
-            Ok(None)
         };
         entries.push(decode_gdt_entry(index, raw, high));
         if is_system_descriptor(raw) && index + 1 < entry_count {
@@ -1374,7 +1395,7 @@ pub fn decode_gdt(target: &Target, processor: u16, descriptor: DescriptorRegiste
 
 #[cfg(test)]
 mod tests {
-    use super::{msr_name, parse_msr_name};
+    use super::{is_system_descriptor, msr_name, parse_msr_name};
     use crate::arch::Arch;
     use crate::backend::kd::registers::{ARM64_WINDBG_ESR_EL1, ARM64_WINDBG_TTBR1_EL1};
 
@@ -1409,5 +1430,15 @@ mod tests {
         assert_eq!(parse_msr_name(Arch::Arm64, "TSC"), None);
         assert_eq!(parse_msr_name(Arch::Arm64, "S3_0_C16_C0_0"), None);
         assert_eq!(msr_name(Arch::Arm64, 0x10), None);
+    }
+
+    /// A long-mode call gate spans two GDT slots like a TSS, so its upper
+    /// half must not be decoded as a descriptor of its own.
+    #[test]
+    fn long_mode_call_gates_take_two_slots() {
+        let present = 1u64 << 47;
+        assert!(is_system_descriptor(present | 0xc << 40));
+        // A code segment (S set) with the same type bits is one slot.
+        assert!(!is_system_descriptor(present | 1 << 44 | 0xc << 40));
     }
 }

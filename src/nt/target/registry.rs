@@ -221,11 +221,11 @@ fn mount_of(hive: &Hive) -> Option<&str> {
 #[derive(Debug, Clone)]
 pub struct Hive {
     pub address: VirtAddr,
-    /// The master hive (`nt!CmpMasterHive`), whose root is `\\REGISTRY`.
+    /// The master hive (`nt!CmpMasterHive`), whose root is `\REGISTRY`.
     pub master: bool,
-    /// Where it is mounted (`HiveRootPath`), `\\REGISTRY` for the master
+    /// Where it is mounted (`HiveRootPath`), `\REGISTRY` for the master
     /// hive; `None` for one not mounted. Unavailable before Vista, whose
-    /// hives do not record it.
+    /// hives do not record it, and where the path does not read.
     pub mount: DiagnosticValue<Option<String>>,
     /// The file it was loaded from (`FileUserName`, else `FileFullPath`).
     pub file: Option<String>,
@@ -1001,7 +1001,8 @@ fn read_hive(types: Types<'_>, address: VirtAddr, master: bool) -> Result<Hive> 
                 Err(Error::FieldNotFound(_)) => {
                     DiagnosticValue::unavailable("_CMHIVE.HiveRootPath not on this build")
                 }
-                root => DiagnosticValue::Available(root.ok().filter(|root| !root.is_empty())),
+                Err(error) => DiagnosticValue::unavailable(error.to_string()),
+                Ok(root) => DiagnosticValue::Available(Some(root).filter(|root| !root.is_empty())),
             }
         },
         file: text("FileUserName").or_else(|| text("FileFullPath")),

@@ -51,6 +51,8 @@ const MAX_ENTRIES: usize = 1 << 20;
 const MAX_LIST: usize = 4096;
 const MAX_HEAPS: usize = 1024;
 const MAX_TREE: usize = 1 << 16;
+/// The most bytes of an NT heap segment read at once while walking entries.
+const RUN_WINDOW: u64 = 1 << 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeapKind {
@@ -351,7 +353,19 @@ impl<'a> HeapReader<'a> {
             heaps.push(VirtAddr(self.read_pointer(record + heap)?));
             cursor.advance(Ok(VirtAddr(self.read_pointer(entry)?)));
         }
-        let truncated = cursor.finish() == ListTermination::Bound;
+        // Only the walk bound is a clean clip; any other stop means heaps
+        // past it were never listed, and a search would miss them silently.
+        let truncated = match cursor.finish() {
+            ListTermination::Head => false,
+            ListTermination::Bound => true,
+            other => {
+                return Err(Error::DebugInfo(format!(
+                    "RtlpProcessHeaps stops after {} heaps: {}",
+                    heaps.len(),
+                    other.diagnostic().unwrap_or_default()
+                )));
+            }
+        };
         Ok(Some((heaps, truncated)))
     }
 
@@ -725,7 +739,10 @@ impl HeapReader<'_> {
                         .min()
                         .unwrap_or(end.0)
                         .min(end.0);
-                    let bytes = self.read_prefix(cursor, (run_end - cursor.0) as usize);
+                    // The span ends at a guest-controlled address; read it in
+                    // bounded windows so a corrupt end cannot size the buffer.
+                    let window = (run_end - cursor.0).min(RUN_WINDOW);
+                    let bytes = self.read_prefix(cursor, window as usize);
                     if bytes.len() < granule as usize {
                         stopped = Some((cursor, "header is not readable (page not resident)"));
                         break;
@@ -870,6 +887,8 @@ pub struct SegmentHeap {
     #[record(skip)]
     pub contexts: Vec<SegContext>,
     pub large_allocations: Vec<LargeAllocation>,
+    /// Whether `large_allocations` stops at the tree walk limit.
+    pub large_truncated: bool,
     /// `ntdll!RtlpHpHeapGlobals`: the VS header key and the LFH offsets key.
     #[record(rename = "keys")]
     pub encoding_keys: SegmentKeys,
@@ -969,13 +988,13 @@ impl PageRange {
     /// The size in bytes: `units * unit_size`.
     #[record(getter)]
     pub fn size(&self) -> u64 {
-        self.units * self.unit_size
+        self.units.saturating_mul(self.unit_size)
     }
 
     /// The first byte after the range.
     #[record(getter)]
     pub fn end(&self) -> VirtAddr {
-        self.address + self.size()
+        VirtAddr(self.address.0.saturating_add(self.size()))
     }
 
     pub fn contains(&self, address: VirtAddr) -> bool {
@@ -1059,7 +1078,6 @@ pub struct LfhSubsegment {
     /// The `BlockBitmap` words (a qword on x64, a dword on x86), each
     /// holding `blocks_per_word` blocks: block `i`'s bit `(i %
     /// blocks_per_word) * bit_stride` is set while the block is busy.
-    #[record(hex)]
     pub bitmap: Vec<u64>,
     pub blocks_per_word: u32,
     /// 1 where a word keeps only busy bits, 2 where each block's busy bit
@@ -1104,11 +1122,11 @@ impl LargeAllocation {
     /// The size in bytes: `pages` pages.
     #[record(getter)]
     pub fn size(&self) -> u64 {
-        self.pages * PAGE
+        self.pages.saturating_mul(PAGE)
     }
 
     pub fn contains(&self, address: VirtAddr) -> bool {
-        (self.address.0..self.address.0 + self.size()).contains(&address.0)
+        (self.address.0..self.address.0.saturating_add(self.size())).contains(&address.0)
     }
 }
 
@@ -1137,7 +1155,7 @@ impl HeapReader<'_> {
         }
         let tree = self.layout("_RTL_RB_TREE")?;
         let root = VirtAddr(tree.read(&image, heap.offset("LargeAllocMetadata")?, "Root")?);
-        let large_allocations = self.large_allocations(root)?;
+        let (large_allocations, large_truncated) = self.large_allocations(root)?;
         Ok(SegmentHeap {
             address,
             global_flags: heap.read(&image, 0, "GlobalFlags")? as u32,
@@ -1150,6 +1168,7 @@ impl HeapReader<'_> {
             large_committed_pages: heap.read(&image, 0, "LargeCommittedPages")?,
             contexts,
             large_allocations,
+            large_truncated,
             encoding_keys: keys,
             granule,
         })
@@ -1174,6 +1193,11 @@ impl HeapReader<'_> {
         index: usize,
     ) -> Result<SegContext> {
         let unit_shift = layout.read(image, at, "UnitShift")? as u8;
+        if unit_shift >= 64 {
+            return Err(Error::DebugInfo(format!(
+                "segment heap context at {address} has UnitShift {unit_shift}"
+            )));
+        }
         let first_descriptor = layout.read(image, at, "FirstDescriptorIndex")? as u8;
         let head = address + layout.offset("SegmentListHead")? as u64;
         let mut segments = Vec::new();
@@ -1240,7 +1264,9 @@ impl HeapReader<'_> {
         Ok(PageSegment { address, ranges })
     }
 
-    fn large_allocations(&self, root: VirtAddr) -> Result<Vec<LargeAllocation>> {
+    /// The large allocations of the tree at `root`, and whether `MAX_TREE`
+    /// clipped the walk.
+    fn large_allocations(&self, root: VirtAddr) -> Result<(Vec<LargeAllocation>, bool)> {
         let node = self.layout("_RTL_BALANCED_NODE")?;
         let data = self.layout("_HEAP_LARGE_ALLOC_DATA")?;
         let node_at = data.offset("TreeNode")? as u64;
@@ -1252,10 +1278,16 @@ impl HeapReader<'_> {
         let mut out = Vec::new();
         let mut stack = vec![root];
         let mut seen = std::collections::HashSet::new();
+        let mut truncated = false;
         while let Some(current) = stack.pop() {
-            if current.is_zero() || !seen.insert(current.0) || seen.len() > MAX_TREE {
+            if current.is_zero() || seen.contains(&current.0) {
                 continue;
             }
+            if seen.len() >= MAX_TREE {
+                truncated = true;
+                break;
+            }
+            seen.insert(current.0);
             let record = VirtAddr(current.0.wrapping_sub(node_at));
             let image = self.read_struct(&data, record)?;
             let virtual_address = data.read(&image, 0, "VirtualAddress")?;
@@ -1270,7 +1302,7 @@ impl HeapReader<'_> {
             stack.push(child(&image, left));
         }
         out.sort_by_key(|allocation| allocation.address.0);
-        Ok(out)
+        Ok((out, truncated))
     }
 
     /// Decode the VS subsegment occupying a page range: header, then the
@@ -1288,7 +1320,8 @@ impl HeapReader<'_> {
         let sizes_at = chunk_layout.offset("Sizes")?;
         let sizes_len = sizes_layout.size();
         let first_chunk = range.address + (layout.size() as u64).next_multiple_of(granule);
-        let size = (size_units * granule)
+        let size = size_units
+            .saturating_mul(granule)
             .min(range.size().saturating_sub(first_chunk.0 - range.address.0));
         let bytes = self.read_prefix(first_chunk, size as usize);
         let mut chunks = Vec::new();

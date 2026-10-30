@@ -214,9 +214,10 @@ pub fn gather(
     }
     if let Some(last) = segments.iter().rev().find(|segment| segment.device_writes)
         && last.len > 0
+        && let Some(at) = last.addr.checked_add(u64::from(last.len) - 1)
     {
         let mut byte = [0u8; 1];
-        if read(last.addr + u64::from(last.len) - 1, &mut byte) {
+        if read(at, &mut byte) {
             bytes.in_last = Some(byte[0]);
         }
     }

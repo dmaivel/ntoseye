@@ -1159,11 +1159,17 @@ impl EventCollector {
     /// Whether `buffer` holds events to decode; a compressed one is noted
     /// as skipped.
     fn wants(&mut self, types: &EtwTypes, buffer: &EtwBuffer) -> bool {
-        if types.is_compressed(buffer) {
+        let skipped = match types.is_compressed(buffer) {
+            Some(false) => None,
+            Some(true) => Some("buffer is compressed"),
+            // Compressed bytes would decode as garbage events.
+            None => Some("state unknown (the PDB has no _ETW_BUFFER_STATE), not decoded"),
+        };
+        if let Some(reason) = skipped {
             self.issues.push(EtwBufferIssue {
                 buffer: buffer.address,
                 offset: 0,
-                reason: "buffer is compressed".into(),
+                reason: reason.into(),
             });
             return false;
         }
@@ -1263,8 +1269,13 @@ impl EtwTypes {
             .map(|(_, value)| *value)
     }
 
-    fn is_compressed(&self, buffer: &EtwBuffer) -> bool {
-        self.buffer_state("EtwBufferStateCompressed") == Some(i64::from(buffer.state))
+    /// Whether `buffer` is compressed; None when the PDB has no
+    /// `_ETW_BUFFER_STATE` to tell.
+    fn is_compressed(&self, buffer: &EtwBuffer) -> Option<bool> {
+        if self.buffer_states.is_empty() {
+            return None;
+        }
+        Some(self.buffer_state("EtwBufferStateCompressed") == Some(i64::from(buffer.state)))
     }
 
     /// The buffer at `address` with the header fields `header` and
@@ -2014,7 +2025,10 @@ impl Target {
         let flush_state = types.buffer_state("EtwBufferStateFlush").ok_or_else(|| {
             Error::DebugInfo("_ETW_BUFFER_STATE has no EtwBufferStateFlush in the PDB".into())
         })? as u32;
-        if let Some(buffer) = buffers.iter().find(|buffer| types.is_compressed(buffer)) {
+        if let Some(buffer) = buffers
+            .iter()
+            .find(|buffer| types.is_compressed(buffer) == Some(true))
+        {
             return Err(Error::DebugInfo(format!(
                 "buffer {:#x} of logger {:#x} is compressed; an .etl of it would need \
                  the logger's compression state",
