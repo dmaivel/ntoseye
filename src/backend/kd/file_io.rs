@@ -274,12 +274,18 @@ impl KdFileMap {
     }
 
     /// Read from an open handle. Returns the bytes read, or `None` for an
-    /// unknown handle.
-    fn read(&self, handle: u64, offset: u64, length: usize) -> Option<Vec<u8>> {
+    /// unknown handle. A host I/O error is `Some(Err(()))` so the target sees
+    /// a failure rather than an end of file and does not load a truncated image.
+    fn read(
+        &self,
+        handle: u64,
+        offset: u64,
+        length: usize,
+    ) -> Option<std::result::Result<Vec<u8>, ()>> {
         let mut inner = self.lock();
         let open = inner.open.get_mut(&handle)?;
         if offset >= open.len {
-            return Some(Vec::new());
+            return Some(Ok(Vec::new()));
         }
         let available = (open.len - offset) as usize;
         let want = length.min(MAX_READ_CHUNK).min(available);
@@ -295,12 +301,12 @@ impl KdFileMap {
                     "kd: kdfiles: read {} at {offset:#x} failed: {err}",
                     open.mapping.host.display()
                 );
-                return Some(Vec::new());
+                return Some(Err(()));
             }
         };
         buf.truncate(read);
         inner.stats.bytes_read += read as u64;
-        Some(buf)
+        Some(Ok(buf))
     }
 
     fn close(&self, handle: u64) -> bool {
@@ -467,7 +473,7 @@ pub fn serve_file_io(map: &KdFileMap, request: &FileIoRequest) -> FileIoReply {
             offset,
             length,
         } => match map.read(*handle, *offset, *length as usize) {
-            Some(data) => {
+            Some(Ok(data)) => {
                 let mut reply = FileIoReply::new(DBGKD_READ_FILE_API, STATUS_SUCCESS);
                 write_u32(&mut reply.header, 24, data.len() as u32);
                 kd_trace!(
@@ -477,6 +483,7 @@ pub fn serve_file_io(map: &KdFileMap, request: &FileIoRequest) -> FileIoReply {
                 reply.data = data;
                 reply
             }
+            Some(Err(())) => FileIoReply::new(DBGKD_READ_FILE_API, STATUS_UNSUCCESSFUL),
             None => {
                 kd_trace!("kd: kdfiles: read for unknown handle {handle:#x}");
                 FileIoReply::new(DBGKD_READ_FILE_API, STATUS_INVALID_HANDLE)

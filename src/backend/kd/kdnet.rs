@@ -247,8 +247,9 @@ impl KdNetStream {
                         self.poke(source, version)?;
                         continue;
                     };
-                    decrypt_payload(datagram, data_key)?;
-                    if let Err(err) = verify_authentication(datagram, &self.state.hmac_key) {
+                    if let Err(err) = decrypt_payload(datagram, data_key)
+                        .and_then(|()| verify_authentication(datagram, &self.state.hmac_key))
+                    {
                         kd_trace!("kdnet: dropping stale-session datagram: {err}");
                         continue;
                     }
@@ -501,7 +502,7 @@ impl Write for KdNetStream {
         // sequence as a duplicate to discard, so byte-identical replays would
         // never be re-examined after a RESEND.
         let sequence = self.state.send_sequence.fetch_add(1, Ordering::Relaxed);
-        create_packet_into(
+        let encoded = create_packet_into(
             &mut self.encoded,
             &self.outbound,
             sequence,
@@ -510,9 +511,12 @@ impl Write for KdNetStream {
             data_key,
             &self.state.hmac_key,
             true,
-        )?;
-        let sent = self.socket.send_to(&self.encoded, peer)?;
+        );
+        // The trailing byte is already popped, so a kept buffer could never be
+        // flushed again; clear it whether or not encoding or sending succeeds.
         self.outbound.clear();
+        encoded?;
+        let sent = self.socket.send_to(&self.encoded, peer)?;
         self.unanswered = true;
         if sent != self.encoded.len() {
             return Err(io::Error::new(

@@ -154,13 +154,20 @@ impl KdBackend {
         // guest memory or resumes, so no later decision has to reason about an
         // `int3` nobody can account for.
         let mut stranded = StrandedEntries::default();
-        if let Some(notice) = reclaimed_breakpoints_notice(restore_unowned_breakpoint_handles(
+        // Best effort: a breakpoint install that later finds the table full
+        // reclaims again and reports its own transport error.
+        match restore_unowned_breakpoint_handles(
             &mut framing,
             initial_stop.processor,
             &HashSet::new(),
             &mut stranded,
-        )) {
-            progress(&notice.text);
+        ) {
+            Ok(reclaim) => {
+                if let Some(notice) = reclaimed_breakpoints_notice(reclaim) {
+                    progress(&notice.text);
+                }
+            }
+            Err(error) => kd_trace!("kd: connect: reclaiming stranded breakpoints failed: {error}"),
         }
 
         // A target left waiting on a debugger that died mid-breakpoint reports

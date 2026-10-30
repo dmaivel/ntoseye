@@ -7,8 +7,8 @@ use memmap2::Mmap;
 
 use crate::arch::{Arch, RegisterFile, RegisterMap, machine_name};
 use crate::backend::dbg_backend::{
-    BackendCapability, DebugBackend, DebugCapability, StopEvent,
-    processor_index_from_backend_thread_id,
+    BackendCapability, DebugBackend, StopEvent, backend_thread_id,
+    processor_index_from_backend_thread_id, snapshot_capabilities, snapshot_refusal,
 };
 use crate::backend::debugger_data::{DebuggerDataCandidate, MetadataSource};
 use crate::base::error::{Error, Result};
@@ -536,9 +536,7 @@ impl DmpBackend {
     }
 
     fn unsupported(operation: &str) -> Error {
-        Error::DebugInfo(format!(
-            "crash dump is a static snapshot; {operation} is not available"
-        ))
+        snapshot_refusal("crash dump", operation)
     }
 }
 
@@ -561,30 +559,7 @@ impl DebugBackend for DmpBackend {
     }
 
     fn capabilities(&self) -> Vec<BackendCapability> {
-        vec![
-            BackendCapability::supported(DebugCapability::MemoryIntrospection),
-            BackendCapability::supported(DebugCapability::ReadRegisters),
-            BackendCapability::unsupported(DebugCapability::ExecutionControl),
-            BackendCapability::unsupported(DebugCapability::InterruptTarget),
-            BackendCapability::unsupported(DebugCapability::SingleStep),
-            BackendCapability::unsupported(DebugCapability::WriteRegisters),
-            BackendCapability::supported(DebugCapability::ThreadList),
-            BackendCapability::supported(DebugCapability::ThreadSelection),
-            BackendCapability::unsupported(DebugCapability::KernelBreakpoints),
-            BackendCapability::unsupported(DebugCapability::UserModeBreakpoints),
-            BackendCapability::unsupported(DebugCapability::Watchpoints),
-            BackendCapability::unsupported(DebugCapability::TargetReloadDetection),
-            BackendCapability::unsupported(DebugCapability::KernelBaseHint),
-            BackendCapability::supported(DebugCapability::BugcheckDetection),
-            BackendCapability::supported(DebugCapability::BugcheckDetails),
-            BackendCapability::unsupported(DebugCapability::ModuleLoadEvents),
-            BackendCapability::unsupported(DebugCapability::DebugOutput),
-            BackendCapability::unsupported(DebugCapability::Msr),
-            BackendCapability::unsupported(DebugCapability::IoPorts),
-            BackendCapability::unsupported(DebugCapability::PciConfig),
-            BackendCapability::unsupported(DebugCapability::TargetControl),
-            BackendCapability::unsupported(DebugCapability::TargetFileIo),
-        ]
+        snapshot_capabilities(true)
     }
 
     fn read_registers(&mut self) -> Result<Vec<u8>> {
@@ -638,7 +613,7 @@ impl DebugBackend for DmpBackend {
 
     fn thread_list(&mut self) -> Result<Vec<String>> {
         Ok((0..self.number_processors as u16)
-            .map(|i| format!("p1.{:x}", i + 1))
+            .map(backend_thread_id)
             .collect())
     }
 
@@ -656,7 +631,7 @@ impl DebugBackend for DmpBackend {
     }
 
     fn stopped_thread_id(&mut self) -> Result<String> {
-        Ok(format!("p1.{:x}", self.current_processor as u16 + 1))
+        Ok(backend_thread_id(self.current_processor as u16))
     }
 
     fn is_running(&self) -> bool {

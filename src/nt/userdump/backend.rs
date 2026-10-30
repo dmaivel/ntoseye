@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use super::UserDumpInfo;
 use crate::arch::RegisterMap;
-use crate::backend::dbg_backend::{BackendCapability, DebugBackend, DebugCapability, StopEvent};
+use crate::backend::dbg_backend::{
+    BackendCapability, DebugBackend, StopEvent, snapshot_capabilities, snapshot_refusal,
+};
 use crate::base::error::{Error, Result};
 use crate::base::notice::Notice;
 
@@ -77,9 +79,7 @@ impl UserDumpBackend {
     }
 
     fn unsupported(operation: &str) -> Error {
-        Error::DebugInfo(format!(
-            "a user-mode minidump is a static snapshot; {operation} is not available"
-        ))
+        snapshot_refusal("a user-mode minidump", operation)
     }
 }
 
@@ -101,30 +101,7 @@ impl DebugBackend for UserDumpBackend {
     }
 
     fn capabilities(&self) -> Vec<BackendCapability> {
-        vec![
-            BackendCapability::supported(DebugCapability::MemoryIntrospection),
-            BackendCapability::supported(DebugCapability::ReadRegisters),
-            BackendCapability::unsupported(DebugCapability::ExecutionControl),
-            BackendCapability::unsupported(DebugCapability::InterruptTarget),
-            BackendCapability::unsupported(DebugCapability::SingleStep),
-            BackendCapability::unsupported(DebugCapability::WriteRegisters),
-            BackendCapability::supported(DebugCapability::ThreadList),
-            BackendCapability::supported(DebugCapability::ThreadSelection),
-            BackendCapability::unsupported(DebugCapability::KernelBreakpoints),
-            BackendCapability::unsupported(DebugCapability::UserModeBreakpoints),
-            BackendCapability::unsupported(DebugCapability::Watchpoints),
-            BackendCapability::unsupported(DebugCapability::TargetReloadDetection),
-            BackendCapability::unsupported(DebugCapability::KernelBaseHint),
-            BackendCapability::unsupported(DebugCapability::BugcheckDetection),
-            BackendCapability::unsupported(DebugCapability::BugcheckDetails),
-            BackendCapability::unsupported(DebugCapability::ModuleLoadEvents),
-            BackendCapability::unsupported(DebugCapability::DebugOutput),
-            BackendCapability::unsupported(DebugCapability::Msr),
-            BackendCapability::unsupported(DebugCapability::IoPorts),
-            BackendCapability::unsupported(DebugCapability::PciConfig),
-            BackendCapability::unsupported(DebugCapability::TargetControl),
-            BackendCapability::unsupported(DebugCapability::TargetFileIo),
-        ]
+        snapshot_capabilities(false)
     }
 
     fn read_registers(&mut self) -> Result<Vec<u8>> {

@@ -15,6 +15,7 @@ use crate::backend::dbg_backend::{DebugLog, ExceptionRecord};
 use crate::backend::kd::api;
 use crate::backend::kd::framing::{
     KdFraming, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO, PACKET_TYPE_KD_STATE_CHANGE64,
+    is_temporary_io_error,
 };
 use crate::backend::kd::trace_enabled;
 use crate::base::bytes::{read_u16, read_u32, read_u64};
@@ -346,9 +347,7 @@ pub fn poll_for_initial_break(
             },
         ) {
             Ok(stop) => break Ok(stop),
-            Err(Error::Io(e))
-                if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
-            {
+            Err(Error::Io(e)) if is_temporary_io_error(e.kind()) => {
                 let elapsed =
                     budget.saturating_sub(deadline.saturating_duration_since(Instant::now()));
                 let now = Instant::now();
@@ -415,18 +414,12 @@ pub fn breakin_and_wait(
         },
     ) {
         Ok(stop) => Ok(stop),
-        Err(Error::Io(e)) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-            Err(Error::Kd(format!(
-                "no break-in response within {}s",
-                budget.as_secs()
-            )))
-        }
+        Err(Error::Io(e)) if is_temporary_io_error(e.kind()) => Err(Error::Kd(format!(
+            "no break-in response within {}s",
+            budget.as_secs()
+        ))),
         Err(e) => Err(e),
     }
-}
-
-pub fn is_temporary_io_error(kind: ErrorKind) -> bool {
-    matches!(kind, ErrorKind::WouldBlock | ErrorKind::TimedOut)
 }
 
 /// Run a KD request under `timeout`, then leave the socket with that timeout
@@ -953,7 +946,11 @@ pub fn run_pump(
                     && drain.is_spurious(&stop)
                 {
                     if let Err(e) = drain.absorb(&mut framing, arch, &stop) {
-                        report(Err(e.to_string()));
+                        // The target is still halted at this stop, so hand it to
+                        // the foreground as a real one; reporting the error
+                        // instead would leave the backend believing it runs.
+                        kd_trace!("kd: pump: absorbing re-break failed: {e}");
+                        report(Ok(stop));
                         break;
                     }
                     continue;
@@ -961,9 +958,7 @@ pub fn run_pump(
                 report(Ok(stop));
                 break;
             }
-            Err(Error::Io(e))
-                if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
-            {
+            Err(Error::Io(e)) if is_temporary_io_error(e.kind()) => {
                 // The re-break a stale break-in causes lands within a clock
                 // tick of the resume; an idle gap means there is none.
                 drain = None;

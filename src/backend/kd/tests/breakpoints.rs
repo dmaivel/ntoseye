@@ -106,7 +106,8 @@ fn a_stranded_entry_the_target_keeps_is_not_counted_as_released() {
         0,
         &HashSet::new(),
         &mut stranded,
-    );
+    )
+    .unwrap();
 
     assert_eq!(
         reclaim,

@@ -433,6 +433,56 @@ impl BackendCapability {
     }
 }
 
+/// What a static snapshot (a crash dump or a user-mode minidump) can do:
+/// read memory, registers and thread contexts, and nothing that runs or
+/// changes the target. `bugchecks` when it records the bugcheck it was
+/// written for.
+pub fn snapshot_capabilities(bugchecks: bool) -> Vec<BackendCapability> {
+    use DebugCapability::*;
+    [
+        MemoryIntrospection,
+        ReadRegisters,
+        ExecutionControl,
+        InterruptTarget,
+        SingleStep,
+        WriteRegisters,
+        ThreadList,
+        ThreadSelection,
+        KernelBreakpoints,
+        UserModeBreakpoints,
+        Watchpoints,
+        TargetReloadDetection,
+        KernelBaseHint,
+        BugcheckDetection,
+        BugcheckDetails,
+        ModuleLoadEvents,
+        DebugOutput,
+        Msr,
+        IoPorts,
+        PciConfig,
+        TargetControl,
+        TargetFileIo,
+    ]
+    .into_iter()
+    .map(|capability| BackendCapability {
+        capability,
+        supported: match capability {
+            MemoryIntrospection | ReadRegisters | ThreadList | ThreadSelection => true,
+            BugcheckDetection | BugcheckDetails => bugchecks,
+            _ => false,
+        },
+    })
+    .collect()
+}
+
+/// The refusal of `operation` by `snapshot`, a static snapshot such as "crash
+/// dump".
+pub fn snapshot_refusal(snapshot: &str, operation: &str) -> Error {
+    Error::DebugInfo(format!(
+        "{snapshot} is a static snapshot; {operation} is not available"
+    ))
+}
+
 /// The refusal a halted-only operation owes a backend that can never halt.
 ///
 /// Without execution control a backend reports `is_running()` forever, so
@@ -501,6 +551,12 @@ pub fn clear_trap_flag(
 pub fn processor_index_from_backend_thread_id(thread_id: &str) -> Option<u16> {
     let (_pid, tid) = thread_id.strip_prefix('p')?.split_once('.')?;
     u16::from_str_radix(tid, 16).ok()?.checked_sub(1)
+}
+
+/// The backend thread id of the zero-based processor `index`; the inverse of
+/// [`processor_index_from_backend_thread_id`].
+pub fn backend_thread_id(index: u16) -> String {
+    format!("p1.{:x}", u32::from(index) + 1)
 }
 
 /// What a backend thread id is shown as: a processor by its number as

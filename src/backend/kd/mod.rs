@@ -11,13 +11,17 @@ use crate::arch::{Arch, HwBreakpointAccess, RegisterMap};
 use crate::backend::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability, DebugLog,
     DebugOutputPage, ExceptionRecord, PciConfigAddress, ProcessorRead, StopEvent, ThreadLayout,
-    TrapState,
+    TrapState, backend_thread_id, processor_index_from_backend_thread_id,
 };
 use crate::backend::debugger_data::DebuggerDataCandidate;
-use crate::backend::kd::framing::KdFraming;
+use crate::backend::kd::framing::{KdFraming, is_temporary_io_error};
 use crate::base::error::{Error, Result};
 use crate::base::memory::TranslationCache;
 use crate::base::notice::Notice;
+use crate::base::ntstatus::{
+    STATUS_BREAKPOINT, STATUS_SINGLE_STEP, STATUS_UNSUCCESSFUL, STATUS_WX86_BREAKPOINT,
+    STATUS_WX86_SINGLE_STEP,
+};
 use crate::base::types::{Dtb, KernelLocation, VirtAddr};
 
 macro_rules! kd_trace {
@@ -171,13 +175,6 @@ const DBG_KD_LOAD_SYMBOLS_STATE_CHANGE: u32 = 0x0000_3031;
 /// Command-string notification (e.g. `.echo` from the target); also transparent
 const DBG_KD_COMMAND_STRING_STATE_CHANGE: u32 = 0x0000_3032;
 
-const STATUS_BREAKPOINT: u32 = 0x8000_0003;
-const STATUS_SINGLE_STEP: u32 = 0x8000_0004;
-/// The single step and breakpoint of a WOW64 thread's x86 code, which
-/// Windows reports for a trap taken in compatibility mode.
-const STATUS_WX86_SINGLE_STEP: u32 = 0x4000_001E;
-const STATUS_WX86_BREAKPOINT: u32 = 0x4000_001F;
-
 /// The `ExceptionInformation[0]` of the `STATUS_BREAKPOINT` that Windows on
 /// ARM64 raises for a hardware watchpoint hit (`BREAKPOINT_HW_WATCH`, with
 /// the address accessed in `[1]`) and a hardware breakpoint hit
@@ -225,7 +222,6 @@ const DBGKD_CREATE_FILE_API: u32 = 0x0000_3430;
 const DBGKD_READ_FILE_API: u32 = 0x0000_3431;
 const DBGKD_WRITE_FILE_API: u32 = 0x0000_3432;
 const DBGKD_CLOSE_FILE_API: u32 = 0x0000_3433;
-const STATUS_UNSUCCESSFUL: u32 = 0xc000_0001;
 const KD_REFRESH_MESSAGE: &[u8] = b"KDTARGET: Refreshing KD connection";
 const KD_INITIAL_TIMEOUT_ENV: &str = "NTOSEYE_KD_TIMEOUT";
 const KD_INITIAL_TIMEOUT_DEFAULT: Duration = Duration::from_secs(8);
@@ -238,20 +234,12 @@ const KD_RECONNECT_BREAKIN_TRACE_EVERY: u32 = 8;
 /// burst, so a timeout this size only ever fires in the idle gap between packets.
 const PUMP_POLL: Duration = Duration::from_millis(100);
 
-fn thread_id_for(processor: u16) -> String {
-    format!("p1.{:x}", u32::from(processor) + 1)
-}
-
 fn parse_thread_id(tid: &str) -> Result<u16> {
-    let stripped = tid
-        .strip_prefix("p1.")
-        .ok_or_else(|| Error::Kd(format!("unrecognised thread id {tid}")))?;
-    let idx =
-        u16::from_str_radix(stripped, 16).map_err(|_| Error::Kd(format!("bad thread id {tid}")))?;
-    if idx == 0 {
-        return Err(Error::Kd(format!("thread id {tid} has zero index")));
+    if !tid.starts_with("p1.") {
+        return Err(Error::Kd(format!("unrecognised thread id {tid}")));
     }
-    Ok(idx - 1)
+    processor_index_from_backend_thread_id(tid)
+        .ok_or_else(|| Error::Kd(format!("bad thread id {tid}")))
 }
 
 fn parse_thread_id_for_processor_count(tid: &str, processor_count: u16) -> Result<u16> {
@@ -851,7 +839,7 @@ impl DebugBackend for KdBackend {
     }
 
     fn thread_list(&mut self) -> Result<Vec<String>> {
-        Ok((0..self.processor_count).map(thread_id_for).collect())
+        Ok((0..self.processor_count).map(backend_thread_id).collect())
     }
 
     fn set_current_thread(&mut self, thread_id: &str) -> Result<()> {
@@ -863,7 +851,7 @@ impl DebugBackend for KdBackend {
     }
 
     fn stopped_thread_id(&mut self) -> Result<String> {
-        Ok(thread_id_for(self.current_processor))
+        Ok(backend_thread_id(self.current_processor))
     }
 
     fn is_running(&self) -> bool {

@@ -96,9 +96,9 @@ fn debug_io_print_payload(text: &[u8]) -> Vec<u8> {
 
 #[test]
 fn thread_id_uses_one_based_hex() {
-    assert_eq!(thread_id_for(0), "p1.1");
-    assert_eq!(thread_id_for(3), "p1.4");
-    assert_eq!(thread_id_for(15), "p1.10");
+    assert_eq!(backend_thread_id(0), "p1.1");
+    assert_eq!(backend_thread_id(3), "p1.4");
+    assert_eq!(backend_thread_id(15), "p1.10");
 }
 
 #[test]

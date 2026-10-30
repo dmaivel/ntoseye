@@ -133,7 +133,7 @@ pub fn control_packet(packet_type: u16, packet_id: u32) -> Vec<u8> {
     Header::control(packet_type, packet_id).encode().to_vec()
 }
 
-fn is_temporary_read_error(kind: ErrorKind) -> bool {
+pub fn is_temporary_io_error(kind: ErrorKind) -> bool {
     matches!(kind, ErrorKind::WouldBlock | ErrorKind::TimedOut)
 }
 
@@ -333,7 +333,7 @@ impl<T: Read + Write> KdFraming<T> {
             // inner loop triggers a resend via the outer loop
             loop {
                 match self.recv_any() {
-                    Err(Error::Io(e)) if is_temporary_read_error(e.kind()) => {
+                    Err(Error::Io(e)) if is_temporary_io_error(e.kind()) => {
                         kd_trace!("kd: send_data: no ACK before read timeout, retransmitting");
                         break;
                     }
@@ -591,7 +591,7 @@ impl<T: Read + Write> KdFraming<T> {
             match self.transport.read_exact(&mut byte) {
                 Ok(()) => {}
                 Err(e) => {
-                    if !is_temporary_read_error(e.kind()) {
+                    if !is_temporary_io_error(e.kind()) {
                         kd_trace!("kd-trace: read error: {e}");
                     }
                     return Err(e.into());

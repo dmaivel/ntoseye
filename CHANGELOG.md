@@ -119,6 +119,9 @@ Keeping this file:
 - With `!gflag +ksl`, Windows' own report of a user-mode DLL load stops at an `sxe ld:` filter and resolves deferred `bu /p` breakpoints while the user-image trap is planted, where it was dropped for the trap to report: on ARM64, where the trap never sees a DLL loaded after its process starts, those loads were lost.
 - `da` and `du` on a user-mode minidump show a string whose end the dump holds when it stops capturing later in the page, a mapped view's pages no longer stay unreadable for a whole session when first read before their process was listed, and a compressed page that fails to decode reports why, not a bad address.
 - ARM64 stacks unwind through functions with a 512-byte local frame in packed unwind data, where the unwinder restored x19 and x20 instead.
+- Over KD, a file the debugger cannot read for `.kdfiles` fails the guest's read, where the guest got a truncated file; a stop the debugger could not step past is shown as a stop, where the target looked running for good; and a transport error while reclaiming a previous session's breakpoint slots is reported as itself, not as a full breakpoint table.
+- Over KDNET, a failed send no longer fails the next request too, and a datagram that does not decrypt is dropped instead of failing the request.
+- When `ntoseye` reads guest memory from the VM process (the `memory` backend, or KD with `--memory-source host`), a physical read or write that crosses the 32-bit MMIO hole fails, where it went on into guest RAM above 4 GiB.
 
 ## v0.52.0 (2026-10-25)
 

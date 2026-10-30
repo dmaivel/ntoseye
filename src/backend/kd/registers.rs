@@ -55,7 +55,7 @@ pub(super) fn arm64_x18(
 ) -> Option<u64> {
     let cpsr = bytes::read_u32(context, arm64::OFFSET_CPSR);
     let x18_at = arm64::OFFSET_X0 + 18 * 8;
-    let x18 = u64::from_le_bytes(context.get(x18_at..x18_at + 8)?.try_into().ok()?);
+    let x18 = bytes::get_u64(context, x18_at)?;
     // CPSR.M[3:2] is the exception level the context was taken at.
     match (cpsr >> 2) & 3 {
         1 => source.kpcr().filter(|kpcr| *kpcr != 0),

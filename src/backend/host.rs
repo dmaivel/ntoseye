@@ -342,7 +342,16 @@ mod platform {
             }
         }
         fn host_address(&self, addr: PhysAddr, len: usize) -> Result<u64> {
+            // The mapping places high RAM right after low RAM, so a range
+            // crossing the MMIO hole would silently continue into high RAM;
+            // both ends must sit in the same RAM run.
+            let last = (len as u64).saturating_sub(1);
             gpa_to_offset(self.layout, addr)
+                .filter(|&offset| {
+                    addr.checked_add(last)
+                        .and_then(|end| gpa_to_offset(self.layout, end))
+                        == offset.checked_add(last)
+                })
                 .and_then(|offset| self.memory.host_range(offset, len))
                 .ok_or(Error::BadPhysicalAddress(addr))
         }

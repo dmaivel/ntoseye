@@ -93,7 +93,7 @@ pub(super) fn restore_unowned_breakpoint_handles(
     processor: u16,
     owned: &HashSet<u32>,
     stranded: &mut StrandedEntries,
-) -> Reclaim {
+) -> Result<Reclaim> {
     let mut reclaim = Reclaim::default();
     let mut restore = |handle| {
         with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
@@ -124,15 +124,20 @@ pub(super) fn restore_unowned_breakpoint_handles(
                 stranded.held.insert(handle);
                 reclaim.held += 1;
             }
-            // Transport trouble will resurface on whatever the caller does
-            // next, with a better error than a reclaim failure could give.
+            // Once something was reclaimed the caller can act on it, and the
+            // transport trouble resurfaces on its next request. Before that,
+            // an empty reclaim would read as a full table, so the error is
+            // the honest answer.
             Err(error) => {
                 kd_trace!("kd: reclaim: handle {handle} failed: {error}");
+                if reclaim == Reclaim::default() {
+                    return Err(error);
+                }
                 break;
             }
         }
     }
-    reclaim
+    Ok(reclaim)
 }
 
 /// Word a reclaim for the operator. A stranded entry is invisible to them
@@ -240,7 +245,7 @@ impl KdBackend {
     /// reports success but keeps the entry, marked suspended: the address is
     /// installable again, though the slot itself only frees on reboot.
     fn write_breakpoint_after_reclaim(&mut self, addr: u64, processor: u16) -> Result<u32> {
-        let reclaimed = self.reclaim_stranded_breakpoints(processor);
+        let reclaimed = self.reclaim_stranded_breakpoints(processor)?;
         self.notices.extend(reclaimed_breakpoints_notice(reclaimed));
         if reclaimed.released == 0 {
             return Err(self.breakpoint_table_error(addr));
@@ -258,11 +263,9 @@ impl KdBackend {
 
     /// Release every table handle this session does not own (see
     /// [`restore_unowned_breakpoint_handles`]).
-    fn reclaim_stranded_breakpoints(&mut self, processor: u16) -> Reclaim {
+    fn reclaim_stranded_breakpoints(&mut self, processor: u16) -> Result<Reclaim> {
         let owned: HashSet<u32> = self.bp_handles.values().copied().collect();
-        let Ok(framing) = self.link.framing(self.running_reason) else {
-            return Reclaim::default();
-        };
+        let framing = self.link.framing(self.running_reason)?;
         restore_unowned_breakpoint_handles(framing, processor, &owned, &mut self.stranded)
     }
 

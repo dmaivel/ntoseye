@@ -22,8 +22,8 @@ use super::{
     AwaitStateOptions, ContinueDrain, DBG_KD_EXCEPTION_STATE_CHANGE,
     DBG_KD_LOAD_SYMBOLS_STATE_CHANGE, KD_REQUEST_TIMEOUT, KdBackend, Link, STATUS_BREAKPOINT,
     StateChange, StateChangeFilter, advance_pc_past_breakpoint, api, await_state_change,
-    blocking_read_timeout, breakin_and_wait, hardware_watch_address, read_program_counter,
-    thread_id_for, with_framing_read_timeout,
+    backend_thread_id, blocking_read_timeout, breakin_and_wait, hardware_watch_address,
+    read_program_counter, with_framing_read_timeout,
 };
 
 const POST_BUGCHECK_RECONNECT_ASSIST_DELAY: Duration = Duration::from_secs(20);
@@ -51,7 +51,7 @@ pub(super) fn stop_event(stop: StateChange) -> StopEvent {
         }
     });
     StopEvent {
-        thread_id: Some(thread_id_for(stop.processor)),
+        thread_id: Some(backend_thread_id(stop.processor)),
         exception_code: (stop.new_state == DBG_KD_EXCEPTION_STATE_CHANGE)
             .then_some(stop.exception_code),
         first_chance: stop.exception_first_chance,
@@ -225,7 +225,7 @@ impl KdBackend {
             processor,
             &owned,
             &mut self.stranded,
-        );
+        )?;
         self.notices.extend(reclaimed_breakpoints_notice(reclaimed));
         if reclaimed.released != 0
             && !breakpoint_instruction_at(
@@ -320,11 +320,12 @@ impl KdBackend {
         // The pump absorbs the re-break a stale break-in byte causes right
         // after resume; it needs to know where we resumed from and which
         // breakpoints are real. Nothing can change either while the VM runs.
+        let retired = std::mem::take(&mut self.retired_bp_addresses);
         let drain = ContinueDrain::new(
             self.last_rip,
             self.managed_bp_addresses.clone(),
             self.breakin_addresses.clone(),
-            std::mem::take(&mut self.retired_bp_addresses),
+            retired.clone(),
             self.register_map.clone(),
             self.surface_break_at,
         );
@@ -333,11 +334,16 @@ impl KdBackend {
             "kd: continue: sending ContinueApi2 on p{}",
             resume_processor + 1
         );
-        self.resume_processor(
+        // A failed continue leaves the target halted, and the next resume must
+        // still absorb re-breaks at breakpoints removed during this halt.
+        if let Err(e) = self.resume_processor(
             resume_processor,
             api::status_for_disposition(disposition),
             false,
-        )?;
+        ) {
+            self.retired_bp_addresses = retired;
+            return Err(e);
+        }
         kd_trace!("kd: continue: ContinueApi2 ACKed, VM should resume");
         self.record_running();
         // Hand the socket to the background pump so prints keep getting ACKed

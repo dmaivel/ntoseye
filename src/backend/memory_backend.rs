@@ -2,30 +2,23 @@ use std::time::Duration;
 
 use crate::arch::RegisterMap;
 use crate::backend::dbg_backend::{
-    BackendCapability, DebugBackend, DebugCapability, StopEvent,
+    BackendCapability, DebugBackend, DebugCapability, StopEvent, backend_thread_id,
     processor_index_from_backend_thread_id,
 };
 use crate::base::error::{Error, Result};
 
 /// Reads guest memory from the host while the guest runs. It has no
-/// registers, but lists the kernel's processors so that one can be selected
-/// for what is read from its PRCB (`~1s` then `!idt`).
+/// registers, but lists the kernel's processors so the session can select
+/// one; the backend itself reads nothing per processor.
 #[derive(Default)]
 pub struct MemoryBackend {
     register_map: RegisterMap,
     processors: u16,
-    selected: u16,
 }
 
 impl MemoryBackend {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// The id the processor at `index` is listed by, as the other backends
-    /// list theirs (see [`processor_index_from_backend_thread_id`]).
-    fn processor_id(index: u16) -> String {
-        format!("p1.{:x}", index + 1)
     }
 
     fn unsupported(operation: &str) -> Error {
@@ -108,22 +101,18 @@ impl DebugBackend for MemoryBackend {
 
     fn set_processor_count(&mut self, count: u16) {
         self.processors = count;
-        self.selected = 0;
     }
 
     fn thread_list(&mut self) -> Result<Vec<String>> {
         if self.processors == 0 {
             return Err(Self::unsupported("context enumeration"));
         }
-        Ok((0..self.processors).map(Self::processor_id).collect())
+        Ok((0..self.processors).map(backend_thread_id).collect())
     }
 
     fn set_current_thread(&mut self, thread_id: &str) -> Result<()> {
         match processor_index_from_backend_thread_id(thread_id) {
-            Some(index) if index < self.processors => {
-                self.selected = index;
-                Ok(())
-            }
+            Some(index) if index < self.processors => Ok(()),
             _ => Err(Error::DebugInfo(format!("no processor {thread_id}"))),
         }
     }
