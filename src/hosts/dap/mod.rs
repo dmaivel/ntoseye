@@ -41,7 +41,7 @@ use crate::session::typeview::Expand;
 use crate::session::{Cancel, Motion, RunOutcome, Session, StepMode};
 use crate::{Backend, TargetSpec};
 
-use breakpoints::BreakpointState;
+use breakpoints::{BreakpointState, Owned};
 use run_control::{StepInProgress, StepRequest};
 use stack::DapThread;
 use wire::{ClientMessage, Request};
@@ -181,10 +181,11 @@ struct Server {
     /// ntoseye breakpoint ids owned by the client's `setBreakpoints` for one
     /// source path. Each DAP breakpoint can expand into several ids, because a
     /// source line may match several addresses (inlined or ICF'd code).
-    source_breakpoints: HashMap<String, Vec<Vec<u32>>>,
-    function_breakpoints: Vec<u32>,
-    instruction_breakpoints: Vec<u32>,
-    data_breakpoints: Vec<u32>,
+    /// The first of each group is the id the client was given.
+    source_breakpoints: HashMap<String, Vec<Vec<Owned>>>,
+    function_breakpoints: Vec<Vec<Owned>>,
+    instruction_breakpoints: Vec<Vec<Owned>>,
+    data_breakpoints: Vec<Vec<Owned>>,
     last_stop: Option<StopInfo>,
     /// The step whose runs are under way, between the response to its
     /// request and the stop it ends on.

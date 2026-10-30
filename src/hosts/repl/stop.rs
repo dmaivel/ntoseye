@@ -31,8 +31,6 @@ use crate::session::{
 
 use crate::hosts::repl::*;
 
-pub const STATUS_BREAKPOINT: u32 = 0x8000_0003;
-
 pub use crate::session::context::refresh_windows_thread_context_for_backend_thread;
 
 /// One-line summary in `!thread`'s words: `thread <addr>  TID 0  PID 0
@@ -89,6 +87,7 @@ pub fn refresh_stop_caches_pre(session: &mut Session, caches: &ReplCaches) -> bo
         print_module_symbol_report(report);
     }
     if modules_changed {
+        caches.invalidate_symbol_indexes();
         caches.refresh_symbol_context(&session.target);
         caches.refresh_breakpoints(&session.breakpoints);
     }
@@ -575,6 +574,9 @@ pub fn print_break_context_at(
         Ok(r) => r,
         Err(e) => {
             session.target.registers = None;
+            // The notification for this stop must not name the last one's
+            // symbol and thread.
+            session.shown_stop = None;
             outln!(
                 "{}{}\n",
                 ui::badge("BREAK"),

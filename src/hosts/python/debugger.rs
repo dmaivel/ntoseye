@@ -307,7 +307,7 @@ impl Debugger {
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         if let Some(conditions) = self.conditions.try_lock() {
-            for callable in conditions.values() {
+            for (_, callable) in conditions.values() {
                 visit.call(callable)?;
             }
         }

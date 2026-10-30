@@ -249,7 +249,7 @@ impl Breakpoints {
             }
             created(session, set.id)
         })?;
-        store_condition(py, self.owner.dbg(), bp.id, callback);
+        store_condition(py, self.owner.dbg(), &bp, callback);
         Ok(handle(py, self.owner.dbg(), &bp))
     }
 
@@ -295,22 +295,21 @@ impl Breakpoints {
                 .collect::<PyResult<Vec<_>>>()?;
             Ok((breakpoints, errors))
         })?;
+        let installed = breakpoints.len();
+        // The installed breakpoints stay on a partial failure, so they get
+        // their `when=` callback before the error is raised.
+        let handles = make_handles(py, self.owner.dbg(), breakpoints, callback.as_ref());
         if let Some(first) = errors.first() {
             return Err(raise(format!(
                 "{} of {} matching symbols failed to install (first: {first})",
                 errors.len(),
-                errors.len() + breakpoints.len()
+                errors.len() + installed
             )));
         }
-        if breakpoints.is_empty() {
+        if handles.is_empty() {
             return Err(raise(format!("no code symbols match '{pattern}'")));
         }
-        Ok(make_handles(
-            py,
-            self.owner.dbg(),
-            breakpoints,
-            callback.as_ref(),
-        ))
+        Ok(handles)
     }
 
     /// Add a source breakpoint at each address that matches `file:line`.
@@ -402,7 +401,7 @@ impl Breakpoints {
                 .map_err(err)?;
             created(session, id)
         })?;
-        store_condition(py, self.owner.dbg(), bp.id, callback);
+        store_condition(py, self.owner.dbg(), &bp, callback);
         Ok(handle(py, self.owner.dbg(), &bp))
     }
 
@@ -464,7 +463,7 @@ impl Breakpoints {
                 .map_err(err)?;
             created(session, id)
         })?;
-        store_condition(py, self.owner.dbg(), bp.id, callback);
+        store_condition(py, self.owner.dbg(), &bp, callback);
         Ok(handle(py, self.owner.dbg(), &bp))
     }
 
@@ -521,7 +520,7 @@ impl Breakpoints {
             let id = session.add_exit_breakpoint(filter, config).map_err(err)?;
             created(session, id)
         })?;
-        store_condition(py, self.owner.dbg(), bp.id, callback);
+        store_condition(py, self.owner.dbg(), &bp, callback);
         Ok(handle(py, self.owner.dbg(), &bp))
     }
 }
@@ -547,7 +546,8 @@ impl Breakpoint {
                 .get()
                 .conditions
                 .lock()
-                .contains_key(&self.id)
+                .get(&self.id)
+                .is_some_and(|&(serial, _)| serial == self.serial)
         {
             return Err(PyValueError::new_err(
                 "this breakpoint has a when= callback; condition and when are mutually exclusive",
@@ -645,21 +645,20 @@ impl Breakpoint {
     /// a one-shot breakpoint whose hit stopped the target, is left as it is,
     /// so deleting after the hit works.
     fn delete(&self, py: Python<'_>) -> PyResult<()> {
-        if self.live(py)?.is_none() {
-            // The id's `when=` callback belongs to whichever breakpoint now
-            // holds the id, if one does.
-            let reused = self.owner.with(py, |session| {
-                Ok(session.breakpoints.listed(self.id).is_some())
+        if self.live(py)?.is_some() {
+            self.mutate(py, "breakpoint.delete", |session| {
+                session.remove_breakpoint(self.id).map_err(err)
             })?;
-            if !reused {
-                self.owner.dbg().get().conditions.lock().remove(&self.id);
-            }
-            return Ok(());
         }
-        self.mutate(py, "breakpoint.delete", |session| {
-            session.remove_breakpoint(self.id).map_err(err)
-        })?;
-        self.owner.dbg().get().conditions.lock().remove(&self.id);
+        // A callback under this id belongs to a later breakpoint that reused
+        // it, if its serial is not this one's.
+        let mut conditions = self.owner.dbg().get().conditions.lock();
+        if conditions
+            .get(&self.id)
+            .is_some_and(|&(serial, _)| serial == self.serial)
+        {
+            conditions.remove(&self.id);
+        }
         Ok(())
     }
 
@@ -822,13 +821,18 @@ fn invalid_breakpoint(id: u32) -> pyo3::PyErr {
     raise(format!("breakpoint #{id} is no longer valid"))
 }
 
-fn store_condition(py: Python<'_>, dbg: &Py<Debugger>, id: u32, callback: Option<Py<PyAny>>) {
+fn store_condition(
+    py: Python<'_>,
+    dbg: &Py<Debugger>,
+    bp: &BreakpointInfo,
+    callback: Option<Py<PyAny>>,
+) {
     // A new breakpoint can reuse the id of one deleted outside the SDK
     // (`bc` through `command()`), whose `when=` must not carry over.
     let mut conditions = dbg.bind(py).get().conditions.lock();
     match callback {
-        Some(callback) => conditions.insert(id, callback),
-        None => conditions.remove(&id),
+        Some(callback) => conditions.insert(bp.id, (bp.serial, callback)),
+        None => conditions.remove(&bp.id),
     };
 }
 
@@ -841,7 +845,7 @@ fn make_handles(
     breakpoints
         .iter()
         .map(|bp| {
-            store_condition(py, dbg, bp.id, callback.map(|value| value.clone_ref(py)));
+            store_condition(py, dbg, bp, callback.map(|value| value.clone_ref(py)));
             handle(py, dbg, bp)
         })
         .collect()

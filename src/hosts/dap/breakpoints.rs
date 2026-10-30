@@ -1,12 +1,13 @@
 //! Client breakpoint sets (source, function, instruction, data), each
 //! replaced in one halt, and verification changes reported as they happen.
 
+use std::mem::take;
 use std::result;
 
 use serde_json::{Value, json};
 
 use crate::backend::dbg_backend::{ModuleEvent, WatchpointAccess};
-use crate::base::error::Result;
+use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
 use crate::nt::breakpoints::{BreakpointConfig, BreakpointInfo};
 use crate::session::Session;
@@ -24,34 +25,51 @@ impl Server {
             return;
         };
         session.refresh_modules_on_stop();
-        let tracked: Vec<u32> = self
-            .source_breakpoints
-            .values()
-            .flatten()
-            .flatten()
-            .copied()
-            .chain(self.function_breakpoints.iter().copied())
-            .chain(self.instruction_breakpoints.iter().copied())
-            .chain(self.data_breakpoints.iter().copied())
-            .collect();
-        for id in tracked {
+        let groups: Vec<Vec<Owned>> = self.owned_groups().cloned().collect();
+        for group in groups {
             let Some(session) = self.session.as_ref() else {
                 return;
             };
-            let Some(breakpoint) = session.breakpoint(id) else {
-                self.verified.remove(&id);
-                continue;
-            };
-            let state = BreakpointState::from(breakpoint);
-            if self.verified.insert(id, state) == Some(state) {
-                continue;
+            let mut changed = false;
+            let mut first = None;
+            for owned in &group {
+                let Some(breakpoint) = session.breakpoints.live(owned.id, owned.serial) else {
+                    self.verified.remove(&owned.id);
+                    continue;
+                };
+                let state = BreakpointState::from(breakpoint);
+                changed |= self.verified.insert(owned.id, state) != Some(state);
+                first.get_or_insert(breakpoint);
             }
-            let Some(breakpoint) = self.session.as_ref().and_then(|s| s.breakpoint(id)) else {
+            let Some(breakpoint) = first.filter(|_| changed) else {
                 continue;
             };
-            let body = json!({"reason": "changed", "breakpoint": breakpoint_json(breakpoint, 1)});
-            self.send_event("breakpoint", body);
+            // One event per client breakpoint, under the id the client holds.
+            let mut breakpoint = breakpoint_json(breakpoint, group.len());
+            breakpoint["id"] = json!(group[0].id);
+            self.send_event(
+                "breakpoint",
+                json!({"reason": "changed", "breakpoint": breakpoint}),
+            );
         }
+    }
+
+    /// Every client breakpoint, as the session breakpoints it installed.
+    fn owned_groups(&self) -> impl Iterator<Item = &Vec<Owned>> {
+        self.source_breakpoints
+            .values()
+            .flatten()
+            .chain(&self.function_breakpoints)
+            .chain(&self.instruction_breakpoints)
+            .chain(&self.data_breakpoints)
+    }
+
+    /// The id the client knows a session breakpoint by, if one of its own
+    /// breakpoints installed it.
+    pub(super) fn client_breakpoint_id(&self, id: u32, serial: u64) -> Option<u32> {
+        self.owned_groups()
+            .find(|group| group.contains(&Owned { id, serial }))
+            .map(|group| group[0].id)
     }
 
     pub(super) fn on_set_breakpoints(&mut self, args: &Value) -> Handled {
@@ -78,17 +96,14 @@ impl Server {
                 Ok(Install::Source(spec, config))
             })
             .collect();
-        let previous: Vec<u32> = self
+        let previous = self
             .source_breakpoints
             .get(&key)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .copied()
-            .collect();
-        let results = self.install_breakpoints(previous, plan)?;
-        self.source_breakpoints.remove(&key);
-        let mut installed = Vec::with_capacity(results.len());
+            .cloned()
+            .unwrap_or_default();
+        let (results, kept) = self.install_breakpoints(&previous, plan)?;
+        let mut installed = retain_kept(previous, &kept);
+        installed.reserve(results.len());
         let mut response = Vec::with_capacity(results.len());
         for (result, line) in results.into_iter().zip(lines) {
             match result {
@@ -162,7 +177,7 @@ impl Server {
         self.replace_owned_set(OwnedSet::Instruction, plan)
     }
 
-    fn owned_set(&mut self, set: OwnedSet) -> &mut Vec<u32> {
+    fn owned_set(&mut self, set: OwnedSet) -> &mut Vec<Vec<Owned>> {
         match set {
             OwnedSet::Function => &mut self.function_breakpoints,
             OwnedSet::Instruction => &mut self.instruction_breakpoints,
@@ -176,15 +191,21 @@ impl Server {
         set: OwnedSet,
         plan: Vec<result::Result<Install, String>>,
     ) -> Handled {
-        let previous = self.owned_set(set).clone();
-        let results = self.install_breakpoints(previous, plan)?;
-        self.owned_set(set).clear();
+        let previous = take(self.owned_set(set));
+        let (results, kept) = match self.install_breakpoints(&previous, plan) {
+            Ok(installed) => installed,
+            Err(message) => {
+                *self.owned_set(set) = previous;
+                return Err(message);
+            }
+        };
+        *self.owned_set(set) = retain_kept(previous, &kept);
         let mut response = Vec::with_capacity(results.len());
         for result in results {
             match result {
                 Ok(ids) => {
                     response.push(self.breakpoint_value(&ids, None));
-                    self.owned_set(set).extend(ids);
+                    self.owned_set(set).push(ids);
                 }
                 Err(message) => response.push(refused_breakpoint(message, None)),
             }
@@ -199,22 +220,46 @@ impl Server {
     ///
     /// `Err` means the target could not be halted and nothing changed. A
     /// failure to resume afterwards is reported to the console instead: the
-    /// edits stand, and the next service tick surfaces the halt.
+    /// edits stand, and the next service tick surfaces the halt. So is a
+    /// breakpoint that could not be removed: it is still installed, so it is
+    /// returned to stay owned, and its hits stay recognised.
     fn install_breakpoints(
         &mut self,
-        remove: Vec<u32>,
+        remove: &[Vec<Owned>],
         mut plan: Vec<result::Result<Install, String>>,
-    ) -> result::Result<Vec<result::Result<Vec<u32>, String>>, String> {
+    ) -> result::Result<Installed, String> {
         let session = self.session()?;
         let mut results = Vec::with_capacity(plan.len());
+        let mut kept = Vec::new();
+        let mut failures = Vec::new();
         let mut edited = false;
         let outcome = session.with_target_halted(|session| {
             edited = true;
-            for id in &remove {
-                let _ = session.remove_breakpoint(*id);
+            for &owned in remove.iter().flatten() {
+                // Gone already (cleared from the console), or the id now
+                // names a breakpoint the client does not own.
+                if session.breakpoints.live(owned.id, owned.serial).is_none() {
+                    continue;
+                }
+                match session.remove_breakpoint(owned.id) {
+                    Ok(()) | Err(Error::BPNotFound(_)) => {}
+                    Err(error) => {
+                        failures.push(format!("#{}: {error}", owned.id));
+                        kept.push(owned);
+                    }
+                }
             }
             results.extend(plan.drain(..).map(|slot| {
-                slot.and_then(|install| install.apply(session).map_err(|error| error.to_string()))
+                let ids = slot.and_then(|install| {
+                    install.apply(session).map_err(|error| error.to_string())
+                })?;
+                Ok(ids
+                    .into_iter()
+                    .filter_map(|id| {
+                        let serial = session.breakpoints.listed(id)?.serial;
+                        Some(Owned { id, serial })
+                    })
+                    .collect())
             }));
             Ok(())
         });
@@ -230,29 +275,40 @@ impl Server {
                 format!("ntoseye: breakpoints changed but the target did not resume: {error}\n"),
             ),
         }
-        for id in &remove {
-            self.verified.remove(id);
+        if !failures.is_empty() {
+            self.emit_output(
+                "important",
+                format!(
+                    "ntoseye: could not remove breakpoints, which stay installed: {}\n",
+                    failures.join("; ")
+                ),
+            );
         }
-        Ok(results)
+        for owned in remove.iter().flatten() {
+            if !kept.contains(owned) {
+                self.verified.remove(&owned.id);
+            }
+        }
+        Ok((results, kept))
     }
 
     /// Report one installed breakpoint: verified once an address is resolved,
     /// unverified (with the reason) while it stays deferred.
-    fn breakpoint_value(&mut self, ids: &[u32], line: Option<i64>) -> Value {
+    fn breakpoint_value(&mut self, ids: &[Owned], line: Option<i64>) -> Value {
         let Some(session) = self.session.as_ref() else {
             return json!({"verified": false, "message": "no target attached"});
         };
-        let first = ids.first().and_then(|id| session.breakpoint(*id));
+        let first = ids.first().and_then(|owned| session.breakpoint(owned.id));
         // One client breakpoint can install several ids (a source line with
         // more than one address). `reconcile_breakpoints` walks all of them, so
         // all of them have to be seeded here or the ids the client never saw
         // each report a spurious change at the next stop.
         let states: Vec<(u32, BreakpointState)> = ids
             .iter()
-            .filter_map(|id| {
+            .filter_map(|owned| {
                 session
-                    .breakpoint(*id)
-                    .map(|breakpoint| (*id, BreakpointState::from(breakpoint)))
+                    .breakpoint(owned.id)
+                    .map(|breakpoint| (owned.id, BreakpointState::from(breakpoint)))
             })
             .collect();
         for (id, state) in states {
@@ -457,6 +513,36 @@ impl Install {
                 .map(|id| vec![id]),
         }
     }
+}
+
+/// One session breakpoint a client breakpoint installed. The serial tells it
+/// apart from a later breakpoint, such as one set from the debug console,
+/// that reuses the id once the session's table empties.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Owned {
+    pub id: u32,
+    pub serial: u64,
+}
+
+/// What one set's install produced, aligned with its plan, and the
+/// breakpoints whose removal failed, which stay installed and owned.
+type Installed = (Vec<result::Result<Vec<Owned>, String>>, Vec<Owned>);
+
+/// The parts of `groups` whose removal failed, still installed and owned.
+fn retain_kept(groups: Vec<Vec<Owned>>, kept: &[Owned]) -> Vec<Vec<Owned>> {
+    if kept.is_empty() {
+        return Vec::new();
+    }
+    groups
+        .into_iter()
+        .map(|group| -> Vec<Owned> {
+            group
+                .into_iter()
+                .filter(|owned| kept.contains(owned))
+                .collect()
+        })
+        .filter(|group| !group.is_empty())
+        .collect()
 }
 
 /// A breakpoint set the client replaces wholesale with one request.

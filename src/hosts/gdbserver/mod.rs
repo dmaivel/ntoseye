@@ -329,6 +329,9 @@ struct Planted {
     kind: PlantedKind,
     address: u64,
     id: u32,
+    /// The session breakpoint's serial: `id` alone is reused once the
+    /// session's table empties, by a `monitor bp` the client never planted.
+    serial: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -343,7 +346,7 @@ struct GdbTarget<'a> {
     arch: Arch,
     layout: Layout,
     /// The REPL state `monitor` commands run in, kept between commands so
-    /// aliases, the radix, and caches persist.
+    /// aliases and caches persist.
     repl: Option<ReplStore>,
     /// Backend vCPU ids; RSP thread `n` is `threads[n - 1]`.
     threads: Vec<String>,
@@ -424,8 +427,8 @@ impl<'a> GdbTarget<'a> {
     /// trap with no debugger to handle it. It stays in the session, for the
     /// shutdown cleanup or a later client to remove.
     fn release(&mut self) {
-        let ids: Vec<u32> = self.planted.drain(..).map(|planted| planted.id).collect();
-        if !ids.is_empty() {
+        let planted = std::mem::take(&mut self.planted);
+        if !planted.is_empty() {
             // Not `with_target_halted`, which resumes a break-in whatever
             // its edit returns.
             if self.session.backend.is_running()
@@ -437,12 +440,16 @@ impl<'a> GdbTarget<'a> {
                 );
                 return;
             }
-            let failures: Vec<String> = ids
+            let failures: Vec<String> = planted
                 .into_iter()
-                .filter_map(|id| match self.session.remove_breakpoint(id) {
-                    // Cleared through `monitor` already: no site is left.
-                    Ok(()) | Err(Error::BPNotFound(_)) => None,
-                    Err(error) => Some(format!("#{id}: {error}")),
+                .filter_map(|Planted { id, serial, .. }| {
+                    // Cleared through `monitor` already: no site is left, and
+                    // a breakpoint that reused the id is not the client's.
+                    self.session.breakpoints.live(id, serial)?;
+                    match self.session.remove_breakpoint(id) {
+                        Ok(()) | Err(Error::BPNotFound(_)) => None,
+                        Err(error) => Some(format!("#{id}: {error}")),
+                    }
                 })
                 .collect();
             if !failures.is_empty() {
@@ -643,16 +650,30 @@ mod tests {
         (session, continues)
     }
 
-    /// Let a client that planted breakpoints `ids` leave.
+    /// Let a client that planted the breakpoints `ids`, as the session
+    /// holds them now, leave.
     fn release(session: &mut Session, ids: &[u32]) {
+        let planted = ids
+            .iter()
+            .map(|&id| {
+                let serial = session.breakpoints.get(id).map_or(0, |bp| bp.serial);
+                (id, serial)
+            })
+            .collect::<Vec<_>>();
+        release_planted(session, &planted);
+    }
+
+    /// Let a client that planted the `(id, serial)` breakpoints leave.
+    fn release_planted(session: &mut Session, planted: &[(u32, u64)]) {
         let flag = || Arc::new(AtomicBool::new(false));
         let mut target = GdbTarget::new(session, flag(), flag());
-        target.planted = ids
+        target.planted = planted
             .iter()
-            .map(|&id| Planted {
+            .map(|&(id, serial)| Planted {
                 kind: PlantedKind::Software,
                 address: 0,
                 id,
+                serial,
             })
             .collect();
         target.release();
@@ -678,5 +699,16 @@ mod tests {
 
         assert_eq!(continues.load(Ordering::SeqCst), 1);
         assert!(session.breakpoints.get(1).is_none());
+    }
+
+    #[test]
+    fn a_monitor_breakpoint_that_reused_a_client_id_survives_the_detach() {
+        let (mut session, _) = session(u64::MAX, &[(1, 0x1000)]);
+        // The client's breakpoint 1 was cleared through `monitor bc`, and
+        // `monitor bp` then created another breakpoint 1.
+        let serial = session.breakpoints.get(1).unwrap().serial;
+        release_planted(&mut session, &[(1, serial.wrapping_add(1))]);
+
+        assert!(session.breakpoints.get(1).is_some());
     }
 }

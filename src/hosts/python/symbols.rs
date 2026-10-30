@@ -59,13 +59,12 @@ impl Symbols {
     /// Get the address of a symbol, or raise `SymbolNotFoundError` if the symbol is not
     /// found.
     fn __getitem__(&self, py: Python<'_>, name: &str) -> PyResult<u64> {
-        self.resolve(py, name)?
-            .ok_or_else(|| symbol_not_found(name))
+        resolve(py, &self.owner, &self.space, name)?.ok_or_else(|| symbol_not_found(name))
     }
 
     /// Get the address of a symbol, or `None` if the symbol is not found.
     fn get(&self, py: Python<'_>, name: &str) -> PyResult<Option<u64>> {
-        self.resolve(py, name)
+        resolve(py, &self.owner, &self.space, name)
     }
 
     /// True if one or more symbol candidates have this name.
@@ -118,9 +117,12 @@ impl Symbols {
         py: Python<'py>,
         address: AddressArg,
     ) -> PyResult<Typed<'py, Option<SourceLocation>>> {
-        let addr = address.resolve(py, &self.owner, &self.space.context())?.0;
+        // Resolved after the scope's symbols load, which an expression
+        // naming a process module needs.
+        let pending = address.pending(py, &self.owner, |address| address)?;
         let location = scoped(py, &self.owner, &self.space, |session| {
-            Ok(session.target.source_location(VirtAddr(addr)))
+            let addr = pending.resolve(session).map_err(err)?;
+            Ok(session.target.source_location(addr))
         })?;
         Typed::new(py, location)
     }
@@ -145,11 +147,12 @@ impl Symbols {
         py: Python<'py>,
         address: AddressArg,
     ) -> PyResult<Typed<'py, Vec<ProcedureLocal>>> {
-        let addr = address.resolve(py, &self.owner, &self.space.context())?.0;
+        let pending = address.pending(py, &self.owner, |address| address)?;
         let rows = scoped(py, &self.owner, &self.space, |session| {
+            let addr = pending.resolve(session).map_err(err)?;
             let locals = session
                 .target
-                .frame_locals(CodeFrame::at(VirtAddr(addr)))
+                .frame_locals(CodeFrame::at(addr))
                 .map_err(err)?
                 .unwrap_or_default();
             Ok(locals.to_vec())
@@ -204,19 +207,18 @@ impl Symbols {
     }
 }
 
-impl Symbols {
-    fn resolve(&self, py: Python<'_>, name: &str) -> PyResult<Option<u64>> {
-        let space = &self.space;
-        scoped(py, &self.owner, space, |session| {
-            let dtb = space.dtb(&session.target)?;
-            session
-                .target
-                .symbols
-                .find_symbol_across_modules(dtb, name)
-                .map(|address| address.map(|address| address.0))
-                .map_err(err)
-        })
-    }
+/// The address of `name` (`module!symbol`) in `space`, with the space's
+/// module symbols loaded first.
+pub fn resolve(py: Python<'_>, owner: &Owner, space: &Space, name: &str) -> PyResult<Option<u64>> {
+    scoped(py, owner, space, |session| {
+        let dtb = space.dtb(&session.target)?;
+        session
+            .target
+            .symbols
+            .find_symbol_across_modules(dtb, name)
+            .map(|address| address.map(|address| address.0))
+            .map_err(err)
+    })
 }
 
 /// Symbol commands (`ln`, `.reload`, `.symfix`) run in the handle's

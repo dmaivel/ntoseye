@@ -10,6 +10,7 @@ use super::command::Bind;
 use super::context::{Context, Space};
 use super::handle::Owner;
 use super::record::Typed;
+use super::symbols;
 use super::{MAX_READ_LEN, err, raise, symbol_not_found};
 use crate::base::error::Error;
 use crate::base::memory::PAGE_SIZE;
@@ -253,15 +254,8 @@ impl Module {
     /// Get the address of a symbol in this module.
     fn __getitem__(&self, py: Python<'_>, name: &str) -> PyResult<u64> {
         let query = format!("{}!{name}", self.info.short_name);
-        let address = self.owner.with_in(py, &self.context(), |session| {
-            session
-                .target
-                .symbols
-                .find_symbol_across_modules(self.space.dtb(&session.target)?, &query)
-                .map(|address| address.map(|address| address.0))
-                .map_err(err)
-        })?;
-        address.ok_or_else(|| symbol_not_found(query))
+        symbols::resolve(py, &self.owner, &self.space, &query)?
+            .ok_or_else(|| symbol_not_found(query))
     }
 
     /// The symbol status, load diagnostics, and PDB identity (`lmv`).

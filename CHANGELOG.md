@@ -148,6 +148,10 @@ Keeping this file:
 - `ssdt` marks an entry that points into a driver whose name contains `nt`, or into no module, as hooked.
 - `dl` says when it stopped at its 4096-entry limit, `!acl` describes a null SACL as auditing nothing, `!chkimg -nospec` no longer calls its total genuine, `.kdfiles` refuses extra words and shows its statistics with an empty map, and `!hvvmcs` refuses a VTL over 255.
 - `.formats` converts FILETIMEs after the year 2440, where it said they were out of range.
+- Breakpoints set with the GDB server's `monitor` or from the DAP debug console are no longer taken for, or removed as, a client's breakpoint that had the same number before, and a Python `when=` callback no longer runs for a later breakpoint that reuses its breakpoint's number.
+- When the GDB server or DAP cannot remove a client's breakpoint, it keeps track of it, and DAP says so, where the breakpoint went on firing unowned; a hit on the second address of a DAP source breakpoint reports the client's breakpoint.
+- `breakpoints.add_pattern` keeps its `when=` callback on the breakpoints it set when others failed, `module["name"]` in a process loads the process's symbols as `process.symbols["module!name"]` does, and `Symbols.source_location` and `Symbols.locals_at` take a symbol name in a process whose symbols are not loaded yet.
+- Tab completion works in the second and later commands of a `;` list, stops offering an unloaded module's symbols, and the command palette lists processes while the target runs, as Tab does; `nt!` and Tab lists `nt`'s symbols, where modules sorting before it could fill the list.
 
 ## v0.52.0 (2026-10-25)
 

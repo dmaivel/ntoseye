@@ -8,10 +8,10 @@ use serde_json::json;
 
 use crate::backend::dbg_backend::{ContinueDisposition, ModuleEvent};
 use crate::base::disasm::{fallthrough_run_end, instruction_length};
-use crate::base::ntstatus::exception_code_name;
 use crate::base::output;
 use crate::base::types::VirtAddr;
 use crate::nt::guest::ModuleInfo;
+use crate::session::driver::describe_bugcheck;
 use crate::session::stops::module_event_line;
 use crate::session::{Cancel, Motion, RunOutcome, StepMode, StepStack, Stop, StopKind};
 
@@ -515,7 +515,7 @@ impl Server {
                     description: format!("breakpoint {id} at {where_}"),
                     exception_id: None,
                     detail: Some(format!("address {:#x}", hit.address)),
-                    breakpoint_id: Some(id),
+                    breakpoint_id: self.client_breakpoint_id(id, hit.serial),
                 }
             }
             StopKind::Step => StopInfo {
@@ -542,36 +542,17 @@ impl Server {
                 detail: None,
                 breakpoint_id: None,
             },
-            StopKind::Exception { exception } => {
-                let code = exception.code;
-                let name = exception_code_name(code);
-                let chance = match exception.first_chance {
-                    Some(true) => " (first chance)",
-                    Some(false) => " (second chance)",
-                    None => "",
-                };
-                StopInfo {
-                    reason: "exception",
-                    description: format!("{name} ({code:#x}){chance} at {rip:#x}"),
-                    exception_id: Some(format!("{code:#010x}")),
-                    detail: exception
-                        .address
-                        .map(|address| format!("exception record address {address:#x}")),
-                    breakpoint_id: None,
-                }
-            }
+            StopKind::Exception { exception } => StopInfo {
+                reason: "exception",
+                description: exception.describe(rip),
+                exception_id: Some(format!("{:#010x}", exception.code)),
+                detail: exception
+                    .address
+                    .map(|address| format!("exception record address {address:#x}")),
+                breakpoint_id: None,
+            },
             StopKind::Bugcheck { bugcheck } => {
-                let detail = match bugcheck {
-                    Some(info) => format!(
-                        "bugcheck {:#x} ({:#x}, {:#x}, {:#x}, {:#x})",
-                        info.code,
-                        info.parameters[0],
-                        info.parameters[1],
-                        info.parameters[2],
-                        info.parameters[3]
-                    ),
-                    None => "bugcheck (code unavailable from the transport)".to_string(),
-                };
+                let detail = describe_bugcheck(bugcheck.as_ref());
                 self.emit_output("important", format!("{detail}\n"));
                 self.emit_output(
                     "console",
@@ -593,17 +574,7 @@ impl Server {
                     .kernel_base
                     .map(|base| format!("{base:#x}"))
                     .unwrap_or_else(|| "unknown".to_string());
-                self.emit_output(
-                    "important",
-                    format!(
-                        "target rebooted; nt base {base}{}\n",
-                        if reload.coherent {
-                            ""
-                        } else {
-                            " (early boot: module and process enumeration not yet available)"
-                        }
-                    ),
-                );
+                self.emit_output("important", format!("{}\n", reload.describe()));
                 StopInfo {
                     reason: "entry",
                     description: format!("target rebooted (nt {base})"),
