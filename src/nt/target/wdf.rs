@@ -16,6 +16,7 @@ use crate::base::bytes::before_nul;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::types::VirtAddr;
+use crate::nt::dmp::tagged::{WDF_DUMP_DRIVERS_TAG, WDF_DUMP_LOG_TAG};
 use crate::nt::layout::{StructRef, TypeInfo, Types, le_uint};
 use crate::nt::symbols::format_symbol_with_offset;
 use crate::nt::wpp::{TmfMessage, format_message};
@@ -50,16 +51,6 @@ const IFR_MAX_MESSAGE_SIZE: usize = 256;
 /// the `Guid` of every IFR header.
 const WDF_TRACE_GUID: [u8; 16] = [
     0x9d, 0x4c, 0x4d, 0x54, 0x2c, 0x94, 0xd5, 0x46, 0xbf, 0x50, 0xdf, 0x5c, 0xd9, 0x52, 0x4a, 0x50,
-];
-/// `WdfDumpGuid` ({54c84888-01d1-4c1e-bed6-282c98241303}) as stored in
-/// memory: the tag of the IFR log Wdf01000 copies into a crash dump.
-const WDF_DUMP_LOG_GUID: [u8; 16] = [
-    0x88, 0x48, 0xc8, 0x54, 0xd1, 0x01, 0x1e, 0x4c, 0xbe, 0xd6, 0x28, 0x2c, 0x98, 0x24, 0x13, 0x03,
-];
-/// `WdfDumpGuid2` ({f87e4a4c-c5a1-4d2f-bff0-d5de63a5e4c3}) as stored in
-/// memory: the tag of Wdf01000's list of client drivers in a crash dump.
-const WDF_DUMP_DRIVERS_GUID: [u8; 16] = [
-    0x4c, 0x4a, 0x7e, 0xf8, 0xa1, 0xc5, 0x2f, 0x4d, 0xbf, 0xf0, 0xd5, 0xde, 0x63, 0xa5, 0xe4, 0xc3,
 ];
 
 /// The class each `FX_OBJECT_TYPES` value is an instance of, where one class
@@ -808,6 +799,24 @@ pub struct IfrRecordLayout {
     pub message_number: usize,
     pub message_guid: usize,
     pub timestamp: usize,
+}
+
+impl IfrRecordLayout {
+    /// Where the fields of `record`, KMDF's `_WDF_IFR_RECORD` or
+    /// WppRecorder's `_WPP_AUTOLOG_RECORD`, sit.
+    pub fn from_type(record: &TypeInfo) -> Result<Self> {
+        let at = |name: &str| -> Result<usize> { Ok(record.field_offset(name)? as usize) };
+        Ok(Self {
+            size: record.size,
+            signature: at("Signature")?,
+            length: at("Length")?,
+            sequence: at("Sequence")?,
+            prev_offset: at("PrevOffset")?,
+            message_number: at("MessageNumber")?,
+            message_guid: at("MessageGuid")?,
+            timestamp: at("TimeStamp")?,
+        })
+    }
 }
 
 /// An In-Flight Recorder record (`_WDF_IFR_RECORD`).
@@ -2180,7 +2189,8 @@ impl Target {
             Error::DebugInfo("Wdf01000's symbols do not describe FxIoQueueNodeType".into())
         })?;
         let node_offset = queue_layout.field_offset("m_IoPkgListNode")?;
-        let link_offset = node_offset + node_layout.field_offset("m_ListEntry")?;
+        let entry_offset = node_layout.field_offset("m_ListEntry")?;
+        let link_offset = node_offset + entry_offset;
         let head = pkg_io + pkg_layout.field_offset("m_IoQueueListHead")?;
         let memory = self.kernel_address_space();
         let (links, termination) =
@@ -2188,8 +2198,14 @@ impl Target {
         let mut stopped = termination.diagnostic();
         let mut queues = Vec::new();
         for link in links {
-            let node = link - node_layout.field_offset("m_ListEntry")?;
-            let node_type = wdf.at(&node_layout, node).read_uint("m_Type")?;
+            let node = link - entry_offset;
+            let node_type = match wdf.at(&node_layout, node).read_uint("m_Type") {
+                Ok(node_type) => node_type,
+                Err(error) => {
+                    stopped = Some(format!("{:#x}: {error}", node.0));
+                    break;
+                }
+            };
             if node_type as i64 != queue_node {
                 continue;
             }
@@ -3002,7 +3018,7 @@ impl Target {
     /// Wdf01000 recorded in the dump (`WdfDumpGuid2`), an array of
     /// `_FX_DUMP_DRIVER_INFO_ENTRY`.
     pub fn wdf_crash_drivers(&self) -> Result<Vec<WdfDumpDriver>> {
-        let data = self.wdf_crash_block(&WDF_DUMP_DRIVERS_GUID, "driver list (WdfDumpGuid2)")?;
+        let data = self.wdf_crash_block(&WDF_DUMP_DRIVERS_TAG, "driver list (WdfDumpGuid2)")?;
         let entry = wdf_layout(
             self.types_in(self.kernel_dtb()),
             "_FX_DUMP_DRIVER_INFO_ENTRY",
@@ -3041,7 +3057,7 @@ impl Target {
     /// point to, or else of the last driver that ran on the crashing
     /// processor. The record walk is `!wdfkd.wdflogdump`'s.
     pub fn wdf_crash_log(&self) -> Result<WdfLogDump> {
-        let data = self.wdf_crash_block(&WDF_DUMP_LOG_GUID, "IFR log (WdfDumpGuid)")?;
+        let data = self.wdf_crash_block(&WDF_DUMP_LOG_TAG, "IFR log (WdfDumpGuid)")?;
         let types = self.types_in(self.kernel_dtb());
         let header = wdf_layout(types, "_WDF_IFR_HEADER")?;
         let field = |name: &str| -> Result<usize> { Ok(header.field_offset(name)? as usize) };
@@ -3117,17 +3133,7 @@ impl Target {
 /// Where `_WDF_IFR_RECORD`'s fields sit in Wdf01000's PDB.
 fn ifr_record_layout(types: Types<'_>) -> Result<IfrRecordLayout> {
     let record = wdf_layout(types, "_WDF_IFR_RECORD")?;
-    let at = |name: &str| -> Result<usize> { Ok(record.field_offset(name)? as usize) };
-    Ok(IfrRecordLayout {
-        size: record.size,
-        signature: at("Signature")?,
-        length: at("Length")?,
-        sequence: at("Sequence")?,
-        prev_offset: at("PrevOffset")?,
-        message_number: at("MessageNumber")?,
-        message_guid: at("MessageGuid")?,
-        timestamp: at("TimeStamp")?,
-    })
+    IfrRecordLayout::from_type(&record)
 }
 
 /// The value `variants` gives `name`.

@@ -1158,13 +1158,14 @@ fn print_pool_find(detail: &PoolFindDetail) {
     if let Some(status) = &detail.big_status {
         outln!("big-page table: {status}");
     }
-    if detail.found == 0 {
+    let found = detail.matches.len();
+    if found == 0 {
         outln!("no pool blocks matched '{}'", detail.tag);
     } else {
         outln!(
-            "{} matching pool block{}",
-            detail.found,
-            if detail.found == 1 { "" } else { "s" }
+            "{found}{} matching pool block{}",
+            if detail.truncated { "+" } else { "" },
+            if found == 1 { "" } else { "s" }
         );
     }
     if detail.interrupted {

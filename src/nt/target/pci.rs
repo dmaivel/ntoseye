@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 
+use crate::base::bytes::{read_u16, read_u32};
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::types::VirtAddr;
@@ -508,22 +509,9 @@ impl PciCapability {
     }
 }
 
-fn u16_at(config: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([config[offset], config[offset + 1]])
-}
-
 /// No function answered the configuration read: its vendor ID is all ones.
 pub fn function_absent(config: &[u8]) -> bool {
-    u16_at(config, 0) == u16::MAX
-}
-
-fn u32_at(config: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        config[offset],
-        config[offset + 1],
-        config[offset + 2],
-        config[offset + 3],
-    ])
+    read_u16(config, 0) == u16::MAX
 }
 
 /// Decode the header in `config` (at least the first 64 bytes).
@@ -541,7 +529,7 @@ pub fn parse_header(config: &[u8]) -> Option<PciHeader> {
     let mut index = 0;
     while index < bar_count {
         let offset = 0x10 + usize::from(index) * 4;
-        let low = u32_at(config, offset);
+        let low = read_u32(config, offset);
         let this = index;
         index += 1;
         if low == 0 {
@@ -559,7 +547,7 @@ pub fn parse_header(config: &[u8]) -> Option<PciHeader> {
             let prefetchable = low & 0x8 != 0;
             match (low >> 1) & 0x3 {
                 2 if index < bar_count => {
-                    let high = u32_at(config, offset + 4);
+                    let high = read_u32(config, offset + 4);
                     index += 1;
                     let raw = u64::from(low) | (u64::from(high) << 32);
                     PciBar {
@@ -590,27 +578,27 @@ pub fn parse_header(config: &[u8]) -> Option<PciHeader> {
     }
     let (subsystem, expansion_rom, buses) = match header_type & 0x7f {
         0 => (
-            Some((u16_at(config, 0x2c), u16_at(config, 0x2e))),
-            Some(u32_at(config, 0x30)),
+            Some((read_u16(config, 0x2c), read_u16(config, 0x2e))),
+            Some(read_u32(config, 0x30)),
             None,
         ),
         1 => (
             None,
-            Some(u32_at(config, 0x38)),
+            Some(read_u32(config, 0x38)),
             Some((config[0x18], config[0x19], config[0x1a])),
         ),
         2 => (
-            (config.len() >= 0x44).then(|| (u16_at(config, 0x40), u16_at(config, 0x42))),
+            (config.len() >= 0x44).then(|| (read_u16(config, 0x40), read_u16(config, 0x42))),
             None,
             Some((config[0x18], config[0x19], config[0x1a])),
         ),
         _ => (None, None, None),
     };
     Some(PciHeader {
-        vendor_id: u16_at(config, 0),
-        device_id: u16_at(config, 2),
-        command: u16_at(config, 4),
-        status: u16_at(config, 6),
+        vendor_id: read_u16(config, 0),
+        device_id: read_u16(config, 2),
+        command: read_u16(config, 4),
+        status: read_u16(config, 6),
         revision: config[8],
         prog_if: config[9],
         sub_class: config[0x0a],
@@ -670,7 +658,7 @@ pub fn extended_capabilities(config: &[u8]) -> Vec<PciCapability> {
         && found.len() < MAX_EXTENDED_CAPABILITIES
         && seen.insert(offset)
     {
-        let header = u32_at(config, offset);
+        let header = read_u32(config, offset);
         if header == 0 || header == u32::MAX {
             break;
         }

@@ -37,6 +37,8 @@ const MAX_PROCESSOR_QUEUES: u64 = 2048;
 const MAX_GATEWAYS: u64 = 1024;
 /// The longest miniport name or adapter ID read, in characters.
 const MAX_NAME_CHARS: usize = 256;
+/// Bound on an adapter's log ring, against a corrupt `RaidLogListSize`.
+const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
 /// `IO_TYPE_DEVICE`, the `Type` of a `DEVICE_OBJECT`.
 const IO_TYPE_DEVICE: u64 = 3;
 /// The `_INTERFACE_TYPE` of a PCI adapter, whose bus, device, and function
@@ -823,7 +825,17 @@ impl Target {
         let entry_size = entry_layout.size as u64;
         let mut entries = Vec::new();
         if !ring.is_zero() && size > 0 {
-            let mut bytes = vec![0u8; (entry_size * u64::from(size)) as usize];
+            let total = entry_size
+                .checked_mul(u64::from(size))
+                .filter(|total| *total <= MAX_LOG_BYTES)
+                .ok_or_else(|| {
+                    Error::DebugInfo(format!(
+                        "the log ring at {:#x} claims {size} entries, past the \
+                         {MAX_LOG_BYTES:#x}-byte bound",
+                        ring.0
+                    ))
+                })?;
+            let mut bytes = vec![0u8; total as usize];
             self.kernel_address_space()
                 .read_bytes(ring, &mut bytes)
                 .map_err(|error| {

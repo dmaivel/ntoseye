@@ -207,7 +207,7 @@ pub struct TargetSelection {
 }
 
 impl TargetSelection {
-    pub(crate) fn holds_live_registers(&self) -> bool {
+    pub fn holds_live_registers(&self) -> bool {
         self.selected_frame
             .as_ref()
             .is_none_or(SelectedFrame::is_live)
@@ -526,7 +526,7 @@ impl ThreadInfo {
 }
 
 #[cfg(test)]
-pub(crate) fn sample_thread() -> ThreadInfo {
+pub fn sample_thread() -> ThreadInfo {
     ThreadInfo {
         ethread: VirtAddr(0xffff_8000_0000_1000),
         kthread: VirtAddr(0xffff_8000_0000_1100),
@@ -699,6 +699,9 @@ pub const KTHREAD_STATE_STANDBY: u8 = 3;
 /// `KTHREAD.State` of a thread whose kernel stack has been freed.
 pub const KTHREAD_STATE_TERMINATED: u8 = 4;
 
+/// `KTHREAD.State` of a thread blocked on a dispatcher object.
+pub const KTHREAD_STATE_WAITING: u8 = 5;
+
 pub fn kthread_state_name(state: u8) -> &'static str {
     match state {
         0 => "Initialized",
@@ -706,7 +709,7 @@ pub fn kthread_state_name(state: u8) -> &'static str {
         KTHREAD_STATE_RUNNING => "Running",
         KTHREAD_STATE_STANDBY => "Standby",
         KTHREAD_STATE_TERMINATED => "Terminated",
-        5 => "Waiting",
+        KTHREAD_STATE_WAITING => "Waiting",
         6 => "Transition",
         7 => "DeferredReady",
         // Windows 10 names it GateWaitObsolete, no longer setting it.

@@ -1245,7 +1245,8 @@ impl<'a> PowerReader<'a> {
         heads: PowerListHeads,
     ) {
         let (irp_head, worker_head) = match self.triage_9f_power(triage) {
-            Ok(lists) => lists,
+            // A block that leaves one list out still has the kernel's.
+            Ok((irps, workers)) => (irps.or(heads.irps), workers.or(heads.workers)),
             Err(error) => {
                 failure.notes.push(format!(
                     "parameter 3 ({:#x}) is not a readable TRIAGE_9F_POWER: {error}; \

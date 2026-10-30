@@ -683,8 +683,14 @@ pub fn read_packed_ring(
             descriptors.push((position as u16, entry));
             remaining -= 1;
             advance(&mut position, &mut wrap, 1);
-            if entry.flags & VRING_DESC_F_NEXT == 0 || remaining == 0 {
+            if entry.flags & VRING_DESC_F_NEXT == 0 {
                 break;
+            }
+            if remaining == 0 {
+                ring.broken = Some(format!(
+                    "the chain at {first} runs past the descriptors in flight"
+                ));
+                return ring;
             }
         }
         ring.with_device += 1;
@@ -2011,6 +2017,26 @@ mod tests {
             .collect();
         assert_eq!(positions, [vec![0, 1], vec![2]]);
         assert!(read.broken.is_none(), "{:?}", read.broken);
+    }
+
+    /// An available chain still joined by NEXT when the in-flight count
+    /// runs out is cut off, not a whole buffer.
+    #[test]
+    fn a_packed_chain_longer_than_in_flight_breaks_the_ring() {
+        let mut ring = [packed(9, false, true, false); 8];
+        ring[6] = packed(2, true, true, false);
+        ring[0] = packed(3, false, false, true);
+        ring[1] = packed(3, false, false, false);
+        ring[2] = packed(4, false, false, true);
+        let read = read_packed_ring(
+            8,
+            &packed_state(3, 6, true),
+            64,
+            |index| ring.get(usize::from(index)).copied(),
+            |id| (id == 2).then_some(2),
+        );
+        assert_eq!(read.with_device, 1);
+        assert!(read.broken.is_some());
     }
 
     /// A used element from an earlier lap is not returned; one whose

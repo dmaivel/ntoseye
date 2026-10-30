@@ -1517,12 +1517,16 @@ impl Target {
         let Ok(self_map) = self.pte_self_map() else {
             return false;
         };
-        expected
+        // One reclaimed page must not hide a genuine mismatch on a page the
+        // image still owns, so every differing page has to be reclaimed.
+        let mut differing = expected
             .chunks(PAGE_SIZE)
             .zip(live.chunks(PAGE_SIZE))
             .enumerate()
             .filter(|(_, (expected, live))| expected != live)
-            .any(|(index, _)| {
+            .peekable();
+        differing.peek().is_some()
+            && differing.all(|(index, _)| {
                 let page = start + (index * PAGE_SIZE) as u64;
                 let Some(physical) = self
                     .virt_to_phys(Some(self.kernel_dtb()), page)
@@ -1994,6 +1998,7 @@ fn module_identity(target: &Target, module: &ModuleInfo) -> Result<(u32, u32)> {
     Ok((
         module
             .time_date_stamp
+            .filter(|timestamp| *timestamp != 0)
             .unwrap_or(view.file_header().TimeDateStamp),
         if module.size == 0 {
             size_of_image(&view)

@@ -410,24 +410,15 @@ impl LocalApic {
             let timer = register == ApicRegister::LvtTimer;
             // The version register says how many LVT entries the APIC has
             // past the first; the thermal and CMCI entries are optional.
-            let optional = matches!(register, ApicRegister::LvtThermal | ApicRegister::Cmci);
             let present = match register {
                 ApicRegister::LvtThermal => max_lvt >= 5,
                 ApicRegister::Cmci => max_lvt >= 6,
                 _ => true,
             };
-            let entry = if present {
-                match read(register) {
-                    Ok(raw) => Some(decode_lvt(name, raw as u32, timer)),
-                    Err(_) if optional => None,
-                    Err(error) => return Err(error),
-                }
+            if present {
+                lvt.push(decode_lvt(name, read(register)? as u32, timer));
             } else {
-                None
-            };
-            match entry {
-                Some(entry) => lvt.push(entry),
-                None => lvt_missing.push(name),
+                lvt_missing.push(name);
             }
         }
         Ok(Self {

@@ -618,7 +618,7 @@ struct ObjectDirectoryLayout {
 
 /// `_IRP.Thread` is a direct field on some builds and inside the `Tail.Overlay`
 /// union on others; read whichever is present, else null (never fatal).
-pub(crate) fn irp_thread(irp: &StructRef) -> VirtAddr {
+pub fn irp_thread(irp: &StructRef) -> VirtAddr {
     if let Ok(t) = irp.read_pointer("Thread") {
         return t;
     }
@@ -707,7 +707,9 @@ impl Target {
         self.guest()?.ntoskrnl.types().struct_at(name, base)
     }
 
-    fn read_kernel_unicode_string(&self, addr: VirtAddr) -> Result<String> {
+    /// The kernel `UNICODE_STRING` at `addr`, laid out as the kernel's PDB
+    /// says.
+    pub fn read_kernel_unicode_string(&self, addr: VirtAddr) -> Result<String> {
         self.kernel_struct("_UNICODE_STRING", addr)?
             .read_unicode_string()
     }
@@ -1103,7 +1105,7 @@ impl Target {
 
     /// [`Self::inspect_irp`] of the `_IRP` under the cursor `irp`, which may
     /// hold a prefetched copy.
-    pub(crate) fn irp_info(&self, irp: &StructRef<'_>) -> Result<IrpInfo> {
+    pub fn irp_info(&self, irp: &StructRef<'_>) -> Result<IrpInfo> {
         let address = irp.addr();
         let io_status = irp
             .embedded("IoStatus")
@@ -2063,14 +2065,15 @@ impl Target {
             // base + (entry >> 4) with arithmetic shift.
             let offset = (raw as i32 >> 4) as i64;
             let target = VirtAddr((base.0 as i64 + offset) as u64);
-            let resolved = self.symbols.find_closest_symbol_for_address(dtb, target);
-            let (symbol, module) = match resolved {
-                Some((module, name, off)) => (
-                    Some(format_symbol_with_offset(&module, &name, off)),
-                    Some(module),
-                ),
-                None => (None, None),
-            };
+            let symbol = self
+                .symbols
+                .find_closest_symbol_for_address(dtb, target)
+                .map(|(module, name, off)| format_symbol_with_offset(&module, &name, off));
+            // A module without symbols still contains the routine.
+            let module = self
+                .symbols
+                .find_module_for_address(dtb, target)
+                .map(|module| module.short_name);
             entries.push(SsdtEntry {
                 index: i,
                 target,

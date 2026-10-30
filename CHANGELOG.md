@@ -124,6 +124,11 @@ Keeping this file:
 - When `ntoseye` reads guest memory from the VM process (the `memory` backend, or KD with `--memory-source host`), a physical read or write that crosses the 32-bit MMIO hole fails, where it went on into guest RAM above 4 GiB.
 - `!hvbp` and the SDK's `add_hypercall` take the `hv!` prefix in any case.
 - Images are downloaded from the symbol servers `.sympath` set, not only the default ones, a symbol download that finishes after its module unloaded no longer registers the module again, and a breakpoint journal that cannot be read is kept, where it was deleted with the record of breakpoints left in the guest.
+- `!heap -s` and `!heap <heap>` give a WOW64 heap's free space in its own granule, where they doubled it; `!heap -x` counts a heap it could not identify as failed, not searched; a heap list that ends early makes the heap unavailable, where its segments and blocks went missing; and a corrupt LFH header no longer makes `!heap` allocate hundreds of megabytes.
+- `!cs` shows 0 waiters for a held critical section with none, where it showed 4294967295, and `!chkimg` no longer skips a section because one changed page was freed.
+- `!poolused` falls back to the big-page table when the pool tracker tables cannot be read, and power-failure analysis walks the kernel's IRP or worker list when the triage block leaves one out.
+- `!vprot` reads an address in a 1 GiB page, `!devstack` and virtio's driver lookup take no PDO from a device stack whose links loop, `!wdfdevice` lists the queues it read before an unreadable one, and `!virtio` stops at a request it cannot read whole, where it decoded the bytes after the gap.
+- `$peb` on a user-mode minidump reads the PEB pointer by the PDB's `_TEB` layout and works before a thread is selected, and a minidump module with a zero timestamp is fetched by its image's timestamp.
 
 ## v0.52.0 (2026-10-25)
 

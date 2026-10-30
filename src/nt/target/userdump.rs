@@ -12,7 +12,6 @@ use crate::{
     base::{
         error::{Error, Result},
         ntstatus::ntstatus_name,
-        types::VirtAddr,
     },
     nt::{
         guest::ModuleInfo,
@@ -51,11 +50,6 @@ pub enum TargetKind {
     /// One process captured by a user-mode minidump.
     UserDump,
 }
-
-/// `_TEB.ProcessEnvironmentBlock`, in pointers from the TEB's start: it
-/// follows the seven-pointer `NT_TIB`, `EnvironmentPointer`, `ClientId` (two),
-/// `ActiveRpcHandle`, and `ThreadLocalStoragePointer` (0x60 on 64-bit).
-const TEB_PEB_SLOT: u64 = 12;
 
 /// The captured process a user-dump target inspects.
 pub struct UserProcess {
@@ -160,18 +154,7 @@ impl Target {
             "teb" => thread.map(|thread| thread.teb).filter(|teb| *teb != 0),
             "tid" => thread.map(|thread| u64::from(thread.tid)),
             "pid" | "tpid" => info.process_id.map(u64::from),
-            "peb" => thread
-                .map(|thread| thread.teb)
-                .filter(|teb| *teb != 0)
-                .and_then(|teb| {
-                    let memory = self.context_memory();
-                    let pointer = memory.arch().pointer_size();
-                    memory
-                        .read_pointer(VirtAddr(teb + TEB_PEB_SLOT * pointer))
-                        .ok()
-                        .map(|peb| peb.0)
-                })
-                .filter(|peb| *peb != 0),
+            "peb" => self.user_process_peb(),
             _ => return None,
         })
     }

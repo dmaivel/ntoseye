@@ -163,12 +163,12 @@ impl PteFormat {
         })
     }
 
-    /// Whether a PDE maps a large page itself.
-    fn maps_large_page(&self, entry: u64) -> bool {
+    /// Whether an upper-level entry at `level` maps a large page itself.
+    fn maps_large_page(&self, level: PageTableLevel, entry: u64) -> bool {
         matches!(
             self.arch
                 .paging()
-                .decode_entry(PageTableLevel::Pde, PageTableEntry(entry)),
+                .decode_entry(level, PageTableEntry(entry)),
             TableEntry::Leaf(_)
         )
     }
@@ -267,17 +267,17 @@ impl PageWalk<'_> {
             return self.untouched(va, va.saturating_add(PAGE_SIZE as u64));
         };
         // The tables above the PTE's, each entry mapping `1 << shift` bytes.
-        let (mut entry, mut span) = (0, PAGE_SIZE as u64);
+        // A valid large entry at any of them (a 1 GiB PPE, a 2 MiB PDE) maps
+        // the whole span, and the levels below it are data, not tables.
         for (level, address) in entries {
-            entry = self.memory.read(address)?;
-            span = 1 << level.shift();
+            let entry: u64 = self.memory.read(address)?;
+            let span = 1u64 << level.shift();
             if entry == 0 {
                 return self.untouched(va, span_end(span));
             }
-        }
-        // The PDE: valid and large, it maps the whole span.
-        if self.format.maps_large_page(entry) {
-            return Ok((Some(self.format.valid_protection(entry)), span_end(span)));
+            if self.format.maps_large_page(level, entry) {
+                return Ok((Some(self.format.valid_protection(entry)), span_end(span)));
+            }
         }
         let table = pte.0 & !(PAGE_SIZE as u64 - 1);
         if self.table.as_ref().is_none_or(|(at, _)| *at != table) {

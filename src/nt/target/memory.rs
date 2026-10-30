@@ -651,6 +651,7 @@ impl Target {
                         }
                         if result.hits.len() == MAX_SEARCH_MATCHES {
                             result.stopped = Some(SearchStop::MatchLimit);
+                            result.pages += index as u64 + 1;
                             break 'runs;
                         }
                         result.hits.push(PhysicalSearchHit {

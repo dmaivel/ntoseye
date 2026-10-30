@@ -526,8 +526,6 @@ pub struct PoolFindDetail {
     /// The pool that the search was limited to, if any.
     pub pool_type: Option<PoolType>,
     pub matches: Vec<PoolFindMatch>,
-    /// The number of matches found, including those past the listing limit.
-    pub found: usize,
     pub ranges: Vec<PoolFindRange>,
     /// The read status of the big-pool table, if the search included it.
     pub big_status: Option<String>,
@@ -825,7 +823,7 @@ fn nested_mi_state_fields(
     }
 }
 
-pub(crate) fn find_mi_state_fields(target: &Target, predicates: &[&str]) -> Vec<(String, u64)> {
+pub fn find_mi_state_fields(target: &Target, predicates: &[&str]) -> Vec<(String, u64)> {
     let Ok(base) = kernel_symbol_address(target, "MiState") else {
         return Vec::new();
     };

@@ -269,14 +269,16 @@ impl Target {
                 }
             }
         }
-        let big_status = if let Some(layout) = layout.as_ref() {
-            Some(
+        // The big-page table is independent of the pool headers: a kernel
+        // whose symbols lack `_POOL_HEADER` may still describe it.
+        let big_status = Some(match big_pool_layout(self) {
+            Ok((big_pool_type, uses_struct, has_pool_type, has_slush)) => {
                 scan_big_pool_entries(
                     self,
-                    layout.big_pool_type.as_deref(),
-                    layout.big_pool_uses_struct,
-                    layout.big_pool_has_pool_type,
-                    layout.big_pool_has_slush,
+                    Some(&big_pool_type),
+                    uses_struct,
+                    has_pool_type,
+                    has_slush,
                     |entry| {
                         if matches.len() < MAX_POOLFIND_RESULTS
                             && pool_type
@@ -303,55 +305,15 @@ impl Target {
                         matches.len() >= MAX_POOLFIND_RESULTS
                     },
                 )
-                .status,
-            )
-        } else {
-            match big_pool_layout(self) {
-                Ok((big_pool_type, uses_struct, has_pool_type, has_slush)) => Some(
-                    scan_big_pool_entries(
-                        self,
-                        Some(&big_pool_type),
-                        uses_struct,
-                        has_pool_type,
-                        has_slush,
-                        |entry| {
-                            if matches.len() < MAX_POOLFIND_RESULTS
-                                && pool_type.is_none_or(|kind| {
-                                    entry.nonpaged == (kind == PoolType::NonPaged)
-                                })
-                                && glob_matches(tag, &tag_string(entry.tag), false)
-                            {
-                                matches.push(PoolFindMatch {
-                                    source: "BigPool".to_string(),
-                                    address: entry.va,
-                                    size: entry.size,
-                                    tag: entry.tag,
-                                    tag_name: tag_string(entry.tag),
-                                    allocated: true,
-                                    state: PoolBlockState::Allocated,
-                                    pool_type: Some(if entry.nonpaged {
-                                        PoolType::NonPaged
-                                    } else {
-                                        PoolType::Paged
-                                    }),
-                                    table_entry: Some(entry.entry),
-                                    index: Some(entry.index),
-                                });
-                            }
-                            matches.len() >= MAX_POOLFIND_RESULTS
-                        },
-                    )
-                    .status,
-                ),
-                Err(error) => Some(format!("big-page layout unavailable: {error}")),
+                .status
             }
-        };
+            Err(error) => format!("big-page layout unavailable: {error}"),
+        });
         let truncated = matches.len() >= MAX_POOLFIND_RESULTS;
         let interrupted = self.interrupted();
         Ok(PoolFindDetail {
             tag: tag.to_string(),
             pool_type,
-            found: matches.len(),
             matches,
             ranges,
             big_status,

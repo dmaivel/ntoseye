@@ -901,6 +901,7 @@ impl Target {
                     .phys
                     .dmp_info()
                     .and_then(|dump| dump.triage_prcb_info.as_ref())
+                    .filter(|info| info.processor_number == processor)
                 {
                     let unavailable_addr =
                         |message: &str| DiagnosticValue::unavailable(message.to_string());
@@ -1022,10 +1023,11 @@ impl Target {
             self.phys
                 .dmp_info()
                 .and_then(|dump| dump.triage_prcb_info.as_ref())
+                .filter(|info| info.processor_number == processor)
                 .map(|info| CpuTriageFallback {
                     processor_number: info.processor_number,
                     vendor: info.vendor_string.clone(),
-                    family: info.cpu_type,
+                    family: u16::from(info.cpu_type),
                     mhz: info.mhz,
                 })
         } else {

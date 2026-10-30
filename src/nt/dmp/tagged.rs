@@ -88,123 +88,166 @@ pub struct KnownTag {
     pub holds: &'static str,
 }
 
-/// Each tag as `format_guid` writes it, the symbol that holds it in its
+/// `text`, a braced GUID (`{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`), as it
+/// lies in memory, for tags spelled the way Windows documents them.
+const fn guid(text: &str) -> [u8; 16] {
+    // Where each byte's two hex digits start in the text: the first three
+    // groups are little-endian integers, the last two plain bytes.
+    const DIGITS: [usize; 16] = [7, 5, 3, 1, 12, 10, 17, 15, 20, 22, 25, 27, 29, 31, 33, 35];
+    const fn nibble(digit: u8) -> u8 {
+        match digit {
+            b'0'..=b'9' => digit - b'0',
+            b'a'..=b'f' => digit - b'a' + 10,
+            b'A'..=b'F' => digit - b'A' + 10,
+            _ => panic!("not a hex digit"),
+        }
+    }
+    let text = text.as_bytes();
+    assert!(text.len() == 38 && text[0] == b'{' && text[37] == b'}');
+    let mut bytes = [0u8; 16];
+    let mut index = 0;
+    while index < 16 {
+        let at = DIGITS[index];
+        bytes[index] = nibble(text[at]) << 4 | nibble(text[at + 1]);
+        index += 1;
+    }
+    bytes
+}
+
+/// `nt!PopBlackBoxBsdGuid`: the boot status data.
+pub const BSD_TAG: [u8; 16] = guid("{f57308df-cc45-4e01-ad76-29a4ebb010ec}");
+/// `nt!PopBlackBoxNtfsGuid`: NTFS's timeout records.
+pub const NTFS_TAG: [u8; 16] = guid("{00afe9c4-940d-4213-8016-cd3719b5bc20}");
+/// `nt!PopBlackBoxPnpGuid`: the PnP event in progress.
+pub const PNP_TAG: [u8; 16] = guid("{b7631941-532a-4cd6-b1b1-edb5917d4557}");
+/// `nt!PopBlackBoxWinLogonGuid`: winlogon's state.
+pub const WINLOGON_TAG: [u8; 16] = guid("{80cc79cf-a719-4af1-bf97-fe29ff76ebc1}");
+/// `pci!PCI_CFG_RECORD_GUID`: the PCI configuration snapshot.
+pub const PCI_TAG: [u8; 16] = guid("{9276c055-eb87-425c-b8b5-04e4d247f6cd}");
+/// `nt!EtwSecondaryDumpDataGuid`: the ETW sessions' buffers.
+pub const ETW_DUMP_DATA_TAG: [u8; 16] = guid("{2b88b710-1c93-4f7c-b06c-655ecc50decc}");
+/// `wdf01000!WdfDumpGuid`: the IFR log Wdf01000 copies into a crash dump.
+pub const WDF_DUMP_LOG_TAG: [u8; 16] = guid("{54c84888-01d1-4c1e-bed6-282c98241303}");
+/// `wdf01000!WdfDumpGuid2`: Wdf01000's list of client drivers.
+pub const WDF_DUMP_DRIVERS_TAG: [u8; 16] = guid("{f87e4a4c-c5a1-4d2f-bff0-d5de63a5e4c3}");
+
+/// Each tag, the symbol that holds it in its
 /// writer's image or, where the GUID has no symbol, the bugcheck callback
 /// that writes it (read off the images in a Windows 11 26100 dump), and
 /// what the block holds.
-const KNOWN_TAGS: &[(&str, &str, &str)] = &[
+const KNOWN_TAGS: &[([u8; 16], &str, &str)] = &[
     (
-        "{f57308df-cc45-4e01-ad76-29a4ebb010ec}",
+        BSD_TAG,
         "nt!PopBlackBoxBsdGuid",
         "boot status data (!blackboxbsd)",
     ),
     (
-        "{00afe9c4-940d-4213-8016-cd3719b5bc20}",
+        NTFS_TAG,
         "nt!PopBlackBoxNtfsGuid",
         "NTFS blackbox (!blackboxntfs)",
     ),
     (
-        "{b7631941-532a-4cd6-b1b1-edb5917d4557}",
+        PNP_TAG,
         "nt!PopBlackBoxPnpGuid",
         "PnP blackbox (!blackboxpnp)",
     ),
     (
-        "{80cc79cf-a719-4af1-bf97-fe29ff76ebc1}",
+        WINLOGON_TAG,
         "nt!PopBlackBoxWinLogonGuid",
         "winlogon blackbox (!blackboxwinlogon)",
     ),
     (
-        "{4ee76bd8-3cf4-44a0-a0ac-3937643e37a3}",
+        guid("{4ee76bd8-3cf4-44a0-a0ac-3937643e37a3}"),
         "nt!PopBlackBoxCodeIntegrityGuid",
         "code integrity blackbox",
     ),
     (
-        "{9276c055-eb87-425c-b8b5-04e4d247f6cd}",
+        PCI_TAG,
         "pci!PCI_CFG_RECORD_GUID",
         "PCI configuration (!blackboxpci)",
     ),
     (
-        "{2b4ae195-a64d-4f04-8ede-7e4f981bd42a}",
+        guid("{2b4ae195-a64d-4f04-8ede-7e4f981bd42a}"),
         "nt!GUID_TRIAGEDUMP_DATA",
         "triage data blocks",
     ),
     (
-        "{2b88b710-1c93-4f7c-b06c-655ecc50decc}",
+        ETW_DUMP_DATA_TAG,
         "nt!EtwSecondaryDumpDataGuid",
         "ETW sessions' buffers (!wmitrace.strdump)",
     ),
     (
-        "{b0692a5e-6b7b-4073-8a7c-604e35032970}",
+        guid("{b0692a5e-6b7b-4073-8a7c-604e35032970}"),
         "nt!HvlSkCrashdumpGuid",
         "secure kernel crash data",
     ),
     (
-        "{5bc8704a-6cb7-4378-ac72-ad06e2416e4a}",
+        guid("{5bc8704a-6cb7-4378-ac72-ad06e2416e4a}"),
         "nt!CarSecondaryDataGuid",
         "CAR secondary data",
     ),
     (
-        "{54c84888-01d1-4c1e-bed6-282c98241303}",
+        WDF_DUMP_LOG_TAG,
         "wdf01000!WdfDumpGuid",
         "KMDF driver's IFR log (!wdfkd.wdfcrashdump)",
     ),
     (
-        "{f87e4a4c-c5a1-4d2f-bff0-d5de63a5e4c3}",
+        WDF_DUMP_DRIVERS_TAG,
         "wdf01000!WdfDumpGuid2",
         "KMDF client drivers (!wdfkd.wdfcrashdump loader)",
     ),
     (
-        "{c939c73b-17dc-4a44-904c-e2d987f52649}",
+        guid("{c939c73b-17dc-4a44-904c-e2d987f52649}"),
         "storport!GUID_STORPORT_PAGING_DEVICE_DUMP",
         "StorPort paging device",
     ),
     (
-        "{da82441d-7142-4bc1-b844-0807c5a4b67f}",
+        guid("{da82441d-7142-4bc1-b844-0807c5a4b67f}"),
         "storport!GUID_DEVICEDUMP_DRIVER_STORAGE_PORT",
         "StorPort device dump",
     ),
     (
-        "{270a33fd-3da6-460d-ba89-3c1bae21e39b}",
+        guid("{270a33fd-3da6-460d-ba89-3c1bae21e39b}"),
         "watchdog!WdDxgkSecondaryDataGUID",
         "display (dxgkrnl) state",
     ),
     (
-        "{65755a40-f146-43ea-8c91-36b85728fd35}",
+        guid("{65755a40-f146-43ea-8c91-36b85728fd35}"),
         "crashdmp!CRASHDUMP_GUID_ID",
         "crash dump driver",
     ),
     (
-        "{00dae7ca-6833-45c5-b147-bdaed7b61fd6}",
+        guid("{00dae7ca-6833-45c5-b147-bdaed7b61fd6}"),
         "hvservice!HbEvtSystemDiagLogCrashdumpAreaGuid",
         "Hyper-V boot event log",
     ),
     (
-        "{bc5c008f-1e3a-44d7-988d-86f6884c6758}",
+        guid("{bc5c008f-1e3a-44d7-988d-86f6884c6758}"),
         "mssmbios!SMBiosGuidSMBios",
         "SMBIOS tables",
     ),
     (
-        "{6c7ac389-4313-47dc-9f34-a8800a0fb56c}",
+        guid("{6c7ac389-4313-47dc-9f34-a8800a0fb56c}"),
         "mssmbios!SMBiosGuidBios",
         "BIOS registry values",
     ),
     (
-        "{d03dc06f-d88e-44c5-ba2a-fae035172d19}",
+        guid("{d03dc06f-d88e-44c5-ba2a-fae035172d19}"),
         "mssmbios!SMBiosGuidRegisters",
         "processor registers",
     ),
     (
-        "{e83b40d2-b0a0-4842-abea-71c9e3463dd1}",
+        guid("{e83b40d2-b0a0-4842-abea-71c9e3463dd1}"),
         "mssmbios!SMBiosGuidAcpi",
         "ACPI tables",
     ),
     (
-        "{9282756a-ab95-4d24-a137-ecddc5de53f5}",
+        guid("{9282756a-ab95-4d24-a137-ecddc5de53f5}"),
         "nt!PspVsmLogBugCheckCallback",
         "VSM (secure kernel) failure log",
     ),
     (
-        "{0f1f53f3-561f-42e7-bdb4-ba8e66b726d5}",
+        guid("{0f1f53f3-561f-42e7-bdb4-ba8e66b726d5}"),
         "nt!CmFcpSecondaryMultiPartDumpDataCallback",
         "feature configuration data",
     ),
@@ -212,10 +255,9 @@ const KNOWN_TAGS: &[(&str, &str, &str)] = &[
 
 /// What Windows writes under `tag`, when it is one of its own.
 pub fn known_tag(tag: &[u8; 16]) -> Option<KnownTag> {
-    let text = format_guid(tag, GuidStyle::Braced);
     KNOWN_TAGS
         .iter()
-        .find(|(guid, _, _)| *guid == text)
+        .find(|(known, _, _)| known == tag)
         .map(|(_, owner, holds)| KnownTag { owner, holds })
 }
 
@@ -223,8 +265,16 @@ pub fn known_tag(tag: &[u8; 16]) -> Option<KnownTag> {
 mod tests {
     use std::sync::Arc;
 
-    use super::{TaggedBlock, known_tag, parse_tagged_blocks, tagged_blocks_at};
+    use super::{TaggedBlock, guid, known_tag, parse_tagged_blocks, tagged_blocks_at};
     use crate::nt::target::etw::parse_guid;
+
+    /// The compile-time spelling lays a GUID out as the runtime parser does:
+    /// its first three groups little-endian, the rest byte by byte.
+    #[test]
+    fn a_tag_constant_lies_in_memory_as_the_guid_parser_has_it() {
+        let text = "{2B88B710-1c93-4f7c-b06c-655ecc50decc}";
+        assert_eq!(Some(guid(text)), parse_guid(text));
+    }
 
     fn block(tag: &str, data: &[u8], post_pad: usize) -> Vec<u8> {
         let mut bytes = 0x20u32.to_le_bytes().to_vec();

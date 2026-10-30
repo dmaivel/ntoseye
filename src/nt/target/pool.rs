@@ -25,13 +25,13 @@ pub const POOL_MAX_GAP_UNITS: u64 = 4;
 
 #[derive(Clone, Copy)]
 pub struct PoolHeader {
-    pub(crate) header: VirtAddr,
-    pub(crate) body: VirtAddr,
-    pub(crate) size: u64,
-    pub(crate) previous_size: u64,
-    pub(crate) pool_type: u8,
-    pub(crate) tag: u32,
-    pub(crate) synthetic_free: bool,
+    pub header: VirtAddr,
+    pub body: VirtAddr,
+    pub size: u64,
+    pub previous_size: u64,
+    pub pool_type: u8,
+    pub tag: u32,
+    pub synthetic_free: bool,
     /// On a page of a segment-heap LFH subsegment, whether the subsegment's
     /// bitmap has the block busy. A freed LFH block keeps its header, so
     /// only the bitmap tells it from an allocated one. `None` elsewhere.
@@ -40,16 +40,16 @@ pub struct PoolHeader {
 
 #[derive(Clone, Copy)]
 pub struct BigPoolEntry {
-    pub(crate) va: VirtAddr,
-    pub(crate) entry: VirtAddr,
-    pub(crate) index: u64,
-    pub(crate) freed: bool,
-    pub(crate) nonpaged: bool,
-    pub(crate) size: u64,
-    pub(crate) tag: u32,
-    pub(crate) pattern: u8,
-    pub(crate) pool_flags: u16,
-    pub(crate) slush_size: u16,
+    pub va: VirtAddr,
+    pub entry: VirtAddr,
+    pub index: u64,
+    pub freed: bool,
+    pub nonpaged: bool,
+    pub size: u64,
+    pub tag: u32,
+    pub pattern: u8,
+    pub pool_flags: u16,
+    pub slush_size: u16,
 }
 
 /// PDB-driven layout for `_POOL_HEADER` and `_POOL_TRACKER_BIG_PAGES`. Field
@@ -57,13 +57,13 @@ pub struct BigPoolEntry {
 /// we can decode each entry field-by-field or have to fall back to fixed offsets
 pub struct PoolLayout {
     pool_header: Arc<TypeInfo>,
-    pub(crate) header_size: u64,
-    pub(crate) pool_tag_offset: u64,
+    pub header_size: u64,
+    pub pool_tag_offset: u64,
     pool_header_uses_struct: bool,
-    pub(crate) big_pool_type: Option<Arc<TypeInfo>>,
-    pub(crate) big_pool_uses_struct: bool,
-    pub(crate) big_pool_has_pool_type: bool,
-    pub(crate) big_pool_has_slush: bool,
+    pub big_pool_type: Option<Arc<TypeInfo>>,
+    pub big_pool_uses_struct: bool,
+    pub big_pool_has_pool_type: bool,
+    pub big_pool_has_slush: bool,
     /// How a segment-heap kernel encodes its VS chunk headers; `None` on a
     /// kernel without the segment heap, or whose PDB lacks its types.
     vs_chunks: Option<VsChunkHeaders>,
@@ -400,24 +400,13 @@ pub fn pool_layout(debugger: &Target) -> Result<PoolLayout> {
     .iter()
     .all(|name| pool_header.fields.contains_key(*name));
 
-    let big_pool_type = debugger
-        .symbols
-        .find_type_across_modules(debugger.current_dtb(), "_POOL_TRACKER_BIG_PAGES")
-        .or_else(|| {
-            debugger
-                .symbols
-                .find_type_across_modules(debugger.kernel_dtb(), "_POOL_TRACKER_BIG_PAGES")
-        });
-    let (big_pool_uses_struct, big_pool_has_pool_type, big_pool_has_slush) = match &big_pool_type {
-        Some(ti) => (
-            ["Va", "Key", "NumberOfBytes", "Pattern"]
-                .iter()
-                .all(|name| ti.fields.contains_key(*name)),
-            ti.fields.contains_key("PoolType") || ti.fields.contains_key("PoolFlags"),
-            ti.fields.contains_key("SlushSize"),
-        ),
-        None => (false, false, false),
-    };
+    let (big_pool_type, big_pool_uses_struct, big_pool_has_pool_type, big_pool_has_slush) =
+        match big_pool_layout(debugger) {
+            Ok((ti, uses_struct, has_pool_type, has_slush)) => {
+                (Some(ti), uses_struct, has_pool_type, has_slush)
+            }
+            Err(_) => (None, false, false, false),
+        };
     let plus_one = big_pool_type.is_some() && !big_pool_has_pool_type;
     Ok(PoolLayout {
         header_size: pool_header.size as u64,
@@ -556,7 +545,7 @@ pub struct PoolUsageSummary {
     pub big: BigPoolScanSummary,
 }
 
-pub(crate) fn kernel_symbol_address(debugger: &Target, name: &str) -> Result<VirtAddr> {
+pub fn kernel_symbol_address(debugger: &Target, name: &str) -> Result<VirtAddr> {
     let qualified = format!("nt!{name}");
     let address = debugger
         .symbols
@@ -574,7 +563,7 @@ pub(crate) fn kernel_symbol_address(debugger: &Target, name: &str) -> Result<Vir
     Ok(address)
 }
 
-pub(crate) fn read_kernel_global_u64(debugger: &Target, name: &str) -> Result<u64> {
+pub fn read_kernel_global_u64(debugger: &Target, name: &str) -> Result<u64> {
     let address = kernel_symbol_address(debugger, name)?;
     debugger.kernel_address_space().read(address)
 }
@@ -584,7 +573,7 @@ pub fn read_kernel_global_u32(debugger: &Target, name: &str) -> Result<u32> {
     debugger.kernel_address_space().read(address)
 }
 
-pub(crate) fn read_kernel_global_ptr(debugger: &Target, name: &str) -> Result<VirtAddr> {
+pub fn read_kernel_global_ptr(debugger: &Target, name: &str) -> Result<VirtAddr> {
     let address = kernel_symbol_address(debugger, name)?;
     debugger.kernel_address_space().read_pointer(address)
 }
@@ -965,6 +954,12 @@ fn collect_tracker_usage(
     }
     if unreadable_pages != 0 {
         status.push_str(&format!(", {unreadable_pages} unreadable pages"));
+    }
+    // A tracker that yielded no tag at all was not read (every table
+    // failed or came back zero-filled), so the big-page table has to
+    // stand in for it.
+    if rows.is_empty() && !debugger.interrupted() {
+        return Err(status);
     }
     Ok(status)
 }

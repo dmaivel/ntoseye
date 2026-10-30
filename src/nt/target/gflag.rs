@@ -192,10 +192,10 @@ impl Target {
         let guest = self.guest()?;
         let kernel_address = self.nt_global_flag_address()?;
         let kernel: u32 = guest.ntoskrnl.memory().read(kernel_address)?;
-        let process = self.selected_process_info().ok();
-        let process_flags = match &process {
-            None => DiagnosticValue::unavailable("no current process"),
-            Some(process) => DiagnosticValue::from_result((|| {
+        let selected = self.selected_process_info();
+        let process_flags = match &selected {
+            Err(error) => DiagnosticValue::unavailable(error.to_string()),
+            Ok(process) => DiagnosticValue::from_result((|| {
                 let types = guest.ntoskrnl.types_in(process.dtb);
                 let peb = types
                     .struct_at("_EPROCESS", process.eprocess)?
@@ -208,6 +208,7 @@ impl Target {
                     .read_field::<u32>("NtGlobalFlag")
             })()),
         };
+        let process = selected.ok();
         Ok(GlobalFlags {
             kernel_address,
             kernel,

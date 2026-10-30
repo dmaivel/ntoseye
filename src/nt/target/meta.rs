@@ -185,8 +185,9 @@ pub struct VerifierDriver {
     pub contiguous_memory_bytes: u64,
     pub peak_contiguous_memory_bytes: u64,
     /// The suspect-list entry of the driver, with its load history.
-    /// `None` if the driver has no entry.
-    pub suspect: Option<VerifierSuspectDriver>,
+    /// `None` if the driver has no entry; unavailable if its entry does not
+    /// read.
+    pub suspect: Option<DiagnosticValue<VerifierSuspectDriver>>,
 }
 
 #[derive(Clone)]
@@ -243,8 +244,16 @@ struct VerifiedDriver {
     image_size: u64,
     driver_object: VirtAddr,
     data: VerifiedData,
-    suspect: Option<SuspectDriver>,
+    /// `None` if the driver has no suspect-list entry.
+    suspect: Option<DiagnosticValue<SuspectDriver>>,
     module_name: String,
+}
+
+impl VerifiedDriver {
+    /// The suspect-list entry, when the driver has one and it reads.
+    fn readable_suspect(&self) -> Option<&SuspectDriver> {
+        self.suspect.as_ref()?.as_result().ok()
+    }
 }
 
 fn read_verifier_state(guest: &Guest) -> VerifierStateRead {
@@ -387,10 +396,11 @@ fn read_verified_driver(
     let suspect = if data.suspect_entry.is_zero() {
         None
     } else {
-        types
-            .struct_at("_VF_SUSPECT_DRIVER_ENTRY", data.suspect_entry)
-            .ok()
-            .and_then(|record| read_suspect_driver(&record).ok())
+        Some(DiagnosticValue::from_result(
+            types
+                .struct_at("_VF_SUSPECT_DRIVER_ENTRY", data.suspect_entry)
+                .and_then(|record| read_suspect_driver(&record)),
+        ))
     };
     Ok(Some(VerifiedDriver {
         entry,
@@ -493,8 +503,7 @@ fn set_module_names(drivers: &mut [VerifiedDriver], modules: &[ModuleInfo]) {
             .map(|module| module.name.clone())
             .or_else(|| {
                 driver
-                    .suspect
-                    .as_ref()
+                    .readable_suspect()
                     .filter(|suspect| !suspect.base_name.is_empty())
                     .map(|suspect| suspect.base_name.clone())
             })
@@ -516,8 +525,7 @@ fn loaded_suspect(suspect: &SuspectDriver, drivers: &[VerifiedDriver]) -> bool {
     let key = module_key(&suspect.base_name);
     drivers.iter().any(|driver| {
         driver
-            .suspect
-            .as_ref()
+            .readable_suspect()
             .is_some_and(|loaded| module_key(&loaded.base_name) == key)
     })
 }
@@ -563,7 +571,10 @@ fn driver_detail(driver: &VerifiedDriver) -> VerifierDriver {
         peak_pages_for_mdl_bytes: driver.data.peak_pages_for_mdl_bytes,
         contiguous_memory_bytes: driver.data.contiguous_memory_bytes,
         peak_contiguous_memory_bytes: driver.data.peak_contiguous_memory_bytes,
-        suspect: driver.suspect.as_ref().map(suspect_detail),
+        suspect: driver
+            .suspect
+            .as_ref()
+            .map(|suspect| suspect.map(suspect_detail)),
     }
 }
 
@@ -650,8 +661,7 @@ impl Target {
             .or_else(|| {
                 drivers.iter().find(|driver| {
                     driver
-                        .suspect
-                        .as_ref()
+                        .readable_suspect()
                         .is_some_and(|suspect| module_key(&suspect.base_name) == module_key(module))
                 })
             })

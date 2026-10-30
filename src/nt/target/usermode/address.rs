@@ -553,7 +553,7 @@ impl Target {
 
     /// The process's PEB, through the selected thread's TEB, else the first
     /// TEB the dump captured.
-    fn user_process_peb(&self) -> Option<u64> {
+    pub fn user_process_peb(&self) -> Option<u64> {
         let types = self.user_mode_types(self.current_dtb()).ok()?;
         let selected = self.user_teb().ok();
         let info = self.user_dump_info()?;

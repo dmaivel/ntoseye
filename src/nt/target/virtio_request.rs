@@ -8,6 +8,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use ntoseye_macros::record;
 
+use crate::base::bytes::{get_u16, get_u32, get_u64};
 use crate::base::memory::MemoryOps;
 use crate::nt::target::Target;
 use crate::nt::target::virtio::{VRING_DESC_F_INDIRECT, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
@@ -191,18 +192,23 @@ pub fn gather(
         written,
         ..Default::default()
     };
+    // A head stops at its first unreadable segment: appending the next
+    // segment's bytes would put them at the wrong offset.
+    let (mut in_cut, mut out_cut) = (false, false);
     for segment in segments {
-        let (head, total) = if segment.device_writes {
-            (&mut bytes.in_head, &mut bytes.in_total)
+        let (head, total, cut) = if segment.device_writes {
+            (&mut bytes.in_head, &mut bytes.in_total, &mut in_cut)
         } else {
-            (&mut bytes.out_head, &mut bytes.out_total)
+            (&mut bytes.out_head, &mut bytes.out_total, &mut out_cut)
         };
         *total += u64::from(segment.len);
         let want = (HEAD_BYTES - head.len()).min(segment.len as usize);
-        if want > 0 {
+        if want > 0 && !*cut {
             let mut chunk = vec![0u8; want];
             if read(segment.addr, &mut chunk) {
                 head.extend_from_slice(&chunk);
+            } else {
+                *cut = true;
             }
         }
     }
@@ -215,18 +221,6 @@ pub fn gather(
         }
     }
     bytes
-}
-
-fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
-}
-
-fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
-}
-
-fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
 }
 
 fn be(bytes: &[u8], at: usize, len: usize) -> Option<u64> {
@@ -278,8 +272,8 @@ type Decoded = (String, Option<String>);
 /// `virtio_blk_req`: the type and sector, the data, and the status byte
 /// the device writes last.
 fn block(bytes: &RequestBytes) -> Option<Decoded> {
-    let kind = u32_at(&bytes.out_head, 0)?;
-    let sector = u64_at(&bytes.out_head, 8)?;
+    let kind = get_u32(&bytes.out_head, 0)?;
+    let sector = get_u64(&bytes.out_head, 8)?;
     let status = || {
         Some(
             match bytes.in_last? {
@@ -310,7 +304,7 @@ fn block(bytes: &RequestBytes) -> Option<Decoded> {
                 _ => "secure erase",
             };
             let ranges = bytes.out_total.saturating_sub(16) / 16;
-            match (u64_at(&bytes.out_head, 16), u32_at(&bytes.out_head, 24)) {
+            match (get_u64(&bytes.out_head, 16), get_u32(&bytes.out_head, 24)) {
                 (Some(first), Some(sectors)) => format!(
                     "blk {name} sector {first:#x}, {sectors} sectors{}",
                     if ranges > 1 {
@@ -505,8 +499,8 @@ fn scsi_request(bytes: &RequestBytes) -> Option<Decoded> {
     let request = format!("scsi {lun} {command}");
     let response = &bytes.in_head;
     let outcome = (|| {
-        let sense_len = u32_at(response, 0)?;
-        let resid = u32_at(response, 4)?;
+        let sense_len = get_u32(response, 0)?;
+        let resid = get_u32(response, 4)?;
         let status = *response.get(10)?;
         let code = *response.get(11)?;
         if code != 0 {
@@ -533,9 +527,9 @@ fn scsi_request(bytes: &RequestBytes) -> Option<Decoded> {
 /// notification requests.
 fn scsi_control(bytes: &RequestBytes) -> Option<Decoded> {
     let head = &bytes.out_head;
-    let request = match u32_at(head, 0)? {
+    let request = match get_u32(head, 0)? {
         0 => {
-            let function = match u32_at(head, 4)? {
+            let function = match get_u32(head, 4)? {
                 0 => "ABORT_TASK",
                 1 => "ABORT_TASK_SET",
                 2 => "CLEAR_ACA",
@@ -547,7 +541,7 @@ fn scsi_control(bytes: &RequestBytes) -> Option<Decoded> {
                 _ => "task management",
             };
             let lun = head.get(8..16).and_then(scsi_lun).unwrap_or_default();
-            match u64_at(head, 16) {
+            match get_u64(head, 16) {
                 Some(tag) if tag != 0 => format!("scsi {function} {lun} tag {tag:#x}"),
                 _ => format!("scsi {function} {lun}"),
             }
@@ -562,7 +556,7 @@ fn scsi_control(bytes: &RequestBytes) -> Option<Decoded> {
 
 /// `virtio_scsi_event`: the event, the LUN it is about, and its reason.
 fn scsi_event(event: &[u8]) -> Option<String> {
-    let code = u32_at(event, 0)?;
+    let code = get_u32(event, 0)?;
     let missed = if code & 0x8000_0000 != 0 {
         " (events missed)"
     } else {
@@ -576,7 +570,7 @@ fn scsi_event(event: &[u8]) -> Option<String> {
         _ => "event",
     };
     let lun = event.get(4..12).and_then(scsi_lun).unwrap_or_default();
-    let reason = u32_at(event, 12).unwrap_or(0);
+    let reason = get_u32(event, 12).unwrap_or(0);
     Some(format!("scsi {name} {lun} reason {reason:#x}{missed}"))
 }
 
@@ -610,8 +604,8 @@ fn net_packet(bytes: &RequestBytes, modern: bool, returned: bool) -> Option<Stri
     if flags & 1 != 0 {
         parts.push(format!(
             "checksum offload (start {}, offset {})",
-            u16_at(head, 6)?,
-            u16_at(head, 8)?
+            get_u16(head, 6)?,
+            get_u16(head, 8)?
         ));
     }
     if flags & 2 != 0 {
@@ -629,14 +623,14 @@ fn net_packet(bytes: &RequestBytes, modern: bool, returned: bool) -> Option<Stri
         parts.push(format!(
             "segmentation {name}{} size {}",
             if gso & 0x80 != 0 { " ECN" } else { "" },
-            u16_at(head, 4)?
+            get_u16(head, 4)?
         ));
     }
     // The device sets num_buffers on a received packet; on a sent one the
     // field is unused, and drivers leave whatever was there.
     if !sent
         && header >= 12
-        && let Some(buffers) = u16_at(head, 10).filter(|buffers| *buffers > 1)
+        && let Some(buffers) = get_u16(head, 10).filter(|buffers| *buffers > 1)
     {
         parts.push(format!("{buffers} buffers"));
     }
@@ -763,18 +757,18 @@ fn net_control(bytes: &RequestBytes) -> Option<Decoded> {
         (2, 0 | 1) => format!(
             "VLAN {} {}",
             if command == 0 { "add" } else { "remove" },
-            u16_at(data, 0).map_or_else(String::new, |id| id.to_string())
+            get_u16(data, 0).map_or_else(String::new, |id| id.to_string())
         ),
         (3, 0) => "announce ack".into(),
         (4, 0) => format!(
             "queue pairs {}",
-            u16_at(data, 0).map_or_else(String::new, |pairs| pairs.to_string())
+            get_u16(data, 0).map_or_else(String::new, |pairs| pairs.to_string())
         ),
         (4, 1) => "RSS configuration".into(),
         (4, 2) => "hash configuration".into(),
         (5, 0) => format!(
             "guest offloads {}",
-            u64_at(data, 0).map_or_else(String::new, |mask| format!("{mask:#x}"))
+            get_u64(data, 0).map_or_else(String::new, |mask| format!("{mask:#x}"))
         ),
         (6, _) => "notification coalescing".into(),
         (7, _) => "statistics".into(),
@@ -838,13 +832,13 @@ fn gpu_type(kind: u32) -> String {
 /// `virtio_gpu_ctrl_hdr` of the command and of the response.
 fn gpu(bytes: &RequestBytes) -> Option<Decoded> {
     let head = &bytes.out_head;
-    let kind = u32_at(head, 0)?;
-    let fenced = u32_at(head, 4)? & 1 != 0;
+    let kind = get_u32(head, 0)?;
+    let fenced = get_u32(head, 4)? & 1 != 0;
     let mut request = format!("gpu {}", gpu_type(kind));
     if fenced {
-        request.push_str(&format!(" (fence {})", u64_at(head, 8)?));
+        request.push_str(&format!(" (fence {})", get_u64(head, 8)?));
     }
-    let outcome = u32_at(&bytes.in_head, 0).map(gpu_type);
+    let outcome = get_u32(&bytes.in_head, 0).map(gpu_type);
     Some((request, outcome))
 }
 
@@ -858,7 +852,7 @@ fn vsock(bytes: &RequestBytes, returned: bool) -> Option<String> {
     } else {
         return None;
     };
-    let operation = match u16_at(head, 30)? {
+    let operation = match get_u16(head, 30)? {
         1 => "REQUEST",
         2 => "RESPONSE",
         3 => "RST",
@@ -870,11 +864,11 @@ fn vsock(bytes: &RequestBytes, returned: bool) -> Option<String> {
     };
     Some(format!(
         "vsock {operation} {}:{} -> {}:{}, {}",
-        u64_at(head, 0)?,
-        u32_at(head, 16)?,
-        u64_at(head, 8)?,
-        u32_at(head, 20)?,
-        size_text(u64::from(u32_at(head, 24)?))
+        get_u64(head, 0)?,
+        get_u32(head, 16)?,
+        get_u64(head, 8)?,
+        get_u32(head, 20)?,
+        size_text(u64::from(get_u32(head, 24)?))
     ))
 }
 
@@ -891,8 +885,10 @@ impl Target {
         for (addr, len, flags) in descriptors {
             let entries = if flags & VRING_DESC_F_INDIRECT != 0 {
                 let mut table = vec![0u8; (len as usize).min(MAX_SEGMENTS * 16)];
+                // The buffers after an unreadable table would be taken
+                // for the request's first ones.
                 if self.read_physical(addr, &mut table).is_err() {
-                    continue;
+                    return Vec::new();
                 }
                 indirect_entries(&table, packed)
             } else {
@@ -1273,6 +1269,31 @@ mod tests {
         assert_eq!(gathered.out_head, [1u8; 16]);
         assert_eq!(gathered.in_head.len(), 128);
         assert_eq!(gathered.in_last, Some(3));
+    }
+
+    /// An unreadable buffer ends its direction's head: the next buffer's
+    /// bytes are not taken for the ones it should have held.
+    #[test]
+    fn gathering_stops_a_head_at_an_unreadable_buffer() {
+        let segments = [
+            Segment {
+                addr: 0x1000,
+                len: 16,
+                device_writes: false,
+            },
+            Segment {
+                addr: 0x2000,
+                len: 16,
+                device_writes: false,
+            },
+        ];
+        let read = |addr: u64, buf: &mut [u8]| {
+            buf.fill((addr >> 12) as u8);
+            addr != 0x1000
+        };
+        let gathered = gather(&segments, None, read);
+        assert_eq!(gathered.out_total, 32);
+        assert!(gathered.out_head.is_empty());
     }
 
     #[test]

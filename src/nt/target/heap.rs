@@ -13,7 +13,9 @@ use crate::base::error::{Error, Result};
 use crate::base::memory::{AddressSpace, MemoryOps};
 use crate::base::types::{Dtb, PAGE_SHIFT, VirtAddr};
 use crate::nt::layout::{ParsedType, TypeInfo, le_uint};
-use crate::nt::target::{DiagnosticValue, ListCursor, ListTermination, Target};
+use crate::nt::target::{
+    DiagnosticValue, ListCursor, ListTermination, Target, bounded_record_list_walk,
+};
 
 pub const NT_HEAP_SIGNATURE: u32 = 0xEEFF_EEFF;
 pub const SEGMENT_HEAP_SIGNATURE: u32 = 0xDDEE_DDEE;
@@ -277,16 +279,21 @@ impl<'a> HeapReader<'a> {
     }
 
     /// Records of an intrusive `_LIST_ENTRY` list, given the head and the
-    /// link's offset inside each record. Bounded and cycle-safe.
+    /// link's offset inside each record. Bounded and cycle-safe; a walk that
+    /// does not come back to the head is an error, since the records it
+    /// missed would otherwise vanish from the heap without notice.
     fn list(&self, head: VirtAddr, link_offset: u64) -> Result<Vec<VirtAddr>> {
-        let mut records = Vec::new();
-        let mut cursor = ListCursor::new(head, MAX_LIST);
-        cursor.advance(Ok(VirtAddr(self.read_pointer(head)?)));
-        while let Some(link) = cursor.take_current() {
-            records.push(VirtAddr(link.0.wrapping_sub(link_offset)));
-            cursor.advance(Ok(VirtAddr(self.read_pointer(link)?)));
+        let (records, termination) =
+            bounded_record_list_walk(head, link_offset, MAX_LIST, |link| {
+                self.read_pointer(link).map(VirtAddr)
+            });
+        match termination.diagnostic() {
+            None => Ok(records),
+            Some(why) => Err(Error::DebugInfo(format!(
+                "the list at {head} stops after {} entries: {why}",
+                records.len()
+            ))),
         }
-        Ok(records)
     }
 
     /// The process's heaps, in creation order, classified by signature. `peb`
@@ -786,9 +793,10 @@ impl HeapReader<'_> {
         }
         let bitmap_layout = self.field_layout(&header_layout, "BusyBitmap")?;
         let bitmap_at = header_layout.offset("BusyBitmap")?;
-        let bits = bitmap_layout.read(&image, bitmap_at, "SizeOfBitMap")? as u32;
         let buffer = VirtAddr(bitmap_layout.read(&image, bitmap_at, "Buffer")?);
-        let words = (bits.max(block_count) as usize).div_ceil(self.pointer_size * 8);
+        // Only the blocks' bits are consulted, and `BlockCount` is a USHORT,
+        // so a corrupt `SizeOfBitMap` cannot inflate the read.
+        let words = (block_count as usize).div_ceil(self.pointer_size * 8);
         let busy = self.read(buffer, words * self.pointer_size)?;
         Ok(Some(NtUserBlocks {
             header,
@@ -1288,15 +1296,14 @@ impl HeapReader<'_> {
         while at + granule <= bytes.len() as u64 && chunks.len() < MAX_ENTRIES {
             let address = first_chunk + at;
             let header = &bytes[at as usize..at as usize + granule as usize];
-            let mut decoded = header.to_vec();
             let sizes = le_uint(&header[sizes_at..sizes_at + sizes_len])
                 ^ heap.encoding_keys.heap_key
                 ^ address.0;
-            decoded[sizes_at..sizes_at + sizes_len]
-                .copy_from_slice(&sizes.to_le_bytes()[..sizes_len]);
-            let chunk_size = sizes_layout.read(&decoded, sizes_at, "UnsafeSize")? * granule;
-            let previous_size = sizes_layout.read(&decoded, sizes_at, "UnsafePrevSize")? * granule;
-            let busy = sizes_layout.read(&decoded, sizes_at, "Allocated")? != 0;
+            let sizes = sizes.to_le_bytes();
+            let sizes = &sizes[..sizes_len];
+            let chunk_size = sizes_layout.read(sizes, 0, "UnsafeSize")? * granule;
+            let previous_size = sizes_layout.read(sizes, 0, "UnsafePrevSize")? * granule;
+            let busy = sizes_layout.read(sizes, 0, "Allocated")? != 0;
             let unused_flagged = chunk_layout.read(header, 0, "UnusedBytes")? != 0;
             let unused_bytes = (busy && unused_flagged && chunk_size >= granule + 2)
                 .then(|| {
@@ -1907,7 +1914,7 @@ fn heap_summary_stats(reader: &HeapReader<'_>, heap: &ProcessHeap) -> Diagnostic
                 flags: nt.flags,
                 reserved,
                 committed: reserved.saturating_sub(uncommitted),
-                free: nt.total_free_units.saturating_mul(16),
+                free: nt.total_free_units.saturating_mul(nt.granule),
                 segments: nt.segments.len() as u64,
                 virtual_blocks: nt.virtual_blocks.len() as u64,
                 front_end: nt.front_end,
@@ -1947,10 +1954,12 @@ fn heap_summary_stats(reader: &HeapReader<'_>, heap: &ProcessHeap) -> Diagnostic
                 }
             }))
         }
-        HeapKind::Unknown(signature) => DiagnosticValue::unavailable(format!(
-            "heap carries neither heap signature (found {signature:#x})"
-        )),
+        HeapKind::Unknown(signature) => DiagnosticValue::unavailable(unknown_heap_error(signature)),
     }
+}
+
+fn unknown_heap_error(signature: u32) -> String {
+    format!("heap carries neither heap signature (found {signature:#x})")
 }
 
 fn nt_lfh_block_detail(region: &NtUserBlocks, entry: &NtEntry, index: u32) -> HeapBlock {
@@ -2246,9 +2255,7 @@ impl Target {
                 Err(error) => detail.error = Some(error.to_string()),
             },
             HeapKind::Unknown(signature) => {
-                detail.error = Some(format!(
-                    "heap carries neither heap signature (found {signature:#x})"
-                ));
+                detail.error = Some(unknown_heap_error(signature));
             }
         }
         Ok(detail)
@@ -2294,7 +2301,10 @@ impl Target {
                         continue;
                     }
                 },
-                HeapKind::Unknown(_) => Ok(None),
+                HeapKind::Unknown(signature) => {
+                    fail(&heap, unknown_heap_error(signature));
+                    continue;
+                }
             };
             let block = match found {
                 Ok(block) => block,

@@ -185,7 +185,9 @@ struct WalkResult {
 
 struct DeviceStack {
     entries: Vec<DeviceInfo>,
-    pdo: DeviceInfo,
+    /// The bottom of the stack, when the walk down reached it (a null
+    /// `AttachedTo`) rather than stopping at a cycle or the bound.
+    pdo: Option<DeviceInfo>,
     truncated: bool,
 }
 
@@ -328,6 +330,7 @@ impl<'a> DevNodeReader<'a> {
                 break;
             }
             if !seen.insert(current.0) {
+                truncated = true;
                 break;
             }
             let device = self.read_device(current)?;
@@ -339,9 +342,10 @@ impl<'a> DevNodeReader<'a> {
             current = next;
         }
 
-        let Some(pdo) = downward.last().cloned() else {
+        let Some(bottom) = downward.last().cloned() else {
             return Err(Error::DebugInfo("empty device stack".to_string()));
         };
+        let pdo = (!truncated).then(|| bottom.clone());
         let known: HashMap<u64, DeviceInfo> = downward
             .iter()
             .cloned()
@@ -349,7 +353,7 @@ impl<'a> DevNodeReader<'a> {
             .collect();
         let mut upward = Vec::new();
         let mut seen = HashSet::new();
-        let mut current = pdo.device;
+        let mut current = bottom.device;
         while !current.is_zero() {
             if upward.len() >= MAX_DEVICE_STACK {
                 truncated = true;
@@ -609,10 +613,14 @@ impl Target {
                 is_argument: device.device == requested,
             })
             .collect();
-        let (pdo_devnode, pdo_devnode_error) = if stack.pdo.device_node.is_zero() {
+        let pdo_node = stack
+            .pdo
+            .as_ref()
+            .map_or(VirtAddr(0), |pdo| pdo.device_node);
+        let (pdo_devnode, pdo_devnode_error) = if pdo_node.is_zero() {
             (None, None)
         } else {
-            match reader.read_node(stack.pdo.device_node) {
+            match reader.read_node(pdo_node) {
                 Ok(node) => (Some(summary(&node, &reader.states)), None),
                 Err(error) => (None, Some(error.to_string())),
             }

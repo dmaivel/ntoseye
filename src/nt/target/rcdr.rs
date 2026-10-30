@@ -169,17 +169,7 @@ fn rcdr_layout(types: Types<'_>, name: &str) -> Result<Arc<TypeInfo>> {
 /// Where `_WPP_AUTOLOG_RECORD`'s fields sit: KMDF's IFR record.
 fn record_layout(types: Types<'_>) -> Result<IfrRecordLayout> {
     let record = rcdr_layout(types, "_WPP_AUTOLOG_RECORD")?;
-    let at = |name: &str| -> Result<usize> { Ok(record.field_offset(name)? as usize) };
-    Ok(IfrRecordLayout {
-        size: record.size,
-        signature: at("Signature")?,
-        length: at("Length")?,
-        sequence: at("Sequence")?,
-        prev_offset: at("PrevOffset")?,
-        message_number: at("MessageNumber")?,
-        message_guid: at("MessageGuid")?,
-        timestamp: at("TimeStamp")?,
-    })
+    IfrRecordLayout::from_type(&record)
 }
 
 impl Target {

@@ -295,7 +295,7 @@ struct LockEntry {
 /// Owner and wait order of one lock from every processor's entry: follow
 /// `Next` from the owner's entry, numbering the processors it reaches. An
 /// entry that claims to wait but is not reached, a second owner, or a
-/// processor reached twice is corrupt.
+/// processor whose `Next` reaches a processor already queued is corrupt.
 fn order_lock_queue(entries: &[LockEntry]) -> Vec<QueuedLockHolder> {
     let by_address: HashMap<u64, u16> = entries
         .iter()
@@ -320,6 +320,7 @@ fn order_lock_queue(entries: &[LockEntry]) -> Vec<QueuedLockHolder> {
     if let Some(owner) = owners.first() {
         states.insert(owner.processor, QueuedLockState::Owner);
         let mut next = owner.next;
+        let mut from = owner.processor;
         let mut order = 0u32;
         // Every processor at most once: a cycle or a stray link ends it.
         for _ in 0..entries.len() {
@@ -330,10 +331,17 @@ fn order_lock_queue(entries: &[LockEntry]) -> Vec<QueuedLockHolder> {
                 break;
             };
             if states.contains_key(&processor) {
+                states.insert(
+                    from,
+                    QueuedLockState::Corrupt(format!(
+                        "links back to processor {processor}, closing a cycle"
+                    )),
+                );
                 break;
             }
             order += 1;
             states.insert(processor, QueuedLockState::Waiting(order));
+            from = processor;
             next = entries
                 .iter()
                 .find(|entry| entry.processor == processor)
@@ -755,7 +763,7 @@ mod tests {
         ];
         let holders = states(&order_lock_queue(&entries));
         assert_eq!(holders[0], (0, QueuedLockState::Owner));
-        assert_eq!(holders[1], (1, QueuedLockState::Waiting(1)));
+        assert!(matches!(holders[1], (1, QueuedLockState::Corrupt(_))));
         assert!(matches!(holders[2], (2, QueuedLockState::Corrupt(_))));
 
         let ownerless = [entry(0, 0, LOCK_QUEUE_WAIT)];

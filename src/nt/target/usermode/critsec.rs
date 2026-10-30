@@ -53,7 +53,9 @@ impl CriticalSection {
     #[record(getter)]
     pub fn waiters(&self) -> Option<u32> {
         match self.lock_count {
-            DiagnosticValue::Available(count) => Some(((-1i64 - i64::from(count)) >> 2) as u32),
+            DiagnosticValue::Available(count) => {
+                Some(((-1i64 - i64::from(count)) >> 2).max(0) as u32)
+            }
             DiagnosticValue::Unavailable(_) => None,
         }
     }

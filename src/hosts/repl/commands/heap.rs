@@ -424,7 +424,10 @@ impl ReplState<'_> {
                     heap.encoding
                         .map_or_else(|| "-".into(), |encoding| format!("{encoding:#x}")),
                 ),
-                ("total free", format!("{:#x}", heap.total_free_units * 16)),
+                (
+                    "total free",
+                    format!("{:#x}", heap.total_free_units.saturating_mul(heap.granule)),
+                ),
                 (
                     "virtual threshold",
                     format!("{:#x}", heap.virtual_threshold),
