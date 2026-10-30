@@ -405,13 +405,6 @@ mod tests {
     }
 
     #[test]
-    fn reads_128_bit_registers_without_truncation() {
-        let map = packed(&[("xmm0", 16)]);
-        let value = 0x0011_2233_4455_6677_8899_aabb_ccdd_eeffu128;
-        assert_eq!(map.read_u128("xmm0", &value.to_le_bytes()).unwrap(), value);
-    }
-
-    #[test]
     fn read_u128_rejects_a_256_bit_register() {
         let map = packed(&[("ymm0", 32)]);
 

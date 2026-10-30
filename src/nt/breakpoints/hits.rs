@@ -1,8 +1,6 @@
 //! Matching a stop to the breakpoint that raised it and accounting the
 //! hit: the software-site hit predicates, pass counts and one-shot state.
 
-#[cfg(test)]
-use super::BreakpointScope;
 use super::{BreakpointHitDisposition, BreakpointHitResult, BreakpointManager};
 use crate::arch::Arch;
 use crate::backend::dbg_backend::DebugBackend;
@@ -95,25 +93,6 @@ impl BreakpointManager {
             .min()
     }
 
-    #[cfg(test)]
-    fn enabled_software_breakpoint_id(
-        &self,
-        scope: &BreakpointScope,
-        address: VirtAddr,
-    ) -> Option<u32> {
-        self.breakpoints
-            .values()
-            .filter(|bp| {
-                bp.resolved
-                    && bp.enabled
-                    && bp.hardware.is_none()
-                    && bp.address == address
-                    && &bp.scope == scope
-            })
-            .map(|bp| bp.id)
-            .min()
-    }
-
     /// Find a BP at `rip` regardless of its scope; "is this int3 owned by us?"
     pub fn breakpoint_id_at_address(&self, rip: u64) -> Option<u32> {
         self.breakpoints
@@ -134,47 +113,22 @@ mod tests {
         BreakpointHitDisposition, BreakpointHitResult, BreakpointInfo, BreakpointManager,
         BreakpointScope, HardwareBreakpoint,
     };
+    use crate::session::session_over_memory;
 
     #[test]
     fn detects_breakpoint_hit_at_exact_rip() {
         let mut manager = BreakpointManager::new();
-        manager.breakpoints.insert(
-            0,
-            BreakpointInfo {
-                id: 0,
-                address: VirtAddr(0x1000),
-                serial: 0,
-                enabled: true,
-                symbol: None,
-                spec: None,
-                resolved: true,
-                scope: BreakpointScope::Kernel,
-                automatic_scope: false,
-                thread: None,
-                processor: None,
-                min_stack_pointer: None,
-                hypercall: None,
-                vm_exit: None,
-                partition: None,
-                condition: None,
-                condition_expr: None,
-                pass_count: 0,
-                hit_count: 0,
-                remaining_pass_count: 0,
-                one_shot: false,
-                action: None,
-                temporary: false,
-                unchecked: false,
-                hardware: None,
-                backend: BreakpointBackend::Kernel {
-                    original: Some(BreakpointPatch::single(0x90)),
-                },
-            },
-        );
+        manager.insert_for_test(0, VirtAddr(0x1000), true, None);
 
         match manager.check_breakpoint_hit(0x1000, 0, Arch::Amd64) {
             BreakpointHitResult::Hit(bp) => assert_eq!(bp.id, 0),
             other => panic!("unexpected result: {:?}", other),
+        }
+        for rip in [0xfff, 0x1001] {
+            assert!(matches!(
+                manager.check_breakpoint_hit(rip, 0, Arch::Amd64),
+                BreakpointHitResult::NotBreakpoint
+            ));
         }
     }
 
@@ -267,6 +221,7 @@ mod tests {
 
     #[test]
     fn software_and_hardware_breakpoint_coexist_at_same_address() {
+        let session = session_over_memory(0x1000, &[0u8; 0x10]);
         let mut manager = BreakpointManager::new();
         let addr = 0x5000;
 
@@ -291,13 +246,13 @@ mod tests {
         }
         assert_eq!(manager.breakpoint_id_at_address(addr), Some(0));
         assert_eq!(
-            manager.enabled_software_breakpoint_id(&BreakpointScope::Kernel, VirtAddr(addr)),
+            manager.enabled_breakpoint_id_for_current_context(&session.target, VirtAddr(addr)),
             Some(0)
         );
 
         manager.breakpoints.remove(&0);
         assert_eq!(
-            manager.enabled_software_breakpoint_id(&BreakpointScope::Kernel, VirtAddr(addr)),
+            manager.enabled_breakpoint_id_for_current_context(&session.target, VirtAddr(addr)),
             None
         );
     }

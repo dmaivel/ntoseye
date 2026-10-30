@@ -916,16 +916,19 @@ mod tests {
         second.truncate(second_len);
 
         assert_ne!(second, first);
-        assert_eq!(host.state.send_sequence.load(Ordering::Relaxed), 3);
-        for pkt in [&mut first, &mut second] {
+        let mut sequences = [0u64; 2];
+        for (pkt, sequence) in [&mut first, &mut second].into_iter().zip(&mut sequences) {
             decrypt_payload(pkt, key2).unwrap();
             verify_authentication(pkt, &host.state.hmac_key).unwrap();
+            *sequence =
+                u64::from_be_bytes(pkt[HEADER_SIZE..HEADER_SIZE + 8].try_into().unwrap()) >> 8;
             assert_eq!(
                 &pkt[HEADER_SIZE + METADATA_SIZE
                     ..HEADER_SIZE + METADATA_SIZE + framing::HEADER_SIZE],
                 &kd_packet[..framing::HEADER_SIZE]
             );
         }
+        assert_ne!(sequences[0], sequences[1]);
     }
 
     #[test]

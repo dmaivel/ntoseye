@@ -485,15 +485,6 @@ serial0.fileName = "/tmp/console.log"
     }
 
     #[test]
-    fn launch_commands_omit_default_backend_and_endpoints() {
-        let instructions = vmware_instructions(
-            request(Action::Configure, Some(BackendSelection::KdAndGdb)),
-            Some(2),
-        );
-        assert_eq!(instructions.run, ["ntoseye", "ntoseye --backend gdb"]);
-    }
-
-    #[test]
     fn kdnet_needs_no_vmx_transport_and_prints_network_setup() {
         let request = kdnet_request();
         let (configured, changes, port) = plan_vmx(BASE_VMX, request).unwrap();

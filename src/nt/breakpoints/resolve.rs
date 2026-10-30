@@ -452,6 +452,7 @@ mod tests {
             allowed.resolved && allowed.address == VirtAddr(0x1020),
             "the armable site still resolved: {allowed:?}"
         );
+        assert_eq!(client.installed, [0x1020]);
     }
 
     #[test]

@@ -1378,7 +1378,8 @@ mod tests {
         let err = open_kd(&mcp, "/tmp/ntoseye-test-close-reopen-does-not-exist.sock")
             .await
             .unwrap_err();
-        assert!(!err.message.contains("already active"), "{err:?}");
+        assert!(err.message.contains("failed to open"), "{err:?}");
+        assert!(matches!(&*mcp.session.lock().unwrap(), SessionSlot::Vacant));
     }
 
     #[tokio::test]

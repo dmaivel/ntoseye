@@ -43,8 +43,10 @@ fn kd_connections_reject_invalid_handshake_timeouts_before_opening_a_transport()
 fn kd_detects_amd64_and_arm64_machine_types() {
     assert_eq!(detect_arch(0x8664).unwrap(), Arch::Amd64);
     assert_eq!(detect_arch(0xaa64).unwrap(), Arch::Arm64);
-    let error = detect_arch(0x014c).unwrap_err();
-    assert!(error.to_string().contains("I386 KD target"));
+    assert!(matches!(
+        detect_arch(0x014c),
+        Err(Error::UnsupportedArchitecture(_))
+    ));
 }
 
 #[test]

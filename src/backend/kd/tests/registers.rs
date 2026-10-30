@@ -397,6 +397,51 @@ fn registers_read_after_an_msr_write_show_it() {
     worker.join().unwrap();
 }
 
+/// The trap flag and DR6 a stop reported stop answering for the processor
+/// once the host writes its registers: serving them after the write would
+/// clear or keep a trap flag the written state no longer has.
+#[test]
+fn a_register_write_drops_the_stop_report() {
+    use crate::backend::kd::amd64::{CONTROL_EFLAGS_OFFSET, CONTROL_REPORT_SIZE};
+    const TF: u32 = 1 << 8;
+    let (kernel, host) = UnixStream::pair().unwrap();
+    let mut backend = amd64_backend_reading(host);
+    let mut report = vec![0u8; CONTROL_REPORT_SIZE];
+    bytes::write_u32(&mut report, CONTROL_EFLAGS_OFFSET, TF | 0x246);
+    backend.registers.stopped(0, Some(ControlReport(report)));
+    let special = vec![0u8; Arch::Amd64.special_register_map().extent()];
+    let worker = serve_manipulate(
+        kernel,
+        vec![
+            // Refusing `SetContextEx` sends the CONTEXT whole, in one reply.
+            (api::DBGKD_SET_CONTEXT_EX, 0xc000_0001, Vec::new()),
+            (api::DBGKD_SET_CONTEXT, api::STATUS_SUCCESS, Vec::new()),
+            // Mirroring the debug registers into the special registers.
+            (
+                api::DBGKD_READ_CONTROL_SPACE,
+                api::STATUS_SUCCESS,
+                special.clone(),
+            ),
+            (api::DBGKD_WRITE_CONTROL_SPACE, api::STATUS_SUCCESS, special),
+        ],
+    );
+    assert_eq!(
+        backend.stop_trap_state().map(|trap| trap.eflags),
+        Some(u64::from(TF | 0x246))
+    );
+
+    backend
+        .write_registers(&vec![0u8; amd64::REGISTER_BUFFER_SIZE])
+        .unwrap();
+
+    assert!(
+        backend.stop_trap_state().is_none(),
+        "the stop's TF and DR6 described the registers before the write"
+    );
+    drop(backend);
+    worker.join().unwrap();
+}
+
 /// Windows' KD does not return an ARM64 thread's `x18`. In kernel mode it is
 /// the KPCR, whatever KD reported (seen: 0, and the KPRCB); in user mode it
 /// is the TEB, read through the KPCR's current thread, and KD reports 0. A

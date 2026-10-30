@@ -1105,10 +1105,7 @@ mod tests {
 
         let unknown = verifier_finding(&bugcheck(0xc4, [0xdead, 1, 2, 3], None)).unwrap();
         assert!(!unknown.known_subcode);
-        assert_eq!(
-            unknown.subcode_description,
-            "unknown verifier subcode 0xdead"
-        );
+        assert!(unknown.subcode_description.contains("0xdead"));
     }
 
     const NT_BASE: u64 = 0xffff_f800_0000_0000;

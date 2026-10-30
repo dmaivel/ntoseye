@@ -1673,6 +1673,14 @@ fn ctrl_c_breaks_in_on_a_step_that_does_not_stop() {
     assert!(session.target.interrupt.load(Ordering::SeqCst));
 }
 
+/// The entries of one phase of a site log in a fixed order: the order a
+/// step visits its successors in is not part of its contract.
+fn sorted<T: Copy + Ord>(entries: &[T]) -> Vec<T> {
+    let mut entries = entries.to_vec();
+    entries.sort_unstable();
+    entries
+}
+
 /// Under the Windows hypervisor a step is this vCPU run alone to temporary
 /// sites on every successor (both arms of a branch), lifted afterwards.
 #[test]
@@ -1691,15 +1699,10 @@ fn a_step_under_the_windows_hypervisor_runs_the_vcpu_alone_to_every_successor() 
     let mut session = stepping_session(&code, backend);
 
     assert_eq!(step_rip(&mut session), 0x1012);
-    assert_eq!(
-        *sites.lock(),
-        [
-            (0x1002, true),
-            (0x1012, true),
-            (0x1002, false),
-            (0x1012, false)
-        ]
-    );
+    let sites = sites.lock();
+    assert_eq!(sites.len(), 4, "{sites:?}");
+    assert_eq!(sorted(&sites[..2]), [(0x1002, true), (0x1012, true)]);
+    assert_eq!(sorted(&sites[2..]), [(0x1002, false), (0x1012, false)]);
     assert!(hardware.lock().is_empty());
 }
 
@@ -2001,17 +2004,11 @@ fn a_step_whose_handler_returns_once_the_others_run_completes() {
 
     assert_eq!(step_rip(&mut session), 0x1002);
     assert!(session.take_notices().is_empty());
-    assert_eq!(
-        *sites.lock(),
-        [
-            (0x1002, true),
-            (0x1012, true),
-            (0x1000, true),
-            (0x1000, false),
-            (0x1002, false),
-            (0x1012, false)
-        ]
-    );
+    let sites = sites.lock();
+    assert_eq!(sites.len(), 6, "{sites:?}");
+    assert_eq!(sorted(&sites[..2]), [(0x1002, true), (0x1012, true)]);
+    assert_eq!(sites[2..4], [(0x1000, true), (0x1000, false)]);
+    assert_eq!(sorted(&sites[4..]), [(0x1002, false), (0x1012, false)]);
 }
 
 /// A walk started on an instruction that matches executes it first, as
@@ -2787,10 +2784,13 @@ fn a_user_space_step_uses_debug_register_sites_where_int3_is_unsafe() {
         assert_eq!(step_rip(&mut session), 0x1002);
         if user_mode {
             assert!(hardware.lock().is_empty());
-            assert_eq!(sites.lock()[..2], [(0x1002, true), (0x1012, true)]);
+            assert_eq!(sorted(&sites.lock()[..2]), [(0x1002, true), (0x1012, true)]);
         } else {
             assert!(sites.lock().is_empty(), "an int3 was planted in user space");
-            assert_eq!(hardware.lock()[..2], [(0, Some(0x1002)), (1, Some(0x1012))]);
+            let hardware = hardware.lock();
+            let ((first, a), (second, b)) = (hardware[0], hardware[1]);
+            assert_ne!(first, second, "{hardware:?}");
+            assert_eq!(sorted(&[a, b]), [Some(0x1002), Some(0x1012)]);
         }
     }
 }

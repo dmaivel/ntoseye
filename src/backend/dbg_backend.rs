@@ -1119,7 +1119,13 @@ mod tests {
         log.record(b"no newline yet");
         assert!(log.read_since(0).lines.is_empty());
         log.record(b"\n");
-        assert_eq!(log.read_since(0).lines.len(), 1);
+        let texts: Vec<String> = log
+            .read_since(0)
+            .lines
+            .into_iter()
+            .map(|l| l.text)
+            .collect();
+        assert_eq!(texts, ["no newline yet"]);
     }
 
     #[test]

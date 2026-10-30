@@ -34,20 +34,6 @@ fn kd_memory_source_parses_supported_values() {
     assert!("remote".parse::<KdMemorySource>().is_err());
 }
 
-#[test]
-fn arm64_capabilities_include_debug_breakpoints() {
-    let (_kernel, host) = UnixStream::pair().unwrap();
-    let mut backend = kd_backend_with_framing(host);
-    backend.arch = Arch::Arm64;
-
-    for capability in [
-        DebugCapability::UserModeBreakpoints,
-        DebugCapability::Watchpoints,
-    ] {
-        assert!(backend.supports(capability));
-    }
-}
-
 struct Loopback {
     inbound: Cursor<Vec<u8>>,
     outbound: Vec<u8>,

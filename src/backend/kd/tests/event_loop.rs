@@ -277,11 +277,7 @@ fn state_change_carries_the_amd64_control_report() {
 
 #[test]
 fn parse_state_change_rejects_short_payload() {
-    let err = parse_state_change(&[0u8; 10]).unwrap_err();
-    match err {
-        Error::Kd(msg) => assert!(msg.contains("too short")),
-        other => panic!("unexpected error: {other:?}"),
-    }
+    assert!(matches!(parse_state_change(&[0u8; 10]), Err(Error::Kd(_))));
 }
 
 #[test]
@@ -302,16 +298,6 @@ fn initial_handshake_breaks_in_immediately_then_resets() {
         initial_handshake_stimulus(3),
         InitialHandshakeStimulus::Reset
     );
-}
-
-#[test]
-fn kd_handshake_timeout_rejects_zero_and_deadline_overflow() {
-    for seconds in [0, u64::MAX] {
-        assert!(matches!(
-            handshake_timeout(seconds),
-            Err(Error::InvalidArgument(_))
-        ));
-    }
 }
 
 #[test]

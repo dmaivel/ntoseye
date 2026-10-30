@@ -65,8 +65,14 @@ fn a_stop_report_answers_for_the_trap_state_until_the_target_runs() {
     );
 }
 
-fn refused_reply(api_number: u32) -> Vec<u8> {
-    let mut reply = api::test_wire::build_reply(api_number, 0, &[], &[]);
+/// A virtual-memory read of `len` bytes at `addr` that the target refused.
+/// The reply echoes the request's address and length, as the target's does;
+/// without them it would be dropped as another request's.
+fn refused_read_reply(addr: u64, len: u32) -> Vec<u8> {
+    let mut union = [0u8; 12];
+    bytes::write_u64(&mut union, 0, addr);
+    bytes::write_u32(&mut union, 8, len);
+    let mut reply = api::test_wire::build_reply(api::DBGKD_READ_VIRTUAL_MEMORY, 0, &union, &[]);
     reply[8..12].copy_from_slice(&0xc000_0005u32.to_le_bytes());
     reply
 }
@@ -88,7 +94,8 @@ fn resume_does_not_step_past_a_breakpoint_it_does_not_own() {
             &guest_context,
         )];
         if !owned_by_us {
-            replies.push(refused_reply(api::DBGKD_READ_VIRTUAL_MEMORY));
+            let int3_len = Arch::Amd64.breakpoint_instruction().len() as u32;
+            replies.push(refused_read_reply(PC, int3_len));
         }
         // Enough of an advance to complete if the resume wrongly attempts
         // one, so a regression trips the assertion below instead of

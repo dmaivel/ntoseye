@@ -1873,12 +1873,36 @@ mod tests {
     /// a guest's value, which the scan does not take for a frame.
     #[test]
     fn a_foreign_root_scan_takes_only_its_own_image() {
-        let session = frame_pointer_session();
+        // The fixture image twice: the hypervisor's at `IMAGE`, and an NT
+        // module's copy after the stack. The stack holds a return address
+        // into each, the NT one nearer its top.
+        const NT_IMAGE: u64 = STACK + 0x2000;
+        let nt_return_address = NT_IMAGE + u64::from(CALLER) + 0x10;
+        let mut memory = frame_pointer_image();
+        memory.resize(IMAGE_SIZE + 0x2000, 0);
+        memory.extend_from_slice(&frame_pointer_image());
+        let stack = |address: u64| (address - IMAGE) as usize;
+        for (offset, value) in [
+            (0, CALLER_RBP),
+            (8, nt_return_address),
+            (0x18, RETURN_ADDRESS),
+        ] {
+            let at = stack(FRAMED_RBP) + offset;
+            memory[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        let mut session = session_over_memory(IMAGE, &memory);
+        session
+            .target
+            .set_kernel_modules_for_test(vec![ModuleInfo::new(
+                "fixture.sys".to_string(),
+                VirtAddr(NT_IMAGE),
+                IMAGE_SIZE as u32,
+            )]);
         let mut trace = super::resolve_thread_trace_context(&session.target, 0);
         trace.foreign_image = Some(ModuleInfo::new(
             "hv".to_string(),
-            VirtAddr(0xffff_f847_9860_0000),
-            0x40_0000,
+            VirtAddr(IMAGE),
+            IMAGE_SIZE as u32,
         ));
 
         let walk = super::walk::build_recovered_stacktrace_seeded(
@@ -1891,7 +1915,7 @@ mod tests {
         );
 
         let frames: Vec<_> = walk.frames.iter().map(|frame| frame.frame.ip).collect();
-        assert_eq!(frames, [FRAMED_RIP]);
+        assert_eq!(frames, [FRAMED_RIP, RETURN_ADDRESS]);
     }
 
     /// Windows hypervisor code whose unwind data leaves out its prolog's

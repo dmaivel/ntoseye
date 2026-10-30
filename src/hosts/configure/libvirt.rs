@@ -826,19 +826,6 @@ mod tests {
     }
 
     #[test]
-    fn launch_commands_omit_default_backend_and_endpoints() {
-        let instructions = libvirt_instructions(
-            BASE_XML,
-            ConfigureRequest::Configure {
-                backend: ConfigureBackend::KdAndGdb,
-                vmcoreinfo: false,
-            },
-            "windows",
-        );
-        assert_eq!(instructions.run, ["ntoseye", "ntoseye --backend gdb"]);
-    }
-
-    #[test]
     fn gdb_adds_qemu_namespace_and_args() {
         let plan =
             apply_transport_config(BASE_XML, &[DebugTransport::Gdb], KD_SOCKET, false).unwrap();

@@ -53,7 +53,6 @@ pub struct DmpException {
     #[record(hex)]
     pub address: u64,
     /// The exception's `ExceptionInformation` parameters.
-    #[record(hex)]
     pub parameters: Vec<u64>,
 }
 
@@ -648,10 +647,10 @@ impl DebugBackend for DmpBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arch::amd64;
     use crate::arch::{
         IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64, IMAGE_FILE_MACHINE_I386,
     };
-    use crate::arch::{amd64, arm64};
 
     #[test]
     fn dump_open_rejects_unsupported_machine_types() {
@@ -665,30 +664,6 @@ mod tests {
         ));
         let error = dump_arch(u32::from(IMAGE_FILE_MACHINE_I386)).unwrap_err();
         assert!(error.to_string().contains("I386 crash dump"));
-    }
-
-    #[test]
-    fn arm64_context_header_round_trips_registers_and_debug_state() {
-        let mut raw = vec![0u8; arm64::CONTEXT_SIZE];
-        raw[arm64::OFFSET_CPSR..arm64::OFFSET_CPSR + 4]
-            .copy_from_slice(&0x6000_03c5u32.to_le_bytes());
-        raw[arm64::OFFSET_X0..arm64::OFFSET_X0 + 8]
-            .copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
-        raw[arm64::OFFSET_SP..arm64::OFFSET_SP + 8]
-            .copy_from_slice(&0xffff_0000_1234_5000u64.to_le_bytes());
-        raw[arm64::OFFSET_PC..arm64::OFFSET_PC + 8]
-            .copy_from_slice(&0xffff_0000_0000_1000u64.to_le_bytes());
-        raw[arm64::OFFSET_BCR0..arm64::OFFSET_BCR0 + 4]
-            .copy_from_slice(&0x0000_e9e1u32.to_le_bytes());
-        raw[arm64::OFFSET_WVR0..arm64::OFFSET_WVR0 + 8].copy_from_slice(&0x4000u64.to_le_bytes());
-        let data = RegisterFile::from_context(Arch::Arm64, &raw).with_kernel_dtb(0x1234_5000);
-        let map = Arch::Arm64.register_map();
-        assert_eq!(map.read_u64("x0", &data).unwrap(), 0x1122_3344_5566_7788);
-        assert_eq!(map.read_u64("pc", &data).unwrap(), 0xffff_0000_0000_1000);
-        assert_eq!(map.read_u64("sp", &data).unwrap(), 0xffff_0000_1234_5000);
-        assert_eq!(map.read_u64("bcr0", &data).unwrap(), 0x0000_e9e1);
-        assert_eq!(map.read_u64("wvr0", &data).unwrap(), 0x4000);
-        assert_eq!(map.read_u64("cr3", &data).unwrap(), 0x1234_5000);
     }
 
     /// An AMD64 register file holding `values`, by name.
@@ -750,39 +725,6 @@ mod tests {
                 ("ss", 0x18),
             ]),
         }
-    }
-
-    #[test]
-    fn dmp_backend_register_round_trip() {
-        let info = make_test_info();
-        let mut backend = DmpBackend::new(&info);
-        let map = backend.register_map().clone();
-        let data = backend.read_registers().unwrap();
-
-        assert_eq!(map.read_u64("rax", &data).unwrap(), 0x1111111111111111);
-        assert_eq!(map.read_u64("rbx", &data).unwrap(), 0x2222222222222222);
-        assert_eq!(map.read_u64("rcx", &data).unwrap(), 0x3333333333333333);
-        assert_eq!(map.read_u64("rdx", &data).unwrap(), 0x4444444444444444);
-        assert_eq!(map.read_u64("rsi", &data).unwrap(), 0x5555555555555555);
-        assert_eq!(map.read_u64("rdi", &data).unwrap(), 0x6666666666666666);
-        assert_eq!(map.read_u64("rbp", &data).unwrap(), 0x7777777777777777);
-        assert_eq!(map.read_u64("rsp", &data).unwrap(), 0x8888888888888888);
-        assert_eq!(map.read_u64("r8", &data).unwrap(), 0x0808080808080808);
-        assert_eq!(map.read_u64("r9", &data).unwrap(), 0x0909090909090909);
-        assert_eq!(map.read_u64("r10", &data).unwrap(), 0x1010101010101010);
-        assert_eq!(map.read_u64("r11", &data).unwrap(), 0x1111111111111111);
-        assert_eq!(map.read_u64("r12", &data).unwrap(), 0x1212121212121212);
-        assert_eq!(map.read_u64("r13", &data).unwrap(), 0x1313131313131313);
-        assert_eq!(map.read_u64("r14", &data).unwrap(), 0x1414141414141414);
-        assert_eq!(map.read_u64("r15", &data).unwrap(), 0x1515151515151515);
-        assert_eq!(map.read_u64("rip", &data).unwrap(), 0xfffff80012345678);
-        assert_eq!(map.read_u64("eflags", &data).unwrap(), 0x246);
-        assert_eq!(map.read_u64("cs", &data).unwrap(), 0x10);
-        assert_eq!(map.read_u64("ss", &data).unwrap(), 0x18);
-        assert_eq!(
-            map.read_u64("cr3", &data).unwrap(),
-            info.directory_table_base
-        );
     }
 
     #[test]

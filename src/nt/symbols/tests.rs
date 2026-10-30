@@ -1504,54 +1504,82 @@ fn each_frame_has_its_own_locals() {
             .map(|locals| {
                 locals
                     .iter()
-                    .map(|local| format!("{} {}", local.name, local.location.describe()))
+                    .map(|local| (local.name.clone(), local.location.clone()))
                     .collect::<Vec<_>>()
             })
     };
+    fn reg(name: &str, register: &str) -> (String, LocalVariableLocation) {
+        let register = register.to_string();
+        (
+            name.to_string(),
+            LocalVariableLocation::Register { register },
+        )
+    }
+    fn frame(name: &str, offset: i32) -> (String, LocalVariableLocation) {
+        (
+            name.to_string(),
+            LocalVariableLocation::FrameRelative { offset },
+        )
+    }
+    fn unavailable(name: &str, reason: &str) -> (String, LocalVariableLocation) {
+        let reason = reason.to_string();
+        (
+            name.to_string(),
+            LocalVariableLocation::Unavailable { reason },
+        )
+    }
+    let optimized_out = |name| unavailable(name, "optimized out");
+    let not_live = |name| unavailable(name, "not live at this address");
 
     // In the first `atomic_add`, five frames deep: every inline site's
     // variables are its frame's, live where their ranges say. `dst` and
     // `self` have no range at all: the compiler dropped them.
     assert_eq!(
         locals(0x101d, 0).unwrap(),
-        ["dst <optimized out>", "val [frame+0x0]"]
+        [optimized_out("dst"), frame("val", 0)]
     );
     assert_eq!(
         locals(0x101d, 1).unwrap(),
-        ["self <optimized out>", "val [frame+0x0]"]
+        [optimized_out("self"), frame("val", 0)]
     );
     assert_eq!(
         locals(0x101d, 2).unwrap(),
-        ["value [frame+0x8]", "scaled [frame+0x0]"]
+        [frame("value", 8), frame("scaled", 0)]
     );
     assert_eq!(
         locals(0x101d, 3).unwrap(),
-        [
-            "value [frame+0x8]",
-            "doubled <not live at this address>",
-            "tripled <not live at this address>"
-        ]
+        [frame("value", 8), not_live("doubled"), not_live("tripled")]
     );
     // The procedure's own: its parameters and its block's `seed`, none of
     // the inlined calls', and not `total`, whose block starts at 0x1050.
     assert_eq!(
         locals(0x101d, 4).unwrap(),
-        ["driver rcx", "registry rdx", "seed [frame+0x8]"]
+        [
+            reg("driver", "rcx"),
+            reg("registry", "rdx"),
+            frame("seed", 8)
+        ]
     );
     assert_eq!(locals(0x101d, 5), None);
 
     // Outside the inline sites the innermost frame is the procedure.
-    assert_eq!(locals(0x1000, 0).unwrap(), ["driver rcx", "registry rdx"]);
+    assert_eq!(
+        locals(0x1000, 0).unwrap(),
+        [reg("driver", "rcx"), reg("registry", "rdx")]
+    );
     assert_eq!(
         locals(0x1053, 1).unwrap(),
         [
-            "driver <not live at this address>",
-            "registry rdx",
-            "seed [frame+0x8]",
-            "total [frame+0xc]"
+            not_live("driver"),
+            reg("registry", "rdx"),
+            frame("seed", 8),
+            frame("total", 0xc)
         ]
     );
-    assert_eq!(locals(0x1053, 0).unwrap(), ["self [frame+0xc]", "rhs edx"]);
+    assert_eq!(
+        locals(0x1053, 0).unwrap(),
+        [frame("self", 0xc), reg("rhs", "edx")]
+    );
 }
 
 /// MSVC's layout (`tests/fixtures/msvc_inline.pdb`, see its README): the

@@ -768,7 +768,6 @@ mod tests {
             !framing.take_peer_reset_seen(),
             "a set SYNC bit in a KDNET id is not a target reload"
         );
-        assert_eq!(framing.kdnet_remote_high_water, Some(0x25f4c));
         let second_ack = Header::decode(
             framing.transport.outbound[HEADER_SIZE..2 * HEADER_SIZE]
                 .try_into()

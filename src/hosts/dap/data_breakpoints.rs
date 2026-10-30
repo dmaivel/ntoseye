@@ -69,7 +69,7 @@ impl Server {
             })));
         }
         Ok(Some(json!({
-            "dataId": format!("{address:#x}:{len}"),
+            "dataId": data_id(address, len),
             "description": format!("{len} byte(s) at {address:#x}"),
             "accessTypes": ["write", "readWrite"],
             "canPersist": false,
@@ -259,6 +259,12 @@ fn watch_length(size: usize) -> u8 {
     }
 }
 
+/// The opaque id the client hands back in `setDataBreakpoints`; `parse_data_id`
+/// reads it.
+fn data_id(address: u64, len: u8) -> String {
+    format!("{address:#x}:{len}")
+}
+
 fn parse_data_id(id: &str) -> result::Result<(u64, u8), String> {
     let (address, len) = id
         .split_once(':')
@@ -272,12 +278,12 @@ fn parse_data_id(id: &str) -> result::Result<(u64, u8), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_data_id, watch_length};
+    use super::{data_id, parse_data_id, watch_length};
 
     #[test]
     fn data_ids_round_trip_through_the_client() {
-        let (address, len) = parse_data_id("0x1000:4").unwrap();
-        assert_eq!((address, len), (0x1000, 4));
+        assert_eq!(parse_data_id(&data_id(0x1000, 4)), Ok((0x1000, 4)));
+        assert_eq!(parse_data_id(&data_id(u64::MAX, 8)), Ok((u64::MAX, 8)));
         assert!(parse_data_id("0x1000").is_err());
         assert!(parse_data_id("0x1000:x").is_err());
     }

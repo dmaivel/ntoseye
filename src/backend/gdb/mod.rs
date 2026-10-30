@@ -2279,8 +2279,10 @@ mod tests {
 
     #[test]
     fn rejects_truncated_escape_sequences() {
-        let err = GdbClient::decode_packet_data(b"}").unwrap_err();
-        assert!(err.to_string().contains("truncated escaped packet data"));
+        assert!(matches!(
+            GdbClient::decode_packet_data(b"}"),
+            Err(Error::Rsp(_))
+        ));
     }
 
     #[test]

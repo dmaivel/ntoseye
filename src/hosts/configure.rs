@@ -735,6 +735,19 @@ mod tests {
         );
     }
 
+    /// Each selected transport adds its run command, and only KD sets the
+    /// guest up, on the port the hypervisor reports.
+    #[test]
+    fn transport_instructions_cover_each_selected_transport() {
+        let both = transport_instructions(ConfigureBackend::KdAndGdb, || 2);
+        assert_eq!(both.run, ["ntoseye", "ntoseye --backend gdb"]);
+        assert!(both.guest[1].contains("debugport:2"), "{:?}", both.guest);
+
+        let gdb = transport_instructions(ConfigureBackend::Gdb, || unreachable!());
+        assert_eq!(gdb.run, ["ntoseye --backend gdb"]);
+        assert!(gdb.guest.is_empty(), "{:?}", gdb.guest);
+    }
+
     #[test]
     fn status_renders_configured_targets_and_commands() {
         let guest = Guest {

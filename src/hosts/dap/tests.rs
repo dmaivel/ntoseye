@@ -346,7 +346,10 @@ fn dump_targets_reject_kd_handshake_timeout_even_with_invalid_live_arguments() {
             "kdHandshakeTimeout": value
         }))
         .unwrap_err();
-        assert_eq!(err, "dump does not use 'kdHandshakeTimeout'");
+        assert!(
+            err.contains("dump") && err.contains("kdHandshakeTimeout"),
+            "{value}: {err}"
+        );
     }
 }
 

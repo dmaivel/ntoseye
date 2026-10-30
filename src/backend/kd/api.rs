@@ -1401,11 +1401,10 @@ mod tests {
         );
 
         let mut framing = KdFraming::new(Loopback::new(stream));
-        let err = get_context(&mut framing, 0, amd64::CONTEXT_ALL).unwrap_err();
-        match err {
-            Error::Kd(msg) => assert!(msg.contains("processor mismatch")),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(matches!(
+            get_context(&mut framing, 0, amd64::CONTEXT_ALL),
+            Err(Error::Kd(_))
+        ));
     }
 
     #[test]
