@@ -883,6 +883,13 @@ pub struct Session {
     /// of the session's traps while being run past it, before executing it:
     /// its next hit on that trap is the same event, not a new one.
     trap_interrupted: Option<(InterruptedTrap, u64)>,
+    /// The vCPU whose single step another vCPU's stop came before, on a
+    /// backend that steps only the stopping processor (ARM64 KD), and the
+    /// NT thread the step was for: the step stays armed and fires when the
+    /// target next runs, so that vCPU's next step resumes the target and
+    /// waits for it rather than stepping again. Any other resume spends it
+    /// (the run loops absorb its stray stop).
+    step_in_flight: Option<(String, Option<u64>)>,
     /// The user-mode image mapping last reported, by the address-space root
     /// it was mapped into, its base, and whether the user-image trap (rather
     /// than Windows) reported it. Under `!gflag +ksl` Windows reports an

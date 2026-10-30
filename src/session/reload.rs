@@ -153,6 +153,7 @@ impl Session {
             *self.bugcheck_trap.edit() = None;
             self.module_traps.edit().clear();
             self.trap_interrupted = None;
+            self.step_in_flight = None;
             self.last_user_image = None;
             let TargetReloadOutcome {
                 report,

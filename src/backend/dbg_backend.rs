@@ -871,6 +871,13 @@ pub trait DebugBackend {
         false
     }
 
+    /// Whether only the processor that reported the stop can be stepped. A
+    /// step armed on another processor before that stop then stays armed,
+    /// and the step goes on by resuming the target, not by stepping again.
+    fn steps_only_the_stopping_processor(&self) -> bool {
+        false
+    }
+
     /// Whether Windows' own exception handlers take the debug exceptions
     /// this backend's single steps and breakpoints raise: KD sets the trap
     /// flag and plants `int3` through the kernel, which dispatches each trap

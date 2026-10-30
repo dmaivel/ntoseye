@@ -173,6 +173,7 @@ Keeping this file:
 - `!hvu`, `u` and `ub` take an `L?<count>` range, `.dump` on a user-mode minidump gives the usual kernel-target refusal, `.process /i` and `attach` on a running target no longer claim that no processor runs the process, and `!dbgprint`'s count follows the radix.
 - The StorPort adapter and class-device overviews say when a unit or packet walk stopped early, `!rcdrkd.rcdrloglist` and `!rcdrkd.rcdrlogdump` take the context address as any expression, `lm` reports a malformed `m`, `u` or `k` option, and `!drvobj` takes `\Driver\` in any case.
 - Python `help()` shows SDK docstrings as written, `\Driver\ACPI`, where command docstrings showed each backslash doubled.
+- On ARM64 over KD, a step or a step walk that a breakpoint hit on another processor came before goes on once that hit is passed over (a Python `when=` callback that declines it), where it failed with "only that processor can step"; a step that the processor finished in another thread it switched to meanwhile ends there, with the diverted notice.
 
 ## v0.52.0 (2026-10-25)
 

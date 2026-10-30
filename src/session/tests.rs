@@ -146,6 +146,17 @@ pub struct MockBackend {
     /// address; a read of any other faults, as on hardware.
     msrs: HashMap<(u16, u32), u64>,
     device_registers: HashMap<(u16, u64), u32>,
+    /// Step only the vCPU that reported the last stop, as ARM64 KD does.
+    stopping_processor_only: bool,
+    /// The first step is cut short by this vCPU (and processor) hitting a
+    /// breakpoint where its landing stands; the stepped vCPU's step stays
+    /// armed, and lands on the second landing when the target resumes.
+    step_cut_short_by: Option<(&'static str, u16, Landing, Landing)>,
+    armed_step: Option<Landing>,
+    /// The vCPU that reported the last stop.
+    stopped_by: &'static str,
+    /// The steps the backend was asked for.
+    steps: Arc<AtomicUsize>,
 }
 
 /// Where processor 0 stands after a mock step or run: its IP and stack
@@ -205,6 +216,11 @@ impl Default for MockBackend {
             immediate_stop: None,
             msrs: HashMap::new(),
             device_registers: HashMap::new(),
+            stopping_processor_only: false,
+            step_cut_short_by: None,
+            armed_step: None,
+            stopped_by: "p01.01",
+            steps: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -429,6 +445,12 @@ impl DebugBackend for MockBackend {
         }
         self.continues.fetch_add(1, Ordering::Relaxed);
         self.running = true;
+        if let Some(landing) = self.armed_step.take() {
+            self.land(landing);
+            self.stopped_by = "p01.01";
+            self.interrupt_events.push_back(single_step_event());
+            return Ok(());
+        }
         if let Some((vcpu, site)) = self.parked_vcpu {
             self.parked_resumes.fetch_add(1, Ordering::Relaxed);
             let mut event = breakpoint_event(site);
@@ -450,6 +472,9 @@ impl DebugBackend for MockBackend {
     }
     fn single_step_unsafe(&self) -> bool {
         self.single_step_unsafe
+    }
+    fn steps_only_the_stopping_processor(&self) -> bool {
+        self.stopping_processor_only
     }
     fn halts_in_windows_hypervisor(&self) -> bool {
         self.single_step_unsafe
@@ -497,6 +522,23 @@ impl DebugBackend for MockBackend {
             !self.single_step_unsafe,
             "single-stepped where it is unsafe"
         );
+        if self.stopping_processor_only && self.selected != self.stopped_by {
+            return Err(Error::Kd(format!(
+                "{} stopped the target; {} cannot step",
+                self.stopped_by, self.selected
+            )));
+        }
+        self.steps.fetch_add(1, Ordering::Relaxed);
+        if let Some((vcpu, processor, hit, armed)) = self.step_cut_short_by.take() {
+            self.set("rip", hit.rip);
+            self.threads.lock().insert(processor, VirtAddr(hit.ethread));
+            self.armed_step = Some(armed);
+            self.stopped_by = vcpu;
+            let mut event = breakpoint_event(hit.rip);
+            event.thread_id = Some(vcpu.into());
+            self.interrupt_events.push_back(event);
+            return Ok(());
+        }
         let mut event = single_step_event();
         self.step_reporter = None;
         if let Some(landing) = self.step_landings.pop_front() {
@@ -2215,6 +2257,57 @@ fn a_declined_hit_on_another_vcpu_hands_the_step_back() {
     session.pass_declined_hit("p01.01").unwrap();
     assert_eq!(session.current_thread, "p01.01");
     assert_eq!(rip(&mut session), 0x1001);
+}
+
+/// Where only the vCPU that reported a stop can step (ARM64 KD), a step
+/// another vCPU's hit came before stays armed: declined, the hit is stepped
+/// past and the target resumed, and the armed step is the step's stop. A
+/// new step of the stepped vCPU would be refused while the other one holds
+/// the target. The armed step is the processor's: taken by a thread switched
+/// in meanwhile, it ends the step diverted, where that thread is.
+#[test]
+fn a_step_another_vcpus_declined_hit_came_before_goes_on_by_resuming() {
+    let at = |rip, rsp, ethread| Landing { rip, rsp, ethread };
+    for (finished_in, diverted) in [(WALKED, false), (OTHER, true)] {
+        let mut backend = MockBackend {
+            allow_breakpoints: true,
+            one_vcpu: true,
+            stopping_processor_only: true,
+            step_cut_short_by: Some((
+                "p01.02",
+                1,
+                at(0x1020, 0x8000, OTHER),
+                at(0x1001, 0x2000, finished_in),
+            )),
+            ..MockBackend::default()
+        };
+        backend.land(at(0x1000, 0x2000, WALKED));
+        let (steps, continues) = (Arc::clone(&backend.steps), Arc::clone(&backend.continues));
+        let mut session = session_running_code(&[0x90u8; 0x40], backend);
+        session
+            .breakpoints
+            .edit()
+            .insert_for_test(1, VirtAddr(0x1020), true, None);
+
+        let hit = session.step().unwrap();
+        assert!(matches!(hit, ContinueOutcome::Breakpoint { .. }), "{hit:?}");
+        session.decline(Motion::Step, "p01.01").unwrap();
+        let stepped = session.step().unwrap();
+
+        assert!(
+            matches!(stepped, ContinueOutcome::Step { rip: 0x1001 }),
+            "{stepped:?}"
+        );
+        // The step itself, then the hit's vCPU off its site; none after.
+        assert_eq!(steps.load(Ordering::Relaxed), 2);
+        assert_eq!(continues.load(Ordering::Relaxed), 1);
+        assert_eq!(session.current_thread, "p01.01");
+        let noted = session
+            .take_notices()
+            .iter()
+            .any(|notice| notice.text.contains("did not reach the next instruction"));
+        assert_eq!(noted, diverted, "{finished_in:#x}");
+    }
 }
 
 /// A walk another stop ended while it ran over a call goes on by finishing

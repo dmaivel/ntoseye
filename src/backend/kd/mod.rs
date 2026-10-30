@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use ntoseye_macros::record;
 
-use crate::arch::{Arch, HwBreakpointAccess, RegisterMap};
+use crate::arch::{Arch, Family, HwBreakpointAccess, RegisterMap};
 use crate::backend::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability, DebugLog,
     DebugOutputPage, ExceptionRecord, PciConfigAddress, ProcessorRead, StopEvent, ThreadLayout,
@@ -506,6 +506,12 @@ impl DebugBackend for KdBackend {
     }
     fn debug_traps_reach_target(&self) -> bool {
         true
+    }
+    // A frozen ARM64 processor reports its state inside
+    // nt!KiFreezeTargetExecution with debug exceptions masked, where no
+    // step can occur; see `single_step`.
+    fn steps_only_the_stopping_processor(&self) -> bool {
+        self.arch.family() == Family::Arm
     }
     fn name(&self) -> &'static str {
         self.backend_name

@@ -97,6 +97,9 @@ impl DebugBackend for KdBackendHandle {
     fn debug_traps_reach_target(&self) -> bool {
         true
     }
+    fn steps_only_the_stopping_processor(&self) -> bool {
+        self.lock().steps_only_the_stopping_processor()
+    }
 
     fn revalidate_host_memory(&mut self, phys: &PhysMem) -> Result<()> {
         // Target-mediated memory is the target itself: there is no host

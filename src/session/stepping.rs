@@ -68,13 +68,22 @@ impl Session {
         if let Some(outcome) = self.kept_watch_hit()? {
             return Ok((outcome, RunPast::Kept));
         }
-        self.require_steppable_vcpu()?;
-        // A walk that reaches the kernel's return to user mode ends here
-        // too, on the instruction it could not step, with this error.
-        if self.run_backend().debug_traps_reach_target() {
-            let rip = VirtAddr(self.current_rip());
-            if let Some(refusal) = self.target.kernel_transition_refusal(rip, "a single step") {
-                return Err(Error::DebugInfo(refusal));
+        // A step another vCPU's stop came before is still armed on this one,
+        // which reads as frozen, not at its instruction: it goes on by
+        // resuming. A step of any other vCPU spends it.
+        let in_flight = self
+            .step_in_flight
+            .take()
+            .filter(|(vcpu, _)| *vcpu == self.current_thread);
+        if in_flight.is_none() {
+            self.require_steppable_vcpu()?;
+            // A walk that reaches the kernel's return to user mode ends here
+            // too, on the instruction it could not step, with this error.
+            if self.run_backend().debug_traps_reach_target() {
+                let rip = VirtAddr(self.current_rip());
+                if let Some(refusal) = self.target.kernel_transition_refusal(rip, "a single step") {
+                    return Err(Error::DebugInfo(refusal));
+                }
             }
         }
         self.target.selected_frame = None;
@@ -86,20 +95,44 @@ impl Session {
         // A step executes the target too, which ends a `.process` context.
         self.target.end_process_context_on_run();
         self.backend.set_current_thread(&self.current_thread)?;
-        let mut stepped = match self.step_over_site_at_pc()? {
-            Some(stepped) => stepped,
-            None if self.backend.single_step_unsafe() => step_without_trap(
-                self.backend.as_mut(),
-                &self.register_map,
-                &self.target,
-                &self.breakpoints,
-                &self.current_thread,
-            )?,
-            None => match self.trap_flag_step()? {
-                None => RunPast::Reached,
-                // Another thread's stop came first, and is the step's.
+        let mut stepped = if let Some((_, armed_in)) = in_flight {
+            match self.trap_flag_step(true)? {
+                // The armed step is the processor's, not the thread's: a
+                // thread switched in meanwhile takes it, and the one the
+                // step was for goes on elsewhere.
+                None => {
+                    let finished_in = self
+                        .backend
+                        .stopped_thread_id()
+                        .ok()
+                        .and_then(|vcpu| nt_thread_on(&self.target, &vcpu));
+                    if armed_in
+                        .zip(finished_in)
+                        .is_some_and(|(armed, finished)| armed != finished)
+                    {
+                        RunPast::Diverted
+                    } else {
+                        RunPast::Reached
+                    }
+                }
                 Some(outcome) => return Ok((outcome, RunPast::Reached)),
-            },
+            }
+        } else {
+            match self.step_over_site_at_pc()? {
+                Some(stepped) => stepped,
+                None if self.backend.single_step_unsafe() => step_without_trap(
+                    self.backend.as_mut(),
+                    &self.register_map,
+                    &self.target,
+                    &self.breakpoints,
+                    &self.current_thread,
+                )?,
+                None => match self.trap_flag_step(false)? {
+                    None => RunPast::Reached,
+                    // Another thread's stop came first, and is the step's.
+                    Some(outcome) => return Ok((outcome, RunPast::Reached)),
+                },
+            }
         };
         for id in self.breakpoints.one_shot_hit_ids() {
             self.breakpoints
@@ -167,12 +200,20 @@ impl Session {
     /// scoped to this thread's, or the single step an absorb left another
     /// thread, is passed and the wait goes on. Any other is where the step
     /// stops, and is returned, the trap flag cleared on the stepping thread if
-    /// its processor still runs it.
-    fn trap_flag_step(&mut self) -> Result<Option<ContinueOutcome>> {
+    /// its processor still runs it; on a backend that steps only the stopping
+    /// processor, whose stepping processor is frozen where the flag cannot
+    /// be cleared, the step stays armed instead (see
+    /// [`Session::step_in_flight`]). `armed`: the step is already armed (by
+    /// such a stop before), so the target is resumed instead of stepped.
+    fn trap_flag_step(&mut self, armed: bool) -> Result<Option<ContinueOutcome>> {
         let arch = self.target.arch();
         let stepping = self.current_thread.clone();
         let stepping_thread = nt_thread_on(&self.target, &stepping);
-        self.backend.step()?;
+        if armed {
+            self.continue_backend(ContinueDisposition::Handled)?;
+        } else {
+            self.backend.step()?;
+        }
         loop {
             let event = wait_for_step_stop(self.backend.as_mut(), &self.target.interrupt)?;
             // The step's own stop is its thread's, on whichever processor it
@@ -193,7 +234,9 @@ impl Session {
                 StopResolution::Resumed | StopResolution::ModulesChanged => {}
                 resolution => {
                     let outcome = self.continue_outcome_from_resolution(resolution);
-                    if nt_thread_on(&self.target, &stepping) == stepping_thread {
+                    if self.backend.steps_only_the_stopping_processor() {
+                        self.step_in_flight = Some((stepping, stepping_thread));
+                    } else if nt_thread_on(&self.target, &stepping) == stepping_thread {
                         let reported = self.current_thread.clone();
                         self.backend.set_current_thread(&stepping)?;
                         clear_trap_flag(arch, self.backend.as_mut(), &self.register_map)?;
@@ -230,9 +273,9 @@ impl Session {
     /// Say that a step stopped where it was diverted (see [`Self::step_once`]).
     fn note_diverted(&mut self) {
         self.notices.push(Notice::warning(format!(
-            "{} did not reach the next instruction within {RUN_PAST_TIMEOUT:?} of running \
-             alone: it took an interrupt first, and stopped in the handler (or in another \
-             thread it switched to); resume with g to let it finish",
+            "{} did not reach the next instruction: it took an interrupt first, and stopped \
+             in the handler or in another thread it switched to (run alone, within \
+             {RUN_PAST_TIMEOUT:?}); resume with g to let it finish",
             self.current_thread
         )));
     }
@@ -538,6 +581,20 @@ impl Session {
         if let Some(PendingWalk { vcpu, sites }) = self.pending_walk.take() {
             if sites.is_empty() {
                 self.pass_declined_hit(&vcpu)?;
+                // A step still armed on the walk's vCPU (see
+                // `step_in_flight`) finishes first: until it does, the vCPU
+                // reads as frozen, not where the walk is.
+                if self
+                    .step_in_flight
+                    .as_ref()
+                    .is_some_and(|(armed, _)| *armed == vcpu)
+                {
+                    let (outcome, _) = self.step_once()?;
+                    if !matches!(outcome, ContinueOutcome::Step { .. }) {
+                        self.pending_walk = Some(PendingWalk { vcpu, sites });
+                        return Ok(outcome);
+                    }
+                }
             } else {
                 match self.run_to_any(
                     &sites,
@@ -641,8 +698,11 @@ impl Session {
                 .code_breakpoint_after_step(state.ip, rip)
                 .and_then(|id| self.breakpoint_outcome(id, rip))
             {
+                // The walk goes on from where the step ended: the walked
+                // thread, which a context switch can have moved to
+                // another vCPU than the one the step started on.
                 self.pending_walk = Some(PendingWalk {
-                    vcpu,
+                    vcpu: self.current_thread.clone(),
                     sites: Vec::new(),
                 });
                 self.note_stop(&outcome);

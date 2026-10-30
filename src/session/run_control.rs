@@ -253,6 +253,7 @@ impl Session {
     /// No stopped inspection view survives a successful continuation, including
     /// one performed internally while absorbing a breakpoint or notification.
     pub(super) fn invalidate_running_context(&mut self) {
+        self.step_in_flight = None;
         self.target.end_process_context_on_run();
         self.target.selected_frame = None;
         self.target.registers = None;

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::arch::{Family, RegisterMap};
 use crate::backend::dbg_backend::{
-    ContinueDisposition, ModuleEvent, ModuleNotification, StopEvent,
+    ContinueDisposition, DebugBackend, ModuleEvent, ModuleNotification, StopEvent,
 };
 use crate::base::error::{Error, Result};
 
@@ -363,7 +363,7 @@ impl KdBackend {
         // inside nt!KiFreezeTargetExecution, with debug exceptions masked
         // (PSTATE.D), not as the code the freeze interrupted, so the trace
         // flag is set in a state where no step can occur.
-        if processor != owner && self.arch.family() == Family::Arm {
+        if processor != owner && self.steps_only_the_stopping_processor() {
             return Err(Error::Kd(format!(
                 "processor {owner} stopped the target, and on ARM64 only that processor can \
                  step; select it with ~{owner}s, or resume with g"
