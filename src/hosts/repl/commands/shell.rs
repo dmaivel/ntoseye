@@ -75,7 +75,7 @@ fn shell(
         _ => (None, tail),
     };
     if host_command.is_empty() {
-        outln!("{}", command_help(name));
+        args::ArgError::Missing.report(name);
         return Ok(Flow::Continue);
     }
     let input = match commands {

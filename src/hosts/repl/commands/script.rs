@@ -48,8 +48,7 @@ fn if_statement(
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     if tail.is_empty() {
-        outln!("{}", command_help(name));
-        return Ok(Flow::Continue);
+        return missing(name);
     }
     let statement = match parse_if(&tail) {
         Ok(statement) => statement,
@@ -235,8 +234,7 @@ fn block(
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     if tail.is_empty() {
-        outln!("{}", command_help(name));
-        return Ok(Flow::Continue);
+        return missing(name);
     }
     let (body, rest) = match take_delimited(&tail, '{', '}') {
         Ok(block) => block,
@@ -272,8 +270,7 @@ fn j(
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     if tail.is_empty() {
-        outln!("{}", command_help(name));
-        return Ok(Flow::Continue);
+        return missing(name);
     }
     // `*` in an expression multiplies; a comment is never Command1.
     let is_command = |word: &str| {
@@ -387,6 +384,13 @@ fn sleep(state: &mut ReplState<'_>, milliseconds: u64) -> Result<()> {
 /// told apart from it, so the line is abandoned.
 fn malformed(name: &str, error: String) -> Result<Flow> {
     error!("{name}: {error}");
+    Ok(Flow::Denied)
+}
+
+/// A construct typed without its operands: the help stands in for the error,
+/// which still counts, and the construct cannot run, as with [`malformed`].
+fn missing(name: &str) -> Result<Flow> {
+    args::ArgError::Missing.report(name);
     Ok(Flow::Denied)
 }
 
@@ -698,8 +702,7 @@ impl ReplState<'_> {
         parse: fn(&str) -> std::result::Result<LoopStatement<'_>, String>,
     ) -> Result<Flow> {
         if tail.is_empty() {
-            outln!("{}", command_help(name));
-            return Ok(Flow::Continue);
+            return missing(name);
         }
         let statement = match parse(tail) {
             Ok(statement) => statement,
@@ -760,8 +763,7 @@ impl ReplState<'_> {
 
     fn loop_jump(&mut self, name: &str, tail: &str, jump: Jump) -> Result<Flow> {
         if !tail.is_empty() {
-            outln!("{}", command_help(name));
-            return Ok(Flow::Continue);
+            return missing(name);
         }
         if !self.breakable_loop {
             error!("{name} is only valid inside a .for, .while, or .do loop");
@@ -789,8 +791,7 @@ impl ReplState<'_> {
             (unquote_whole(operand), Vec::new())
         };
         if path.is_empty() {
-            outln!("{}", command_help("$<"));
-            return Ok(Flow::Continue);
+            return missing("$<");
         }
         let text = match std::fs::read_to_string(path.as_ref()) {
             Ok(text) => text,
@@ -852,7 +853,7 @@ impl ReplState<'_> {
             return;
         };
         if expression.is_empty() {
-            outln!("{}", command_help("r"));
+            args::ArgError::Missing.report("r");
             return;
         }
         let Some(value) = self.eval_or_report(expression) else {
@@ -931,6 +932,17 @@ mod tests {
     fn do_loop_tests_after_the_body() {
         let (_, text) = interactive("r $t0 = 5; .do { .echo ran; r $t0 = @$t0 + 1 } (@$t0 < 3)");
         assert_eq!(text, "ran\n");
+    }
+
+    #[test]
+    fn a_refused_command_ends_the_loop_and_the_line() {
+        // wrmsr needs a halted target, and the memory backend always runs.
+        let (flow, text) = interactive(
+            ".for (r $t0 = 0; @$t0 < 3; r $t0 = @$t0 + 1) { wrmsr 10 0; .echo body }; .echo after",
+        );
+        assert_eq!(flow, Flow::Denied);
+        assert_eq!(text.matches("error:").count(), 1, "{text}");
+        assert!(!text.contains("body") && !text.contains("after"), "{text}");
     }
 
     #[test]

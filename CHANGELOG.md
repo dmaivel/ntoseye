@@ -29,6 +29,7 @@ Keeping this file:
 - `LfhSubsegment.block_count` counts the blocks a subsegment withholds, and `LfhSubsegment.bit_stride` gives its bitmap's bits per block; `LfhSubsegment.bucket` is `None` for a subsegment that names no bucket, and `VtopDetail.physical_walk` says whether its entry addresses are physical (an explicit DTB) or in the self-map.
 - `sx` aliases follow WinDbg's event table: `cc` is Ctrl+C (0x40010005), where it named the C++ exception (`eh`); `asrt` is an assertion failure (0xC0000420); the breakpoint exception is `bpe`, where it was `bp`; and `bpec`, `ssec`, `cce`, `ch`, `hc`, `wkd`, `aph`, `dbce`, `vcpp`, `clr` and `clrn` are added.
 - `bp`, `ba` and `bm` with `/p <pid>` evaluate the address or pattern in that process, as after `.process /p` and without changing the current process context, so `ba e1 /p <pid> kernelbase!GetFileAttributesExW+0x60` works from a break-in in the System process or the hypervisor; the SDK's `breakpoints.add(hardware=True, process=...)` and `breakpoints.watch(..., process=...)` do the same.
+- `dt -a` counts above 16 and `dl` sizes above 64 are errors, where they were cut silently, and `dt`'s help says arrays show their first 16 elements.
 
 ### Fixed
 
@@ -161,6 +162,15 @@ Keeping this file:
 - Corrupt guest data no longer makes ntoseye allocate gigabytes for a hypervisor image, or overflow on virtio descriptors and MDL frame numbers; virtio views show a returned buffer's length and a queue's interrupt signal as unknown when they did not read, where they showed 0 or off.
 - `!lookaside` says when a walk stopped at its limit or on a bad link, the registry shows a hive whose root path cannot be read as unavailable, not unmounted, and the shadow service table is skipped when its descriptor's layout is missing, where fixed offsets were assumed.
 - On a triage dump, the process list is refused when its layout names no process ID, where every process showed PID 0.
+- Commands that answer a missing argument with their help, such as `undisplay`, `.if`, `j` and `$<`, count as failed, so a `;` list stops there and MCP reports the failure; `.break` or `.continue` with an argument ends its loop.
+- A command refused inside `.while`, `.for` or `.do` ends the loop, where the loop repeated the refusal until Ctrl+C.
+- `~N` and `vcpu N` read the processor number in decimal, as `~` lists it, where they used the current radix and `~10s` selected processor 16; `vcpu` works on the `memory` backend, as `~Ns` does.
+- `f` refuses a range over 16 MiB, and `bc`, `bd` and `be` take any ID range without expanding it, where a wide one hung the REPL.
+- `.printf %mu` and `dx` read a string that ends before an unmapped page or a dump's capture hole, and `dx` marks a string it cut short with `...`; an unnamed object's `ObjectName` is empty, so the documented `Where(o => o.Name != "")` handle query works.
+- A breakpoint target with a space after a comma in a template argument list, `bp nt!X<A, B>::f`, is one target.
+- `!pci` reads its arguments in hex, as its help says, and needs a halted target; `.hh <name>` finds aliases and Python commands; `ds` and `dS` refuse a descriptor that runs past the top of the address space; `!analyze -hang` says how many processors it left out; and `!cpuinfo` on a triage dump shows the dump's metadata when any field is missing.
+- `!hvu`, `u` and `ub` take an `L?<count>` range, `.dump` on a user-mode minidump gives the usual kernel-target refusal, `.process /i` and `attach` on a running target no longer claim that no processor runs the process, and `!dbgprint`'s count follows the radix.
+- The StorPort adapter and class-device overviews say when a unit or packet walk stopped early, `!rcdrkd.rcdrloglist` and `!rcdrkd.rcdrlogdump` take the context address as any expression, `lm` reports a malformed `m`, `u` or `k` option, and `!drvobj` takes `\Driver\` in any case.
 
 ## v0.52.0 (2026-10-25)
 

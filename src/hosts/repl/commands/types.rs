@@ -35,9 +35,10 @@ pub fn untyped_symbol_message(name: &str, address: VirtAddr) -> String {
 
 /// Show a type layout or a decoded structure.
 ///
-/// -r expands nested structures, -a expands bounded arrays, and -v shows field
-/// sizes. -y matches names by case-insensitive prefix, and -l <field> walks a
-/// LIST_ENTRY field. ntoseye looks for a bare type name in the kernel PDB
+/// -r expands nested structures, and -v shows field sizes. Arrays show their
+/// first 16 elements; -a<N> shows the first N, up to 16. -y matches names by
+/// case-insensitive prefix, and -l <field> walks a LIST_ENTRY field. ntoseye
+/// looks for a bare type name in the kernel PDB
 /// first, and then in the modules of the current address space. If the PDB of a
 /// module defines a member type, ntoseye names the type with that module
 /// (wdf01000!_WDF_DRIVER_GLOBALS) and expands it from that PDB. If the PDB only
@@ -331,7 +332,10 @@ fn parse_array_option(arg: &str) -> std::result::Result<usize, String> {
     let value = suffix
         .parse::<usize>()
         .map_err(|_| format!("invalid -a count '{}'", suffix))?;
-    Ok(value.min(MAX_ARRAY_ELEMENTS))
+    if value > MAX_ARRAY_ELEMENTS {
+        return Err(format!("-a count must be at most {MAX_ARRAY_ELEMENTS}"));
+    }
+    Ok(value)
 }
 
 fn parse_dt_args(args: &[Cow<'_, str>]) -> std::result::Result<ParsedDtArgs, String> {
@@ -1069,9 +1073,9 @@ impl ReplState<'_> {
         let limit = requested.min(MAX_LIST_ENTRIES as u64) as usize;
         let display_words = match positional.get(2) {
             Some(size) => match self.eval_or_report(size) {
-                Some(size) if size.0 > 0 => size.0.min(MAX_DL_WORDS as u64) as usize,
+                Some(size) if (1..=MAX_DL_WORDS as u64).contains(&size.0) => size.0 as usize,
                 Some(_) => {
-                    error!("dl size must be greater than zero");
+                    error!("dl size must be 1..{MAX_DL_WORDS}");
                     return Ok(());
                 }
                 None => return Ok(()),

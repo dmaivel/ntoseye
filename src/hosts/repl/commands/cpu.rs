@@ -13,7 +13,6 @@ use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError, FromArg};
 use crate::hosts::repl::*;
 use crate::hosts::ui;
-use crate::nt::expr::Expr;
 use crate::nt::target::cpu::{
     CpuInfo, CpuTriageFallback, DescriptorRegister, Gdt, GdtDescriptor, Idt, IdtGate, Irql, Pcr,
     Prcb, Processor, SpecialRegistersArea, msr_kind, msr_name, parse_msr_name,
@@ -1043,15 +1042,13 @@ fn vcpu(
         .thread_list()
         .map_err(|e| Error::DebugInfo(format!("failed to list the processors: {e}")))?;
 
-    let thread_id = Expr::eval_with_radix(&requested, &state.ctx.target, state.ctx.radix)
-        .ok()
-        .and_then(|value| u16::try_from(value.0).ok())
-        .and_then(|number| {
-            threads
-                .iter()
-                .find(|thread| processor_index_from_backend_thread_id(thread) == Some(number))
-                .cloned()
-        });
+    // Processor numbers are decimal, as `~` and the prompt show them.
+    let thread_id = requested.parse::<u16>().ok().and_then(|number| {
+        threads
+            .iter()
+            .find(|thread| processor_index_from_backend_thread_id(thread) == Some(number))
+            .cloned()
+    });
     let Some(thread_id) = thread_id else {
         return Err(Error::DebugInfo(format!(
             "no processor '{requested}' (`~` lists the processors)"
@@ -1089,14 +1086,14 @@ impl ReplState<'_> {
                 );
                 return Ok(Flow::Continue);
             }
-            let selector =
-                match Expr::eval_with_radix(&body[..digits], &self.ctx.target, self.ctx.radix) {
-                    Ok(value) => TildeSelector::Number(value.0),
-                    Err(_) => {
-                        error!("processor {} out of range", &body[..digits]);
-                        return Ok(Flow::Continue);
-                    }
-                };
+            // Decimal, as WinDbg reads `~N` and as `~` lists the processors.
+            let selector = match body[..digits].parse::<u64>() {
+                Ok(value) => TildeSelector::Number(value),
+                Err(_) => {
+                    error!("processor {} out of range", &body[..digits]);
+                    return Ok(Flow::Continue);
+                }
+            };
             (selector, &body[digits..])
         };
         let suffix = suffix.trim();
@@ -1544,7 +1541,7 @@ mod tests {
     use super::tilde_command;
 
     #[test]
-    fn tilde_runs_the_k_family_and_r_with_their_arguments() {
+    fn tilde_command_accepts_the_k_family_and_r_with_arguments() {
         for suffix in ["k", "kv", "kb", "KP", "k 3", "kf 2", "r", "r rip"] {
             assert_eq!(tilde_command(suffix), Some(suffix), "{suffix}");
         }

@@ -198,7 +198,7 @@ fn ev(
     #[arg(raw, usage = "<expression>", complete = Expression)] expression: String,
 ) -> Result<()> {
     if expression.is_empty() {
-        outln!("{}", command_help("ev"));
+        ArgError::Missing.report("ev");
         return Ok(());
     }
 
@@ -767,7 +767,7 @@ struct ModuleWords<'w> {
     containing: Option<Option<&'w str>>,
 }
 
-fn module_words<'w>(line: &[&'w str]) -> ModuleWords<'w> {
+fn module_words<'w>(line: &[&'w str]) -> std::result::Result<ModuleWords<'w>, &'static str> {
     let mut words = ModuleWords {
         display: ModuleDisplay::default(),
         pattern: None,
@@ -785,9 +785,12 @@ fn module_words<'w>(line: &[&'w str]) -> ModuleWords<'w> {
             "k" => words.kernel = true,
             "t" => words.display.timestamp = true,
             "m" => {
+                if words.pattern.is_some() {
+                    return Err("give one module pattern");
+                }
                 words.glob = true;
                 index += 1;
-                words.pattern = line.get(index).copied();
+                words.pattern = Some(*line.get(index).ok_or("m needs a pattern")?);
             }
             "a" => {
                 index += 1;
@@ -797,21 +800,25 @@ fn module_words<'w>(line: &[&'w str]) -> ModuleWords<'w> {
                 }
             }
             _ if words.pattern.is_none() => words.pattern = Some(arg),
-            _ => {}
+            _ => return Err("give one module pattern"),
         }
         index += 1;
     }
-    words
+    if words.user && words.kernel {
+        return Err("give u or k, not both");
+    }
+    Ok(words)
 }
 
 /// `lm`'s display words, left for [`module_filter`].
 #[grammar(usage = "")]
 fn module_display(
-    _: &mut ArgCx<'_, '_>,
+    cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<ModuleDisplay, ArgError> {
     let line: Vec<&str> = cursor.words().collect();
-    let words = module_words(&line);
+    let words = module_words(&line)
+        .map_err(|reason| ArgError::usage(cx.name, format!("{}: {reason}", cx.name)))?;
     Ok(ModuleDisplay {
         pattern: words.pattern.map(str::to_string),
         ..words.display
@@ -838,7 +845,8 @@ fn module_filter(
 ) -> std::result::Result<ModuleFilter, ArgError> {
     let taken = cursor.take_all(|_| true);
     let line: Vec<&str> = taken.iter().map(AsRef::as_ref).collect();
-    let words = module_words(&line);
+    let words = module_words(&line)
+        .map_err(|reason| ArgError::usage(cx.name, format!("{}: {reason}", cx.name)))?;
     let containing = match words.containing {
         Some(Some(text)) => Some(cx.eval(text)?),
         Some(None) => return Err(ArgError::Missing),
@@ -1021,7 +1029,7 @@ fn set(
     #[arg(rest, usage = "<$name> <expression>", complete = [None, Expression])] rest: String,
 ) -> Result<()> {
     let Some((lhs, rhs)) = rest.split_once(char::is_whitespace) else {
-        outln!("{}", command_help("set"));
+        ArgError::Missing.report("set");
         return Ok(());
     };
     let name = lhs.trim().strip_prefix('$').unwrap_or(lhs.trim()).trim();

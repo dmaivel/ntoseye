@@ -345,6 +345,13 @@ impl ReplState<'_> {
         Ok(Flow::Continue)
     }
 
+    /// Whether the backend runs the target and can never stop it (the
+    /// memory backend), where selecting a processor needs no halt.
+    fn backend_never_halts(&self) -> bool {
+        self.ctx.backend.is_running()
+            && !self.ctx.backend.supports(DebugCapability::ExecutionControl)
+    }
+
     /// The per-command policy every dispatch path shares: the context's
     /// refusal of host commands and of run control, then a remote host's
     /// wait for the halt the command needs (against the target's state right
@@ -367,7 +374,9 @@ impl ReplState<'_> {
         if let Err(refusal) = self.ctx.admit(&spec.effects) {
             // A VTL1 refusal ends a script or event command as a context
             // denial does: what follows was meant for the other VTL.
-            let flow = if matches!(refusal, Refusal::Vtl1(_)) {
+            // Inside a command loop any refusal ends the loop, since the
+            // refused command would be refused on every pass.
+            let flow = if matches!(refusal, Refusal::Vtl1(_)) || self.command_loop_depth > 0 {
                 Flow::Denied
             } else {
                 Flow::Continue
@@ -391,9 +400,7 @@ impl ReplState<'_> {
             let selection = !digits.is_empty()
                 && digits.bytes().all(|byte| byte.is_ascii_digit())
                 && body.len() <= digits.len() + 1;
-            let never_halts = self.ctx.backend.is_running()
-                && !self.ctx.backend.supports(DebugCapability::ExecutionControl);
-            if !(selection && never_halts)
+            if !(selection && self.backend_never_halts())
                 && let Some(spec) = command_registry().get("~")
                 && let Some(flow) = self.admit(spec, "~")?
             {
@@ -442,7 +449,10 @@ impl ReplState<'_> {
                 self.cmd_pseudo_register(slot, value);
                 return Ok(Flow::Continue);
             }
-            if let Some(flow) = self.admit(spec, parsed.name)? {
+            // `vcpu N` selects a processor as `~Ns` does, so it needs a halt
+            // only where the backend can halt.
+            let selection_only = spec.names[0] == "vcpu" && self.backend_never_halts();
+            if !selection_only && let Some(flow) = self.admit(spec, parsed.name)? {
                 return Ok(flow);
             }
             match spec.handler {

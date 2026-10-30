@@ -76,7 +76,7 @@ fn foreach(
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     if tail.is_empty() {
-        outln!("{}", command_help(name));
+        args::ArgError::Missing.report(name);
         return Ok(Flow::Continue);
     }
     let spec = match parse_foreach(&tail) {

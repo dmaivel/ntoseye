@@ -85,7 +85,7 @@ fn crash(session: &mut Session) -> Result<Motion> {
     names = [".dump", "dump"],
     category = "target control",
     kind = Action,
-    target = Nt,
+    target = Kernel,
     state = Halted,
     capability = MemoryIntrospection,
     writes = [Files],
@@ -509,17 +509,17 @@ fn dbgprint(state: &mut ReplState<'_>, #[arg(parse = dbgprint_count)] count: usi
     Ok(())
 }
 
-/// `!dbgprint`'s count of lines, a decimal number; 50 when omitted.
+/// `!dbgprint`'s count of lines, an expression in the current radix; 50
+/// when omitted.
 #[grammar(usage = "[count]", complete = [None])]
 fn dbgprint_count(
-    _: &mut ArgCx<'_, '_>,
+    cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<usize, ArgError> {
     const DEFAULT_TAIL: usize = 50;
     match cursor.word() {
         None => Ok(DEFAULT_TAIL),
-        Some(arg) => arg
-            .parse::<usize>()
+        Some(arg) => usize::try_from(cx.eval(&arg)?.0)
             .map_err(|_| ArgError::Message(format!("invalid count: {arg}"))),
     }
 }

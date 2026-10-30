@@ -740,7 +740,7 @@ fn registers(
         };
         let expression = expression.trim();
         if name.is_empty() || expression.is_empty() {
-            outln!("{}", command_help(invoked));
+            ArgError::Missing.report(invoked);
             return Ok(());
         }
         // Reading is this command's effect; setting a register is a write,

@@ -140,7 +140,10 @@ fn driver_argument(
         return Err(ArgError::Missing);
     };
     let full;
-    let needle = if text.starts_with("\\Driver\\") {
+    let needle = if text
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("\\Driver\\"))
+    {
         &*text
     } else {
         full = format!("\\Driver\\{text}");

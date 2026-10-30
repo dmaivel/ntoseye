@@ -6,6 +6,8 @@ use std::result;
 use std::sync::Arc;
 
 use crate::base::bytes::{before_nul, utf16le_lossy};
+use crate::base::error::Result as BaseResult;
+use crate::base::memory::{ScanFault, TerminatedRead, read_terminated};
 use crate::base::types::{Dtb, VirtAddr};
 use crate::nt::layout::{
     FieldInfo, ParsedType, TypeInfo, abi_layout, bitfield_value, find_field, le_uint, named_type,
@@ -390,6 +392,22 @@ impl<'a> TypeView<'a> {
             .read_masked_in(self.dtb, address, &mut bytes)
             .map_err(|error| error.to_string())?;
         Ok(bytes)
+    }
+
+    /// The NUL-terminated string of `unit`-byte characters at `address`, at
+    /// most `max_bytes` long, read as [`Self::read_display_bytes`] reads.
+    pub fn read_display_terminated(
+        &self,
+        address: VirtAddr,
+        max_bytes: usize,
+        unit: usize,
+    ) -> BaseResult<TerminatedRead> {
+        read_terminated(address, max_bytes, unit, |at, buf| {
+            self.session
+                .target
+                .read_masked_in(self.dtb, at, buf)
+                .map_err(ScanFault::Unreadable)
+        })
     }
 
     fn format_enum_value(&self, type_name: &str, raw: u64, size: usize) -> String {

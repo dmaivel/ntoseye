@@ -691,6 +691,18 @@ fn print_class_devices(list: &ClassDevices) {
             ))
         );
     }
+    // The in-flight counts are only what each packet walk reached.
+    for device in &list.devices {
+        for stopped in &device.packets_stopped {
+            outln!(
+                "{}",
+                ui::muted(&format!(
+                    "private data {}: packet list stopped: {stopped}",
+                    ui::addr(device.private_data.0)
+                ))
+            );
+        }
+    }
     stopped_line("device list", &list.stopped);
 }
 
@@ -948,16 +960,26 @@ fn print_adapters(drivers: &StorDrivers) {
         }
         for StorAdapterEntry { extension, adapter } in &driver.adapters {
             match adapter {
-                Ok(adapter) => builder.push_record([
-                    driver.name.clone(),
-                    ui::addr(adapter.extension.0),
-                    ui::addr_opt(adapter.fdo),
-                    enum_text(&adapter.state, "DeviceState"),
-                    adapter.device_name.clone(),
-                    location_text(adapter),
-                    adapter.units.len().to_string(),
-                    adapter.io(),
-                ]),
+                Ok(adapter) => {
+                    builder.push_record([
+                        driver.name.clone(),
+                        ui::addr(adapter.extension.0),
+                        ui::addr_opt(adapter.fdo),
+                        enum_text(&adapter.state, "DeviceState"),
+                        adapter.device_name.clone(),
+                        location_text(adapter),
+                        adapter.units.len().to_string(),
+                        adapter.io(),
+                    ]);
+                    // The Units count is only what the walk reached.
+                    if let Some(stopped) = &adapter.units_stopped {
+                        problems.push(format!(
+                            "{}: adapter {}: unit list stopped: {stopped}",
+                            driver.name,
+                            ui::addr(adapter.extension.0)
+                        ));
+                    }
+                }
                 Err(why) => problems.push(format!(
                     "{}: adapter {}: {why}",
                     driver.name,

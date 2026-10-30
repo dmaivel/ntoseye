@@ -1677,6 +1677,21 @@ mod tests {
         assert!(!state.ctx.backend.is_running(), "g ran after bd failed");
     }
 
+    /// A handler that checks its own operands counts the missing argument
+    /// as an error too, so the list stops before `g`.
+    #[test]
+    fn handler_missing_argument_stops_a_command_list() {
+        let mut session = session_with_mock(MockBackend::default());
+        let mut state = remote_state(&mut session, 5_000);
+        let (result, text) = capture(|| state.dispatch_line("undisplay; g"));
+        result.unwrap();
+        assert!(text.contains("undisplay <number>"), "{text:?}");
+        assert!(
+            !state.ctx.backend.is_running(),
+            "g ran after undisplay failed"
+        );
+    }
+
     /// `.pagein` resumes the target for the guest's worker, so every context
     /// that must not move the target refuses it, as it refuses `g`.
     #[test]

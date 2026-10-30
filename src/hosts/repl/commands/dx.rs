@@ -501,11 +501,15 @@ impl ReplState<'_> {
                     for property in model::properties(value) {
                         let child = model::property(&self.ctx.target, value, &property);
                         line.children.push(match (property.as_str(), child) {
-                            ("ObjectName", Ok(ModelValue::Text(object_name))) => DxLine {
-                                name: Some(property),
-                                value: Some(format!("\"{object_name}\"")),
-                                ..DxLine::default()
-                            },
+                            ("ObjectName", Ok(ModelValue::Text(object_name)))
+                                if !object_name.is_empty() =>
+                            {
+                                DxLine {
+                                    name: Some(property),
+                                    value: Some(format!("\"{object_name}\"")),
+                                    ..DxLine::default()
+                                }
+                            }
                             ("ObjectName", _) => continue,
                             (_, Ok(child)) => {
                                 self.dx_model_line(&property, &child, depth - 1, view)
@@ -978,28 +982,19 @@ impl ReplState<'_> {
 
     /// The NUL-terminated string of `unit`-byte characters at `address`,
     /// quoted, read a page at a time so a string that ends just before an
-    /// unmapped page still reads.
+    /// unmapped page or a dump's capture hole still reads. `...` after the
+    /// quote marks a string cut short with no terminator read.
     fn dx_c_string(&self, view: &TypeView<'_>, address: VirtAddr, unit: usize) -> String {
-        let mut bytes = Vec::new();
-        let mut cursor = address;
-        while bytes.len() < MAX_DX_STRING * unit {
-            let to_page_end = 0x1000 - (cursor.0 & 0xfff) as usize;
-            let Ok(chunk) = view.read_display_bytes(cursor, to_page_end) else {
-                if bytes.is_empty() {
-                    return unreadable(address);
-                }
-                break;
-            };
-            bytes.extend_from_slice(&chunk);
-            if chunk
-                .chunks_exact(unit)
-                .any(|ch| ch.iter().all(|byte| *byte == 0))
-            {
-                break;
-            }
-            cursor += to_page_end as u64;
-        }
-        format!("\"{}\"", decode_string(&bytes, unit))
+        let max_bytes = MAX_DX_STRING * unit;
+        let Ok(read) = view.read_display_terminated(address, max_bytes, unit) else {
+            return unreadable(address);
+        };
+        let cut = if read.unreadable || read.bytes.len() >= max_bytes {
+            "..."
+        } else {
+            ""
+        };
+        format!("\"{}\"{cut}", decode_string(&read.bytes, unit))
     }
 
     /// A `_UNICODE_STRING`'s text, quoted: `Length` bytes at `Buffer`.

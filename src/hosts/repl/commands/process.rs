@@ -290,6 +290,12 @@ fn select_process_thread(state: &mut ReplState<'_>, process: &ProcessInfo) {
                     ui::addr(thread.ethread.0),
                     ui::thread(&vcpu)
                 ),
+                // A running target has no live registers to match a
+                // processor against, so nothing was checked there.
+                ThreadContext::Parked if state.ctx.backend.is_running() => outln!(
+                    "thread {} (TID {tid}), by its stack: the target is running",
+                    ui::addr(thread.ethread.0)
+                ),
                 ThreadContext::Parked => outln!(
                     "thread {} (TID {tid}), by its stack: no processor runs a thread of the process",
                     ui::addr(thread.ethread.0)

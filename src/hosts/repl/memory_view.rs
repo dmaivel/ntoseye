@@ -769,8 +769,13 @@ mod tests {
             pattern(SearchKind::Dwords, &["c0000005"]).unwrap(),
             [5, 0, 0, 0xc0]
         );
+        assert_eq!(
+            pattern(SearchKind::Qwords, &["c0000005"]).unwrap(),
+            [5, 0, 0, 0xc0, 0, 0, 0, 0]
+        );
         assert!(pattern(SearchKind::Words, &["10000"]).is_err());
         assert!(pattern(SearchKind::Bytes, &["100"]).is_err());
+        assert_eq!(pattern(SearchKind::Ascii, &["a", "b"]).unwrap(), *b"a b");
         assert_eq!(
             pattern(SearchKind::Unicode, &["a", "b"]).unwrap(),
             [b'a', 0, b' ', 0, b'b', 0]

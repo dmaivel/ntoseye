@@ -228,6 +228,15 @@ fn print_hang_report(arch: Arch, report: &HangReport) {
             ),
         }
     }
+    if report.processors_not_shown > 0 {
+        outln!(
+            "  {}",
+            ui::muted(&format!(
+                "{} processors not shown",
+                report.processors_not_shown
+            ))
+        );
+    }
 
     print_section("waiting threads by pending I/O");
     let threads = match &report.waiting {

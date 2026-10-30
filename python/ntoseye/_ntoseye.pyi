@@ -461,7 +461,7 @@ class AlpcProcessPorts(BaseRecord):
     """
     The ALPC ports that a process holds handles to (`!alpc /lpp`).
     """
-    __match_args__: Final[tuple[Literal["process"], Literal["created"], Literal["connected"], Literal["server_ports"], Literal["scanned_handles"], Literal["advertised_handles"], Literal["skipped_entries"]]]
+    __match_args__: Final[tuple[Literal["process"], Literal["created"], Literal["connected"], Literal["server_ports"], Literal["scanned_handles"], Literal["advertised_handles"], Literal["skipped_entries"], Literal["unreadable_ports"]]]
     @property
     def advertised_handles(self, /) -> int:
         """
@@ -491,6 +491,12 @@ class AlpcProcessPorts(BaseRecord):
     def skipped_entries(self, /) -> int:
         """
         The number of handle-table entries that ntoseye could not read.
+        """
+    @property
+    def unreadable_ports(self, /) -> int:
+        """
+        The number of ALPC port handles left out of `created` and `connected`
+        because ntoseye could not read the port's kind or its connection.
         """
 
 @final
@@ -2935,7 +2941,8 @@ class CpuInfo(BaseRecord):
     @property
     def triage_fallback(self, /) -> CpuTriageFallback |None:
         """
-        The triage metadata, present if ntoseye could not find the KPRCB.
+        The triage metadata, present when the KPRCB was found but its vendor,
+        family or MHz did not read.
         """
     @property
     def vendor(self, /) -> Diagnostic[str]:
@@ -5641,7 +5648,7 @@ class FileCacheDetail(BaseRecord):
     The mapped views of the cache manager, from its VACB arrays
     (`!filecache`).
     """
-    __match_args__: Final[tuple[Literal["vacb_arrays"], Literal["free_vacbs"], Literal["active_vacbs"], Literal["mapped_bytes"], Literal["valid_bytes"], Literal["files"], Literal["file_count"], Literal["interrupted"]]]
+    __match_args__: Final[tuple[Literal["vacb_arrays"], Literal["free_vacbs"], Literal["active_vacbs"], Literal["mapped_bytes"], Literal["valid_bytes"], Literal["files"], Literal["file_count"], Literal["interrupted"], Literal["unreadable_arrays"], Literal["unwalked_views"]]]
     @property
     def active_vacbs(self, /) -> int:
         """
@@ -5671,6 +5678,18 @@ class FileCacheDetail(BaseRecord):
         """
     @property
     def mapped_bytes(self, /) -> int: ...
+    @property
+    def unreadable_arrays(self, /) -> int:
+        """
+        The VACB arrays left out because their slot, header or VACBs could not
+        be read; the totals miss their views.
+        """
+    @property
+    def unwalked_views(self, /) -> int:
+        """
+        The mapped views whose pages could not all be walked; `valid_bytes`
+        misses what they hold past the failure.
+        """
     @property
     def vacb_arrays(self, /) -> int: ...
     @property
@@ -6350,7 +6369,7 @@ class HalController(BaseRecord):
     @property
     def ranges_stopped(self, /) -> str |None: ...
     @property
-    def resource_id(self, /) -> str:
+    def resource_id(self, /) -> Diagnostic[str]:
         """
         The ACPI ID the HAL gave the controller's device.
         """
@@ -6755,11 +6774,16 @@ class HangReport(BaseRecord):
     What `!analyze -hang` found: the thread on each processor with its
     stack, and the waiting threads.
     """
-    __match_args__: Final[tuple[Literal["processors"]]]
+    __match_args__: Final[tuple[Literal["processors"], Literal["processors_not_shown"]]]
     @property
     def processors(self, /) -> list[HangProcessor]:
         """
         One entry per processor, in order; empty when the count is unknown.
+        """
+    @property
+    def processors_not_shown(self, /) -> int:
+        """
+        How many processors past the first 256 the report leaves out.
         """
     @property
     def waiting(self, /) -> Diagnostic[list[ThreadInfo]]:
@@ -7132,7 +7156,7 @@ class Hive(BaseRecord):
         """
         Where it is mounted (`HiveRootPath`), `\\REGISTRY` for the master
         hive; `None` for one not mounted. Unavailable before Vista, whose
-        hives do not record it.
+        hives do not record it, and where the path does not read.
         """
     @property
     def root_cell(self, /) -> Diagnostic[int]:
@@ -9246,7 +9270,7 @@ class Inspect:
         """
         Translate a virtual address with an explicit directory base.
         
-        The command shows each AMD64 page-table level and the final physical
+        The command shows each page-table level and the final physical
         address. A directory base of zero uses the current context, and for a large
         page, the walk stops at its leaf level.
         """
@@ -10927,7 +10951,8 @@ class Memory:
         address.
         
         The command walks the page tables in reverse and detects cycles in them. The
-        walk stops after 32 mappings or 65,536 table pages.
+        walk stops after 32 mappings or 65,536 table pages. It works on AMD64
+        targets only.
         """
     def read(self, /, address: int |str |Process |Thread |Module |Driver |Device |Heap, size: int) -> bytes:
         """
@@ -16977,7 +17002,7 @@ class SegmentHeap(BaseRecord):
     """
     A segment heap (`_SEGMENT_HEAP`).
     """
-    __match_args__: Final[tuple[Literal["address"], Literal["global_flags"], Literal["reserved_pages"], Literal["committed_pages"], Literal["free_committed_pages"], Literal["lfh_free_committed_pages"], Literal["vs_free_committed_pages"], Literal["large_reserved_pages"], Literal["large_committed_pages"], Literal["large_allocations"], Literal["keys"], Literal["granule"]]]
+    __match_args__: Final[tuple[Literal["address"], Literal["global_flags"], Literal["reserved_pages"], Literal["committed_pages"], Literal["free_committed_pages"], Literal["lfh_free_committed_pages"], Literal["vs_free_committed_pages"], Literal["large_reserved_pages"], Literal["large_committed_pages"], Literal["large_allocations"], Literal["large_truncated"], Literal["keys"], Literal["granule"]]]
     @property
     def address(self, /) -> int: ...
     @property
@@ -17006,6 +17031,11 @@ class SegmentHeap(BaseRecord):
     def large_committed_pages(self, /) -> int: ...
     @property
     def large_reserved_pages(self, /) -> int: ...
+    @property
+    def large_truncated(self, /) -> bool:
+        """
+        Whether `large_allocations` stops at the tree walk limit.
+        """
     @property
     def lfh_free_committed_pages(self, /) -> int: ...
     @property
@@ -17260,9 +17290,9 @@ class Signal(BaseRecord):
     notifications (kicks).
     """
     @property
-    def kind(self, /) -> Literal["on", "off", "after", "at"]:
+    def kind(self, /) -> Literal["on", "off", "after", "at", "unknown"]:
         """
-        The variant: `on`, `off`, `after`, `at`.
+        The variant: `on`, `off`, `after`, `at`, `unknown`.
         """
     @final
     class After(Signal):
@@ -17314,6 +17344,17 @@ class Signal(BaseRecord):
         def kind(self, /) -> Literal["on"]:
             """
             `on`.
+            """
+    @final
+    class Unknown(Signal):
+        """
+        Not known: the event index the side signals by did not read.
+        """
+        __match_args__: Final[tuple[()]]
+        @property
+        def kind(self, /) -> Literal["unknown"]:
+            """
+            `unknown`.
             """
 
 @final
@@ -18453,7 +18494,7 @@ class SubsectionDetail(BaseRecord):
     @property
     def starting_sector(self, /) -> int: ...
     @property
-    def unused_ptes(self, /) -> int: ...
+    def unused_ptes(self, /) -> Diagnostic[int]: ...
 
 @final
 class SummaryRow(BaseRecord):

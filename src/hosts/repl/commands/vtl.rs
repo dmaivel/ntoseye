@@ -1708,7 +1708,7 @@ fn hvu(
     let extent = match arguments.get(1) {
         None => CodeExtent::Count(DEFAULT_INSTRUCTIONS),
         Some(text) => match windbg_count_expression(text) {
-            Some(count) => match repl.eval_or_report(count) {
+            Some(count) => match repl.eval_or_report(count.strip_prefix('?').unwrap_or(count)) {
                 Some(count) if (1..=MAX_DISASSEMBLY_INSTRUCTIONS as u64).contains(&count.0) => {
                     CodeExtent::Count(count.0 as usize)
                 }

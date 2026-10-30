@@ -4,7 +4,6 @@
 //! [`BreakpointInfo`] record `bl` lists.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use tabled::builder::Builder;
@@ -729,9 +728,18 @@ fn managed(session: &Session, selection: BreakpointIdSelection) -> Vec<u32> {
     let managed = session.breakpoints.managed_ids();
     match selection {
         BreakpointIdSelection::All => managed,
-        BreakpointIdSelection::Ids(ids) => {
-            let managed: HashSet<u32> = managed.into_iter().collect();
-            ids.into_iter().filter(|id| managed.contains(id)).collect()
+        // Ranges are tested against the breakpoints that exist, so a wide
+        // range such as `bc 0-4294967295` costs no more than a short one.
+        BreakpointIdSelection::Ranges(ranges) => {
+            let mut picked = Vec::new();
+            for (first, last) in ranges {
+                for &id in &managed {
+                    if (first..=last).contains(&id) && !picked.contains(&id) {
+                        picked.push(id);
+                    }
+                }
+            }
+            picked
         }
     }
 }
@@ -972,7 +980,8 @@ struct ParsedBreakpointArgs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BreakpointIdSelection {
     All,
-    Ids(Vec<u32>),
+    /// Inclusive `(first, last)` ID ranges; a lone ID is a range of one.
+    Ranges(Vec<(u32, u32)>),
 }
 
 /// An option argument that is a bare number, in the session radix. It takes
@@ -1100,6 +1109,17 @@ fn parse_breakpoint_options(
     Ok((options, index))
 }
 
+/// How many more `<` than `>` `text` holds.
+fn angle_depth(text: &str) -> isize {
+    text.chars()
+        .map(|ch| match ch {
+            '<' => 1,
+            '>' => -1,
+            _ => 0,
+        })
+        .sum()
+}
+
 fn parse_breakpoint_arguments(
     argv: &[Cow<'_, str>],
     radix: NumberRadix,
@@ -1123,8 +1143,20 @@ fn parse_breakpoint_arguments(
     let target = argv
         .get(index)
         .ok_or_else(|| Error::InvalidArgument(format!("{command}: missing breakpoint target")))?;
-    let target = target.as_ref().to_string();
+    let mut target = target.as_ref().to_string();
     index += 1;
+    // A template argument list may hold a space after a comma, which splits
+    // the target into words: rejoin them while the list is open.
+    let mut depth = angle_depth(&target);
+    while depth > 0
+        && target.ends_with(',')
+        && let Some(word) = argv.get(index)
+    {
+        target.push(' ');
+        target.push_str(word);
+        depth += angle_depth(word);
+        index += 1;
+    }
 
     let mut pass_count = 0;
     if let Some(value) = argv.get(index)
@@ -1479,8 +1511,7 @@ fn parse_breakpoint_id_selectors(args: &[&str]) -> Result<BreakpointIdSelection>
         ));
     }
 
-    let mut ids = Vec::new();
-    let mut seen = HashSet::new();
+    let mut ranges = Vec::new();
     for selector in args {
         if let Some((first, last)) = selector.split_once('-') {
             let first = first.parse::<u32>().map_err(|_| {
@@ -1494,21 +1525,15 @@ fn parse_breakpoint_id_selectors(args: &[&str]) -> Result<BreakpointIdSelection>
                     "breakpoint ID range must be ascending: {selector}"
                 )));
             }
-            for id in first..=last {
-                if seen.insert(id) {
-                    ids.push(id);
-                }
-            }
+            ranges.push((first, last));
         } else {
             let id = selector.parse::<u32>().map_err(|_| {
                 Error::InvalidArgument(format!("invalid breakpoint ID: {selector}"))
             })?;
-            if seen.insert(id) {
-                ids.push(id);
-            }
+            ranges.push((id, id));
         }
     }
-    Ok(BreakpointIdSelection::Ids(ids))
+    Ok(BreakpointIdSelection::Ranges(ranges))
 }
 
 fn compile_repl_condition(
@@ -1693,19 +1718,34 @@ mod tests {
         assert!(parse(&["/p", "4", "e1", "/p", "8", "kernelbase!SleepEx"]).is_err());
     }
 
+    /// A space after a comma in a template argument list stays in the
+    /// target; the words after the list are the pass count and condition.
+    #[test]
+    fn template_target_keeps_spaces_after_commas() {
+        let words: Vec<Cow<'_, str>> = ["nt!X<A,", "B<C,", "D>>::f", "3", "if", "@rcx"]
+            .iter()
+            .map(|&word| Cow::from(word))
+            .collect();
+        let parsed =
+            parse_breakpoint_arguments(&words, NumberRadix::Hexadecimal, "bp", false).unwrap();
+        assert_eq!(parsed.target, "nt!X<A, B<C, D>>::f");
+        assert_eq!(parsed.pass_count, 3);
+        assert_eq!(parsed.condition.as_deref(), Some("@rcx"));
+    }
+
     #[test]
     fn breakpoint_id_selectors_accept_lists_and_ranges() {
         assert_eq!(
             parse_breakpoint_id_selectors(&["0", "2", "5"]).unwrap(),
-            BreakpointIdSelection::Ids(vec![0, 2, 5])
+            BreakpointIdSelection::Ranges(vec![(0, 0), (2, 2), (5, 5)])
         );
         assert_eq!(
             parse_breakpoint_id_selectors(&["1-3"]).unwrap(),
-            BreakpointIdSelection::Ids(vec![1, 2, 3])
+            BreakpointIdSelection::Ranges(vec![(1, 3)])
         );
         assert_eq!(
             parse_breakpoint_id_selectors(&["1-3", "2", "5"]).unwrap(),
-            BreakpointIdSelection::Ids(vec![1, 2, 3, 5])
+            BreakpointIdSelection::Ranges(vec![(1, 3), (2, 2), (5, 5)])
         );
         assert_eq!(
             parse_breakpoint_id_selectors(&["*"]).unwrap(),

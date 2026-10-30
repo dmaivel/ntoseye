@@ -22,6 +22,8 @@ pub const ANALYZE_HANG_STACK_LIMIT: usize = 8;
 pub struct HangReport {
     /// One entry per processor, in order; empty when the count is unknown.
     pub processors: Vec<HangProcessor>,
+    /// How many processors past the first 256 the report leaves out.
+    pub processors_not_shown: u16,
     /// The waiting threads, most pending IRPs first, or why there are none
     /// (see the `waiting` property).
     #[record(skip)]
@@ -106,8 +108,9 @@ pub fn gather_hang_report(session: &mut Session) -> HangReport {
                 .ok()
                 .map(|threads| threads.len() as u16)
         })
-        .unwrap_or(0)
-        .min(ANALYZE_HANG_PROCESSOR_LIMIT);
+        .unwrap_or(0);
+    let processors_not_shown = processor_count.saturating_sub(ANALYZE_HANG_PROCESSOR_LIMIT);
+    let processor_count = processor_count.min(ANALYZE_HANG_PROCESSOR_LIMIT);
     let vcpus = session.processor_vcpus();
     let mut processors = Vec::with_capacity(usize::from(processor_count));
     for processor in 0..processor_count {
@@ -146,6 +149,7 @@ pub fn gather_hang_report(session: &mut Session) -> HangReport {
         .map_err(|error| error.to_string());
     HangReport {
         processors,
+        processors_not_shown,
         waiting,
     }
 }

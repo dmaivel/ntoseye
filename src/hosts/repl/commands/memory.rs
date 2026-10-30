@@ -939,10 +939,10 @@ fn counted_string(
             let byte_len = (length as usize / unit_size) * unit_size;
             if byte_len == 0 || buffer.is_zero() {
                 CountedText::Empty
-            } else {
+            } else if let Some(end) = buffer.0.checked_add(byte_len as u64) {
                 let range = AddressRange {
                     start: buffer,
-                    end: buffer + byte_len as u64,
+                    end: VirtAddr(end),
                 };
                 let (data, valid) = read_best_effort(session, MemoryKind::Virtual, &range)?;
                 let text = match kind {
@@ -953,6 +953,10 @@ fn counted_string(
                     text,
                     complete: valid.iter().all(|ok| *ok),
                 }
+            } else {
+                // A buffer that runs past the top of the address space is a
+                // corrupt descriptor.
+                CountedText::Unreadable
             }
         }
         _ => CountedText::Unreadable,
@@ -1890,7 +1894,7 @@ impl Render for MemoryFilled {
 ///
 /// The pattern is bytes, in the same format as for `s`: `90`, `48 89 5c`,
 /// `48895c`, or `\x48\x89`. The command repeats the pattern to fill the
-/// range (`f @rsp L20 cc`).
+/// range (`f @rsp L20 cc`). It fills up to 16 MiB.
 #[command(
     names = ["f"],
     category = "memory and disassembly",
@@ -1903,6 +1907,14 @@ fn fill(
     #[arg(parse = fill_range)] range: AddressRange,
     #[arg(parse = fill_pattern)] pattern: Vec<u8>,
 ) -> Result<MemoryFilled> {
+    // The fill is built whole and written at once, so it is bounded.
+    const MAX_FILL_BYTES: usize = 16 << 20;
+    if range.len() > MAX_FILL_BYTES {
+        return Err(Error::DebugInfo(format!(
+            "cannot fill {:#x} bytes: at most {MAX_FILL_BYTES:#x} are filled at once",
+            range.len()
+        )));
+    }
     let data = repeat_pattern(&pattern, range.len());
     session
         .write_memory(MemoryKind::Virtual, range.start.0, &data)

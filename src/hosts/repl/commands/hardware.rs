@@ -9,7 +9,7 @@ use crate::base::error::{Error, Result};
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::hosts::repl::*;
 use crate::hosts::ui;
-use crate::nt::expr::Expr;
+use crate::nt::expr::{Expr, NumberRadix};
 use crate::nt::target::DiagnosticValue;
 use crate::nt::target::hang::{
     IpiProcessor, IpiState, QueuedLockState, QueuedLocks, ipi_frozen_name, ipi_request_type_name,
@@ -174,7 +174,8 @@ impl Render for PciTree {
     }
 }
 
-/// `!pci`'s words, each an expression, as WinDbg reads them.
+/// `!pci`'s words, each an expression, as WinDbg reads them: hex whatever
+/// the session radix.
 #[grammar(usage = "[flags] [bus [device [function [min max]]]]", complete = Expression)]
 fn pci_request(
     cx: &mut ArgCx<'_, '_>,
@@ -182,7 +183,9 @@ fn pci_request(
 ) -> std::result::Result<PciRequest, ArgError> {
     let mut values = Vec::with_capacity(cursor.remaining());
     while let Some(text) = cursor.word() {
-        values.push(cx.eval(&text)?.0);
+        let value = Expr::eval_with_radix(&text, &cx.state.ctx.target, NumberRadix::Hexadecimal)
+            .map_err(|error| ArgError::Message(error.to_string()))?;
+        values.push(value.0);
     }
     parse_pci_request(&values).map_err(|error| ArgError::Message(format!("!pci: {error}")))
 }
@@ -224,6 +227,8 @@ pub struct PciReport {
     category = "objects and I/O",
     kind = Query,
     target = Kernel,
+    state = Halted,
+    capability = PciConfig,
     forms = [pci],
 )]
 fn pci_command(

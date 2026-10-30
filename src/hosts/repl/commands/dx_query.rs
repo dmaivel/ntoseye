@@ -203,6 +203,7 @@ pub fn is_query(text: &str) -> bool {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 enum Node {
     Int(Integer),
     Str(String),
@@ -1191,19 +1192,44 @@ mod tests {
         assert!(!is_query("DebuggerData"));
     }
 
-    fn parsed(text: &str) -> String {
-        format!("{:?}", parse(text).unwrap())
+    fn parsed(text: &str) -> Node {
+        parse(text).unwrap()
+    }
+
+    fn name(text: &str) -> Box<Node> {
+        Box::new(Node::Name(text.into()))
+    }
+
+    fn int(value: i128) -> Box<Node> {
+        Box::new(Node::Int(Integer::new(value, false, false)))
+    }
+
+    fn member(object: Box<Node>, field: &str) -> Box<Node> {
+        Box::new(Node::Member(object, field.into()))
+    }
+
+    fn binary(op: &'static str, left: Box<Node>, right: Box<Node>) -> Box<Node> {
+        Box::new(Node::Binary(op, left, right))
     }
 
     /// `(p)` inside a lambda over `p` is a parenthesized name, while
     /// `(nt!_TOKEN *)` and `(unsigned char)` are casts.
     #[test]
     fn casts_are_told_from_parentheses() {
-        assert!(parsed("(nt!_TOKEN *)x").starts_with("Cast(\"nt!_TOKEN *\""));
-        assert!(parsed("(unsigned char)x").starts_with("Cast(\"unsigned char\""));
-        assert!(parsed("p => (p) * 2").contains("Binary(\"*\", Name(\"p\")"));
+        assert_eq!(
+            parsed("(nt!_TOKEN *)x"),
+            Node::Cast("nt!_TOKEN *".into(), name("x"))
+        );
+        assert_eq!(
+            parsed("(unsigned char)x"),
+            Node::Cast("unsigned char".into(), name("x"))
+        );
+        assert_eq!(
+            parsed("p => (p) * 2"),
+            Node::Lambda("p".into(), binary("*", name("p"), int(2)))
+        );
         // A plain name in parentheses is not a type.
-        assert!(parsed("(x) - 1").starts_with("Binary(\"-\""));
+        assert_eq!(parsed("(x) - 1"), *binary("-", name("x"), int(1)));
     }
 
     /// Precedence follows C# and C++: `==` binds tighter than `&`, which
@@ -1212,11 +1238,25 @@ mod tests {
     fn operators_bind_as_in_csharp() {
         assert_eq!(parsed("a & 0xF == 3 && b"), parsed("(a & (0xF == 3)) && b"));
         assert_eq!(parsed("a + 2 * 3 << 1"), parsed("(a + (2 * 3)) << 1"));
-        assert!(
-            parsed("p.Name.ToLower().Contains(\"svc\")")
-                .starts_with("Call(Call(Member(Name(\"p\"), \"Name\"), \"ToLower\", [])")
+        assert_eq!(
+            parsed("p.Name.ToLower().Contains(\"svc\")"),
+            Node::Call(
+                Box::new(Node::Call(
+                    member(name("p"), "Name"),
+                    "ToLower".into(),
+                    vec![]
+                )),
+                "Contains".into(),
+                vec![Node::Str("svc".into())]
+            )
         );
-        assert!(parsed("new { Name = p.Name, Pid = p.Id }").starts_with("New([(\"Name\""));
+        assert_eq!(
+            parsed("new { Name = p.Name, Pid = p.Id }"),
+            Node::New(vec![
+                ("Name".into(), *member(name("p"), "Name")),
+                ("Pid".into(), *member(name("p"), "Id")),
+            ])
+        );
         // WinDbg names no field after its path, as C# does.
         assert!(parse("new { p.Name }").is_err());
     }
@@ -1225,9 +1265,17 @@ mod tests {
     /// a whole argument, its body running to the closing parenthesis.
     #[test]
     fn lambdas_take_their_whole_argument() {
-        assert!(
-            parsed("x.Where((p) => p.Id > 4 && p.Id < 8)")
-                .starts_with("Call(Name(\"x\"), \"Where\", [Lambda(\"p\", Binary(\"&&\"")
+        let id = || member(name("p"), "Id");
+        assert_eq!(
+            parsed("x.Where((p) => p.Id > 4 && p.Id < 8)"),
+            Node::Call(
+                name("x"),
+                "Where".into(),
+                vec![Node::Lambda(
+                    "p".into(),
+                    binary("&&", binary(">", id(), int(4)), binary("<", id(), int(8)))
+                )]
+            )
         );
         assert!(parse("x.Where(p => )").is_err());
         assert!(parse("new { 1 }").is_err());

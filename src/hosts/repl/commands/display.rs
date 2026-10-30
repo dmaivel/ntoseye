@@ -8,7 +8,7 @@ use crate::nt::expr::Expr;
 use crate::nt::layout::ParsedType;
 use ntoseye_macros::command;
 
-use crate::hosts::repl::args::words;
+use crate::hosts::repl::args::{ArgError, words};
 use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::unwind::try_format_symbol_at;
@@ -82,7 +82,7 @@ fn undisplay(
 ) -> Result<()> {
     let args: Vec<&str> = numbers.iter().map(String::as_str).collect();
     if args.is_empty() {
-        outln!("{}", command_help("undisplay"));
+        ArgError::Missing.report("undisplay");
         return Ok(());
     }
     if args == ["*"] {

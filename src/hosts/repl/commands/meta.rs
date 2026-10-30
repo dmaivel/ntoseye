@@ -3,7 +3,7 @@ use std::io::IsTerminal;
 
 use crate::base::bytes::utf16le_nul_terminated;
 use crate::base::error::{Error, Result};
-use crate::base::memory::MemoryOps;
+use crate::base::memory::{MemoryOps, ScanFault, read_terminated};
 use crate::base::output;
 use crate::base::time::{FILETIME_UNIX_EPOCH_TICKS, filetime_to_iso};
 use crate::base::types::{CodeMachine, VirtAddr};
@@ -215,7 +215,7 @@ fn printf(
     #[arg(invoked)] name: &str,
 ) -> Result<()> {
     let Some((format, args)) = parse_printf_tail(&tail) else {
-        outln!("{}", command_help(name));
+        ArgError::Missing.report(name);
         return Ok(());
     };
     // An unreadable argument is reported (the REPL prints the error), not
@@ -290,15 +290,10 @@ fn logclose(_state: &mut ReplState<'_>) -> Result<()> {
 )]
 fn help(state: &mut ReplState<'_>, command: Option<String>) -> Result<()> {
     if let Some(name) = command.as_deref() {
-        if let Some((_, help, _)) = state
-            .caches
-            .user_commands
-            .read()
-            .unwrap()
-            .iter()
-            .find(|(command, _, _)| command == name)
-        {
-            outln!("{name}\n{help}");
+        // In dispatch order: a built-in hides an alias or Python command of
+        // its name, and an alias hides a Python command.
+        if let Some(spec) = command_registry().get(name) {
+            outln!("{}", spec_help(spec));
             return Ok(());
         }
         if let Some((_, expansion)) = state
@@ -310,12 +305,18 @@ fn help(state: &mut ReplState<'_>, command: Option<String>) -> Result<()> {
             outln!("alias {name} {expansion}");
             return Ok(());
         }
-        match command_registry().get(name) {
-            None => error!("unknown command '{name}'"),
-            Some(spec) => {
-                outln!("{}", spec_help(spec));
-            }
+        if let Some((_, help, _)) = state
+            .caches
+            .user_commands
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(command, _, _)| command == name)
+        {
+            outln!("{name}\n{help}");
+            return Ok(());
         }
+        error!("unknown command '{name}'");
         return Ok(());
     }
 
@@ -943,13 +944,14 @@ fn parse_printf_tail(text: &str) -> Option<(String, Vec<String>)> {
 }
 
 fn read_wide_string(target: &Target, address: VirtAddr, max_chars: usize) -> Option<String> {
-    let count = max_chars.checked_mul(2)?;
-    let mut bytes = vec![0u8; count];
-    target
-        .context_memory()
-        .read_bytes(address, &mut bytes)
-        .ok()?;
-    Some(utf16le_nul_terminated(&bytes))
+    // Page by page, so a string that ends before an unmapped page or a
+    // dump's capture hole still reads.
+    let memory = target.context_memory();
+    let read = read_terminated(address, max_chars.checked_mul(2)?, 2, |at, buf| {
+        memory.read_bytes(at, buf).map_err(ScanFault::Unreadable)
+    })
+    .ok()?;
+    Some(utf16le_nul_terminated(&read.bytes))
 }
 
 fn format_printf(

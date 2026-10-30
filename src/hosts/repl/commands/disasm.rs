@@ -164,7 +164,9 @@ fn listing_extent(
         return Ok(DisasmExtent::Count(DEFAULT_INSTRUCTIONS));
     };
     match windbg_count_expression(&text) {
-        Some(count) => cx.eval(count).map(|count| DisasmExtent::Count(count.0)),
+        Some(count) => cx
+            .eval(count.strip_prefix('?').unwrap_or(count))
+            .map(|count| DisasmExtent::Count(count.0)),
         None => cx.eval(&text).map(|value| DisasmExtent::Through(value.0)),
     }
 }
@@ -343,13 +345,13 @@ fn disasm_search(
         [count] => match windbg_count_expression(count) {
             Some(count) => Some(count),
             None => {
-                outln!("{}", command_help("#"));
+                ArgError::Missing.report("#");
                 return Ok(());
             }
         },
         [l, count] if l.eq_ignore_ascii_case("l") => Some(count.as_str()),
         _ => {
-            outln!("{}", command_help("#"));
+            ArgError::Missing.report("#");
             return Ok(());
         }
     };
@@ -357,7 +359,7 @@ fn disasm_search(
         state.disasm_search.pattern = Some(pattern.clone());
     }
     let Some(pattern) = state.disasm_search.pattern.clone() else {
-        outln!("{}", command_help("#"));
+        ArgError::Missing.report("#");
         return Ok(());
     };
     let start = match args.get(1) {
