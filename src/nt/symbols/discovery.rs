@@ -176,7 +176,7 @@ impl SymbolStore {
         time_date_stamp: u32,
         size_of_image: u32,
     ) -> Result<Option<u128>> {
-        let image_job = Self::build_image_download_job(name, time_date_stamp, size_of_image)?;
+        let image_job = self.build_image_download_job(name, time_date_stamp, size_of_image)?;
         download_job(&image_job, output::progress_bar(0, "downloading symbols"))?;
 
         let Some((pdb_job, guid)) = self.extract_download_job_from_image_file(&image_job.path)?
@@ -243,7 +243,7 @@ impl SymbolStore {
                 guid,
                 source: ModuleSymbolSource::Memory,
             }),
-            Ok(None) => Self::plan_image_fallback(&addr_space, module_name, base_address),
+            Ok(None) => self.plan_image_fallback(&addr_space, module_name, base_address),
             Err(Error::BadVirtualAddress(_))
             | Err(Error::AddressNotInDump(_))
             | Err(Error::NotCaptured { .. })
@@ -262,13 +262,33 @@ impl SymbolStore {
                         source: ModuleSymbolSource::Memory,
                     });
                 }
-                Self::plan_image_fallback(&addr_space, module_name, base_address)
+                self.plan_image_fallback(&addr_space, module_name, base_address)
             }
             Err(err) => Err(err),
         }
     }
 
-    pub fn load_downloaded_pdb(&self, load: &ModuleSymbolLoad) -> Result<()> {
+    /// Index and register `load`'s PDB. A `background` load commits only
+    /// while its module is still `Fetching`: every cleanup path (process
+    /// exit, invalidation, reboot) drops that status, and registering after
+    /// one would attach symbols to a dead, possibly reused, address space.
+    pub fn load_downloaded_pdb(&self, load: &ModuleSymbolLoad, background: bool) -> Result<()> {
+        let stale = || {
+            Error::DebugInfo(format!(
+                "stale symbol job for {}: module was replaced",
+                load.module.name
+            ))
+        };
+        let unloaded = || {
+            background
+                && !matches!(
+                    self.module_symbol_status(load.dtb, load.module.base_address),
+                    Some(ModuleSymbolStatus::Fetching)
+                )
+        };
+        if unloaded() {
+            return Err(stale());
+        }
         let module_key = Self::module_key(load.dtb, load.module.base_address);
         let existing_guid = self.modules.get(&module_key).map(|existing| existing.guid);
         // The export fallback of this very image, from before its PDB
@@ -279,10 +299,7 @@ impl SymbolStore {
             // A job that outlived a reload/reattach of its module describes a
             // different image; finishing it would mark the wrong PDB loaded.
             if existing_guid != load.guid && image_fallback.is_none() {
-                return Err(Error::DebugInfo(format!(
-                    "stale symbol job for {}: module was replaced",
-                    load.module.name
-                )));
+                return Err(stale());
             }
             // Registered with its PDB already loaded. A registration from the
             // export-table fallback has no PDB yet: load it below, which
@@ -303,6 +320,10 @@ impl SymbolStore {
         }
 
         self.ensure_pdb_loaded(load.job.expected_identity().unwrap(), &load.job.path)?;
+        // Indexing can take long enough for the module to go away meanwhile.
+        if unloaded() {
+            return Err(stale());
+        }
         self.modules.insert(module_key, load.loaded_module());
         if let Some(fallback) = image_fallback
             && !self.modules.iter().any(|module| module.guid == fallback)
@@ -428,13 +449,14 @@ impl SymbolStore {
     }
 
     fn plan_image_fallback<B: MemoryOps<PhysAddr>>(
+        &self,
         memory: &memory::AddressSpace<'_, B>,
         module_name: &str,
         base_address: VirtAddr,
     ) -> Result<ModuleSymbolDiscovery> {
         let (time_date_stamp, size_of_image) = Self::read_image_lookup_info(memory, base_address)?;
         let image_job =
-            Self::build_image_download_job(module_name, time_date_stamp, size_of_image)?;
+            self.build_image_download_job(module_name, time_date_stamp, size_of_image)?;
         Ok(ModuleSymbolDiscovery::NeedsImage { image_job })
     }
 

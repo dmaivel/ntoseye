@@ -193,7 +193,7 @@ impl TypeInfo {
             .iter()
             .filter_map(|(name, field)| match field.type_data {
                 ParsedType::Bitfield { pos, len: 1, .. }
-                    if field.offset == word.offset && value >> pos & 1 != 0 =>
+                    if field.offset == word.offset && bitfield_value(value, pos, 1) != 0 =>
                 {
                     Some((pos, name))
                 }

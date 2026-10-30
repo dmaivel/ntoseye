@@ -84,10 +84,10 @@ impl SymbolIndex {
         let (range_start, range_end) = qualified_search_range(&self.names, query);
         let names = &self.names[range_start..range_end];
         let top = if plain_ascii_query(query) {
-            let fragment = query
+            let (module, fragment) = query
                 .rsplit_once('!')
-                .map_or(query, |(_, fragment)| fragment);
-            let candidates = self.candidates(fragment, range_start, range_end);
+                .map_or((None, query), |(module, fragment)| (Some(module), fragment));
+            let candidates = self.candidates(module, fragment, range_start, range_end);
             let chunk_size = candidates
                 .len()
                 .div_ceil(rayon::current_num_threads())
@@ -141,23 +141,40 @@ impl SymbolIndex {
         scored.into_iter().map(|(_, name)| name.clone()).collect()
     }
 
-    /// The names worth fuzzy-scoring for `needle`, as indices into `names`,
-    /// restricted to `range_start..range_end` and capped at [`CANDIDATE_CAP`].
+    /// The names worth fuzzy-scoring for `needle` typed after `module!`, as
+    /// indices into `names`, restricted to `range_start..range_end` and
+    /// capped at [`CANDIDATE_CAP`].
     ///
     /// Bare-name prefix matches come first and, when any exist, come alone:
     /// that is what typing a prefix means, and they are found by scanning the
     /// packed key column rather than the names. Only when no name starts with
     /// `needle` is the far more expensive contiguous-substring scan of the
     /// names themselves worth running.
-    fn candidates(&self, needle: &str, range_start: usize, range_end: usize) -> Vec<u32> {
+    fn candidates(
+        &self,
+        module: Option<&str>,
+        needle: &str,
+        range_start: usize,
+        range_end: usize,
+    ) -> Vec<u32> {
         if range_start >= range_end {
             return Vec::new();
         }
-        // `module!` with nothing typed after it: every name in range is a
-        // candidate, and the scorer ranks the module's own names first.
+        // `module!` with nothing typed after it: every name of that module is
+        // a candidate. The range is not narrowed to the module for a
+        // lowercase query, so the module is matched here, before the cap,
+        // or the modules sorting ahead of it would fill the cap alone.
         if needle.is_empty() {
-            let end = range_end.min(range_start.saturating_add(CANDIDATE_CAP));
-            return (range_start..end).map(|index| index as u32).collect();
+            return (range_start..range_end)
+                .filter(|&index| {
+                    module.is_none_or(|module| {
+                        let offset = self.bare_offsets[index] as usize;
+                        offset > 0 && self.names[index][..offset - 1].eq_ignore_ascii_case(module)
+                    })
+                })
+                .take(CANDIDATE_CAP)
+                .map(|index| index as u32)
+                .collect();
         }
         let prefixed = self.prefix_candidates(needle, range_start, range_end);
         if !prefixed.is_empty() {

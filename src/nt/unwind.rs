@@ -32,8 +32,8 @@ use crate::{
     },
 };
 
-pub(crate) mod amd64;
-pub(crate) mod arm64;
+pub mod amd64;
+mod arm64;
 mod arm64ec;
 mod tracer;
 mod walk;
@@ -1177,15 +1177,7 @@ pub fn build_stacktrace(
     regs: &[u8],
     limit: usize,
 ) -> StackTrace {
-    let recovered = build_stacktrace_with_context(debugger, register_map, regs, limit);
-    StackTrace {
-        frames: recovered
-            .frames
-            .into_iter()
-            .map(|frame| frame.frame)
-            .collect(),
-        truncated: recovered.truncated,
-    }
+    build_stacktrace_with_context(debugger, register_map, regs, limit).into_stacktrace()
 }
 
 /// Build a stack trace while retaining the register values known at every

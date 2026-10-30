@@ -326,12 +326,15 @@ pub(super) fn live_x86_stack(
         });
     let raw = walk_live_x86(&u32_at, registers, &returns_after_call, frame_set, limit);
     let mut frames = recovered_frames(debugger, trace, raw);
+    // Inline frames come on top of the walked ones, so the limit applies again.
+    let truncated = frames.len().saturating_sub(limit);
+    frames.truncate(limit);
     if let Some(first) = frames.first_mut() {
         first.registers = values.clone();
     }
     Some(RecoveredStackTrace {
         frames,
-        truncated: 0,
+        truncated,
         dtb: trace.dtb(),
         thread: None,
     })

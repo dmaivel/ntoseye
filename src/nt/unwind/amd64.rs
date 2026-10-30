@@ -237,9 +237,9 @@ impl StackTracer<'_> {
             return Unwound::Stop;
         }
         for &(register, at) in &frame.saved {
-            if let Ok(value) = self.stack_u64(context.sp.wrapping_add(u64::from(at))) {
-                context.regs[register] = Some(value);
-            }
+            // An unreadable slot leaves the caller's value unknown; keeping
+            // the callee's would pass it off as the caller's.
+            context.regs[register] = self.stack_u64(context.sp.wrapping_add(u64::from(at))).ok();
         }
         context.pc = return_address;
         context.sp = rsp.wrapping_add(8);

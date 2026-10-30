@@ -88,16 +88,23 @@ impl SiteJournal {
     /// another boot are dropped: that memory is gone.
     pub fn open(dir: &Path, key: &str, kernel_base: u64) -> Self {
         let path = dir.join(key);
-        let sites = fs::read_to_string(&path)
-            .map(|text| parse(&text, kernel_base))
-            .unwrap_or_default();
+        // Only a missing file means there is nothing to repair. Rewriting a
+        // journal that exists but could not be read would delete the only
+        // record of sites still patched in the guest, so it counts as already
+        // holding the empty journal: it is left alone until this session
+        // plants a site of its own.
+        let (sites, written) = match fs::read_to_string(&path) {
+            Ok(text) => (parse(&text, kernel_base), None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (BTreeMap::new(), None),
+            Err(_) => (BTreeMap::new(), Some(String::new())),
+        };
         let journal = Self {
             path,
             state: Mutex::new(State {
                 kernel_base,
                 sites,
                 planted: BTreeMap::new(),
-                written: None,
+                written,
             }),
         };
         journal.persist(&mut journal.state());
@@ -757,6 +764,18 @@ mod tests {
         let rebooted = SiteJournal::open(&dir.0, "target", BASE + 0x200000);
         assert_eq!(rebooted.repair(&frames, INT3), Repair::default());
         assert_eq!(frames.get(0x26a06bf90, 8), patched());
+    }
+
+    /// A journal that exists but cannot be read still records sites patched
+    /// in the guest; opening it must not delete it.
+    #[test]
+    fn an_unreadable_journal_is_not_deleted() {
+        let dir = Dir::new("unreadable");
+        let path = dir.0.join("target");
+        fs::write(&path, [0xff, 0xfe]).unwrap();
+
+        drop(SiteJournal::open(&dir.0, "target", BASE));
+        assert_eq!(fs::read(&path).unwrap(), [0xff, 0xfe]);
     }
 
     #[test]

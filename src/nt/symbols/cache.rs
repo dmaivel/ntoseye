@@ -3,7 +3,7 @@
 
 use super::download::{download_job, install_local_file};
 use super::ntoseye_home;
-use super::{DownloadJob, ImageFetch, SymbolSource, SymbolStore, server_urls};
+use super::{DownloadJob, ImageFetch, SymbolSource, SymbolStore};
 use crate::{
     base::{
         error::{Error, Result},
@@ -242,7 +242,7 @@ impl SymbolStore {
         time_date_stamp: u32,
         size_of_image: u32,
     ) -> Result<PathBuf> {
-        let job = Self::build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
+        let job = self.build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
         match self.local_image(&job, time_date_stamp, size_of_image) {
             Some(local) => install_local_file(&local, &job.path)?,
             None => download_job(&job, output::progress_bar(0, "downloading symbols"))?,
@@ -302,7 +302,7 @@ impl SymbolStore {
         time_date_stamp: u32,
         size_of_image: u32,
     ) -> Result<Option<PathBuf>> {
-        let job = Self::build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
+        let job = self.build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
         self.fetch_image_later(job)
     }
 
@@ -400,7 +400,7 @@ impl SymbolStore {
         size_of_image: u32,
         fetch: ImageFetch,
     ) -> Result<Arc<PeImage>> {
-        let job = Self::build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
+        let job = self.build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
         if let Some(image) = self.on_disk_images.get(&job.path) {
             return Ok(Arc::clone(&image));
         }
@@ -465,13 +465,25 @@ impl SymbolStore {
     }
 
     pub fn build_image_download_job(
+        &self,
         image_file_name: &str,
         time_date_stamp: u32,
         size_of_image: u32,
     ) -> Result<DownloadJob> {
         let server_name = Self::symbol_server_file_name(image_file_name);
         let key = image_key(time_date_stamp, size_of_image);
-        let urls = server_urls(&format!("{server_name}/{key}/{server_name}"));
+        let urls = self
+            .sources
+            .read()
+            .iter()
+            .filter_map(|source| match source {
+                SymbolSource::Http(base) => Some(format!(
+                    "{}/{server_name}/{key}/{server_name}",
+                    base.trim_end_matches('/')
+                )),
+                _ => None,
+            })
+            .collect();
         let storage_dir = symbols_directory().ok_or(Error::StorageNotFound)?;
         let path = store_path(&storage_dir, server_name, &key);
 

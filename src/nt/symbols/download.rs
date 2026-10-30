@@ -2,9 +2,7 @@
 //! PDB identity validation, and parallel download with progress.
 
 use super::cache::{store_path, symbols_directory};
-use super::{
-    DownloadJob, FORCE_DOWNLOADS, PdbIdentity, PdbRequest, SymbolSource, SymbolStore, server_urls,
-};
+use super::{DownloadJob, FORCE_DOWNLOADS, PdbIdentity, PdbRequest, SymbolSource, SymbolStore};
 use crate::base::error::{Error, Result};
 use crate::base::output;
 use dashmap::DashMap;
@@ -446,12 +444,13 @@ impl SymbolStore {
         let server_name = Self::symbol_server_file_name(pdb_file_name);
         let identity = PdbIdentity { guid, age };
         let key = identity.symbol_store_key();
-        let urls = server_urls(&format!("{server_name}/{key}/{server_name}"));
         let storage_dir = symbols_directory().ok_or(Error::StorageNotFound)?;
         let path = store_path(&storage_dir, server_name, &key);
 
+        // A PDB job is resolved against `sources`, which also covers local
+        // stores and compressed files, so it has no fixed URL list.
         let job = DownloadJob {
-            urls,
+            urls: Vec::new(),
             path,
             filename: server_name.to_string(),
             pdb: Some(PdbRequest {

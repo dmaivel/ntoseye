@@ -148,11 +148,6 @@ fn remembered_module_is_discovered_without_reading_the_target() {
     assert_eq!(guid, reference(2).guid);
     assert_eq!(job.filename, "driver.pdb");
     assert!(
-        job.urls[0].ends_with("/driver.pdb/0123456789ABCDEF0123456789ABCDEF2/driver.pdb"),
-        "{}",
-        job.urls[0]
-    );
-    assert!(
         job.path
             .ends_with("driver.pdb/0123456789ABCDEF0123456789ABCDEF2/driver.pdb"),
         "{}",
@@ -1273,15 +1268,18 @@ fn prefix_search_ranks_and_substring_search_falls_back() {
 
 #[test]
 fn a_bare_module_qualifier_lists_that_module() {
-    let index = SymbolIndex::from_names(vec![
+    // More names than the search scores per query sort ahead of `nt!`.
+    let mut names: Vec<String> = (0..60_000).map(|n| format!("acpi!f{n}")).collect();
+    names.extend([
         "nt!KeBugCheckEx".to_string(),
         "nt!memcpy".to_string(),
         "ntdll!memcpy".to_string(),
     ]);
+    let index = SymbolIndex::from_names(names);
 
     let hits = index.search("nt!", 10);
     assert_eq!(
-        hits[..2],
+        hits,
         ["nt!KeBugCheckEx".to_string(), "nt!memcpy".to_string()]
     );
 }
@@ -1855,7 +1853,7 @@ fn a_pdb_acquired_after_the_export_fallback_replaces_it() {
 
     // Then it is acquired (a source added, the process attached again):
     // the PDB is loaded and its symbols replace the exports.
-    store.load_downloaded_pdb(&load).unwrap();
+    store.load_downloaded_pdb(&load, false).unwrap();
     assert!(store.has_matching_pdb(&load.job));
     assert_eq!(closest(), Some(("DriverEntry".to_string(), 0x10)));
 
@@ -1910,12 +1908,64 @@ fn the_pdb_of_an_image_whose_identity_was_unknown_replaces_its_exports() {
 
     // A job for another build at that address is stale, as before.
     let other_build = module.clone().with_time_date_stamp(0x6000_0001);
-    assert!(store.load_downloaded_pdb(&load_for(&other_build)).is_err());
+    assert!(
+        store
+            .load_downloaded_pdb(&load_for(&other_build), false)
+            .is_err()
+    );
     assert_eq!(closest(), Some(("exported_entry".to_string(), 0x10)));
 
     // The image, fetched since, names its PDB: it replaces the exports, and
     // the image-keyed names go with them.
-    store.load_downloaded_pdb(&load_for(&module)).unwrap();
+    store
+        .load_downloaded_pdb(&load_for(&module), false)
+        .unwrap();
     assert_eq!(closest(), Some(("DriverEntry".to_string(), 0x10)));
     assert!(!store.symbol_rvas.contains_key(&image_key));
+}
+
+#[test]
+fn a_background_pdb_load_does_not_register_a_module_unloaded_meanwhile() {
+    let path = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/inline_frames.pdb"
+    ));
+    let bytes = std::fs::read(path).unwrap();
+    let info = pdb2::PDB::open(std::io::Cursor::new(bytes.as_slice()))
+        .unwrap()
+        .pdb_information()
+        .unwrap();
+    let store = SymbolStore::new();
+    let dtb: Dtb = 0x1000;
+    let module = ModuleInfo::new(
+        "fixture.sys".to_string(),
+        VirtAddr(INLINE_FIXTURE_BASE),
+        0x8000,
+    );
+    let (mut job, guid) = store
+        .build_download_job("inline_frames.pdb", info.guid.as_u128(), info.age)
+        .unwrap();
+    job.path = path.to_path_buf();
+    let load = ModuleSymbolLoad::new(job, guid, ModuleSymbolSource::Image, module, dtb);
+
+    // Cleanup dropped the `Fetching` status the fetch was started under.
+    assert!(store.load_downloaded_pdb(&load, true).is_err());
+    assert!(
+        store
+            .find_closest_symbol_for_address(dtb, fixture_address(0x1010))
+            .is_none()
+    );
+    assert!(
+        store
+            .module_symbol_status(dtb, load.module.base_address)
+            .is_none()
+    );
+
+    store.set_module_symbol_status(dtb, load.module.base_address, ModuleSymbolStatus::Fetching);
+    store.load_downloaded_pdb(&load, true).unwrap();
+    assert!(
+        store
+            .find_closest_symbol_for_address(dtb, fixture_address(0x1010))
+            .is_some()
+    );
 }

@@ -476,7 +476,7 @@ impl Guest {
                 }
                 Err(_e) if module.time_date_stamp.is_some() => {
                     let tds = module.time_date_stamp.unwrap();
-                    match SymbolStore::build_image_download_job(&module.name, tds, module.size) {
+                    match symbols.build_image_download_job(&module.name, tds, module.size) {
                         Ok(image_job) => match unavailable(&image_job) {
                             Some(status) => Self::apply_module_symbol_status(
                                 symbols, report, dtb, &module, status,
@@ -618,6 +618,15 @@ impl Guest {
         }
     }
 
+    /// Whether a background fetch for `module` lost its `Fetching` status,
+    /// which every cleanup path removes when the module goes away.
+    fn fetch_abandoned(symbols: &SymbolStore, dtb: Dtb, module: &ModuleInfo) -> bool {
+        !matches!(
+            symbols.module_symbol_status(dtb, module.base_address),
+            Some(ModuleSymbolStatus::Fetching)
+        )
+    }
+
     /// Acquisition half of a symbol load: download images and PDBs the plan
     /// asked for, then index everything that is on disk. Files and network
     /// only, so it may run off the session thread. Returns the modules whose
@@ -628,7 +637,7 @@ impl Guest {
         plan: ModuleSymbolPlan,
         dtb: Dtb,
         report: &mut ModuleSymbolLoadReport,
-        quiet: bool,
+        background: bool,
     ) -> Vec<ModuleInfo> {
         let ModuleSymbolPlan {
             mut ready,
@@ -638,7 +647,7 @@ impl Guest {
 
         let image_results = download_jobs_parallel(
             image_jobs.iter().map(|image| image.job.clone()).collect(),
-            quiet,
+            background,
         );
         for (image, result) in image_jobs.into_iter().zip(image_results) {
             let ImageLoad {
@@ -646,6 +655,9 @@ impl Guest {
                 module,
                 exports,
             } = image;
+            if background && Self::fetch_abandoned(symbols, dtb, &module) {
+                continue;
+            }
             match result {
                 Ok(_) => match symbols.extract_download_job_from_image_file(&image_job.path) {
                     Ok(Some((job, guid))) => {
@@ -710,10 +722,13 @@ impl Guest {
 
         let download_results = download_jobs_parallel(
             downloads.iter().map(|load| load.job.clone()).collect(),
-            quiet,
+            background,
         );
         let mut stale_identities: Vec<ModuleInfo> = Vec::new();
         for (load, result) in downloads.into_iter().zip(download_results) {
+            if background && Self::fetch_abandoned(symbols, dtb, &load.module) {
+                continue;
+            }
             match result {
                 Ok(_) => ready.push(load),
                 Err(_) if matches!(load.source, ModuleSymbolSource::Identity) => {
@@ -738,7 +753,7 @@ impl Guest {
         }
 
         if !ready.is_empty() {
-            let pb = if quiet {
+            let pb = if background {
                 ProgressBar::hidden()
             } else {
                 output::progress_bar(ready.len() as u64, "indexing symbols")
@@ -763,13 +778,13 @@ impl Guest {
             let mut results = first_per_guid
                 .into_par_iter()
                 .map(|load| {
-                    let result = symbols.load_downloaded_pdb(&load);
+                    let result = symbols.load_downloaded_pdb(&load, background);
                     pb.inc(1);
                     (load, result)
                 })
                 .collect::<Vec<_>>();
             results.extend(duplicate_guids.into_iter().map(|load| {
-                let result = symbols.load_downloaded_pdb(&load);
+                let result = symbols.load_downloaded_pdb(&load, background);
                 pb.inc(1);
                 (load, result)
             }));
@@ -788,6 +803,9 @@ impl Guest {
                             symbols.remember_module_identity(&load.module, &load.job);
                         }
                     }
+                    // The module was unloaded while its PDB was fetched: it
+                    // has no status left to report a failure in.
+                    Err(_) if background && Self::fetch_abandoned(symbols, dtb, &load.module) => {}
                     Err(_) if matches!(load.source, ModuleSymbolSource::Identity) => {
                         stale_identities.push(load.module);
                     }

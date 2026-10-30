@@ -123,6 +123,7 @@ Keeping this file:
 - Over KDNET, a failed send no longer fails the next request too, and a datagram that does not decrypt is dropped instead of failing the request.
 - When `ntoseye` reads guest memory from the VM process (the `memory` backend, or KD with `--memory-source host`), a physical read or write that crosses the 32-bit MMIO hole fails, where it went on into guest RAM above 4 GiB.
 - `!hvbp` and the SDK's `add_hypercall` take the `hv!` prefix in any case.
+- Images are downloaded from the symbol servers `.sympath` set, not only the default ones, a symbol download that finishes after its module unloaded no longer registers the module again, and a breakpoint journal that cannot be read is kept, where it was deleted with the record of breakpoints left in the guest.
 
 ## v0.52.0 (2026-10-25)
 

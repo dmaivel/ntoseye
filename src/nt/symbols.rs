@@ -85,19 +85,6 @@ static DEFAULT_SYMBOL_SOURCES: LazyLock<Vec<SymbolSource>> = LazyLock::new(|| {
     sources
 });
 
-/// `index_path` under every symbol server in the default symbol path.
-fn server_urls(index_path: &str) -> Vec<String> {
-    DEFAULT_SYMBOL_SOURCES
-        .iter()
-        .filter_map(|source| match source {
-            SymbolSource::Http(base) => {
-                Some(format!("{}/{index_path}", base.trim_end_matches('/')))
-            }
-            _ => None,
-        })
-        .collect()
-}
-
 /// Whether a symbol is a public (exported or PDB public) or a private one.
 #[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1133,10 +1120,6 @@ impl SymbolStore {
         self.source_paths.write().push(path);
     }
 
-    pub fn reset_source_paths(&self) {
-        self.source_paths.write().clear();
-    }
-
     /// Record the kernel module's guid so type/enum layout lookups can prefer it
     /// regardless of the attached address space. Called when `ntoskrnl` loads.
     pub fn set_kernel(&self, guid: Option<u128>, dtb: Dtb) {
@@ -1609,10 +1592,6 @@ impl SymbolStore {
         self.module_source
             .get(&Self::module_key(dtb, base_address))
             .map(|source| source.clone())
-    }
-
-    pub fn has_guid(&self, guid: u128) -> bool {
-        self.pdbs.contains_key(&guid)
     }
 
     pub fn has_matching_pdb(&self, job: &DownloadJob) -> bool {
