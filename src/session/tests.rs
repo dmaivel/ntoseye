@@ -2994,6 +2994,41 @@ fn resuming_from_the_bugcheck_trap_steps_past_it() {
     assert!(session.bugcheck_trap.is_some());
 }
 
+/// A thread interrupted on the bugcheck trap while run past it comes back
+/// to it: that hit is the bugcheck already reported, so it is stepped past
+/// and resumed, not reported again. Another thread's hit is a new bugcheck.
+#[test]
+fn a_thread_back_on_the_bugcheck_trap_after_an_interrupt_is_resumed() {
+    for (marked_stack, reported) in [(0x9000, false), (0x8000, true)] {
+        let mut backend = MockBackend {
+            allow_breakpoints: true,
+            one_vcpu: true,
+            ..MockBackend::default()
+        };
+        backend.set("rip", 0x1_4000);
+        backend.set("rsp", 0x9000);
+        let continues = Arc::clone(&backend.continues);
+        let mut session = session_with_mock(backend);
+        session.current_thread = "p01.01".into();
+        *session.bugcheck_trap.edit() = Some(TrapSite {
+            address: VirtAddr(0x1_4000),
+            original: vec![0x48],
+        });
+        session.trap_interrupted = Some((InterruptedTrap::Bugcheck, marked_stack));
+
+        let resolution = session
+            .classify_stop_event(breakpoint_event(0x1_4000))
+            .unwrap();
+
+        assert_eq!(
+            matches!(resolution, StopResolution::Bugcheck { .. }),
+            reported,
+            "{resolution:?}"
+        );
+        assert_eq!(continues.load(Ordering::Relaxed), usize::from(!reported));
+    }
+}
+
 /// A session that exits while a partition view is shown cleans up the
 /// target: its trap comes out through the target's backend, not the view's,
 /// which refuses breakpoints, and the view is gone.
@@ -3417,7 +3452,13 @@ fn lifting_the_unload_traps_keeps_the_load_traps_interrupted_hit() {
     );
     let regs = session.backend.read_registers().unwrap();
     let stack = session.register_map.read_u64("rsp", &regs).unwrap();
-    session.module_trap_interrupted = Some((ModuleEvent::Load, false, stack));
+    session.trap_interrupted = Some((
+        InterruptedTrap::Module {
+            event: ModuleEvent::Load,
+            user: false,
+        },
+        stack,
+    ));
 
     session.arm_traps();
     assert!(!has_module_trap(&session, ModuleEvent::Unload));
@@ -3450,7 +3491,13 @@ fn lifting_the_user_image_trap_keeps_the_load_traps_interrupted_hit() {
     );
     let regs = session.backend.read_registers().unwrap();
     let stack = session.register_map.read_u64("rsp", &regs).unwrap();
-    session.module_trap_interrupted = Some((ModuleEvent::Load, false, stack));
+    session.trap_interrupted = Some((
+        InterruptedTrap::Module {
+            event: ModuleEvent::Load,
+            user: false,
+        },
+        stack,
+    ));
 
     session.arm_traps();
     assert!(!session.user_image_trap_planted());

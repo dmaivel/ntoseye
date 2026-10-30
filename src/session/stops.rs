@@ -26,7 +26,7 @@ use crate::session::exception_policy::ExceptionPolicyMode;
 use crate::session::hits::{resolve_watchpoint_stop, rewind_thread_off_breakpoint};
 use crate::session::reload::ReloadDisposition;
 use crate::session::{
-    BreakpointStopAction, Cancel, ContinueOutcome, RunStatus, STATUS_BREAKPOINT,
+    BreakpointStopAction, Cancel, ContinueOutcome, InterruptedTrap, RunStatus, STATUS_BREAKPOINT,
     STATUS_SINGLE_STEP, Session, StopResolution, WatchpointStopAction,
 };
 
@@ -623,6 +623,21 @@ impl Session {
             .as_ref()
             .is_some_and(|trap| trap.address.0 == rip)
         {
+            // A thread interrupted on the trap while run past it comes
+            // back to it: the bugcheck the last stop reported, not a new one.
+            let stack = self.target.register_value(self.target.arch().sp_register());
+            if self
+                .trap_interrupted
+                .take_if(|(trap, interrupted)| {
+                    *trap == InterruptedTrap::Bugcheck && Some(*interrupted) == stack
+                })
+                .is_some()
+            {
+                self.backend.set_current_thread(&self.current_thread)?;
+                self.step_over_site_at_pc()?;
+                self.continue_backend(ContinueDisposition::Handled)?;
+                return Ok(StopResolution::Resumed);
+            }
             event.is_bugcheck = true;
             event.bugcheck = self.bugcheck_from_trap();
             // Re-record: the event was stored before the trap enriched it,
@@ -714,9 +729,14 @@ impl Session {
     ) -> Result<StopResolution> {
         let stack = self.target.register_value(self.target.arch().sp_register());
         let repeated = self
-            .module_trap_interrupted
-            .take_if(|(event, user, interrupted)| {
-                *event == kind && !*user && Some(*interrupted) == stack
+            .trap_interrupted
+            .take_if(|(trap, interrupted)| {
+                *trap
+                    == InterruptedTrap::Module {
+                        event: kind,
+                        user: false,
+                    }
+                    && Some(*interrupted) == stack
             })
             .is_some();
         self.unreported_module_change = self.refresh_modules_on_stop();
@@ -747,9 +767,14 @@ impl Session {
     ) -> Result<StopResolution> {
         let stack = self.target.register_value(self.target.arch().sp_register());
         let repeated = self
-            .module_trap_interrupted
-            .take_if(|(event, user, interrupted)| {
-                *event == ModuleEvent::Load && *user && Some(*interrupted) == stack
+            .trap_interrupted
+            .take_if(|(trap, interrupted)| {
+                *trap
+                    == InterruptedTrap::Module {
+                        event: ModuleEvent::Load,
+                        user: true,
+                    }
+                    && Some(*interrupted) == stack
             })
             .is_some();
         let module = (!repeated)

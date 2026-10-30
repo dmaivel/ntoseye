@@ -33,7 +33,7 @@ use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::hits::{reported_watch_hit, stack_pointer};
 use crate::session::{
     CallTrace, CallTraceEnd, CallTraceFrame, Cancel, CancelBehavior, ContinueOutcome, ControlState,
-    CurrentInstruction, HandedBackRun, ModuleTrap, PendingWalk, STATUS_BREAKPOINT,
+    CurrentInstruction, HandedBackRun, InterruptedTrap, ModuleTrap, PendingWalk, STATUS_BREAKPOINT,
     STATUS_SINGLE_STEP, Session, StepKind, StepMode, StepStack, StopResolution,
 };
 
@@ -307,14 +307,15 @@ impl Session {
             )));
         }
         // Interrupted on the trap itself, the thread returns to it and hits
-        // it again; that hit is this event, not a new one. A thread back on
-        // the bugcheck trap is reported as the bugcheck again, which it is.
-        if let Some((_, event, user)) = module
-            && matches!(stepped, Ok(RunPast::Diverted | RunPast::Kept))
-        {
-            self.module_trap_interrupted =
+        // it again; that hit is this event, not a new one.
+        if matches!(stepped, Ok(RunPast::Diverted | RunPast::Kept)) {
+            let which = match module {
+                Some((_, event, user)) => InterruptedTrap::Module { event, user },
+                None => InterruptedTrap::Bugcheck,
+            };
+            self.trap_interrupted =
                 interrupted_on(&self.target, &self.register_map, &regs, rip, cr3)
-                    .map(|stack| (event, user, stack));
+                    .map(|stack| (which, stack));
         }
         stepped.map(Some)
     }

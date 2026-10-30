@@ -430,7 +430,7 @@ impl Session {
             reload_module_list_pending,
             bugcheck_trap,
             module_traps,
-            module_trap_interrupted: None,
+            trap_interrupted: None,
             last_user_image: None,
             hold_declined_hits: false,
             reload_surface_pending: false,

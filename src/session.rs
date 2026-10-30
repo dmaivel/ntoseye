@@ -699,6 +699,17 @@ pub struct ModuleTrap {
     pub user: bool,
 }
 
+/// Which of the session's own traps a thread was interrupted on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InterruptedTrap {
+    /// A module trap, by its event and whether it is the user-image trap:
+    /// that trap and the kernel load trap are both load traps, so the event
+    /// alone does not name the trap.
+    Module { event: ModuleEvent, user: bool },
+    /// The trap on `nt!KeBugCheckEx`.
+    Bugcheck,
+}
+
 impl Publish for Option<TrapSite> {
     fn publish(&self, sites: &CodeSites) {
         sites.publish_traps(
@@ -869,12 +880,10 @@ pub struct Session {
     /// loads and unloads, while one is waited on. Only backends that report
     /// no module events themselves get them; see [`Self::sync_module_traps`].
     module_traps: Published<Vec<ModuleTrap>>,
-    /// The trap (its event, and whether it is the user-image trap) and stack
-    /// pointer of a thread that took an interrupt on a module trap while
-    /// being run past it, before executing it: its next hit on that trap is
-    /// the same event, not a new one. The user-image trap and the kernel load
-    /// trap are both load traps, so the event alone does not name the trap.
-    module_trap_interrupted: Option<(ModuleEvent, bool, u64)>,
+    /// The trap and stack pointer of a thread that took an interrupt on one
+    /// of the session's traps while being run past it, before executing it:
+    /// its next hit on that trap is the same event, not a new one.
+    trap_interrupted: Option<(InterruptedTrap, u64)>,
     /// The user-mode image mapping last reported, by the address-space root
     /// it was mapped into, its base, and whether the user-image trap (rather
     /// than Windows) reported it. Under `!gflag +ksl` Windows reports an

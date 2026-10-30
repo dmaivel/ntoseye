@@ -22,7 +22,7 @@ use crate::nt::guest::{ModuleSymbolLoadReport, ProcessInfo, hypercalls};
 use crate::nt::symbols::split_query_module;
 use crate::nt::target::{MemoryKind, Target};
 use crate::session::exception_policy::ExceptionPolicyMode;
-use crate::session::{ModuleTrap, Session, TrapSite};
+use crate::session::{InterruptedTrap, ModuleTrap, Session, TrapSite};
 
 /// What [`Session::add_pattern_breakpoints`] set.
 pub struct PatternBreakpoints {
@@ -524,8 +524,8 @@ impl Session {
         }
         *self.module_traps.edit() = kept;
         // The other traps stay planted, and so do their markers.
-        self.module_trap_interrupted
-            .take_if(|(interrupted, trap_user, _)| *interrupted == event && *trap_user == user);
+        self.trap_interrupted
+            .take_if(|(trap, _)| *trap == InterruptedTrap::Module { event, user });
     }
 
     /// Set an `sx* ld` or `sx* ud` filter.
@@ -1115,7 +1115,7 @@ impl Session {
             lift_target_site(self.backend.as_mut(), &self.target, trap.site.address)?;
             self.module_traps.edit().pop();
         }
-        self.module_trap_interrupted = None;
+        self.trap_interrupted = None;
         Ok(())
     }
 
