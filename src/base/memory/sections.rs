@@ -63,11 +63,14 @@ pub struct SectionViews {
 
 /// Each process's `EPROCESS` by the root of its address space, and roots no
 /// process has, so a root that is not a process's (VTL1, the hypervisor)
-/// does not cost a walk of the process list per page.
+/// does not cost a walk of the process list per page. `unknown` holds for
+/// one halt (`epoch`): a root may join the list, or be reused by a new
+/// process, once the target runs.
 #[derive(Default)]
 struct Processes {
     by_root: HashMap<u64, VirtAddr>,
     unknown: HashSet<u64>,
+    epoch: Option<u64>,
 }
 
 impl SectionViews {
@@ -88,15 +91,17 @@ impl SectionViews {
     /// process whose address space is rooted at `dtb`, read from the VAD that
     /// maps it; `None` when no view maps it (private memory has no prototype
     /// PTEs) or its PTE is outside the view's contiguous run of them.
-    /// `kernel` reads kernel addresses.
+    /// `kernel` reads kernel addresses; `epoch` is the halt it reads in
+    /// (`None` for a target that never runs).
     pub fn prototype_pte(
         &self,
         kernel: &impl MemoryOps<VirtAddr>,
+        epoch: Option<u64>,
         dtb: Dtb,
         va: VirtAddr,
     ) -> Option<VirtAddr> {
         let layout = &self.layout;
-        let eprocess = self.process(kernel, dtb & layout.root_mask)?;
+        let eprocess = self.process(kernel, epoch, dtb & layout.root_mask)?;
         let vpn = va.0 >> 12;
         let (vad, start) = self.find_vad(kernel, eprocess, vpn)?;
         // 8 bytes of flags before Windows 8 (`PrivateMemory` is bit 63
@@ -114,8 +119,20 @@ impl SectionViews {
     /// The `EPROCESS` whose root is `root`, confirmed against the process's
     /// own field, since a root outlives nothing: an exited process's may be
     /// reused.
-    fn process(&self, kernel: &impl MemoryOps<VirtAddr>, root: u64) -> Option<VirtAddr> {
-        let known = self.processes().by_root.get(&root).copied();
+    fn process(
+        &self,
+        kernel: &impl MemoryOps<VirtAddr>,
+        epoch: Option<u64>,
+        root: u64,
+    ) -> Option<VirtAddr> {
+        let known = {
+            let mut processes = self.processes();
+            if processes.epoch != epoch {
+                processes.epoch = epoch;
+                processes.unknown.clear();
+            }
+            processes.by_root.get(&root).copied()
+        };
         if let Some(eprocess) = known
             && self.root_of(kernel, eprocess) == Some(root)
         {
@@ -127,6 +144,8 @@ impl SectionViews {
         let by_root = self.walk_processes(kernel);
         let mut processes = self.processes();
         processes.by_root = by_root;
+        // The fresh walk is the answer for every root it does not list.
+        processes.unknown.clear();
         let eprocess = processes.by_root.get(&root).copied();
         if eprocess.is_none() {
             processes.unknown.insert(root);

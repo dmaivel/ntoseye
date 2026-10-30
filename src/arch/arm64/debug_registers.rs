@@ -135,7 +135,7 @@ impl DebugRegisters for Arm64 {
         pc: u64,
         armed: &dyn Fn(usize) -> Option<HardwareWatch>,
     ) -> Option<usize> {
-        let read = |name: String| map.read_u64(name, registers).unwrap_or(0);
+        let read = |name: &str| map.read_u64(name, registers).unwrap_or(0);
         let far = map.read_u64("far", registers).unwrap_or(0);
         let watchpoint = WATCHPOINT_SLOTS.filter(|_| far != 0).find(|&slot| {
             let Some(watch) =
@@ -143,24 +143,27 @@ impl DebugRegisters for Arm64 {
             else {
                 return false;
             };
-            let control = read(format!("wcr{slot}"));
-            let bas = (control >> CONTROL_BAS_SHIFT) & 0xff;
+            let Ok((value, control)) = slot_pair(slot) else {
+                return false;
+            };
+            let control_bits = read(&control);
+            let bas = (control_bits >> CONTROL_BAS_SHIFT) & 0xff;
             let in_watch = watch
                 .address
                 .checked_add(u64::from(watch.len))
                 .is_some_and(|end| far >= watch.address && far < end);
-            control & 1 != 0
-                && read(format!("wvr{slot}")) == wvr_address(far)
+            control_bits & 1 != 0
+                && read(&value) == wvr_address(far)
                 && bas & (1 << (far & 7)) != 0
                 && in_watch
         });
         watchpoint.or_else(|| {
             BREAKPOINT_SLOTS.clone().find(|&slot| {
-                let index = slot - BREAKPOINT_SLOTS.start;
                 armed(slot).is_some_and(|watch| {
                     watch.access == HwBreakpointAccess::Execute && watch.address == pc
-                }) && read(format!("bcr{index}")) & 1 != 0
-                    && read(format!("bvr{index}")) == pc & !3
+                }) && slot_pair(slot).is_ok_and(|(value, control)| {
+                    read(&control) & 1 != 0 && read(&value) == pc & !3
+                })
             })
         })
     }

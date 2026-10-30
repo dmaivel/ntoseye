@@ -337,14 +337,6 @@ impl VirtAddr {
         self.0 == 0
     }
 
-    pub const fn huge_page_offset(self) -> u64 {
-        self.0 & !(!0u64 << 30)
-    }
-
-    pub const fn large_page_offset(self) -> u64 {
-        self.0 & !(!0u64 << 21)
-    }
-
     pub const fn pml4_index(self) -> usize {
         ((self.0 >> PML4E_SHIFT) & PT_INDEX_MASK) as usize
     }

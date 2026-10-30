@@ -130,16 +130,23 @@ pub fn read_terminated(
         let current = addr + start as u64;
         let page_remaining = PAGE_SIZE - current.page_offset() as usize;
         bytes.resize(start + page_remaining.min(max_bytes - start), 0);
-        match read(current, &mut bytes[start..]) {
-            Ok(()) => {}
-            Err(ScanFault::Unreadable(error)) if start == 0 => return Err(error),
-            Err(ScanFault::Unreadable(_)) => {
-                bytes.truncate(start);
-                unreadable = true;
-                break;
+        let fault = match read(current, &mut bytes[start..]) {
+            Ok(()) => None,
+            Err(ScanFault::Unreadable(error)) => {
+                // A dump captures memory by the byte: the bytes before the
+                // hole were read and may hold the terminator.
+                let readable = match error {
+                    Error::NotCaptured { address, .. } => address
+                        .0
+                        .checked_sub(current.0)
+                        .map_or(0, |delta| delta.min((bytes.len() - start) as u64) as usize),
+                    _ => 0,
+                };
+                bytes.truncate(start + readable);
+                Some(error)
             }
             Err(ScanFault::Fatal(error)) => return Err(error),
-        }
+        };
         let complete_units = bytes.len() / unit;
         if let Some(index) = (start / unit..complete_units).find(|&index| {
             bytes[index * unit..(index + 1) * unit]
@@ -151,6 +158,13 @@ pub fn read_terminated(
                 bytes,
                 unreadable: false,
             });
+        }
+        if let Some(error) = fault {
+            if start == 0 && bytes.len() < unit {
+                return Err(error);
+            }
+            unreadable = true;
+            break;
         }
     }
     bytes.truncate(bytes.len() - bytes.len() % unit);
@@ -659,7 +673,11 @@ impl<'a, B: MemoryOps<PhysAddr>> AddressSpace<'a, B> {
             return None;
         }
         let views = self.backend.section_views()?;
-        let from_vad = || views.prototype_pte(self, self.dtb, va);
+        let epoch = self
+            .backend
+            .translation_cache()
+            .map(TranslationCache::halt_epoch);
+        let from_vad = || views.prototype_pte(self, epoch, self.dtb, va);
         match leaf {
             None => from_vad(),
             Some(pte) if pte.0 == 0 => from_vad(),
@@ -1011,16 +1029,21 @@ impl<'a, B: MemoryOps<PhysAddr>> MemoryOps<VirtAddr> for AddressSpace<'a, B> {
 
             let translation = match self.virt_to_phys(curr_vaddr)? {
                 Some(translation) => translation,
-                None if let Some(Ok(page)) = self.compressed_page(curr_vaddr) => {
-                    let start = curr_vaddr.page_offset() as usize;
-                    let chunk_size = (buf.len() - offset).min(PAGE_SIZE - start);
-                    buf[offset..offset + chunk_size]
-                        .copy_from_slice(&page[start..start + chunk_size]);
-                    offset += chunk_size;
-                    continue;
-                }
-                None if offset > 0 => return Err(Error::PartialRead(offset)),
-                None => return Err(Error::BadVirtualAddress(curr_vaddr)),
+                None => match self.compressed_page(curr_vaddr) {
+                    Some(Ok(page)) => {
+                        let start = curr_vaddr.page_offset() as usize;
+                        let chunk_size = (buf.len() - offset).min(PAGE_SIZE - start);
+                        buf[offset..offset + chunk_size]
+                            .copy_from_slice(&page[start..start + chunk_size]);
+                        offset += chunk_size;
+                        continue;
+                    }
+                    // The store holds the page but cannot produce it: that
+                    // failure says more than an unmapped address would.
+                    Some(Err(error)) if offset == 0 => return Err(error),
+                    _ if offset > 0 => return Err(Error::PartialRead(offset)),
+                    _ => return Err(Error::BadVirtualAddress(curr_vaddr)),
+                },
             };
 
             let bytes_available = PAGE_SIZE - curr_vaddr.page_offset() as usize;
@@ -1954,5 +1977,28 @@ mod tests {
             }
         );
         assert!(read_terminated(VirtAddr(end - 3), 8, 2, read(true)).is_err());
+    }
+
+    #[test]
+    fn terminated_scan_finds_the_terminator_before_a_capture_hole() {
+        // A dump that captured the page up to 0x1010, which holds "AB\0".
+        let read = |at: VirtAddr, buf: &mut [u8]| {
+            let captured = (0x1010 - at.0) as usize;
+            buf[..captured].fill(b'A');
+            buf[1] = b'B';
+            buf[2] = 0;
+            Err(ScanFault::Unreadable(Error::NotCaptured {
+                address: VirtAddr(0x1010),
+                resumes: None,
+            }))
+        };
+        let string = read_terminated(VirtAddr(0x1000), 64, 1, read).unwrap();
+        assert_eq!(
+            string,
+            TerminatedRead {
+                bytes: b"AB".to_vec(),
+                unreadable: false
+            }
+        );
     }
 }

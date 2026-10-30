@@ -54,11 +54,6 @@ pub const OFFSET_R14: usize = 0xE8;
 pub const OFFSET_R15: usize = 0xF0;
 pub const OFFSET_RIP: usize = 0xF8;
 pub const OFFSET_XMM0: usize = 0x1A0;
-pub const OFFSET_DEBUG_CONTROL: usize = 0x4A8;
-pub const OFFSET_LAST_BRANCH_TO_RIP: usize = 0x4B0;
-pub const OFFSET_LAST_BRANCH_FROM_RIP: usize = 0x4B8;
-pub const OFFSET_LAST_EXCEPTION_TO_RIP: usize = 0x4C0;
-pub const OFFSET_LAST_EXCEPTION_FROM_RIP: usize = 0x4C8;
 
 // Synthetic control-register slots appended after CONTEXT
 pub const OFFSET_CR0: usize = CONTEXT_SIZE;
