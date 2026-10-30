@@ -103,10 +103,10 @@ pub struct BugcheckAnalysis {
     pub fault: Option<BugcheckFault>,
     /// The trap frames that the parameters point to.
     pub trap_frames: Vec<BugcheckTrapFrame>,
-    /// Set only when the data was not where it should have been, naming
-    /// where it was instead: `nt!KiBugCheckData` holding a pointer to the
-    /// real slots rather than the slots themselves. `None` is the normal
-    /// case, including every bugcheck the target reported itself.
+    /// Where the data came from when not `nt!KiBugCheckData`'s own slots:
+    /// `"dump header"` for a dump's recorded bugcheck, or a note that
+    /// `nt!KiBugCheckData` held a pointer to the real slots. `None` when it
+    /// was read from those slots, or the target reported the bugcheck itself.
     pub source: Option<String>,
 }
 
@@ -269,27 +269,43 @@ pub fn trap_on_stack_is_the_fault(code: u32) -> bool {
     matches!(code, 0x0000_007f | 0x1000_007f)
 }
 
+const VIOLATION_TYPE: &str = "violation type: ";
+
+/// The parameters of the Driver Verifier stops whose violation type
+/// (parameter 1) ntoseye knows, the first naming that type.
+fn verifier_arguments(code: u32, subcode: u64) -> Option<[&'static str; 4]> {
+    match (code, subcode) {
+        (0x0000_00c4, 0xf6) => Some([
+            "violation type: a kernel handle was referenced as a user-mode handle",
+            "handle value",
+            "current process",
+            "address inside the driver that referenced the handle",
+        ]),
+        (0x0000_00e6, 0x26) => Some([
+            "violation type: an IOMMU detected a DMA violation",
+            "device object of the faulting device",
+            "fault information (usually the physical address)",
+            "fault type (hardware-specific)",
+        ]),
+        _ => None,
+    }
+}
+
+/// What Driver Verifier stop `code` with violation type `subcode` means, for
+/// the types ntoseye knows.
+pub fn verifier_violation(code: u32, subcode: u64) -> Option<&'static str> {
+    verifier_arguments(code, subcode).and_then(|args| args[0].strip_prefix(VIOLATION_TYPE))
+}
+
 /// Resolve parameter meanings that vary by bugcheck parameter values.
 ///
 /// [`BugcheckDescriptor::arguments`] stays a code-only, conservative fallback;
 /// this function provides the precise schema used for a concrete stop.
 pub fn bugcheck_argument_descriptions(info: &BugcheckInfo) -> [&'static str; 4] {
-    const VERIFIER_C4_F6_ARGS: [&str; 4] = [
-        "violation type: a kernel handle was referenced as a user-mode handle",
-        "handle value",
-        "current process",
-        "address inside the driver that referenced the handle",
-    ];
-    const VERIFIER_E6_26_ARGS: [&str; 4] = [
-        "violation type: an IOMMU detected a DMA violation",
-        "device object of the faulting device",
-        "fault information (usually the physical address)",
-        "fault type (hardware-specific)",
-    ];
-
+    if let Some(args) = verifier_arguments(info.code, info.parameters[0]) {
+        return args;
+    }
     match info.code {
-        0x0000_00c4 if info.parameters[0] == 0xf6 => VERIFIER_C4_F6_ARGS,
-        0x0000_00e6 if info.parameters[0] == 0x26 => VERIFIER_E6_26_ARGS,
         0x0000_0077 if matches!(info.parameters[0], 0..=2) => [
             "page retrieval result: 0 = page cache; 1 = disk; 2 = disk success with a short transfer",
             "value where the kernel-stack signature should be",

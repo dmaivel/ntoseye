@@ -1418,11 +1418,13 @@ fn parse_memory_info_list(stream: &[u8], notes: &mut Vec<String>) -> Vec<MemoryR
     }
     regions.sort_by_key(|region| region.base);
     let before = regions.len();
-    let mut end = 0u64;
+    // The last byte kept so far, inclusive: a region may end at the top of
+    // the address space, where its exclusive end does not fit in a `u64`.
+    let mut last: Option<u64> = None;
     regions.retain(|region| {
-        let keep = region.base >= end;
+        let keep = last.is_none_or(|last| region.base > last);
         if keep {
-            end = region.base + region.size;
+            last = Some(region.base + (region.size - 1));
         }
         keep
     });

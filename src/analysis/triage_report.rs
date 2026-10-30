@@ -639,7 +639,8 @@ fn evidence_module_for_address(report: &TriageReport, address: u64) -> Option<&s
         })
 }
 
-fn canonical_module_component(name: &str) -> String {
+/// `name`'s file name without a `.sys` or `.exe` extension.
+fn module_stem(name: &str) -> &str {
     let filename = module_filename(name);
     filename
         .rsplit_once('.')
@@ -648,7 +649,10 @@ fn canonical_module_component(name: &str) -> String {
         })
         .map(|(stem, _)| stem)
         .unwrap_or(filename)
-        .to_ascii_lowercase()
+}
+
+fn canonical_module_component(name: &str) -> String {
+    module_stem(name).to_ascii_lowercase()
 }
 
 fn module_name_matches(recorded: &str, module: &ModuleInfo) -> bool {
@@ -656,17 +660,7 @@ fn module_name_matches(recorded: &str, module: &ModuleInfo) -> bool {
 }
 
 fn names_match(left: &str, right: &str) -> bool {
-    fn basename(name: &str) -> &str {
-        let name = module_filename(name);
-        name.get(..name.len().saturating_sub(4))
-            .filter(|_| {
-                name.get(name.len().saturating_sub(4)..)
-                    .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".sys"))
-            })
-            .unwrap_or(name)
-    }
-
-    basename(left).eq_ignore_ascii_case(basename(right))
+    module_stem(left).eq_ignore_ascii_case(module_stem(right))
 }
 
 #[cfg(test)]
@@ -781,7 +775,7 @@ mod tests {
                 current_thread: 0xffff_8000_1234_0000,
                 processor_number: 1,
                 mhz: 3600,
-                cpu_type: 0x8664,
+                cpu_type: 6,
                 vendor_string: "GenuineIntel".into(),
             }),
             broken_driver: Some("sample.sys".into()),

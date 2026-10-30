@@ -129,6 +129,8 @@ Keeping this file:
 - `!poolused` falls back to the big-page table when the pool tracker tables cannot be read, and power-failure analysis walks the kernel's IRP or worker list when the triage block leaves one out.
 - `!vprot` reads an address in a 1 GiB page, `!devstack` and virtio's driver lookup take no PDO from a device stack whose links loop, `!wdfdevice` lists the queues it read before an unreadable one, and `!virtio` stops at a request it cannot read whole, where it decoded the bytes after the gap.
 - `$peb` on a user-mode minidump reads the PEB pointer by the PDB's `_TEB` layout and works before a thread is selected, and a minidump module with a zero timestamp is fetched by its image's timestamp.
+- `!cpuinfo` on a triage dump gives the CPU family (6, not 0x106) and only for the processor the dump holds.
+- A truncated triage dump is reported as such, where its integrity check passed.
 
 ## v0.52.0 (2026-10-25)
 

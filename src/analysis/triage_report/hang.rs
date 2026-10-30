@@ -5,7 +5,7 @@ use ntoseye_macros::record;
 
 use crate::nt::bugchecks::BugcheckAnalysis;
 use crate::nt::cpu_state;
-use crate::nt::target::{DiagnosticValue, ThreadInfo};
+use crate::nt::target::{DiagnosticValue, KTHREAD_STATE_WAITING, ThreadInfo};
 use crate::nt::unwind::{StackFrame, StackTrace};
 use crate::session::Session;
 
@@ -15,7 +15,6 @@ pub const ANALYZE_HANG_PROCESSOR_LIMIT: u16 = 256;
 pub const ANALYZE_HANG_THREAD_LIMIT: usize = 32;
 /// Frames shown per processor in `!analyze -hang`.
 pub const ANALYZE_HANG_STACK_LIMIT: usize = 8;
-pub const KTHREAD_STATE_WAITING: u8 = 5;
 
 /// What `!analyze -hang` found: the thread on each processor with its
 /// stack, and the waiting threads.

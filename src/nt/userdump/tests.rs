@@ -612,6 +612,38 @@ fn memory_info_regions_are_sorted_and_overlaps_and_empty_regions_dropped() {
 }
 
 #[test]
+fn a_memory_region_ending_at_the_top_of_the_address_space_still_drops_overlaps() {
+    let mut builder = Builder::new(2);
+    builder.system_info(AMD64, WIN32_NT);
+    let region = |base: u64, size: u64| {
+        let mut entry = u64s(&[base, base]);
+        entry.extend(u32s(&[0x04, 0]));
+        entry.extend(u64s(&[size]));
+        entry.extend(u32s(&[0x1000, 0x04, 0x20000, 0]));
+        entry
+    };
+    let top = u64::MAX - 0xfff;
+    let mut stream = u32s(&[16, 48]);
+    stream.extend(u64s(&[2]));
+    stream.extend(region(top, 0x1000));
+    stream.extend(region(u64::MAX, 1));
+    builder.stream(16, &stream);
+    let dump = open(&builder.finish()).unwrap();
+    let info = dump.info();
+
+    assert_eq!(
+        info.regions
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|region| region.base)
+            .collect::<Vec<_>>(),
+        [top]
+    );
+    assert!(info.notes.iter().any(|note| note.contains("overlapping")));
+}
+
+#[test]
 fn function_tables_follow_their_padding_and_resolve_code_outside_modules() {
     let mut builder = Builder::new(2);
     builder.system_info(AMD64, WIN32_NT);

@@ -13,7 +13,11 @@ use super::signature::user_failure_signature;
 use super::{TRIAGE_BACKTRACE_LIMIT, TriageReport};
 use crate::arch::Arch;
 use crate::base::memory::MemoryOps;
-use crate::base::ntstatus::ntstatus_name;
+use crate::base::ntstatus::{
+    DBG_PRINTEXCEPTION_C, DBG_PRINTEXCEPTION_WIDE_C, STATUS_ACCESS_VIOLATION,
+    STATUS_GUARD_PAGE_VIOLATION, STATUS_IN_PAGE_ERROR, STATUS_STACK_BUFFER_OVERRUN,
+    STATUS_STOWED_EXCEPTION, ntstatus_name,
+};
 use crate::base::time::unix_time_to_iso;
 use crate::base::types::VirtAddr;
 use crate::nt::dmp::{DmpException, UnloadedDriver};
@@ -267,13 +271,6 @@ const MS_VC_EXCEPTION: u32 = 0x406D_1388;
 const DELAY_LOAD_MODULE_NOT_FOUND: u32 = 0xC06D_007E;
 const DELAY_LOAD_PROC_NOT_FOUND: u32 = 0xC06D_007F;
 const DELPHI_EXCEPTION: u32 = 0x0EED_FADE;
-const STATUS_GUARD_PAGE_VIOLATION: u32 = 0x8000_0001;
-const STATUS_ACCESS_VIOLATION: u32 = 0xC000_0005;
-const STATUS_IN_PAGE_ERROR: u32 = 0xC000_0006;
-const STATUS_STOWED_EXCEPTION: u32 = 0xC000_027B;
-const STATUS_STACK_BUFFER_OVERRUN: u32 = 0xC000_0409;
-const DBG_PRINTEXCEPTION_C: u32 = 0x4001_0006;
-const DBG_PRINTEXCEPTION_WIDE_C: u32 = 0x4001_000A;
 /// The customer bit of an NTSTATUS-shaped code: the code is not Microsoft's.
 const CUSTOMER_BIT: u32 = 0x2000_0000;
 

@@ -129,7 +129,8 @@ pub struct TriagePrcbInfo {
     pub processor_number: u16,
     /// The processor's clock speed in MHz.
     pub mhz: u32,
-    pub cpu_type: u16,
+    /// `_KPRCB.CpuType`, the processor family.
+    pub cpu_type: u8,
     /// The CPU vendor (`GenuineIntel`, `AuthenticAMD`, ...).
     pub vendor_string: String,
 }
@@ -432,13 +433,13 @@ fn read_string_pool_entry(
 }
 
 /// Whether the DGRT ('TRGD' LE) integrity signature at the offset stored in
-/// ValidOffset is intact. An absent offset is not a mismatch.
+/// ValidOffset is intact. An absent offset is not a mismatch, but one past
+/// the end of the file is: the signature is the last word of the triage
+/// data, so a truncated file loses it first.
 fn triage_signature_valid(mmap: &[u8], triage_hdr: &[u8]) -> bool {
     let valid_offset = read_u32(triage_hdr, TRIAGE_VALID_OFFSET) as usize;
-    if valid_offset == 0 || valid_offset + 4 > mmap.len() {
-        return true;
-    }
-    &mmap[valid_offset..valid_offset + 4] == b"TRGD"
+    valid_offset == 0
+        || mmap.get(valid_offset..valid_offset.saturating_add(4)) == Some(b"TRGD".as_slice())
 }
 
 fn parse_broken_driver(mmap: &[u8], triage_hdr: &[u8]) -> Option<String> {
@@ -492,10 +493,13 @@ fn extract_snapshot(mmap: &[u8], offset: usize, size: usize) -> Option<Vec<u8>> 
     Some(mmap[offset..end].to_vec())
 }
 
-/// Extract `offset_prcb_context` from the embedded KDDEBUGGER_DATA64 blob.
+/// The fields of the embedded KDDEBUGGER_DATA64 blob a triage dump needs:
+/// the kernel base, the `_EPROCESS`, `_ETHREAD` and PRCB sizes, and the
+/// offsets of the PRCB fields (context, current thread, clock speed, ...)
+/// that per-processor reads need.
 ///
-/// Returns `Some(offset)` when the blob is large enough and the field is
-/// non-zero — this enables multi-CPU register reading on triage dumps.
+/// `None` when the dump has no blob, the blob ends before
+/// `OffsetPrcbContext`, or it runs past the end of the file.
 fn parse_debugger_data(mmap: &[u8], triage_hdr: &[u8]) -> Option<DebuggerDataFields> {
     let offset = read_u32(triage_hdr, TRIAGE_DEBUGGER_DATA_OFFSET) as usize;
     let size = read_u32(triage_hdr, TRIAGE_DEBUGGER_DATA_SIZE) as usize;
@@ -622,12 +626,13 @@ fn parse_prcb_info(
         0
     };
 
-    let cpu_type =
-        if dd.offset_prcb_cpu_type > 0 && (dd.offset_prcb_cpu_type as usize) + 2 <= prcb_size {
-            read_u16(prcb, dd.offset_prcb_cpu_type as usize)
-        } else {
-            0
-        };
+    // `_KPRCB.CpuType` is a UCHAR; the byte after it is `CpuID`.
+    let cpu_type = if dd.offset_prcb_cpu_type > 0 && (dd.offset_prcb_cpu_type as usize) < prcb_size
+    {
+        prcb[dd.offset_prcb_cpu_type as usize]
+    } else {
+        0
+    };
 
     let vendor_string = if dd.offset_prcb_vendor_string > 0
         && (dd.offset_prcb_vendor_string as usize) + 13 <= prcb_size
@@ -685,7 +690,7 @@ fn parse_unloaded_drivers(mmap: &[u8], triage_hdr: &[u8]) -> Vec<UnloadedDriver>
 /// Build a minimal AMD64 triage dump image: one data block per `blocks`
 /// entry, filled from the matching `mem_regions` address.
 #[cfg(test)]
-pub(crate) fn make_triage_dump(blocks: &[TriageBlock], mem_regions: &[(u64, &[u8])]) -> Vec<u8> {
+pub fn make_triage_dump(blocks: &[TriageBlock], mem_regions: &[(u64, &[u8])]) -> Vec<u8> {
     // DUMP_HEADER64 (0x2000) + TRIAGE_DUMP64 + data
     let mut buf = vec![0u8; 0x10000];
     // Signature
@@ -780,6 +785,10 @@ mod tests {
         assert!(parse_triage(&dump).unwrap().0.triage_signature_valid);
 
         dump[valid_offset as usize] = b'X';
+        assert!(!parse_triage(&dump).unwrap().0.triage_signature_valid);
+
+        // A file cut short before the signature lost it.
+        dump.truncate(valid_offset as usize + 2);
         assert!(!parse_triage(&dump).unwrap().0.triage_signature_valid);
     }
 

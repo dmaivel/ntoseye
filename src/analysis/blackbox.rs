@@ -7,23 +7,16 @@
 use crate::base::bytes::utf16le_nul_terminated;
 use crate::base::bytes::{c_string_lossy, read_u16, read_u32, read_u64};
 use crate::nt::dmp::tagged::TaggedBlock;
-use crate::nt::target::etw::{GuidStyle, format_guid, parse_guid};
+use crate::nt::target::etw::{GuidStyle, format_guid};
 use ntoseye_macros::record;
 
-pub const BSD_TAG: &str = "{f57308df-cc45-4e01-ad76-29a4ebb010ec}";
-pub const NTFS_TAG: &str = "{00afe9c4-940d-4213-8016-cd3719b5bc20}";
-pub const PNP_TAG: &str = "{b7631941-532a-4cd6-b1b1-edb5917d4557}";
-pub const WINLOGON_TAG: &str = "{80cc79cf-a719-4af1-bf97-fe29ff76ebc1}";
-pub const PCI_TAG: &str = "{9276c055-eb87-425c-b8b5-04e4d247f6cd}";
-
 /// The block tagged `tag`.
-pub fn tagged_block<'a>(blocks: &'a [TaggedBlock], tag: &str) -> Option<&'a TaggedBlock> {
-    let tag = parse_guid(tag)?;
-    blocks.iter().find(|block| block.tag == tag)
+pub fn tagged_block<'a>(blocks: &'a [TaggedBlock], tag: &[u8; 16]) -> Option<&'a TaggedBlock> {
+    blocks.iter().find(|block| block.tag == *tag)
 }
 
 /// The data of the block tagged `tag`.
-pub fn tagged_data<'a>(blocks: &'a [TaggedBlock], tag: &str) -> Option<&'a [u8]> {
+pub fn tagged_data<'a>(blocks: &'a [TaggedBlock], tag: &[u8; 16]) -> Option<&'a [u8]> {
     tagged_block(blocks, tag).map(|block| &*block.data)
 }
 

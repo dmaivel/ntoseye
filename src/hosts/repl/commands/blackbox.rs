@@ -3,11 +3,10 @@
 //! `!blackboxwinlogon`, `!blackboxpci`), as WinDbg shows them.
 
 use crate::analysis::blackbox::{
-    BSD_TAG, BootStatus, NTFS_OPLOCK_BREAK_TIMEOUT, NTFS_SLOW_IO_TIMEOUT, NTFS_TAG, NtfsRecord,
-    PCI_TAG, PNP_TAG, PciRecord, PnpBlackbox, WINLOGON_TAG, WinlogonBlackbox, decode_boot_status,
-    decode_ntfs, decode_pci, decode_pnp, decode_winlogon, feature_configuration_state_name,
-    ntfs_break_reason_name, ntfs_record_kind_name, pci_command_flags, pci_status_flags,
-    tagged_block,
+    BootStatus, NTFS_OPLOCK_BREAK_TIMEOUT, NTFS_SLOW_IO_TIMEOUT, NtfsRecord, PciRecord,
+    PnpBlackbox, WinlogonBlackbox, decode_boot_status, decode_ntfs, decode_pci, decode_pnp,
+    decode_winlogon, feature_configuration_state_name, ntfs_break_reason_name,
+    ntfs_record_kind_name, pci_command_flags, pci_status_flags, tagged_block,
 };
 use crate::base::error::{Error, Result};
 use crate::base::time::filetime_to_iso;
@@ -15,7 +14,9 @@ use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::hosts::repl::*;
 use crate::hosts::ui;
-use crate::nt::dmp::tagged::{TaggedBlock, known_tag};
+use crate::nt::dmp::tagged::{
+    BSD_TAG, NTFS_TAG, PCI_TAG, PNP_TAG, TaggedBlock, WINLOGON_TAG, known_tag,
+};
 use crate::nt::target::etw::{GuidStyle, format_guid, parse_guid};
 use crate::session::Session;
 use ntoseye_macros::{command, grammar};
@@ -40,7 +41,7 @@ fn tagged_blocks<'s>(session: &'s Session, command: &str) -> Result<&'s [TaggedB
 fn blackbox_block<'s>(
     session: &'s Session,
     command: &str,
-    tag: &str,
+    tag: &[u8; 16],
     what: &str,
 ) -> Result<&'s [u8]> {
     let blocks = tagged_blocks(session, command)?;
@@ -114,7 +115,7 @@ fn enumtag(
             let (hex, text) = hex_ascii_row(line, HexCase::Upper);
             outln!("  {hex:<47}  {text}");
         }
-        let rest = block.data.len().saturating_sub(16 * lines);
+        let rest = block.data.len().saturating_sub(lines.saturating_mul(16));
         if rest > 0 {
             outln!(
                 "  {}",
@@ -184,7 +185,7 @@ fn tag_owner(session: &Session, tag: &[u8; 16]) -> Option<String> {
     python = Inspect,
 )]
 fn blackbox_bsd(session: &Session) -> Result<BootStatus> {
-    let data = blackbox_block(session, "!blackboxbsd", BSD_TAG, "boot status data")?;
+    let data = blackbox_block(session, "!blackboxbsd", &BSD_TAG, "boot status data")?;
     decoded("!blackboxbsd", decode_boot_status(data))
 }
 
@@ -208,7 +209,7 @@ impl Render for BootStatus {
     python = Inspect,
 )]
 fn blackbox_ntfs(session: &Session) -> Result<Vec<NtfsRecord>> {
-    let data = blackbox_block(session, "!blackboxntfs", NTFS_TAG, "NTFS blackbox")?;
+    let data = blackbox_block(session, "!blackboxntfs", &NTFS_TAG, "NTFS blackbox")?;
     decoded("!blackboxntfs", decode_ntfs(data))
 }
 
@@ -284,7 +285,7 @@ impl Render for Vec<NtfsRecord> {
     python = Inspect,
 )]
 fn blackbox_pnp(session: &Session) -> Result<PnpBlackbox> {
-    let data = blackbox_block(session, "!blackboxpnp", PNP_TAG, "PnP blackbox")?;
+    let data = blackbox_block(session, "!blackboxpnp", &PNP_TAG, "PnP blackbox")?;
     decoded("!blackboxpnp", decode_pnp(data))
 }
 
@@ -316,7 +317,7 @@ fn blackbox_winlogon(session: &Session) -> Result<WinlogonBlackbox> {
     let data = blackbox_block(
         session,
         "!blackboxwinlogon",
-        WINLOGON_TAG,
+        &WINLOGON_TAG,
         "winlogon blackbox",
     )?;
     decoded("!blackboxwinlogon", decode_winlogon(data))
@@ -348,7 +349,7 @@ impl Render for WinlogonBlackbox {
     python = Inspect,
 )]
 fn blackbox_pci(session: &Session) -> Result<Vec<PciRecord>> {
-    let data = blackbox_block(session, "!blackboxpci", PCI_TAG, "PCI blackbox")?;
+    let data = blackbox_block(session, "!blackboxpci", &PCI_TAG, "PCI blackbox")?;
     decoded("!blackboxpci", decode_pci(data))
 }
 
