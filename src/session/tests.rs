@@ -347,10 +347,28 @@ impl MockBackend {
         self.register_map.read_u64(name, &self.regs).unwrap()
     }
 
+    /// The architecture of the mock's register file: AMD64's by default,
+    /// ARM64's when a test gives it that map.
+    fn arch(&self) -> Arch {
+        if self.register_map.contains("rip") {
+            Arch::Amd64
+        } else {
+            Arch::Arm64
+        }
+    }
+
+    fn set_pc(&mut self, value: u64) {
+        self.set(self.arch().pc_register(), value);
+    }
+
+    fn pc(&self) -> u64 {
+        self.get(self.arch().pc_register())
+    }
+
     /// Put processor 0 at `landing`.
     fn land(&mut self, landing: Landing) {
-        self.set("rip", landing.rip);
-        self.set("rsp", landing.rsp);
+        self.set_pc(landing.rip);
+        self.set(self.arch().sp_register(), landing.rsp);
         self.threads.lock().insert(0, VirtAddr(landing.ethread));
     }
 }
@@ -366,7 +384,8 @@ impl DebugBackend for MockBackend {
         if let Some((vcpu, site)) = self.parked_vcpu
             && self.selected == vcpu
         {
-            self.register_map.write_u64("rip", &mut regs, site)?;
+            self.register_map
+                .write_u64(self.arch().pc_register(), &mut regs, site)?;
         }
         Ok(regs)
     }
@@ -463,7 +482,7 @@ impl DebugBackend for MockBackend {
             self.interrupt_events
                 .push_back(breakpoint_event(landing.rip));
         } else if let Some(address) = self.released_to {
-            self.set("rip", address);
+            self.set_pc(address);
             let mut event = breakpoint_event(address);
             event.watchpoint_address = self.released_watch;
             self.interrupt_events.push_back(event);
@@ -492,7 +511,7 @@ impl DebugBackend for MockBackend {
             self.interrupt_events
                 .push_back(breakpoint_event(landing.rip));
         } else if let Some(address) = self.landings.pop_front().or(self.lands_at) {
-            self.set("rip", address);
+            self.set_pc(address);
             self.interrupt_events.push_back(breakpoint_event(address));
         }
         Ok(())
@@ -509,14 +528,13 @@ impl DebugBackend for MockBackend {
         if self.parked_resumes.load(Ordering::Relaxed) >= self.freed_after_resumes
             && let Some(address) = self.released_to
         {
-            self.set("rip", address);
+            self.set_pc(address);
         }
-        self.interrupt_events
-            .push_back(breakpoint_event(self.get("rip")));
+        self.interrupt_events.push_back(breakpoint_event(self.pc()));
         Ok(())
     }
-    /// A step lands on `step_landings`, then one byte on, reported by the
-    /// queued single-step event.
+    /// A step lands on `step_landings`, then one shortest instruction on,
+    /// reported by the queued single-step event.
     fn step(&mut self) -> Result<()> {
         assert!(
             !self.single_step_unsafe,
@@ -530,7 +548,7 @@ impl DebugBackend for MockBackend {
         }
         self.steps.fetch_add(1, Ordering::Relaxed);
         if let Some((vcpu, processor, hit, armed)) = self.step_cut_short_by.take() {
-            self.set("rip", hit.rip);
+            self.set_pc(hit.rip);
             self.threads.lock().insert(processor, VirtAddr(hit.ethread));
             self.armed_step = Some(armed);
             self.stopped_by = vcpu;
@@ -551,8 +569,8 @@ impl DebugBackend for MockBackend {
                 self.step_reporter = Some(vcpu);
             }
         } else {
-            let rip = self.get("rip");
-            self.set("rip", rip + 1);
+            let next = self.pc() + self.arch().code_machine().min_instruction_bytes() as u64;
+            self.set_pc(next);
         }
         self.interrupt_events.push_back(event);
         Ok(())
@@ -2308,6 +2326,129 @@ fn a_step_another_vcpus_declined_hit_came_before_goes_on_by_resuming() {
             .any(|notice| notice.text.contains("did not reach the next instruction"));
         assert_eq!(noted, diverted, "{finished_in:#x}");
     }
+}
+
+/// A walk with no sites to follow its thread to (its instruction's
+/// successors not known), resumed after such a declined hit, finishes the
+/// armed step first. Taken by a thread switched in meanwhile, that step ends
+/// the walk diverted, where that thread is, rather than walking on in it.
+#[test]
+fn a_resumed_walk_ends_where_its_armed_step_was_diverted() {
+    let at = |rip, rsp, ethread| Landing { rip, rsp, ethread };
+    let until = |ip, _| ip == 0x1002;
+    for (finished_in, ended_at, diverted) in [(WALKED, 0x1002, false), (OTHER, 0x1001, true)] {
+        let mut backend = MockBackend {
+            allow_breakpoints: true,
+            one_vcpu: true,
+            stopping_processor_only: true,
+            step_cut_short_by: Some((
+                "p01.02",
+                1,
+                at(0x1020, 0x8000, OTHER),
+                at(0x1001, 0x2000, finished_in),
+            )),
+            ..MockBackend::default()
+        };
+        backend.land(at(0x1000, 0x2000, WALKED));
+        let mut session = session_running_code(&[0x90u8; 0x40], backend);
+        session
+            .breakpoints
+            .edit()
+            .insert_for_test(1, VirtAddr(0x1020), true, None);
+
+        let hit = session
+            .step_until(StepMode::Into, 16, &Cancel::NEVER, until)
+            .unwrap();
+        assert!(matches!(hit, ContinueOutcome::Breakpoint { .. }), "{hit:?}");
+        // The mock's nops have successors; the walk is left as one whose
+        // instruction had none.
+        session.pending_walk = Some(PendingWalk {
+            vcpu: "p01.01".into(),
+            sites: Vec::new(),
+        });
+        session.take_notices();
+        let outcome = session
+            .resume_step_until(StepMode::Into, 16, &Cancel::NEVER, until)
+            .unwrap();
+
+        assert!(
+            matches!(outcome, ContinueOutcome::Step { rip } if rip == ended_at),
+            "{finished_in:#x}: {outcome:?}"
+        );
+        let noted = session
+            .take_notices()
+            .iter()
+            .any(|notice| notice.text.contains("did not reach the next instruction"));
+        assert_eq!(noted, diverted, "{finished_in:#x}");
+    }
+}
+
+/// An ARM64 walk knows where its thread goes on, as an x86 one does: resumed
+/// after another vCPU's declined hit came before its step, it runs to the
+/// stepped `bl`'s target in the walked thread, at no lower a stack, rather
+/// than finishing the armed step, which a thread the processor switched to
+/// takes.
+#[test]
+fn an_arm64_walk_follows_its_thread_past_a_step_another_vcpus_hit_came_before() {
+    let at = |rip, rsp, ethread| Landing { rip, rsp, ethread };
+    // bl 0x1020, then nops.
+    let mut code = [0u8; 0x40];
+    for (slot, word) in code
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(std::iter::once(0x9400_0008u32).chain(std::iter::repeat(0xd503_201f)))
+    {
+        *slot = word.to_le_bytes();
+    }
+    let mut backend = MockBackend {
+        register_map: Arch::Arm64.register_map().clone(),
+        regs: vec![0; arm64::REGISTER_BUFFER_SIZE],
+        allow_breakpoints: true,
+        one_vcpu: true,
+        stopping_processor_only: true,
+        step_cut_short_by: Some((
+            "p01.02",
+            1,
+            at(0x1038, 0x8000, OTHER),
+            at(0x1030, 0x9000, OTHER),
+        )),
+        schedule: [
+            at(0x1020, 0x1ff0, WALKED),
+            at(0x1020, 0x2000, OTHER),
+            at(0x1020, 0x2000, WALKED),
+        ]
+        .into(),
+        ..MockBackend::default()
+    };
+    backend.land(at(0x1000, 0x2000, WALKED));
+    let (threads, continues) = (Arc::clone(&backend.threads), Arc::clone(&backend.continues));
+    let mut session = session_over_arm64_memory(0x1000, &code);
+    session.register_map = backend.register_map.clone();
+    session.backend = Box::new(backend);
+    session.target.test_current_threads = Some(threads);
+    session.current_thread = "p01.01".into();
+    session
+        .breakpoints
+        .edit()
+        .insert_for_test(1, VirtAddr(0x1038), true, None);
+    let until = |ip, _| ip == 0x1020;
+
+    let hit = session
+        .step_until(StepMode::Into, 16, &Cancel::NEVER, until)
+        .unwrap();
+    assert!(matches!(hit, ContinueOutcome::Breakpoint { .. }), "{hit:?}");
+    let outcome = session
+        .resume_step_until(StepMode::Into, 16, &Cancel::NEVER, until)
+        .unwrap();
+
+    assert!(
+        matches!(outcome, ContinueOutcome::Step { rip: 0x1020 }),
+        "{outcome:?}"
+    );
+    // The armed step's stop, then the deeper call, the other thread, and
+    // the walked one.
+    assert_eq!(continues.load(Ordering::Relaxed), 4);
 }
 
 /// A walk another stop ended while it ran over a call goes on by finishing

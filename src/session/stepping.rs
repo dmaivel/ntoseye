@@ -10,7 +10,7 @@ use iced_x86::{
     Mnemonic, OpAccess, OpKind, Register,
 };
 
-use crate::arch::{Arch, Family, HwBreakpointAccess, RegisterMap};
+use crate::arch::{Arch, Family, HwBreakpointAccess, RegisterMap, arm64};
 use crate::backend::dbg_backend::{
     ContinueDisposition, DebugBackend, STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent, clear_trap_flag,
     processor_index_from_backend_thread_id,
@@ -589,9 +589,20 @@ impl Session {
                     .as_ref()
                     .is_some_and(|(armed, _)| *armed == vcpu)
                 {
-                    let (outcome, _) = self.step_once()?;
-                    if !matches!(outcome, ContinueOutcome::Step { .. }) {
+                    let (outcome, stepped) = self.step_once()?;
+                    let ContinueOutcome::Step { rip } = outcome else {
                         self.pending_walk = Some(PendingWalk { vcpu, sites });
+                        return Ok(outcome);
+                    };
+                    // The armed step is the processor's: finished in another
+                    // thread switched in meanwhile, it left the walked one
+                    // short of its instruction, with no sites known to
+                    // follow it to. The walk ends here, as a diverted step
+                    // ends it.
+                    if stepped == RunPast::Diverted {
+                        self.note_diverted();
+                        let outcome = ContinueOutcome::Step { rip };
+                        self.note_stop(&outcome);
                         return Ok(outcome);
                     }
                 }
@@ -734,10 +745,8 @@ impl Session {
         walked: Option<&ThreadScope>,
     ) -> Result<WalkStep> {
         // An instruction without known successors is not followed; one run
-        // alone fails its step the same way. Successors are decoded for x86
-        // code only.
-        let follows = self.target.arch().family() == Family::X86 && walked.is_some();
-        let (successors, floor) = if follows {
+        // alone fails its step the same way.
+        let (successors, floor) = if walked.is_some() {
             self.walk_continuation(state, registers, bytes)
                 .unwrap_or_default()
         } else {
@@ -861,7 +870,8 @@ impl Session {
 
     /// Where the execution at `state` continues past its instruction: every
     /// address it can continue at (see [`site_successors`]), and the lowest
-    /// stack pointer it can have there (see [`stack_floor`]).
+    /// stack pointer it can have there (see [`stack_floor`] and
+    /// [`arm64::continuation::stack_floor`]).
     fn walk_continuation(
         &self,
         state: &ControlState,
@@ -881,9 +891,16 @@ impl Session {
             cr3,
             bytes,
         )?;
-        let bitness = self.target.code_bitness(VirtAddr(state.ip));
-        let instruction = Decoder::with_ip(bitness, bytes, state.ip, DecoderOptions::NONE).decode();
-        Ok((successors, stack_floor(&instruction, state.sp)))
+        let floor = match self.target.arch().family() {
+            Family::X86 => {
+                let bitness = self.target.code_bitness(VirtAddr(state.ip));
+                let instruction =
+                    Decoder::with_ip(bitness, bytes, state.ip, DecoderOptions::NONE).decode();
+                stack_floor(&instruction, state.sp)
+            }
+            Family::Arm => arm64::continuation::stack_floor(bytes, state.sp),
+        };
+        Ok((successors, floor))
     }
 
     fn breakpoint_outcome(&self, id: u32, rip: u64) -> Option<ContinueOutcome> {
@@ -2556,7 +2573,8 @@ pub fn site_successors(
     instruction_successors(debugger, register_map, thread, regs, rip, cr3, &bytes)
 }
 
-/// [`site_successors`] of the instruction `bytes` at `rip`.
+/// [`site_successors`] of the instruction `bytes` at `rip`. A64 code goes on
+/// where [`arm64::continuation::successors`] says, from the registers alone.
 fn instruction_successors(
     debugger: &Target,
     register_map: &RegisterMap,
@@ -2566,6 +2584,18 @@ fn instruction_successors(
     cr3: Option<u64>,
     bytes: &[u8; 16],
 ) -> Result<Vec<u64>> {
+    if debugger.arch().family() == Family::Arm {
+        let read = |name: &str| register_map.read_u64(name, regs).ok();
+        return arm64::continuation::successors(bytes, rip, read)
+            .map(|successors| successors.to_vec())
+            .ok_or_else(|| {
+                Error::DebugInfo(format!(
+                    "cannot tell where the instruction at {rip:#x} continues: `{}` raises or \
+                     returns from an exception, or branches through a register not known here",
+                    CodeMachine::Arm64.instruction_set().mnemonic(bytes, rip)
+                ))
+            });
+    }
     // The vCPU fetches the instruction and follows its pointers through its
     // own root. Without one, a module's own root serves its code.
     let memory = debugger.address_space(code_root(debugger, cr3, rip));

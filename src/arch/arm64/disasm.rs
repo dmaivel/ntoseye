@@ -9,7 +9,7 @@ use crate::base::types::CodeMachine;
 use super::Arm64;
 
 /// The instruction word at the start of `bytes`.
-fn word(bytes: &[u8]) -> Option<u32> {
+pub fn word(bytes: &[u8]) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?))
 }
 
@@ -369,7 +369,8 @@ fn describe_operand(op: &bad64::Operand, text: String) -> DisasmOperand {
     out
 }
 
-fn immediate_value(imm: bad64::Imm) -> i128 {
+/// An immediate's value, signed or not.
+pub fn immediate_value(imm: bad64::Imm) -> i128 {
     match imm {
         bad64::Imm::Signed(value) => value.into(),
         bad64::Imm::Unsigned(value) => value.into(),
