@@ -195,8 +195,11 @@ def test_results_match_their_stub_types(halted: Debugger) -> None:
         cls = type(owner).__name__
         checker.value(call(), returns(CLASSES[cls], method), f"{cls}.{method}()")
     assert checker.errors == []
-    # The sample must keep exercising every kind of field.
-    assert checker.forms >= {"class", "dict", "available", "unavailable", "source"}
+    # The sample must keep exercising every kind of field. Whether any read
+    # fails depends on the guest's state (what is paged out), so an
+    # unavailable diagnostic is not required here; the target-free test in
+    # `src/hosts/python/record.rs` checks one.
+    assert checker.forms >= {"class", "dict", "available", "source"}
 
 
 def user_dump_results(dbg: Debugger) -> list[tuple[object, str, Callable[[], object]]]:
