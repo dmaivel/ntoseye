@@ -175,12 +175,12 @@ def test_trace_calls_returns_a_call_tree(halted: Debugger) -> None:
     for _ in range(ATTEMPTS):
         require_single_step(halted)
         # gdb single-steps at a few hundred instructions a second, KDCOM at a
-        # few dozen, and KDNET to an ARM64 guest at about ten, so 1,000 fit
-        # the timeout on each. A step the trace follows
-        # its thread through can wait on that thread while others keep
-        # reaching the instruction first, so a busy guest gets another
-        # attempt from where the last one stopped.
-        trace = halted.trace_calls(limit=1_000, timeout=120.0)
+        # few dozen, and KDNET to an ARM64 guest at 5 to 15 (measured over
+        # 15 s traces from nt!NtClose), so 400 fit the timeout on each. A
+        # step the trace follows its thread through can wait on that thread
+        # while others keep reaching the instruction first, so a busy guest
+        # gets another attempt from where the last one stopped.
+        trace = halted.trace_calls(limit=400, timeout=120.0)
         if trace.end not in ("diverted", "interrupted") and not (
             trace.end == "failed"
             and any(
