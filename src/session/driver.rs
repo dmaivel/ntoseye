@@ -990,10 +990,17 @@ impl Session {
         let mask = self.target.arch().dtb_page_mask();
         let secure = cr3.is_some_and(|cr3| self.target.recognize_secure_root(cr3 & mask));
         let user_dump = self.target.user_dump_info().is_some();
+        let thread = windows_thread_on_backend_thread(&self.target, &self.current_thread);
+        // The thread's owner is checked first: a resume dropped the selected
+        // thread, and without one every stop walks the process list, which
+        // over KD costs seconds a breakpoint a `when=` callback declines.
+        // An idle thread's owner, the Idle process, is on no process list;
+        // its root is System's, which the walk finds, so the stop names a
+        // process `dbg.processes` has.
+        let owner = thread.as_ref().filter(|thread| thread.pid != Some(0));
         let process = cr3
             .filter(|_| !secure && !user_dump)
-            .and_then(|cr3| self.target.process_for_cr3(cr3 & mask));
-        let thread = windows_thread_on_backend_thread(&self.target, &self.current_thread);
+            .and_then(|cr3| self.target.process_for_thread_cr3(cr3 & mask, owner));
         let mut stop = Stop {
             kind: StopKind::Entry,
             cpu: (!user_dump)

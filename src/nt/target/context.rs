@@ -461,10 +461,7 @@ impl Target {
             return Some(process);
         }
         guest
-            .enumerate_processes()
-            .ok()?
-            .into_iter()
-            .find(|process| (process.dtb & mask) == cr3_masked)
+            .process_for_root(cr3_masked, mask)
             .or_else(|| guest.process_for_user_root(cr3_masked, mask))
     }
 

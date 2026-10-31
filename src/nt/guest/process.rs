@@ -12,7 +12,7 @@ use crate::{
     },
     nt::target::{ListCursor, links_back_to},
 };
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::PoisonError};
 
 /// `EPROCESS.ImageFileName` capacity: the kernel keeps this many bytes of the
 /// image name, unterminated when the name is at least this long.
@@ -117,6 +117,59 @@ impl Guest {
             |memo| &mut memo.processes,
             || self.walk_processes().map(|(processes, _)| processes),
         )
+    }
+
+    /// The process whose page-table root is `root`, compared under `mask`.
+    /// The process the last walk of the list found for the root answers
+    /// while it still has that root and PID and is still on the active list
+    /// (the process after it links back to it); otherwise the list is walked
+    /// again. Stops come back to the same few roots (an idle thread runs on
+    /// whichever process's root its processor last loaded), and over KD a
+    /// walk costs requests for every process.
+    pub fn process_for_root(&self, root: Dtb, mask: u64) -> Option<ProcessInfo> {
+        let known = self
+            .root_owners
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&root)
+            .cloned();
+        if let Some(process) = known
+            && self.still_owns(&process, root, mask)
+        {
+            return Some(process);
+        }
+        let processes = self.enumerate_processes().ok()?;
+        let owner = processes
+            .iter()
+            .find(|process| process.dtb & mask == root)
+            .cloned();
+        *self
+            .root_owners
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = processes
+            .into_iter()
+            .map(|process| (process.dtb & mask, process))
+            .collect();
+        owner
+    }
+
+    /// Whether `process` still has page-table root `root` (under `mask`) and
+    /// its PID, and is still on the active process list: removing it relinks
+    /// its neighbours past it but leaves its own links as they were.
+    fn still_owns(&self, process: &ProcessInfo, root: Dtb, mask: u64) -> bool {
+        let Ok(mut span) = EprocessSpan::new(self) else {
+            return false;
+        };
+        let memory = self.ntoskrnl.memory();
+        if span.read(&memory, process.eprocess).is_err()
+            || span.dtb() & mask != root
+            || span.pid() != process.pid
+        {
+            return false;
+        }
+        let links = process.eprocess + span.active_process_links_offset;
+        let blink = span.active_process_links_flink() + memory.arch().pointer_size();
+        memory.read_pointer(blink).is_ok_and(|back| back == links)
     }
 
     /// The active processes, and whether the walk read the whole list, which

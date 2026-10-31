@@ -321,19 +321,23 @@ fn resume_and_halt(backend: &Arc<Mutex<KdBackend>>) {
 }
 
 const SMSS_EPROCESS: u64 = 0xffff_e000_0002_0000;
+const SYSTEM_EPROCESS: u64 = 0xffff_e000_0001_0000;
+/// `PsActiveProcessHead`, the list entry no process embeds.
+const PROCESS_LIST_HEAD: u64 = FAKE_KERNEL_BASE + 0x1008;
+/// `_EPROCESS.ActiveProcessLinks`.
+const PROCESS_LINKS: u64 = 0x448;
 
-/// A halted guest whose process list is System (root `0x1ad000`) and
-/// smss.exe (`SMSS_EPROCESS`, root `0x2be000`, KVA-shadow user root
-/// `0x2bf000` stored with PCID bits), whose `ExitTime` is `smss_exit_time`.
-/// System and smss on the active process list, smss with `ExitTime`
-/// `smss_exit_time`; with `zero_root_between`, a process whose root reads 0
-/// sits between them, which ends a walk of the list before smss.
+/// A halted guest whose process list is System (`SYSTEM_EPROCESS`, root
+/// `0x1ad000`) and smss.exe (`SMSS_EPROCESS`, root `0x2be000`, KVA-shadow
+/// user root `0x2bf000` stored with PCID bits), whose `ExitTime` is
+/// `smss_exit_time`, linked both ways through `PROCESS_LIST_HEAD`; with
+/// `zero_root_between`, a process whose root reads 0 sits between them,
+/// which ends a walk of the list before smss.
 fn process_list_guest(
     smss_exit_time: u64,
     zero_root_between: bool,
 ) -> (Guest, Arc<Mutex<KdBackend>>, JoinHandle<usize>) {
     const PID: u32 = 0x440;
-    const LINKS: u32 = 0x448;
     const NAME: u32 = 0x5a8;
     const EXIT_TIME: u32 = 0x5b8;
     const DTB: u32 = 0x28;
@@ -347,7 +351,7 @@ fn process_list_guest(
                 field(0, 0x438, ParsedType::Struct("_KPROCESS".into())),
             ),
             ("UniqueProcessId", primitive(PID, 8)),
-            ("ActiveProcessLinks", primitive(LINKS, 16)),
+            ("ActiveProcessLinks", primitive(PROCESS_LINKS as u32, 16)),
             ("ImageFileName", primitive(NAME, 15)),
             ("ExitTime", primitive(EXIT_TIME, 8)),
         ],
@@ -361,17 +365,26 @@ fn process_list_guest(
         ],
     );
 
-    let head = FAKE_KERNEL_BASE + 0x1008;
-    let system = 0xffff_e000_0001_0000u64;
+    let head = PROCESS_LIST_HEAD;
+    let system = SYSTEM_EPROCESS;
     let mut nt = vec![0u8; 0x2000];
     put_u64(&mut nt, 0x1000, system);
-    put_u64(&mut nt, 0x1008, system + LINKS as u64);
-    let process = |pid: u64, dtb: u64, user_dtb: u64, name: &[u8], exit_time: u64, next: u64| {
+    put_u64(&mut nt, 0x1008, system + PROCESS_LINKS);
+    put_u64(&mut nt, 0x1010, SMSS_EPROCESS + PROCESS_LINKS);
+    // `next` and `previous` are the neighbouring list entries.
+    let process = |pid: u64,
+                   dtb: u64,
+                   user_dtb: u64,
+                   name: &[u8],
+                   exit_time: u64,
+                   next: u64,
+                   previous: u64| {
         let mut bytes = vec![0u8; 0x600];
         put_u64(&mut bytes, PID as usize, pid);
         put_u64(&mut bytes, DTB as usize, dtb);
         put_u64(&mut bytes, USER_DTB as usize, user_dtb);
-        put_u64(&mut bytes, LINKS as usize, next + LINKS as u64);
+        put_u64(&mut bytes, PROCESS_LINKS as usize, next);
+        put_u64(&mut bytes, PROCESS_LINKS as usize + 8, previous);
         put_u64(&mut bytes, EXIT_TIME as usize, exit_time);
         bytes[NAME as usize..NAME as usize + name.len()].copy_from_slice(name);
         bytes
@@ -382,9 +395,21 @@ fn process_list_guest(
     } else {
         SMSS_EPROCESS
     };
+    let before_smss = if zero_root_between { between } else { system };
     let mut regions = vec![
         (FAKE_KERNEL_BASE, nt),
-        (system, process(4, 0x1ad000, 0, b"System", 0, after_system)),
+        (
+            system,
+            process(
+                4,
+                0x1ad000,
+                0,
+                b"System",
+                0,
+                after_system + PROCESS_LINKS,
+                head,
+            ),
+        ),
         (
             SMSS_EPROCESS,
             process(
@@ -393,12 +418,24 @@ fn process_list_guest(
                 0x2bf002,
                 b"smss.exe",
                 smss_exit_time,
-                head - LINKS as u64,
+                head,
+                before_smss + PROCESS_LINKS,
             ),
         ),
     ];
     if zero_root_between {
-        regions.push((between, process(0x2f0, 0, 0, b"Starting", 0, SMSS_EPROCESS)));
+        regions.push((
+            between,
+            process(
+                0x2f0,
+                0,
+                0,
+                b"Starting",
+                0,
+                SMSS_EPROCESS + PROCESS_LINKS,
+                system + PROCESS_LINKS,
+            ),
+        ));
     }
     synthetic_guest(
         regions,
@@ -453,6 +490,48 @@ fn kva_shadow_user_root_resolves_to_its_process() {
     assert_eq!(guest.user_root(&owner, mask), Some(0x2bf000));
     let system = guest.process_at(VirtAddr(0xffff_e000_0001_0000)).unwrap();
     assert_eq!(guest.user_root(&system, mask), None);
+
+    drop(guest);
+    drop(backend);
+    worker.join().unwrap();
+}
+
+/// A root names the process an earlier halt's walk found for it with two
+/// reads, its `_EPROCESS` and the next entry's back link, not a walk of the
+/// list; once the process is off the list, the root names no process.
+#[test]
+fn a_root_names_its_process_without_a_walk_while_it_stays_on_the_list() {
+    let (guest, backend, worker) = process_list_guest(0, false);
+    let mask = Arch::Amd64.dtb_page_mask();
+    let pid = |guest: &Guest| guest.process_for_root(0x2be000, mask).map(|p| p.pid);
+
+    assert_eq!(pid(&guest), Some(0x1d8));
+    resume_and_halt(&backend);
+    assert_eq!(pid(&guest), Some(0x1d8));
+
+    drop(guest);
+    drop(backend);
+    // The first halt's walk is three fills (the list head, each process's
+    // span); the second halt's lookup is two.
+    assert_eq!(worker.join().unwrap(), 3 + 2);
+
+    let (guest, backend, worker) = process_list_guest(0, false);
+    assert_eq!(pid(&guest), Some(0x1d8));
+    resume_and_halt(&backend);
+    // smss leaves the list: System and the head link past it, and its own
+    // links stay as they were.
+    let system_links = SYSTEM_EPROCESS + PROCESS_LINKS;
+    let write = |address: u64, value: u64| {
+        guest
+            .ntoskrnl
+            .memory()
+            .write_bytes(VirtAddr(address), &value.to_le_bytes())
+            .unwrap()
+    };
+    write(system_links, PROCESS_LIST_HEAD);
+    write(PROCESS_LIST_HEAD + 8, system_links);
+    resume_and_halt(&backend);
+    assert_eq!(pid(&guest), None);
 
     drop(guest);
     drop(backend);

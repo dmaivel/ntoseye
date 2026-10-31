@@ -296,6 +296,10 @@ pub struct Guest {
     /// calibrated. A calibration that failed is not kept: a later halt may
     /// have the mapped VPs it needs.
     vp_register_layouts: Mutex<HashMap<u64, vp_registers::VpRegisterLayout>>,
+    /// The process the last process list walk found for each page-table
+    /// root, masked, kept across halts and checked before it is used (see
+    /// [`Self::process_for_root`]).
+    root_owners: Mutex<HashMap<Dtb, ProcessInfo>>,
 }
 
 /// Guest-derived lists memoized for one halt epoch (see
@@ -397,6 +401,7 @@ impl Guest {
             vp_slots: Mutex::new(HashMap::new()),
             processor_vps: Mutex::new(None),
             vp_register_layouts: Mutex::new(HashMap::new()),
+            root_owners: Mutex::new(HashMap::new()),
         }
     }
 

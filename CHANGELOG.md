@@ -174,6 +174,7 @@ Keeping this file:
 - The StorPort adapter and class-device overviews say when a unit or packet walk stopped early, `!rcdrkd.rcdrloglist` and `!rcdrkd.rcdrlogdump` take the context address as any expression, `lm` reports a malformed `m`, `u` or `k` option, and `!drvobj` takes `\Driver\` in any case.
 - Python `help()` shows SDK docstrings as written, `\Driver\ACPI`, where command docstrings showed each backslash doubled.
 - On ARM64 over KD, a step or a step walk that a breakpoint hit on another processor came before goes on once that hit is passed over (a Python `when=` callback that declines it), where it failed with "only that processor can step"; a step that the processor finished in another thread it switched to meanwhile ends there, with the diverted notice. A step walk (`step(until=)`, `step_over(until=)`, `wt`) goes on in the thread it started in instead, as on x86, unless the instruction continues through an exception (`svc`, `brk`, `eret`).
+- A stop no longer walks the whole process list to name the process whose page tables it stopped on: the stopped thread's own process answers, and a root an earlier stop found keeps its process while that process stays on the list. Over KD every stop walked it, with a read of every process's PEB for a long name, which made a breakpoint hit a Python `when=` callback declines take about 2 s on an ARM64 KDNET target, where it takes about 0.15 s now.
 
 ## v0.52.0 (2026-10-25)
 
