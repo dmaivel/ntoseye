@@ -730,7 +730,7 @@ fn irpfind(
     #[arg(parse = irpfind_pool)] pool_type: Option<IrpPool>,
     #[arg(name = "restart-address")] restart: Option<VirtAddr>,
     criteria: Option<IrpCriteriaKind>,
-    #[arg(default = 0, name = "data")] value: u64,
+    #[arg(default = 0, name = "data", paired)] value: u64,
 ) -> Result<IrpFindDetail> {
     let criteria = criteria.map(|kind| IrpCriteria::new(kind, value));
     session.target.irp_find(

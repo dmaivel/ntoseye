@@ -169,7 +169,11 @@ pub fn record(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `usage = "..."` (with `complete = [Strategy, ...]` per word, or
 ///   `complete = Strategy` for every word): the fragment of a `raw`
 ///   argument, or of one whose `#[grammar(operation)]` parser hands its
-///   words to the operation, which reads them itself.
+///   words to the operation, which reads them itself;
+/// - `paired`: a word the line gives together with the optional word
+///   before it, never alone, which the usage shows in that word's bracket
+///   (`[criteria data]`); the parser of an argument before it enforces the
+///   pair.
 ///
 /// The function returns `Result<R>`. The REPL renders `R` with
 /// `Render`, except a `Result<Flow>`, which a command that runs other

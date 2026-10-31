@@ -584,6 +584,10 @@ struct Arg {
     /// The usage fragment of a `raw` argument, or of one whose
     /// `#[grammar(operation)]` parser hands its words to the operation.
     usage: Option<LitStr>,
+    /// The line gives its word with the optional word before it, never
+    /// alone (`!irpfind`'s criteria and its data): the usage shows the two
+    /// in one bracket.
+    paired: bool,
     span: Span,
 }
 
@@ -654,6 +658,7 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
             name: None,
             complete: None,
             usage: None,
+            paired: false,
             span: typed.span(),
         };
         let mut kept = Vec::new();
@@ -685,12 +690,13 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
                     "name" => arg.name = Some(meta.value()?.parse()?),
                     "complete" => arg.complete = Some(Completion::parse(meta.value()?)?),
                     "usage" => arg.usage = Some(meta.value()?.parse()?),
+                    "paired" => arg.paired = true,
                     _ => {
                         return Err(meta.error(
                             "expected `render`, `default = ...`, `current`, `switch = \"/x\"`, \
                              `rest`, `raw`, `invoked`, `parse = path`, `each = path`, `receiver`, \
                              `sdk`, `positional`, `cancel`, `name = \"...\"`, `complete = \
-                             Strategy` or `usage = \"...\"`",
+                             Strategy`, `usage = \"...\"` or `paired`",
                         ));
                     }
                 }
@@ -699,6 +705,12 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
         }
         typed.attrs = kept;
         let custom = arg.parse.is_some() || arg.each.is_some();
+        if arg.paired && (custom || arg.switch.is_some() || arg.rest || arg.raw) {
+            return Err(Error::new(
+                arg.span,
+                "`paired` marks a typed word the line gives with the optional word before it",
+            ));
+        }
         if arg.usage.is_some() && !(arg.raw || arg.rest || custom) {
             return Err(Error::new(
                 arg.span,
@@ -992,6 +1004,8 @@ impl Command {
                     "[{}]...".to_owned(),
                     words(Vec::new(), Some(value_completion())),
                 )
+            } else if arg.paired {
+                ("{}".to_owned(), words(vec![value_completion()], None))
             } else if arg.omittable() {
                 ("[{}]".to_owned(), words(vec![value_completion()], None))
             } else {
