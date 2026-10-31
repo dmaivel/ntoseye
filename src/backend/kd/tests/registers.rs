@@ -205,7 +205,8 @@ fn arm64_context_debug_registers_update_special_registers() {
 }
 
 /// A halted fake kernel answering manipulate requests from an ordered
-/// `(api, status, data)` script, asserting each request's API number.
+/// `(api, status, data)` script, asserting each request's API number. A
+/// register read's data is its value, which the reply carries in its header.
 fn serve_manipulate(mut kernel: UnixStream, script: Vec<(u32, u32, Vec<u8>)>) -> JoinHandle<()> {
     const UNION: usize = 16;
     spawn(move || {
@@ -225,8 +226,12 @@ fn serve_manipulate(mut kernel: UnixStream, script: Vec<(u32, u32, Vec<u8>)>) ->
             // Windows answers in the request it received.
             let mut reply = request[..api::MANIPULATE_HEADER_SIZE].to_vec();
             reply[8..12].copy_from_slice(&status.to_le_bytes());
-            reply[UNION + 12..UNION + 16].copy_from_slice(&(data.len() as u32).to_le_bytes());
-            reply.extend_from_slice(&data);
+            if api_number == api::DBGKD_READ_MACHINE_SPECIFIC_REGISTER {
+                reply[UNION + 4..UNION + 4 + data.len()].copy_from_slice(&data);
+            } else {
+                reply[UNION + 12..UNION + 16].copy_from_slice(&(data.len() as u32).to_le_bytes());
+                reply.extend_from_slice(&data);
+            }
             kernel
                 .write_all(&data_packet(
                     PACKET_TYPE_KD_STATE_MANIPULATE,
@@ -490,4 +495,92 @@ fn an_arm64_context_gets_its_real_x18() {
         arm64_x18(&context(EL1H, 0), Some(PATH), &mut Guest(None)),
         None
     );
+}
+
+/// The KPCR that gives a kernel-mode ARM64 thread its `x18` is read once a
+/// boot: the next halt's registers reuse it without asking, and after a
+/// reboot, whether a stop reports it or a reload hands over the new
+/// kernel's root, `x18` is the new boot's KPCR.
+#[test]
+fn an_arm64_kpcr_is_read_once_a_boot() {
+    const EL1H: u32 = 0b0101;
+    const REFUSED: u32 = 0xc000_0001;
+    let (kernel, host) = UnixStream::pair().unwrap();
+    let mut backend = kd_backend_with_framing(host);
+    backend.arch = Arch::Arm64;
+    backend.register_map = Arch::Arm64.register_map().clone();
+    backend.link.halt();
+    backend.exit_prepared = true;
+
+    let mut context = vec![0u8; arm64::CONTEXT_SIZE];
+    bytes::write_u32(&mut context, arm64::OFFSET_CPSR, EL1H);
+    let msr = |status: u32, value: Option<u64>| {
+        let data = value.map_or_else(Vec::new, |value| value.to_le_bytes().to_vec());
+        (api::DBGKD_READ_MACHINE_SPECIFIC_REGISTER, status, data)
+    };
+    // GetContext, then TTBR0, ESR and FAR (refused, so 0), then TPIDR_EL1
+    // when the KPCR is not known; the first read's refused control space is
+    // not asked again.
+    let read = |tpidr: Option<u64>, first: bool| {
+        let mut script = vec![
+            (api::DBGKD_GET_CONTEXT, api::STATUS_SUCCESS, context.clone()),
+            msr(REFUSED, None),
+            msr(REFUSED, None),
+            msr(REFUSED, None),
+        ];
+        script.extend(tpidr.map(|value| msr(api::STATUS_SUCCESS, Some(value))));
+        if first {
+            script.push((api::DBGKD_READ_CONTROL_SPACE, REFUSED, Vec::new()));
+        }
+        script
+    };
+    const KPCR: u64 = 0xffff_f800_a1b7_0000;
+    const REPORTED: u64 = 0xffff_f801_22c4_0000;
+    const RELOADED: u64 = 0xffff_f802_9e10_0000;
+    let script = [
+        read(Some(KPCR | 0x2), true),
+        read(None, false),
+        read(Some(REPORTED), false),
+        read(Some(RELOADED), false),
+    ]
+    .concat();
+    let worker = serve_manipulate(kernel, script);
+    let x18 = |backend: &mut KdBackend| {
+        let registers = backend.read_registers().unwrap();
+        backend.register_map.read_u64("x18", &registers).unwrap()
+    };
+    let next_halt = |backend: &mut KdBackend| {
+        backend.record_running();
+        backend.link.halt();
+    };
+
+    assert_eq!(x18(&mut backend), KPCR);
+    next_halt(&mut backend);
+    assert_eq!(x18(&mut backend), KPCR);
+
+    backend.record_running();
+    backend.record_stop(&StateChange {
+        processor: 0,
+        number_processors: 1,
+        new_state: DBG_KD_EXCEPTION_STATE_CHANGE,
+        exception_code: STATUS_BREAKPOINT,
+        exception_first_chance: Some(true),
+        exception_address: None,
+        program_counter: 0xffff_f801_0011_2233,
+        kernel_base_hint: None,
+        load_symbols: None,
+        exception_record: None,
+        is_bugcheck: false,
+        bugcheck: None,
+        target_reloaded: true,
+        assisted_breakin: false,
+        control_report: None,
+    });
+    assert_eq!(x18(&mut backend), REPORTED);
+
+    next_halt(&mut backend);
+    backend.set_kernel_dtb(0x4_0000);
+    assert_eq!(x18(&mut backend), RELOADED);
+    drop(backend);
+    worker.join().unwrap();
 }

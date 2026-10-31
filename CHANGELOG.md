@@ -32,6 +32,7 @@ Keeping this file:
 - `dt -a` counts above 16 and `dl` sizes above 64 are errors, where they were cut silently, and `dt`'s help says arrays show their first 16 elements.
 - `.process` takes a process's image name, as `!process` does (`.process /p /r explorer.exe`), besides its EPROCESS address and PID; a name several processes share is refused with a hint to give the PID.
 - At a stop in the Windows hypervisor whose context is the hypervisor's own (after `.cxr`, or on its VM-exit entry, whose saved VTL0 state may be one exit behind), a `d*` listing or `dx` that cannot read an NT address, and a command that fails on one, add a note that the hypervisor's address space does not map it and that `.vtlcxr` selects where VTL0 left off.
+- Over KD on ARM64, a processor's KPCR is read once a boot instead of at every register read, which makes `~` and a debug adapter's thread list about a third faster.
 
 ### Fixed
 

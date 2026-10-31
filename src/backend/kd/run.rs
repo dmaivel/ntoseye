@@ -150,12 +150,13 @@ impl KdBackend {
         if self.surface_break_at == Some(stop.program_counter) {
             self.surface_break_at = None;
         }
-        // EFER survives: the guest sets it once entering long mode and a
-        // reload is the only way a processor's value can differ from the one
-        // we read. Re-reading it per stop costs an MSR round trip in every
-        // absorbed breakpoint hit.
+        // EFER and the KPCRs survive: the guest sets EFER once entering long
+        // mode, and places a processor's KPCR when it starts it, so a reload
+        // is the only way either can differ from the one we read. Re-reading
+        // them per stop costs a round trip in every absorbed breakpoint hit.
         if stop.target_reloaded {
             self.efer_cache.clear();
+            self.kpcr_cache.clear();
         }
         self.link.halt();
     }

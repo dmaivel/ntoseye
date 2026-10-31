@@ -397,6 +397,11 @@ pub struct KdBackend {
     /// Avoid repeated round trips or timeouts after an ARM64 control-space read fails.
     special_registers_unsupported: bool,
     efer_cache: HashMap<u16, u64>,
+    /// Each processor's KPCR, as [`Self::processor_kpcr`] read it this boot:
+    /// the kernel places a processor's KPCR when it starts the processor,
+    /// and a reboot (a stop that reports one, or a reload that
+    /// [`DebugBackend::set_kernel_dtb`] hands a new kernel root) empties it.
+    kpcr_cache: HashMap<u16, u64>,
     /// The processor's debug feature register, which counts the hardware
     /// breakpoints it implements, read at attach; `None` where the family
     /// has none or the target refused it.
@@ -519,6 +524,7 @@ impl DebugBackend for KdBackend {
 
     fn set_kernel_dtb(&mut self, dtb: u64) {
         self.kernel_dtb_override = dtb;
+        self.kpcr_cache.clear();
         kd_trace!("kd: kernel page-table root = {dtb:#x}");
     }
 

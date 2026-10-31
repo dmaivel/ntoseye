@@ -136,8 +136,11 @@ impl KdBackend {
     /// `processor`'s KPCR. On the processor that stopped the target it is
     /// `TPIDR_EL1` with its flag bits (the low 12) cleared; the target reads
     /// system registers only there, so any other processor's comes from
-    /// control space.
+    /// control space. Read once a boot (see [`Self::kpcr_cache`]).
     pub(super) fn processor_kpcr(&mut self, processor: u16) -> Option<u64> {
+        if let Some(&kpcr) = self.kpcr_cache.get(&processor) {
+            return Some(kpcr);
+        }
         let kpcr = if processor == self.last_stop_processor {
             self.read_msr_value(processor, ARM64_WINDBG_TPIDR_EL1)
                 .inspect_err(|error| kd_trace!("kd: ARM64 TPIDR_EL1 read unavailable: {error}"))
@@ -150,8 +153,10 @@ impl KdBackend {
             .inspect_err(|error| kd_trace!("kd: p{} KPCR read unavailable: {error}", processor + 1))
             .ok()
             .and_then(|bytes| Some(u64::from_le_bytes(bytes.get(..8)?.try_into().ok()?)))
-        };
-        kpcr.filter(|kpcr| *kpcr != 0)
+        }
+        .filter(|kpcr| *kpcr != 0)?;
+        self.kpcr_cache.insert(processor, kpcr);
+        Some(kpcr)
     }
 
     /// The page-table root of the address space `processor`'s current

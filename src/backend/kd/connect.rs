@@ -228,6 +228,7 @@ impl KdBackend {
             surface_break_at: None,
             special_registers_unsupported: false,
             efer_cache: HashMap::new(),
+            kpcr_cache: HashMap::new(),
             debug_features: None,
             virtual_lines: LineCache::default(),
             table_lines: LineCache::default(),
