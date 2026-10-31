@@ -399,8 +399,10 @@ impl Target {
             .is_some_and(|guest| guest.in_hypervisor_image(address))
     }
 
-    /// Whether inspection is in the hypervisor's address space: a stop in it,
-    /// whose context `.cxr` selected.
+    /// Whether inspection is in the hypervisor's address space, which maps no
+    /// NT memory: a stop in it whose context is the hypervisor's own, which
+    /// `.cxr` selects and a stop on the VM-exit entry keeps (its saved VTL0
+    /// state may be one exit behind, so it is not selected).
     pub fn in_hypervisor_address_space(&self) -> bool {
         self.guest
             .as_ref()

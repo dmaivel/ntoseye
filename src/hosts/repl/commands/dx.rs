@@ -229,6 +229,17 @@ struct DxLine {
     /// array, a pointer that isn't null), which pads the root's name.
     expandable: bool,
     children: Vec<DxLine>,
+    /// Where the value is, when it is in memory that did not read.
+    unreadable: Option<VirtAddr>,
+}
+
+impl DxLine {
+    /// The first address of the tree, this line's or a line's under it,
+    /// that did not read.
+    fn first_unreadable(&self) -> Option<VirtAddr> {
+        self.unreadable
+            .or_else(|| self.children.iter().find_map(DxLine::first_unreadable))
+    }
 }
 
 /// The root line: an expandable value's name stands apart from its value,
@@ -453,8 +464,22 @@ impl ReplState<'_> {
             self.dx_typed(args.name, text, depth)
         };
         match root {
-            Ok(root) if args.grid => print_dx_grid(&root),
-            Ok(root) => print_dx(&root),
+            Ok(root) => {
+                if args.grid {
+                    print_dx_grid(&root);
+                } else {
+                    print_dx(&root);
+                }
+                // WinDbg's per-value text does not say why; at a stop in the
+                // hypervisor the reason is the address space, not the page.
+                let target = &self.ctx.target;
+                if let Some(address) = root.first_unreadable()
+                    && target.in_hypervisor_address_space()
+                    && let Some(why) = crate::hosts::repl::unreadable_reason(target, address)
+                {
+                    crate::base::diagnostics::print_note(format!("{}: {why}", ui::addr(address.0)));
+                }
+            }
             Err(error) => crate::hosts::repl::report_error(self, &error),
         }
         Ok(())
@@ -739,7 +764,10 @@ impl ReplState<'_> {
                         .min(MAX_DX_STRING * 2);
                     line.value = Some(match view.read_display_bytes(address, bytes) {
                         Ok(bytes) => format!("\"{}\"", decode_string(&bytes, unit)),
-                        Err(_) => unreadable(address),
+                        Err(_) => {
+                            line.unreadable = Some(address);
+                            unreadable(address)
+                        }
                     });
                     return line;
                 }
@@ -754,6 +782,7 @@ impl ReplState<'_> {
                         Ok(raw) => raw,
                         Err(_) => {
                             line.value = Some(unreadable(address));
+                            line.unreadable = Some(address);
                             line.type_name = None;
                             return line;
                         }

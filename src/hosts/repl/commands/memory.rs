@@ -149,8 +149,19 @@ pub(super) fn dump_memory(
 }
 
 impl Render for MemoryDump {
-    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+    fn render(&self, state: &mut ReplState<'_>, (): ()) {
         display_memory_with_validity(self.start, &self.data, Some(&self.valid), &self.mode);
+        // Question marks for NT addresses at a stop in the hypervisor are not
+        // paged-out memory: the context's address space maps none of NT's.
+        let target = &state.ctx.target;
+        if let Some(offset) = self.valid.iter().position(|read| !read)
+            && target.in_hypervisor_address_space()
+        {
+            let address = self.start + offset as u64;
+            if let Some(why) = crate::hosts::repl::unreadable_reason(target, address) {
+                crate::base::diagnostics::print_note(format!("{}: {why}", ui::addr(address.0)));
+            }
+        }
     }
 }
 

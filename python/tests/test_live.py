@@ -272,6 +272,27 @@ def test_kernel_memory_reads_at_a_stop_in_the_hypervisor(halted: Debugger) -> No
     assert halted.memory.read(address, 1) == halted.processes[4].memory.read(address, 1)
 
 
+def test_an_nt_read_in_the_hypervisors_context_says_why_it_fails(halted: Debugger) -> None:
+    """In the hypervisor's own context (`.cxr` at a stop there; a stop on its
+    VM-exit entry keeps it) no NT address reads, and `dq` and `dx` say that
+    the context's address space is why and that `.vtlcxr` selects NT."""
+    cpu = next((cpu for cpu in halted.cpus if cpu.saved_vtl), None)
+    if cpu is None:
+        pytest.skip("no vCPU halted in the Windows hypervisor with saved VTL state (needs VBS and hv-evmcs)")
+    reason = "not mapped in the Windows hypervisor's address space"
+    halted.command(f"~{cpu.number}s")
+    halted.command(".cxr")
+    try:
+        assert reason in halted.command("dq nt!PsActiveProcessHead L1")
+        assert reason in halted.command("dx -r0 *(void**)&nt!PsActiveProcessHead")
+        halted.command(".vtlcxr")
+        listing = halted.command("dq nt!PsActiveProcessHead L1")
+        assert "?" not in listing and reason not in listing
+    finally:
+        # Back to the stopped processor and its own context.
+        halted.command(f"~{halted.stop.cpu}s" if halted.stop and halted.stop.cpu is not None else ".thread")
+
+
 def test_hypervisor_memory_is_its_own_and_read_only(halted: Debugger) -> None:
     cpu = next((cpu for cpu in halted.cpus if cpu.saved_vtl), None)
     if cpu is None:

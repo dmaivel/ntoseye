@@ -80,12 +80,33 @@ pub fn error(msg: &str) {
 /// it is that one but for a command that reads another process's.
 pub fn report_error(state: &ReplState<'_>, error: &crate::base::error::Error) {
     self::error(&error.to_string());
-    let target = &state.ctx.target;
     if let crate::base::error::Error::BadVirtualAddress(address) = error
-        && let Some(why) = target.non_resident(target.current_dtb(), *address)
+        && let Some(why) = unreadable_reason(&state.ctx.target, *address)
     {
         diagnostics::print_note(format!("{}: {why}", ui::addr(address.0)));
     }
+}
+
+/// Why `address` does not read in the inspection address space, as its page
+/// tables tell it. At a stop whose context is the Windows hypervisor's own,
+/// a VM-exit entry's or one `.cxr` selected, that space maps no NT memory,
+/// which the page walk alone would only call unmapped.
+pub fn unreadable_reason(
+    target: &crate::nt::target::Target,
+    address: crate::base::types::VirtAddr,
+) -> Option<String> {
+    let why = target.non_resident(target.current_dtb(), address);
+    let unmapped = why
+        .as_ref()
+        .is_none_or(|why| why.place == crate::base::memory::Place::Unmapped);
+    if unmapped && target.in_hypervisor_address_space() {
+        return Some(
+            "not mapped in the Windows hypervisor's address space, which this stop's context is; \
+             .vtlcxr selects where VTL0 left off"
+                .to_string(),
+        );
+    }
+    why.map(|why| why.to_string())
 }
 
 macro_rules! error {

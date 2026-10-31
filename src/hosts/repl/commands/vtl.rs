@@ -483,11 +483,7 @@ impl ReplState<'_> {
                     )
                 );
             }
-        } else if let Some(rip) = target.register_value(target.arch().pc_register())
-            && halted_in_windows_hypervisor(target, target.current_dtb(), rip)
-        {
-            // Not VTL0: the vCPU halted in the Windows hypervisor, whose root
-            // maps no NT memory.
+        } else if target.in_hypervisor_address_space() {
             outln!(
                 "hypervisor stop on vCPU {}: DTB {} is the Windows hypervisor's and maps no NT memory",
                 self.ctx.current_thread,
