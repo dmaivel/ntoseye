@@ -332,6 +332,11 @@ impl Target {
         let Some(guest) = &self.guest else {
             return dtb;
         };
+        // Only a KVA-shadow user root fails to reach the kernel; a kernel
+        // without them is spared the probe, a request per stop over KD.
+        if guest.user_root_offset().is_none() {
+            return dtb;
+        }
         let Ok(process_list) = guest.ntoskrnl.symbol("PsActiveProcessHead") else {
             return dtb;
         };

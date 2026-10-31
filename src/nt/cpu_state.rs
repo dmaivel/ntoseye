@@ -24,10 +24,13 @@ fn processor_block(target: &Target, index: u16) -> Result<VirtAddr> {
             "processor index {index} exceeds the supported bound of {MAX_PROCESSORS}"
         )));
     }
-    let nt = kernel(target)?;
-    let symbol = nt.symbol("KiProcessorBlock")?;
-    let memory = nt.memory();
-    memory.read_pointer(symbol.address() + u64::from(index) * memory.arch().pointer_size())
+    let guest = target.guest()?;
+    guest.processor_block(index, || {
+        let nt = &guest.ntoskrnl;
+        let symbol = nt.symbol("KiProcessorBlock")?;
+        let memory = nt.memory();
+        memory.read_pointer(symbol.address() + u64::from(index) * memory.arch().pointer_size())
+    })
 }
 
 fn prcb_offset(target: &Target) -> Result<u64> {

@@ -331,7 +331,10 @@ impl Guest {
         (root != 0).then_some(root)
     }
 
-    fn user_root_offset(&self) -> Option<u64> {
+    /// Where `_EPROCESS` keeps the KVA-shadow user root
+    /// (`Pcb.UserDirectoryTableBase`); `None` on a kernel without shadow
+    /// roots, such as ARM64's, whose user root never maps the kernel.
+    pub fn user_root_offset(&self) -> Option<u64> {
         let types = self.ntoskrnl.types();
         Some(
             types.layout("_EPROCESS").ok()?.field_offset("Pcb").ok()?

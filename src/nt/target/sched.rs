@@ -1630,6 +1630,86 @@ pub struct ApcLayout {
     pub normal_routine: Option<&'static str>,
 }
 
+/// The `_ETHREAD` fields after `Tcb` that a thread's summary reads.
+const THREAD_SUMMARY_FIELDS: [&str; 7] = [
+    "Cid",
+    "ThreadsProcess",
+    "ProcessFastRef",
+    "StartAddress",
+    "Win32StartAddress",
+    "Teb",
+    "IrpList",
+];
+
+/// The bytes of an `_ETHREAD` a thread's summary decodes, read at once from
+/// its start through its `Tcb` and the last summary field, as
+/// `EprocessSpan` reads a process's: the fields lie over a few lines, and
+/// over KD each line a field read misses costs a request. A field outside
+/// the span, or a span that did not read whole, is read on its own.
+struct ThreadBytes {
+    start: VirtAddr,
+    bytes: Option<Vec<u8>>,
+}
+
+impl ThreadBytes {
+    fn fetch(
+        memory: &AddressSpace<'_, impl MemoryOps<PhysAddr>>,
+        ethread: VirtAddr,
+        ethread_layout: &TypeInfo,
+        kthread_layout: &TypeInfo,
+        tcb_offset: u64,
+    ) -> Self {
+        // Every summary field is pointer-sized at most, `Cid` two pointers.
+        let pointer = memory.arch().pointer_size();
+        let end = THREAD_SUMMARY_FIELDS
+            .iter()
+            .filter_map(|name| ethread_layout.field_offset(name).ok())
+            .map(|offset| offset + 2 * pointer)
+            .fold(tcb_offset + kthread_layout.size as u64, u64::max)
+            .min(ethread_layout.size as u64);
+        let mut bytes = vec![0u8; end as usize];
+        let bytes = memory
+            .read_bytes(ethread, &mut bytes)
+            .is_ok()
+            .then_some(bytes);
+        Self {
+            start: ethread,
+            bytes,
+        }
+    }
+
+    fn slice(&self, address: VirtAddr, len: usize) -> Option<&[u8]> {
+        let offset = usize::try_from(address.0.checked_sub(self.start.0)?).ok()?;
+        self.bytes.as_ref()?.get(offset..offset.checked_add(len)?)
+    }
+
+    fn read<T>(
+        &self,
+        memory: &AddressSpace<'_, impl MemoryOps<PhysAddr>>,
+        address: VirtAddr,
+    ) -> Option<T>
+    where
+        T: Copy + zerocopy::FromZeros + zerocopy::FromBytes + zerocopy::IntoBytes,
+    {
+        match self.slice(address, size_of::<T>()) {
+            Some(bytes) => T::read_from_bytes(bytes).ok(),
+            None => memory.read(address).ok(),
+        }
+    }
+
+    fn pointer(
+        &self,
+        memory: &AddressSpace<'_, impl MemoryOps<PhysAddr>>,
+        address: VirtAddr,
+    ) -> Option<VirtAddr> {
+        let arch = memory.arch();
+        match self.slice(address, arch.pointer_size() as usize) {
+            Some(bytes) => Some(arch.decode_pointer(bytes)),
+            None => memory.read_pointer(address).ok(),
+        }
+    }
+}
+
 impl Target {
     /// The process's parent PID; see `parent_pid` for the field fallback.
     pub fn process_parent_pid(&self, process: &ProcessInfo) -> Result<u64> {
@@ -1859,6 +1939,13 @@ impl Target {
         let kthread_layout = types.layout("_KTHREAD")?;
         let tcb_offset = ethread_layout.field_offset("Tcb").unwrap_or(0);
         let kthread = ethread + tcb_offset;
+        let bytes = ThreadBytes::fetch(
+            &memory,
+            ethread,
+            &ethread_layout,
+            &kthread_layout,
+            tcb_offset,
+        );
 
         let cid_base = ethread_layout
             .field_offset("Cid")
@@ -1869,14 +1956,14 @@ impl Target {
             client_id_layout
                 .as_ref()
                 .and_then(|layout| layout.field_offset("UniqueThread").ok())
-                .and_then(|offset| memory.read_pointer(base + offset).ok())
+                .and_then(|offset| bytes.pointer(&memory, base + offset))
                 .map(|id| id.0)
         });
         let pid = cid_base.and_then(|base| {
             client_id_layout
                 .as_ref()
                 .and_then(|layout| layout.field_offset("UniqueProcess").ok())
-                .and_then(|offset| memory.read_pointer(base + offset).ok())
+                .and_then(|offset| bytes.pointer(&memory, base + offset))
                 .map(|id| id.0)
         });
 
@@ -1884,21 +1971,21 @@ impl Target {
             ethread_layout
                 .field_offset(field)
                 .ok()
-                .and_then(|offset| memory.read_pointer(ethread + offset).ok())
+                .and_then(|offset| bytes.pointer(&memory, ethread + offset))
                 .filter(|addr| !addr.is_zero())
         };
         let read_kthread_ptr = |field: &str| -> Option<VirtAddr> {
             kthread_layout
                 .field_offset(field)
                 .ok()
-                .and_then(|offset| memory.read_pointer(kthread + offset).ok())
+                .and_then(|offset| bytes.pointer(&memory, kthread + offset))
                 .filter(|addr| !addr.is_zero())
         };
         let read_kthread_u8 = |field: &str| -> Option<u8> {
             kthread_layout
                 .field_offset(field)
                 .ok()
-                .and_then(|offset| memory.read::<u8>(kthread + offset).ok())
+                .and_then(|offset| bytes.read::<u8>(&memory, kthread + offset))
         };
 
         // KTHREAD.Process (KPROCESS* == EPROCESS base) first; ThreadsProcess
@@ -1910,7 +1997,7 @@ impl Target {
                 ethread_layout
                     .field_offset("ProcessFastRef")
                     .ok()
-                    .and_then(|offset| memory.read_pointer(ethread + offset).ok())
+                    .and_then(|offset| bytes.pointer(&memory, ethread + offset))
                     .map(|fast_ref| fast_ref_address(fast_ref.0))
                     .filter(|addr| !addr.is_zero())
             });
@@ -1947,10 +2034,13 @@ impl Target {
             base_priority: read_kthread_u8("BasePriority"),
             wait_irql: read_kthread_u8("WaitIrql"),
             // A one-bit field inside `MiscFlags`: the whole byte is never zero.
-            kernel_stack_resident: self
-                .extract_kernel_layout_bits(&kthread_layout, kthread, "KernelStackResident")
-                .ok()
-                .map(|value| value != 0),
+            kernel_stack_resident: kthread_layout.field("KernelStackResident").ok().and_then(
+                |field| {
+                    bytes
+                        .read::<u64>(&memory, kthread + field.offset as u64)
+                        .map(|raw| field.decode(raw) != 0)
+                },
+            ),
             start_address: read_ethread_ptr("StartAddress"),
             win32_start_address: read_ethread_ptr("Win32StartAddress"),
             teb: read_kthread_ptr("Teb").or_else(|| read_ethread_ptr("Teb")),

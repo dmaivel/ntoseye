@@ -300,6 +300,9 @@ pub struct Guest {
     /// root, masked, kept across halts and checked before it is used (see
     /// [`Self::process_for_root`]).
     root_owners: Mutex<HashMap<Dtb, ProcessInfo>>,
+    /// Each processor's `KiProcessorBlock` entry, once it held one (see
+    /// [`Self::processor_block`]).
+    processor_blocks: Mutex<HashMap<u16, VirtAddr>>,
 }
 
 /// Guest-derived lists memoized for one halt epoch (see
@@ -402,6 +405,7 @@ impl Guest {
             processor_vps: Mutex::new(None),
             vp_register_layouts: Mutex::new(HashMap::new()),
             root_owners: Mutex::new(HashMap::new()),
+            processor_blocks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -553,6 +557,31 @@ impl Guest {
 
     fn memo(&self) -> MutexGuard<'_, HaltMemo> {
         self.memo.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Processor `index`'s `KiProcessorBlock` entry, its KPRCB, which `read`
+    /// reads; remembered for the boot once it is set, since a processor's
+    /// KPRCB stays where the kernel put it when the processor started. A null
+    /// entry (a processor not started yet) is read again next time. Every
+    /// stop finds its thread through it, and over KD a read is a request.
+    pub fn processor_block(
+        &self,
+        index: u16,
+        read: impl FnOnce() -> Result<VirtAddr>,
+    ) -> Result<VirtAddr> {
+        let lock = || {
+            self.processor_blocks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+        };
+        if let Some(&block) = lock().get(&index) {
+            return Ok(block);
+        }
+        let block = read()?;
+        if !block.is_zero() {
+            lock().insert(index, block);
+        }
+        Ok(block)
     }
 
     /// Serve `slot` from the current halt's memo, walking with `walk` on a
