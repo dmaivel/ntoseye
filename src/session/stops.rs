@@ -515,6 +515,9 @@ impl Session {
                     .map(|module| (notification.kind, module))
                 }
                 notification => {
+                    // A kernel module loaded or unloaded: the list the
+                    // guest keeps across halts is out of date.
+                    self.target.forget_kernel_modules();
                     self.unreported_module_change = self.refresh_modules_on_stop();
                     notification.and_then(|notification| {
                         self.kernel_module_at(notification.base)

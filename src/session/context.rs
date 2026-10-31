@@ -671,13 +671,14 @@ impl Session {
                 .format_closest_symbol_for_address(self.target.kernel_dtb(), VirtAddr(rip));
             ("kernel".to_string(), sym)
         } else {
-            let processes = self
+            // The root's process as an earlier stop found it, checked: the
+            // list walk reads each long name from its process's memory.
+            let process = self
                 .target
                 .guest
                 .as_ref()
-                .and_then(|g| g.enumerate_processes().ok())
-                .unwrap_or_default();
-            match processes.iter().find(|p| (p.dtb & dtb_mask) == dtb_masked) {
+                .and_then(|guest| guest.process_for_root(dtb_masked, dtb_mask));
+            match process {
                 Some(proc) => {
                     let sym = self
                         .target

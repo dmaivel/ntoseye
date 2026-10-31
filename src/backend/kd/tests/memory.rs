@@ -538,6 +538,127 @@ fn a_root_names_its_process_without_a_walk_while_it_stays_on_the_list() {
     worker.join().unwrap();
 }
 
+/// A halted guest whose `PsLoadedModuleList` links `entries`, `(address,
+/// DllBase)` pairs, in order, and whose head's back link names `last`, the
+/// list's last entry as the kernel keeps it. `spare` is an entry in memory
+/// but not on the list, as a loading module's is before the kernel links it
+/// after the last.
+fn module_list_guest(
+    entries: &[(u64, u64)],
+    last: u64,
+    spare: Option<(u64, u64)>,
+) -> (Guest, Arc<Mutex<KdBackend>>, JoinHandle<usize>) {
+    const DLL_BASE: usize = 0x30;
+    const SIZE_OF_IMAGE: usize = 0x40;
+    let entry_layout = layout(
+        "_KLDR_DATA_TABLE_ENTRY",
+        0x50,
+        &[
+            ("InLoadOrderLinks", primitive(0, 16)),
+            ("DllBase", primitive(DLL_BASE as u32, 8)),
+            ("SizeOfImage", primitive(SIZE_OF_IMAGE as u32, 4)),
+        ],
+    );
+    let mut nt = vec![0u8; 0x2000];
+    let first = entries
+        .first()
+        .map_or(PS_LOADED_MODULE_LIST, |entry| entry.0);
+    put_u64(&mut nt, 0x1020, first);
+    put_u64(&mut nt, 0x1028, last);
+    let entry = |next: u64, previous: u64, base: u64| {
+        let mut bytes = vec![0u8; 0x200];
+        put_u64(&mut bytes, 0, next);
+        put_u64(&mut bytes, 8, previous);
+        put_u64(&mut bytes, DLL_BASE, base);
+        bytes[SIZE_OF_IMAGE..SIZE_OF_IMAGE + 4].copy_from_slice(&0x1000u32.to_le_bytes());
+        bytes
+    };
+    let mut regions = vec![(FAKE_KERNEL_BASE, nt)];
+    for (index, &(address, base)) in entries.iter().enumerate() {
+        let next = entries
+            .get(index + 1)
+            .map_or(PS_LOADED_MODULE_LIST, |entry| entry.0);
+        let previous = index
+            .checked_sub(1)
+            .map_or(PS_LOADED_MODULE_LIST, |previous| entries[previous].0);
+        regions.push((address, entry(next, previous, base)));
+    }
+    if let Some((address, base)) = spare {
+        let previous = entries
+            .last()
+            .map_or(PS_LOADED_MODULE_LIST, |entry| entry.0);
+        regions.push((address, entry(PS_LOADED_MODULE_LIST, previous, base)));
+    }
+    synthetic_guest(
+        regions,
+        vec![entry_layout],
+        &[("PsLoadedModuleList", 0x1020)],
+    )
+}
+
+const PS_LOADED_MODULE_LIST: u64 = FAKE_KERNEL_BASE + 0x1020;
+
+/// Where every module load and unload is reported, the kernel module list
+/// read whole is kept across halts, costing no request at the next, until
+/// it is forgotten; a walk that stops short of the list's last entry is
+/// read again at the next halt.
+#[test]
+fn a_kept_kernel_module_list_is_read_once_until_forgotten() {
+    const NT: u64 = 0xffff_e000_0003_0000;
+    const HAL: u64 = 0xffff_e000_0004_0000;
+    let bases = |guest: &Guest| -> Vec<u64> {
+        guest
+            .kernel_modules()
+            .unwrap()
+            .iter()
+            .map(|module| module.base_address.0)
+            .collect()
+    };
+    let entries = [(NT, FAKE_KERNEL_BASE), (HAL, 0xffff_f800_0100_0000)];
+
+    let (guest, backend, worker) = module_list_guest(&entries, HAL, None);
+    guest.keep_kernel_modules();
+    assert_eq!(bases(&guest), [FAKE_KERNEL_BASE, 0xffff_f800_0100_0000]);
+    resume_and_halt(&backend);
+    assert_eq!(bases(&guest).len(), 2);
+    drop(guest);
+    drop(backend);
+    // The head's line and one per entry, at the first halt only.
+    assert_eq!(worker.join().unwrap(), 3);
+
+    // The head links back to an entry the walk never reached.
+    let (guest, backend, worker) = module_list_guest(&entries[..1], HAL, None);
+    guest.keep_kernel_modules();
+    assert_eq!(bases(&guest), [FAKE_KERNEL_BASE]);
+    resume_and_halt(&backend);
+    assert_eq!(bases(&guest), [FAKE_KERNEL_BASE]);
+    drop(guest);
+    drop(backend);
+    assert_eq!(worker.join().unwrap(), 2 + 2);
+
+    // A module loads: the kernel links it in and reports it.
+    let (guest, backend, worker) = module_list_guest(&entries[..1], NT, Some(entries[1]));
+    guest.keep_kernel_modules();
+    assert_eq!(bases(&guest), [FAKE_KERNEL_BASE]);
+    resume_and_halt(&backend);
+    let write = |address: u64, value: u64| {
+        guest
+            .ntoskrnl
+            .memory()
+            .write_bytes(VirtAddr(address), &value.to_le_bytes())
+            .unwrap()
+    };
+    write(NT, HAL);
+    write(PS_LOADED_MODULE_LIST + 8, HAL);
+    assert_eq!(bases(&guest), [FAKE_KERNEL_BASE]);
+    guest.forget_kernel_modules();
+    resume_and_halt(&backend);
+    assert_eq!(bases(&guest), [FAKE_KERNEL_BASE, 0xffff_f800_0100_0000]);
+    drop(guest);
+    drop(backend);
+    worker.join().unwrap();
+}
+
 /// A process has exited once it is off the active process list, its PID
 /// given to a process with another root, or while it stays on the list
 /// with `ExitTime` set (a process object something still references).

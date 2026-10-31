@@ -387,6 +387,9 @@ impl Session {
             backend.set_processor_count(count);
         }
         backend.set_windows_hypervisor(target.windows_hypervisor_running());
+        if backend.reports_kernel_module_changes() {
+            target.keep_kernel_modules();
+        }
         let register_map = backend.register_map().clone();
 
         // Seed the selected thread from the backend when it exposes register

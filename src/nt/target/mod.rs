@@ -175,6 +175,10 @@ pub struct Target {
     /// the handles they hand out with it, so an address from before a reboot
     /// is refused instead of read through the new kernel's layout.
     generation: Arc<AtomicU64>,
+    /// Whether every guest keeps its kernel module list across halts, the
+    /// backend reporting each load and unload; see
+    /// [`Self::keep_kernel_modules`].
+    keep_kernel_modules: bool,
     /// The on-disk record of breakpoint instructions this session patched
     /// into guest memory itself, so a session that dies with them in place is
     /// repaired by the next; `None` for targets nothing is patched into.

@@ -100,6 +100,11 @@ impl DebugBackend for KdBackendHandle {
     fn steps_only_the_stopping_processor(&self) -> bool {
         self.lock().steps_only_the_stopping_processor()
     }
+    // Windows sends a load-symbols state change for every kernel image it
+    // loads or unloads while a kernel debugger is attached.
+    fn reports_kernel_module_changes(&self) -> bool {
+        true
+    }
 
     fn revalidate_host_memory(&mut self, phys: &PhysMem) -> Result<()> {
         // Target-mediated memory is the target itself: there is no host

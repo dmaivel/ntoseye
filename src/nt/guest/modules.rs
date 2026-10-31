@@ -2,7 +2,7 @@
 //! kernel's `PsLoadedModuleList`, and module version population.
 
 use super::vad::{VadTreeOffsets, vad_root_offset, vad_tree_link};
-use super::{Guest, ModuleInfo, ProcessInfo, ProcessModulesDetail};
+use super::{Guest, KeptModules, ModuleInfo, ProcessInfo, ProcessModulesDetail};
 use crate::{
     base::{
         bytes::{read_u16, read_u32, utf16le_lossy},
@@ -18,7 +18,7 @@ use crate::{
     },
 };
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard, PoisonError};
 
 const MAX_LOADER_MODULES: usize = 1000;
 /// The name of a loader entry whose name cannot be read.
@@ -438,22 +438,64 @@ impl Guest {
     }
 
     pub fn kernel_modules(&self) -> Result<Vec<ModuleInfo>> {
-        self.memoized(
+        if let KeptModules::Kept(modules) = &*self.kept_kernel_modules() {
+            return Ok(modules.clone());
+        }
+        let (modules, whole) = self.memoized(
             |memo| &mut memo.kernel_modules,
             || self.walk_kernel_modules(),
-        )
+        )?;
+        if whole {
+            let mut kept = self.kept_kernel_modules();
+            if matches!(*kept, KeptModules::Unread) {
+                *kept = KeptModules::Kept(modules.clone());
+            }
+        }
+        Ok(modules)
     }
 
-    fn walk_kernel_modules(&self) -> Result<Vec<ModuleInfo>> {
+    /// Keep the kernel module list across halts from the next one read
+    /// whole, until [`Self::forget_kernel_modules`]: for a backend that
+    /// reports every load and unload (KD), where walking the list again at
+    /// every halt only finds it unchanged, and over a slow link costs a
+    /// request for each module's entry and names.
+    pub fn keep_kernel_modules(&self) {
+        let mut kept = self.kept_kernel_modules();
+        if matches!(*kept, KeptModules::Off) {
+            *kept = KeptModules::Unread;
+        }
+    }
+
+    /// Drop the kept kernel module list (see [`Self::keep_kernel_modules`]):
+    /// a module loaded or unloaded, or the user asked for the list afresh.
+    pub fn forget_kernel_modules(&self) {
+        let mut kept = self.kept_kernel_modules();
+        if matches!(*kept, KeptModules::Kept(_)) {
+            *kept = KeptModules::Unread;
+        }
+    }
+
+    fn kept_kernel_modules(&self) -> MutexGuard<'_, KeptModules> {
+        self.kept_kernel_modules
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The kernel modules, and whether the walk read the whole list: it got
+    /// to the list's last entry past entries that all read.
+    fn walk_kernel_modules(&self) -> Result<(Vec<ModuleInfo>, bool)> {
         let head = self.ntoskrnl.symbol("PsLoadedModuleList")?;
         // At a reboot's first boot notification the list is not built yet,
         // but the kernel itself is loaded; stacks unwind through it.
         if head.read_pointer()?.is_zero() {
-            return Ok(vec![ModuleInfo::new(
-                "ntoskrnl.exe".to_string(),
-                self.ntoskrnl.base_address,
-                self.ntoskrnl.binary_size() as u32,
-            )]);
+            return Ok((
+                vec![ModuleInfo::new(
+                    "ntoskrnl.exe".to_string(),
+                    self.ntoskrnl.base_address,
+                    self.ntoskrnl.binary_size() as u32,
+                )],
+                false,
+            ));
         }
         let head = head.address();
 
@@ -488,11 +530,18 @@ impl Guest {
                 modules.push(module);
             }
         }
+        let memory = self.ntoskrnl.memory();
+        let blink_offset = memory.arch().pointer_size();
+        // The walk read the whole list when it reached the entry the head
+        // links back to, its last: a cycle or the entry cap ends it short
+        // without an error.
+        let whole = broken.is_none()
+            && memory
+                .read_pointer(head + blink_offset)
+                .is_ok_and(|last| reached.contains(&last));
         // An entry that cannot be read ends the walk forward; the modules
         // past it are found backward, and only that entry's is missing.
         if let Some(error) = broken {
-            let memory = self.ntoskrnl.memory();
-            let blink_offset = memory.arch().pointer_size();
             let tail = links_back_to(head, &reached, MAX_LOADER_MODULES, |link| {
                 memory.read_pointer(link + blink_offset)
             });
@@ -509,7 +558,7 @@ impl Guest {
             }
         }
 
-        Ok(modules)
+        Ok((modules, whole))
     }
 
     pub fn populate_kernel_module_versions(&self, modules: &mut [ModuleInfo]) {

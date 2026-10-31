@@ -303,6 +303,20 @@ pub struct Guest {
     /// Each processor's `KiProcessorBlock` entry, once it held one (see
     /// [`Self::processor_block`]).
     processor_blocks: Mutex<HashMap<u16, VirtAddr>>,
+    /// The kernel's module list kept across halts, where the backend reports
+    /// every module load and unload (see [`Self::keep_kernel_modules`]).
+    kept_kernel_modules: Mutex<KeptModules>,
+}
+
+/// Whether, and what, [`Guest::kernel_modules`] keeps across halts.
+#[derive(Default)]
+enum KeptModules {
+    /// Walked once a halt: nothing reports a module load.
+    #[default]
+    Off,
+    /// To keep the next list read whole.
+    Unread,
+    Kept(Vec<ModuleInfo>),
 }
 
 /// Guest-derived lists memoized for one halt epoch (see
@@ -315,7 +329,8 @@ pub struct Guest {
 struct HaltMemo {
     epoch: Option<u64>,
     processes: Option<Vec<ProcessInfo>>,
-    kernel_modules: Option<Vec<ModuleInfo>>,
+    /// The kernel modules, and whether the walk read the whole list.
+    kernel_modules: Option<(Vec<ModuleInfo>, bool)>,
     drivers: Option<Vec<DriverObjectInfo>>,
     /// Loader lists by `_EPROCESS`; every thread of a process walked in one
     /// halt shares them.
@@ -406,6 +421,7 @@ impl Guest {
             vp_register_layouts: Mutex::new(HashMap::new()),
             root_owners: Mutex::new(HashMap::new()),
             processor_blocks: Mutex::new(HashMap::new()),
+            kept_kernel_modules: Mutex::new(KeptModules::Off),
         }
     }
 

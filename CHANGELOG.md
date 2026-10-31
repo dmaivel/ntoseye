@@ -33,6 +33,7 @@ Keeping this file:
 - `.process` takes a process's image name, as `!process` does (`.process /p /r explorer.exe`), besides its EPROCESS address and PID; a name several processes share is refused with a hint to give the PID.
 - At a stop in the Windows hypervisor whose context is the hypervisor's own (after `.cxr`, or on its VM-exit entry, whose saved VTL0 state may be one exit behind), a `d*` listing or `dx` that cannot read an NT address, and a command that fails on one, add a note that the hypervisor's address space does not map it and that `.vtlcxr` selects where VTL0 left off.
 - Over KD on ARM64, a processor's KPCR is read once a boot instead of at every register read, which makes `~` and a debug adapter's thread list about a third faster.
+- Over KD, a stop no longer reads the kernel's whole module list again, since the target reports every module load and unload, and a processor's process is named without walking the process list and reading each long process name from its process's memory. A REPL stop over a serial link with memory read through KD took 9 to 15 s, and takes 1 to 2.5 s.
 
 ### Fixed
 

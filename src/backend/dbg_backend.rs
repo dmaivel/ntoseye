@@ -878,6 +878,13 @@ pub trait DebugBackend {
         false
     }
 
+    /// Whether the target reports each kernel module it loads or unloads as
+    /// a stop (KD's load-symbols state change), so a kernel module list read
+    /// earlier holds until the next report.
+    fn reports_kernel_module_changes(&self) -> bool {
+        false
+    }
+
     /// Whether Windows' own exception handlers take the debug exceptions
     /// this backend's single steps and breakpoints raise: KD sets the trap
     /// flag and plants `int3` through the kernel, which dispatches each trap

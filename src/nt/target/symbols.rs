@@ -57,6 +57,25 @@ impl Target {
         }
     }
 
+    /// Keep the kernel module list across halts, in this boot's guest and
+    /// every later one, for a backend that reports each module load and
+    /// unload; the session forgets it at each report (see
+    /// [`Self::forget_kernel_modules`]).
+    pub fn keep_kernel_modules(&mut self) {
+        self.keep_kernel_modules = true;
+        if let Some(guest) = &self.guest {
+            guest.keep_kernel_modules();
+        }
+    }
+
+    /// Read the kernel module list afresh at its next use: a module loaded
+    /// or unloaded.
+    pub fn forget_kernel_modules(&self) {
+        if let Some(guest) = &self.guest {
+            guest.forget_kernel_modules();
+        }
+    }
+
     pub fn kernel_modules_with_versions(&self) -> Result<Vec<ModuleInfo>> {
         let mut mods = self.kernel_modules()?;
         if let Ok(g) = self.guest() {
@@ -293,6 +312,8 @@ impl Target {
         scope: ReloadScope,
         pattern: Option<&str>,
     ) -> Result<ModuleSymbolLoadReport> {
+        // A reload asks for the module lists as they are now.
+        self.forget_kernel_modules();
         let (mut modules, dtb) = match scope {
             ReloadScope::Current => (self.modules()?, self.process_dtb()),
             ReloadScope::Kernel => (self.kernel_modules()?, self.kernel_dtb()),

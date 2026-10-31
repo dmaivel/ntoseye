@@ -243,6 +243,7 @@ impl Target {
             interrupt_requests: Arc::new(AtomicU64::new(0)),
             notices,
             generation: Arc::new(AtomicU64::new(0)),
+            keep_kernel_modules: false,
             site_journal: None,
             code_sites: Arc::default(),
             #[cfg(test)]
@@ -378,6 +379,9 @@ impl Target {
                 Err(e) => (None, Some(e.to_string())),
             };
 
+        if self.keep_kernel_modules {
+            guest.keep_kernel_modules();
+        }
         self.guest = Some(guest);
         self.triage_modules_cache = None;
         self.generation.fetch_add(1, Ordering::AcqRel);
