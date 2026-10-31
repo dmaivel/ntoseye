@@ -8,6 +8,7 @@ import re
 import signal
 import threading
 import time
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -46,6 +47,9 @@ IN_GUEST_VP = "of a guest partition, which the Windows hypervisor put on its pro
 # that no module or unwind data covers.
 NO_CALLER = "could not find caller return address"
 ATTEMPTS = 3
+# How long to wait for the root partition's next IPI or flush hypercall: at
+# low load the whole root made no synthetic IPI for 44 s, and one VP for 64.
+HYPERCALL_WAIT = 90.0
 
 
 @contextmanager
@@ -696,9 +700,11 @@ def test_hypercall_breakpoint_stops_only_for_its_call_and_caller(halted: Debugge
     state holds the code in RCX's low 16 bits. With a VP index, the stop is
     on that VP's processor, as the root's VPs are pinned to the processors
     with their numbers. A hit whose caller is unknown stops too, so only the
-    stops with a known caller are checked. A root VP can go many seconds
-    without the call (its processor parked by Windows at low load), so the
-    VP is one seen making it."""
+    stops with a known caller are checked. The root's VPs make the call at
+    very different rates (one several times a second, another once in
+    several seconds), and the whole root can go a minute without it at low
+    load, so the VP is the one seen making it most and each wait is long; a
+    filter that declined that VP's calls would still time out."""
     if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
         pytest.skip("breakpoints in the Windows hypervisor require the host GDB backend")
     try:
@@ -719,9 +725,9 @@ def test_hypercall_breakpoint_stops_only_for_its_call_and_caller(halted: Debugge
             assert hypercall is not None
             assert (hypercall.code, hypercall.partition, hypercall.vp) == (0x000B, root.id, index)
             for _ in range(ATTEMPTS * 3):
-                stop = halted.run(timeout=30.0)
+                stop = halted.run(timeout=HYPERCALL_WAIT)
                 who = "the root" if index is None else f"the root's VP {index}"
-                assert stop is not None, f"no synthetic IPI from {who} in 30 s"
+                assert stop is not None, f"no synthetic IPI from {who} in {HYPERCALL_WAIT:.0f} s"
                 assert stop.hit(bp)
                 assert stop.cpu is not None  # a kernel stop is on a processor
                 cpu = halted.cpus[stop.cpu]
@@ -738,7 +744,7 @@ def test_hypercall_breakpoint_stops_only_for_its_call_and_caller(halted: Debugge
         assert callers, "no stop had a known caller"
         return callers
 
-    caller = known_callers(None)[-1]
+    caller = Counter(known_callers(None)).most_common(1)[0][0]
     known_callers(list(halted.cpus).index(caller))
 
 
@@ -758,7 +764,7 @@ def test_a_hypercall_stop_decodes_the_call_from_the_callers_registers(halted: De
     decoded = 0
     try:
         for _ in range(ATTEMPTS * 3):
-            stop = halted.run(timeout=10.0)
+            stop = halted.run(timeout=HYPERCALL_WAIT)
             assert stop is not None and stop.hit(bp)
             assert stop.cpu is not None  # a kernel stop is on a processor
             cpu = halted.cpus[stop.cpu]
@@ -840,7 +846,7 @@ def test_flush_gva_ranges_decode_in_the_format_their_flags_select(halted: Debugg
     extended = 0
     try:
         for _ in range(ATTEMPTS):
-            stop = halted.run(timeout=10.0)
+            stop = halted.run(timeout=HYPERCALL_WAIT)
             assert stop is not None and stop.hit(bp)
             assert stop.cpu is not None  # a kernel stop is on a processor
             caller = halted.cpus[stop.cpu].hypercall_caller()
@@ -877,7 +883,7 @@ def test_a_hypercall_condition_reads_the_callers_memory(halted: Debugger) -> Non
     bp = halted.breakpoints.add_hypercall(0x0003, root.id, condition=AT_VMCALL)
     try:
         for _ in range(ATTEMPTS):
-            stop = halted.run(timeout=10.0)
+            stop = halted.run(timeout=HYPERCALL_WAIT)
             assert isinstance(stop, Stop.Breakpoint) and stop.hit(bp)
             assert stop.breakpoint.condition_error is None
     finally:
@@ -894,8 +900,10 @@ def test_a_hypercall_condition_reads_the_callers_memory(halted: Debugger) -> Non
         0x0003, root.id, condition=f"{SLOW} && $pqwo(rdx) == 0 && $pqwo(rdx + 8) == {flags:#x}"
     )
     try:
-        stop = halted.run(timeout=30.0)
-        assert isinstance(stop, Stop.Breakpoint) and stop.hit(bp), "no slow flush of the root in 30 s"
+        stop = halted.run(timeout=HYPERCALL_WAIT)
+        assert isinstance(stop, Stop.Breakpoint) and stop.hit(bp), (
+            f"no slow flush of the root in {HYPERCALL_WAIT:.0f} s"
+        )
         assert stop.breakpoint.condition_error is None
         assert stop.cpu is not None  # a kernel stop is on a processor
         caller = halted.cpus[stop.cpu].hypercall_caller()
@@ -929,12 +937,12 @@ def test_a_hypercall_callback_reads_its_caller(halted: Debugger) -> None:
 
     bp = halted.breakpoints.add_hypercall(0x0003, root.id, when=check)
     try:
-        stop = halted.run(timeout=30.0)
+        stop = halted.run(timeout=HYPERCALL_WAIT)
     finally:
         halted.interrupt()
         bp.delete()
     assert isinstance(stop, Stop.Breakpoint) and stop.hit(bp), (
-        f"{len(code)} flushes of the root, or no vCPU in NT at one, in 30 s"
+        f"{len(code)} flushes of the root, or no vCPU in NT at one, in {HYPERCALL_WAIT:.0f} s"
     )
     assert stop.breakpoint.condition_error is None
     assert all(caller is not None and caller.partition_id == root.id and caller.root for caller in callers)
@@ -960,12 +968,12 @@ def test_a_slow_hypercall_callback_reads_its_input(halted: Debugger) -> None:
 
     bp = halted.breakpoints.add_hypercall(0x0003, root.id, when=slow)
     try:
-        stop = halted.run(timeout=90.0)
+        stop = halted.run(timeout=HYPERCALL_WAIT)
     finally:
         halted.interrupt()
         bp.delete()
     if stop is None:
-        pytest.skip("the guest made no slow flush of the root in 90 s")
+        pytest.skip(f"the guest made no slow flush of the root in {HYPERCALL_WAIT:.0f} s")
     assert isinstance(stop, Stop.Breakpoint) and stop.hit(bp)
     assert stop.breakpoint.condition_error is None
     assert inputs and all(rdx == gpa for rdx, gpa in inputs)
