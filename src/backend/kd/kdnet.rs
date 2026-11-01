@@ -11,8 +11,10 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
+use crate::backend::kd::api;
 use crate::backend::kd::framing::{
     self, BREAKIN_BYTE, DATA_PACKET_LEADER, Header, PACKET_TRAILING_BYTE,
+    PACKET_TYPE_KD_ACKNOWLEDGE, PACKET_TYPE_KD_STATE_MANIPULATE,
 };
 use crate::base::error::{Error, Result};
 
@@ -32,6 +34,17 @@ const MAX_KD_STREAM_SIZE: usize = 4017;
 const CHANNEL_DATA: u8 = 0;
 const CHANNEL_CONTROL: u8 = 1;
 const HOST_DIRECTION: u64 = 0x80;
+/// How long a read waits for the target's answer to a KD data packet just
+/// sent before it times out: the target ACKs a packet as it arrives, in one
+/// round trip (milliseconds on a LAN), so a packet or ACK the network lost
+/// is sent again after this rather than after the whole read timeout.
+const ACK_WAIT: Duration = Duration::from_secs(1);
+/// How long a read waits for the reply to a request once the target ACKed
+/// it, the first time: the reply follows in milliseconds, so a request the
+/// target dropped (taken while it waited for our ACK of its own last packet)
+/// or a lost reply is sent again after this. A request sent again waits the
+/// whole read timeout, so a slow one is not given up on.
+const REPLY_WAIT: Duration = Duration::from_secs(1);
 
 type Aes256CbcEncryptor = cbc::Encryptor<Aes256>;
 type Aes256CbcDecryptor = cbc::Decryptor<Aes256>;
@@ -75,6 +88,20 @@ pub struct KdNetStream {
     /// `encoded` was sent and no data datagram has come back since, so it
     /// may have gone to an endpoint the target has left.
     unanswered: bool,
+    /// When the target's answer to the KD data packet last sent is overdue,
+    /// until it comes (see [`Self::note_answer`]) or the wait times out: its
+    /// ACK (see [`ACK_WAIT`]), then a request's reply (see [`REPLY_WAIT`]).
+    /// Our own ACKs set none: the target answers those with nothing.
+    answer_due: Option<Instant>,
+    /// The request sent last, by packet id, whose reply is yet to get its
+    /// short wait once its ACK comes.
+    reply_wait: Option<u32>,
+    /// The request whose reply had the short wait: sent again, it waits
+    /// the whole read timeout.
+    reply_waited: Option<u32>,
+    /// The id of the KD data packet received last; the target repeats it
+    /// while it waits for our ACK.
+    last_inbound_data: Option<u32>,
     outbound: Vec<u8>,
     /// A break-in written before the target had negotiated a session; sent
     /// the moment it has one, so attach does not wait for the next attempt.
@@ -116,6 +143,10 @@ impl KdNetStream {
             received_datagrams: 0,
             encoded: Vec::with_capacity(MAX_DATAGRAM_SIZE),
             unanswered: false,
+            answer_due: None,
+            reply_wait: None,
+            reply_waited: None,
+            last_inbound_data: None,
             outbound: Vec::with_capacity(MAX_KD_STREAM_SIZE),
             deferred_breakin: false,
             read_timeout: None,
@@ -132,6 +163,10 @@ impl KdNetStream {
             received_datagrams: 0,
             encoded: Vec::with_capacity(MAX_DATAGRAM_SIZE),
             unanswered: false,
+            answer_due: None,
+            reply_wait: None,
+            reply_waited: None,
+            last_inbound_data: None,
             outbound: Vec::with_capacity(MAX_KD_STREAM_SIZE),
             deferred_breakin: false,
             // The dup shares one socket, so it shares the timeout already set
@@ -185,9 +220,24 @@ impl KdNetStream {
 
     fn receive_packet_with(&mut self, datagram: &mut Vec<u8>) -> io::Result<()> {
         let deadline = self.read_timeout.map(|timeout| Instant::now() + timeout);
+        // The answer wait bounds the reads until the answer comes; once it
+        // has timed out, the packet is sent again (and the wait set again),
+        // or the caller waits on its own terms.
+        let deadline = match (deadline, self.answer_due) {
+            (Some(deadline), Some(due)) => Some(deadline.min(due)),
+            (deadline, due) => deadline.or(due),
+        };
         loop {
             datagram.resize(MAX_DATAGRAM_SIZE, 0);
-            let (size, source) = self.recv_before(deadline, datagram)?;
+            let (size, source) = match self.recv_before(deadline, datagram) {
+                Ok(received) => received,
+                Err(error) => {
+                    if self.answer_due.is_some_and(|due| due <= Instant::now()) {
+                        self.answer_due = None;
+                    }
+                    return Err(error);
+                }
+            };
             self.received_datagrams = self.received_datagrams.saturating_add(1);
             kd_trace!("kdnet: received {size}-byte UDP datagram from {source}");
             if size < HEADER_SIZE + METADATA_SIZE + AUTH_TAG_SIZE {
@@ -283,7 +333,29 @@ impl KdNetStream {
                 self.inbound.push(PACKET_TRAILING_BYTE);
             }
             self.inbound_offset = 0;
+            self.note_answer();
             return Ok(());
+        }
+    }
+
+    /// Whether the KD packet just received answers the one last sent: an ACK
+    /// ends the wait for it, starting the wait for a request's reply once
+    /// (see [`REPLY_WAIT`]), and a new data packet ends any wait. The target
+    /// sending its last packet again (our ACK of it lost) answers nothing.
+    fn note_answer(&mut self) {
+        let Some(header) = Header::peek(&self.inbound) else {
+            return;
+        };
+        if header.is_data() {
+            if self.last_inbound_data != Some(header.packet_id) {
+                self.last_inbound_data = Some(header.packet_id);
+                self.answer_due = None;
+            }
+        } else if header.packet_type == PACKET_TYPE_KD_ACKNOWLEDGE {
+            self.answer_due = (self.reply_wait == Some(header.packet_id)).then(|| {
+                self.reply_waited = self.reply_wait.take();
+                Instant::now() + REPLY_WAIT
+            });
         }
     }
 
@@ -478,7 +550,16 @@ impl Write for KdNetStream {
             return Ok(());
         };
 
-        if let Some(header) = Header::peek(&self.outbound).filter(Header::is_data) {
+        let data_header = Header::peek(&self.outbound).filter(Header::is_data);
+        // A manipulate request's API number opens its payload.
+        let api_number = data_header
+            .filter(|header| header.packet_type == PACKET_TYPE_KD_STATE_MANIPULATE)
+            .and_then(|_| {
+                self.outbound
+                    .get(framing::HEADER_SIZE..framing::HEADER_SIZE + 4)
+            })
+            .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four bytes")));
+        if let Some(header) = data_header {
             if self.outbound.len() != header.packet_len()
                 || self.outbound.last().copied() != Some(PACKET_TRAILING_BYTE)
             {
@@ -518,6 +599,12 @@ impl Write for KdNetStream {
         encoded?;
         let sent = self.socket.send_to(&self.encoded, peer)?;
         self.unanswered = true;
+        if let Some(header) = data_header {
+            self.answer_due = Some(Instant::now() + ACK_WAIT);
+            let reply_expected = api_number.is_some_and(api::answered_by_reply);
+            self.reply_wait = (reply_expected && self.reply_waited != Some(header.packet_id))
+                .then_some(header.packet_id);
+        }
         if sent != self.encoded.len() {
             return Err(io::Error::new(
                 ErrorKind::WriteZero,
@@ -683,8 +770,8 @@ mod tests {
     use super::*;
     use crate::backend::kd::api;
     use crate::backend::kd::framing::{
-        INITIAL_PACKET_ID, KdFraming, PACKET_TYPE_KD_STATE_CHANGE64,
-        PACKET_TYPE_KD_STATE_MANIPULATE, data_packet,
+        INITIAL_PACKET_ID, KdFraming, PACKET_TYPE_KD_ACKNOWLEDGE, PACKET_TYPE_KD_STATE_CHANGE64,
+        PACKET_TYPE_KD_STATE_MANIPULATE, control_packet, data_packet,
     };
     use crate::backend::kd::transport::KdTransport;
 
@@ -929,6 +1016,95 @@ mod tests {
             );
         }
         assert_ne!(sequences[0], sequences[1]);
+    }
+
+    /// A read after a request waits for the target's ACK only [`ACK_WAIT`],
+    /// and once it is ACKed, for its reply only [`REPLY_WAIT`], so a packet
+    /// the network or the target lost is sent again within a second or so;
+    /// the target repeating its last packet meanwhile does not end the wait.
+    /// Sent again, the request waits the whole read timeout for its reply,
+    /// as a read does after our own ACKs, which nothing answers.
+    #[test]
+    fn a_request_is_answered_within_the_ack_and_reply_waits() {
+        let mut host = KdNetStream::bind("127.0.0.1:0", "1.2.3.4").unwrap();
+        let (data_key, _) = test_keys();
+        let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+        *write_lock(&host.state.peer).unwrap() = Some(target.local_addr().unwrap());
+        *write_lock(&host.state.data_key).unwrap() = Some(data_key);
+        host.state.version.store(5, Ordering::Relaxed);
+        let read_timeout = Duration::from_millis(2500);
+        host.set_read_timeout(Some(read_timeout)).unwrap();
+        let wait = |host: &mut KdNetStream| {
+            let start = Instant::now();
+            let error = host.read(&mut [0u8; 1]).unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                ErrorKind::WouldBlock | ErrorKind::TimedOut
+            ));
+            start.elapsed()
+        };
+        let mut version = [0u8; api::MANIPULATE_HEADER_SIZE];
+        version[0..4].copy_from_slice(&api::DBGKD_GET_VERSION.to_le_bytes());
+        let request = data_packet(PACKET_TYPE_KD_STATE_MANIPULATE, INITIAL_PACKET_ID, &version);
+        let ack = control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, INITIAL_PACKET_ID);
+        let target_acks = |host: &mut KdNetStream| {
+            let datagram = create_packet(
+                &ack,
+                1,
+                CHANNEL_DATA,
+                5,
+                data_key,
+                &host.state.hmac_key,
+                false,
+            )
+            .unwrap();
+            target.send_to(&datagram, host.local_addr()).unwrap();
+            let mut answer = vec![0u8; ack.len()];
+            host.read_exact(&mut answer).unwrap();
+        };
+        let short = |waited: Duration, limit: Duration| waited >= limit && waited < limit * 2;
+        // The target's last packet, which it sends again until our ACK of it
+        // reaches it.
+        let last = kd_data_packet_with_id(0x29a958, b"last");
+        let target_sends_last = |host: &mut KdNetStream| {
+            let datagram = create_packet(
+                &last,
+                2,
+                CHANNEL_DATA,
+                5,
+                data_key,
+                &host.state.hmac_key,
+                false,
+            )
+            .unwrap();
+            target.send_to(&datagram, host.local_addr()).unwrap();
+            let mut received = vec![0u8; last.len() + 1];
+            host.read_exact(&mut received).unwrap();
+        };
+        target_sends_last(&mut host);
+
+        host.write_all(&request).unwrap();
+        host.flush().unwrap();
+        let unacked = wait(&mut host);
+        assert!(short(unacked, ACK_WAIT), "{unacked:?}");
+        target_acks(&mut host);
+        let acked = Instant::now();
+        target_sends_last(&mut host);
+        wait(&mut host);
+        let unanswered = acked.elapsed();
+        assert!(short(unanswered, REPLY_WAIT), "{unanswered:?}");
+
+        host.write_all(&request).unwrap();
+        host.flush().unwrap();
+        target_acks(&mut host);
+        host.write_all(&control_packet(
+            PACKET_TYPE_KD_ACKNOWLEDGE,
+            INITIAL_PACKET_ID,
+        ))
+        .unwrap();
+        host.flush().unwrap();
+        let resent = wait(&mut host);
+        assert!(resent >= read_timeout, "{resent:?}");
     }
 
     #[test]

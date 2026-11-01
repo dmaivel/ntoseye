@@ -43,6 +43,16 @@ pub const DBGKD_GET_BUS_DATA: u32 = 0x0000_3157;
 pub const PCI_CONFIGURATION: u32 = 4;
 pub const DBGKD_SET_CONTEXT_EX: u32 = 0x0000_3160;
 
+/// Whether the target answers manipulate request `api_number` with a reply:
+/// all but the continue, and the reboot, bugcheck and processor switch,
+/// which this module sends without waiting for one.
+pub fn answered_by_reply(api_number: u32) -> bool {
+    !matches!(
+        api_number,
+        DBGKD_CONTINUE_API2 | DBGKD_REBOOT | DBGKD_CAUSE_BUGCHECK | DBGKD_SWITCH_PROCESSOR
+    )
+}
+
 /// Scripted KD replies for tests that need a target on the other end of a
 /// framing. Shared with the KD event-loop tests, which drive the same wire.
 #[cfg(test)]
