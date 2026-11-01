@@ -12,7 +12,7 @@ use crate::{
     },
     nt::target::{ListCursor, links_back_to},
 };
-use std::{collections::HashSet, sync::PoisonError};
+use std::{collections::HashSet, ops::ControlFlow, sync::PoisonError};
 
 /// `EPROCESS.ImageFileName` capacity: the kernel keeps this many bytes of the
 /// image name, unterminated when the name is at least this long.
@@ -123,9 +123,11 @@ impl Guest {
     /// The process the last walk of the list found for the root answers
     /// while it still has that root and PID and is still on the active list
     /// (the process after it links back to it); otherwise the list is walked
-    /// again. Stops come back to the same few roots (an idle thread runs on
-    /// whichever process's root its processor last loaded), and over KD a
-    /// walk costs requests for every process.
+    /// again, as far as the process with the root. Stops come back to the
+    /// same few roots (an idle thread runs on whichever process's root its
+    /// processor last loaded), and over KD a walk costs requests for every
+    /// process it passes; naming one can cost a walk of its own page tables
+    /// to its PEB, so only the owner is named.
     pub fn process_for_root(&self, root: Dtb, mask: u64) -> Option<ProcessInfo> {
         let known = self
             .root_owners
@@ -138,19 +140,21 @@ impl Guest {
         {
             return Some(process);
         }
-        let processes = self.enumerate_processes().ok()?;
-        let owner = processes
-            .iter()
-            .find(|process| process.dtb & mask == root)
-            .cloned();
-        *self
-            .root_owners
+        let mut owner = None;
+        self.visit_processes(|eprocess, span| {
+            if span.dtb() & mask != root {
+                return ControlFlow::Continue(());
+            }
+            owner = Some(self.process_from_span(eprocess, span));
+            ControlFlow::Break(())
+        })
+        .ok()?;
+        let owner = owner?;
+        self.root_owners
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = processes
-            .into_iter()
-            .map(|process| (process.dtb & mask, process))
-            .collect();
-        owner
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(root, owner.clone());
+        Some(owner)
     }
 
     /// Whether `process` still has page-table root `root` (under `mask`) and
@@ -178,6 +182,22 @@ impl Guest {
     /// link, a loop that misses the head, the entry cap, no head symbol to
     /// recognise) can leave processes out of a list that is still returned.
     fn walk_processes(&self) -> Result<(Vec<ProcessInfo>, bool)> {
+        let mut processes = Vec::new();
+        let complete = self.visit_processes(|eprocess, span| {
+            processes.push(self.process_from_span(eprocess, span));
+            ControlFlow::Continue(())
+        })?;
+        Ok((processes, complete))
+    }
+
+    /// Hand `visit` each active process, its `_EPROCESS` address and the
+    /// span just read from it, until it breaks. Whether the walk read the
+    /// whole list, as [`Self::walk_processes`] says it; not when `visit`
+    /// ended it. An error when no process could be read.
+    fn visit_processes(
+        &self,
+        mut visit: impl FnMut(VirtAddr, &EprocessSpan) -> ControlFlow<()>,
+    ) -> Result<bool> {
         let memory = self.ntoskrnl.memory();
         let mut span = EprocessSpan::new(self)?;
 
@@ -192,7 +212,7 @@ impl Guest {
             .map(|s| s.address());
 
         let blink_offset = memory.arch().pointer_size();
-        let mut processes = Vec::new();
+        let mut visited = 0usize;
         let mut reached = HashSet::new();
         let mut broken = None;
         let mut complete = false;
@@ -210,7 +230,10 @@ impl Guest {
                 break;
             }
             reached.insert(current_eprocess + span.active_process_links_offset);
-            processes.push(self.process_from_span(current_eprocess, &span));
+            visited += 1;
+            if visit(current_eprocess, &span).is_break() {
+                return Ok(false);
+            }
 
             // PsActiveProcessHead is not embedded in an EPROCESS, so reaching
             // it ends the walk before the link becomes a record address.
@@ -234,16 +257,19 @@ impl Guest {
                 for link in tail.into_iter().rev() {
                     let eprocess = link - span.active_process_links_offset;
                     if span.read(&memory, eprocess).is_ok() && span.dtb() != 0 {
-                        processes.push(self.process_from_span(eprocess, &span));
+                        visited += 1;
+                        if visit(eprocess, &span).is_break() {
+                            return Ok(false);
+                        }
                     }
                 }
             }
-            if processes.is_empty() {
+            if visited == 0 {
                 return Err(error);
             }
         }
 
-        Ok((processes, complete))
+        Ok(complete)
     }
 
     /// The process whose `_EPROCESS` at `eprocess` `span` has just read.

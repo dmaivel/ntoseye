@@ -538,6 +538,23 @@ fn a_root_names_its_process_without_a_walk_while_it_stays_on_the_list() {
     worker.join().unwrap();
 }
 
+/// A root no earlier halt found is looked for along the list only as far
+/// as its process: the processes after it are not read, nor named, which
+/// over KD can mean a walk of each one's page tables to its PEB.
+#[test]
+fn a_new_root_is_looked_for_no_further_than_its_process() {
+    let (guest, backend, worker) = process_list_guest(0, false);
+    let mask = Arch::Amd64.dtb_page_mask();
+
+    let system = guest.process_for_root(0x1ad000, mask).unwrap();
+
+    assert_eq!((system.name.as_str(), system.pid), ("System", 4));
+    drop(guest);
+    drop(backend);
+    // The list head and System's span: smss, after it, is not read.
+    assert_eq!(worker.join().unwrap(), 2);
+}
+
 /// A halted guest whose `PsLoadedModuleList` links `entries`, `(address,
 /// DllBase)` pairs, in order, and whose head's back link names `last`, the
 /// list's last entry as the kernel keeps it. `spare` is an entry in memory
