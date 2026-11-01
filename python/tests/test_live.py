@@ -140,7 +140,9 @@ def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
     # too. The interrupt can also halt the vCPU taking a VM exit, in the
     # Windows hypervisor, or running a guest partition's VP, where no step
     # can start, or in code outside every loaded module, which no unwind data
-    # leaves; a finished step is always in NT.
+    # leaves; a finished step is always in NT, though it can be in its
+    # thread's outermost frame (the idle thread's nt!KiIdleLoop), which has
+    # no caller to step out to.
     try:
         out = halted.step_out(timeout=20.0)
     except ntoseye.NtoseyeError as error:
@@ -148,7 +150,8 @@ def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
         refused_after_interrupt = isinstance(over, Stop.Interrupt) and (
             IN_HYPERVISOR in message or IN_GUEST_VP in message or NO_CALLER in message
         )
-        if EXITED not in message and not refused_after_interrupt:
+        outermost = NO_CALLER in message and len(halted.cpus[over.cpu].backtrace(limit=2)) < 2
+        if EXITED not in message and not refused_after_interrupt and not outermost:
             raise
         return
     assert isinstance(out, (Stop.Step, Stop.Interrupt))
