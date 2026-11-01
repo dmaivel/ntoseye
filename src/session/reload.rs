@@ -241,6 +241,7 @@ impl Session {
         // Target-specific numeric breakpoints and hardware slots cannot survive a
         // rebuild. Symbolic code breakpoints retain identity and become deferred.
         breakpoints.prepare_target_reload(backend);
+        backend.forget_target_breakpoints();
         // Release file handles owned by the previous target.
         kd_files().reset_handles();
         // A load-symbols stop's hint is the loading image's base, which is the

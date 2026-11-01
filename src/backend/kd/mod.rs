@@ -74,7 +74,7 @@ mod pump;
 pub mod registers;
 mod run;
 mod transport;
-use breakpoints::PendingWriteBreakpoint;
+use breakpoints::{PendingWriteBreakpoint, StrandedEntries};
 use halt::HaltRegisters;
 use machine::machine;
 use memory::LineCache;
@@ -822,6 +822,19 @@ impl DebugBackend for KdBackend {
 
     fn note_target_rediscovery_complete(&mut self) {
         self.reconnect_assist_after_continue = None;
+    }
+
+    fn forget_target_breakpoints(&mut self) {
+        kd_trace!("kd: the session reloads the target; forgetting its breakpoints");
+        self.bp_handles.clear();
+        self.dropped_bp_addresses.clear();
+        self.managed_bp_addresses.clear();
+        self.retired_bp_addresses.clear();
+        self.pending_write_breakpoint = None;
+        // A reboot emptied the target's breakpoint table, and the entries
+        // earlier sessions stranded in it went with it; after a reset that
+        // was no reboot, they are found again when an install needs them.
+        self.stranded = StrandedEntries::default();
     }
 
     fn target_kernel_location(&mut self) -> Result<Option<KernelLocation>> {

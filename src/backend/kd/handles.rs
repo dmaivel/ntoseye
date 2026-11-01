@@ -285,6 +285,10 @@ impl DebugBackend for KdBackendHandle {
         self.lock().note_target_rediscovery_complete();
     }
 
+    fn forget_target_breakpoints(&mut self) {
+        self.lock().forget_target_breakpoints();
+    }
+
     fn target_manages_breakpoint_sites(&self) -> bool {
         self.lock().target_manages_breakpoint_sites()
     }

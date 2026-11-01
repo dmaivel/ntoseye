@@ -823,6 +823,14 @@ pub trait DebugBackend {
     fn note_target_rediscovery_pending(&mut self) {}
     fn note_target_rediscovery_complete(&mut self) {}
 
+    /// The session is rebuilding the target after a reload: forget the
+    /// software breakpoints planted before it, whose sites the session
+    /// plants anew. A backend whose target keeps the sites (KD's breakpoint
+    /// table) must not forget them on its own when it sees a reset: a stop
+    /// the session never classifies (a step's) would leave the session
+    /// tracking sites the backend no longer knows.
+    fn forget_target_breakpoints(&mut self) {}
+
     /// Where the transport says the kernel is after a target reload. KD reads
     /// it from GetVersion and the page-table root, so the rebuild needs no RAM
     /// scan (which cannot succeed early in boot). Transports without a native

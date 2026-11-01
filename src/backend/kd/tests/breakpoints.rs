@@ -400,3 +400,39 @@ fn a_table_full_of_this_sessions_breakpoints_says_so() {
         "no stranded handle to release"
     );
 }
+
+/// A stop that reports a reset of the KD connection leaves the session's
+/// breakpoints in the target's table: a reset need not be a reboot, and a
+/// stop a step collects never reaches the session's reload. The breakpoint
+/// is still removed through its handle; only the session's reload forgets
+/// it.
+#[test]
+fn a_reset_reported_with_a_stop_keeps_the_breakpoints_until_the_session_reloads() {
+    let (kernel, host) = UnixStream::pair().unwrap();
+    let mut backend = kd_backend_with_framing(host);
+    backend.link.halt();
+    backend.exit_prepared = true;
+    let (kept, forgotten) = (0xfffff80000001000, 0xfffff80000002000);
+    for (address, handle) in [(kept, 3), (forgotten, 4)] {
+        backend.bp_handles.insert(address, handle);
+        backend.managed_bp_addresses.insert(address);
+    }
+    let worker = serve_breakpoints(
+        kernel,
+        vec![(api::DBGKD_RESTORE_BREAKPOINT, api::STATUS_SUCCESS, 0)],
+    );
+    let mut stop = parse_state_change(&exception_state_change_payload(0xfffff80000009000)).unwrap();
+    stop.target_reloaded = true;
+
+    backend.record_stop(&stop);
+    backend.remove_breakpoint(kept).unwrap();
+    backend.forget_target_breakpoints();
+    let error = backend.remove_breakpoint(forgotten).unwrap_err();
+
+    assert!(
+        error.to_string().contains("no breakpoint tracked"),
+        "{error}"
+    );
+    drop(backend);
+    assert_eq!(worker.join().unwrap(), [(api::DBGKD_RESTORE_BREAKPOINT, 3)]);
+}

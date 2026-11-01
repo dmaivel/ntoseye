@@ -15,8 +15,7 @@ use crate::backend::dbg_backend::{
 use crate::base::error::{Error, Result};
 
 use super::breakpoints::{
-    StrandedEntries, breakpoint_instruction_at, reclaimed_breakpoints_notice,
-    restore_unowned_breakpoint_handles,
+    breakpoint_instruction_at, reclaimed_breakpoints_notice, restore_unowned_breakpoint_handles,
 };
 use super::{
     AwaitStateOptions, ContinueDrain, DBG_KD_EXCEPTION_STATE_CHANGE,
@@ -102,17 +101,12 @@ impl KdBackend {
             self.late_breakin = false;
         }
         if stop.target_reloaded {
-            kd_trace!("kd: target reload detected; clearing target-owned breakpoint state");
-            self.bp_handles.clear();
-            self.dropped_bp_addresses.clear();
-            self.managed_bp_addresses.clear();
+            // The breakpoints are forgotten when the session reloads (see
+            // `forget_target_breakpoints`): a reset need not be a reboot, and
+            // the table keeps its entries across one.
+            kd_trace!("kd: target reload detected");
             self.breakin_addresses.clear();
-            self.retired_bp_addresses.clear();
             self.late_breakin = false;
-            self.pending_write_breakpoint = None;
-            // The reboot emptied the target's breakpoint table, and the
-            // entries earlier sessions stranded in it went with it.
-            self.stranded = StrandedEntries::default();
         } else if stop.is_bugcheck {
             self.reconnect_assist_after_continue = Some(POST_BUGCHECK_RECONNECT_ASSIST_DELAY);
         }
