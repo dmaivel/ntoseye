@@ -146,6 +146,10 @@ pub struct DataPacket {
 /// Send retry budget for RESEND or missing ACK
 const MAX_SEND_RETRIES: usize = 5;
 
+/// How many times [`KdFraming::recv_reply`] sends a request again for want
+/// of its reply.
+const REPLY_RESENDS: usize = 3;
+
 pub struct KdFraming<T> {
     transport: T,
     current_packet_id: u32,
@@ -161,6 +165,23 @@ pub struct KdFraming<T> {
     /// KDNET session generation, bumped by the transport on every rollover.
     kdnet_generation: Option<Arc<AtomicU64>>,
     kdnet_generation_seen: u64,
+    /// The manipulate request the target took last, while what answers it
+    /// has not come, and its payload in [`Self::unanswered_payload`]. A
+    /// target that sends its own last packet again meanwhile never had our
+    /// ACK of it, and drops what it receives before that ACK: the request is
+    /// sent again (see [`Self::recv_data`]). `None` for one nothing answers
+    /// (see [`Self::forget_unanswered`]).
+    unanswered: Option<Unanswered>,
+    unanswered_payload: Vec<u8>,
+}
+
+/// A manipulate request the target took (see [`KdFraming::unanswered`]).
+#[derive(Clone, Copy)]
+struct Unanswered {
+    packet_id: u32,
+    /// The kind of data packet that answers it: a manipulate reply for a
+    /// request, the next state change for a continue.
+    answer: u16,
 }
 
 impl<T> KdFraming<T> {
@@ -190,6 +211,8 @@ impl<T: Read + Write> KdFraming<T> {
             kdnet_remote_high_water: None,
             kdnet_generation: None,
             kdnet_generation_seen: 0,
+            unanswered: None,
+            unanswered_payload: Vec::new(),
         }
     }
 
@@ -233,6 +256,7 @@ impl<T: Read + Write> KdFraming<T> {
         self.reset_outbound_packet_id();
         self.kdnet_remote_high_water = None;
         self.queued_data.clear();
+        self.unanswered = None;
         self.peer_reset_seen = true;
     }
 
@@ -253,6 +277,17 @@ impl<T: Read + Write> KdFraming<T> {
         } else {
             (packet_id & !SYNC_PACKET_ID) == (self.current_packet_id & !SYNC_PACKET_ID)
         }
+    }
+
+    /// Whether an inbound ACK answers a KDNET packet sent before the one in
+    /// flight: a late copy, as the target ACKs a packet once for each time
+    /// it is sent. KDNET ids count up by two in the low 31 bits; KDCOM's
+    /// two alternating ids cannot tell a late ACK from a wrong one.
+    fn acks_earlier_kdnet_packet(&self, packet_id: u32) -> bool {
+        let behind = self.current_packet_id.wrapping_sub(packet_id) & !KDNET_INITIAL_PACKET_ID;
+        self.kdnet_packet_ids
+            && packet_id & KDNET_INITIAL_PACKET_ID != 0
+            && (1..=64).contains(&behind)
     }
 
     fn remote_ack_id(&self, packet_id: u32) -> u32 {
@@ -278,6 +313,7 @@ impl<T: Read + Write> KdFraming<T> {
         self.remote_packet_id = INITIAL_PACKET_ID;
         self.kdnet_remote_high_water = None;
         self.queued_data.clear();
+        self.unanswered = None;
         self.awaiting_reset_ack = true;
         self.send_control(PACKET_TYPE_KD_RESET, self.current_packet_id)
     }
@@ -290,6 +326,7 @@ impl<T: Read + Write> KdFraming<T> {
         // would reject everything it sends next.
         self.kdnet_remote_high_water = None;
         self.queued_data.clear();
+        self.unanswered = None;
         self.peer_reset_seen = true;
         if self.awaiting_reset_ack {
             self.awaiting_reset_ack = false;
@@ -300,6 +337,24 @@ impl<T: Read + Write> KdFraming<T> {
     }
 
     pub fn send_data(&mut self, packet_type: u16, payload: &[u8]) -> Result<()> {
+        self.send_answered_by(packet_type, payload, PACKET_TYPE_KD_STATE_MANIPULATE)
+    }
+
+    /// Send a continue (`payload`, a manipulate request): no reply answers
+    /// it, but the stop the target reports after running does, so that stop
+    /// arriving before the ACK proves the continue arrived. Sent again
+    /// then, the target would take it for another continue.
+    pub fn send_continue(&mut self, payload: &[u8]) -> Result<()> {
+        self.send_answered_by(
+            PACKET_TYPE_KD_STATE_MANIPULATE,
+            payload,
+            PACKET_TYPE_KD_STATE_CHANGE64,
+        )
+    }
+
+    /// [`Self::send_data`], a manipulate request being answered by a data
+    /// packet of type `answer`.
+    fn send_answered_by(&mut self, packet_type: u16, payload: &[u8], answer: u16) -> Result<()> {
         if payload.len() > PACKET_MAX_SIZE {
             return Err(Error::Kd(format!(
                 "outbound packet too large: {} bytes",
@@ -340,13 +395,17 @@ impl<T: Read + Write> KdFraming<T> {
                     Err(e) => return Err(e),
                     Ok(Received::Ack { packet_id }) if self.ack_matches(packet_id) => {
                         kd_trace!("kd: send_data: ACKed id={:#x}", packet_id);
-                        if self.kdnet_packet_ids {
-                            self.current_packet_id =
-                                self.current_packet_id.wrapping_add(2) | KDNET_INITIAL_PACKET_ID;
-                        } else {
-                            self.current_packet_id ^= 1;
-                            self.current_packet_id &= !SYNC_PACKET_ID;
+                        // A packet of another kind (a file-I/O answer)
+                        // leaves the request it came amid unanswered.
+                        if packet_type == PACKET_TYPE_KD_STATE_MANIPULATE {
+                            self.unanswered = Some(Unanswered {
+                                packet_id: self.current_packet_id,
+                                answer,
+                            });
+                            self.unanswered_payload.clear();
+                            self.unanswered_payload.extend_from_slice(payload);
                         }
+                        self.next_packet_id();
                         return Ok(());
                     }
                     Ok(Received::Reset) => {
@@ -368,6 +427,17 @@ impl<T: Read + Write> KdFraming<T> {
                         kd_trace!("kd: send_data: got RESEND, retransmitting");
                         break;
                     }
+                    // Sending this one again would only draw another late
+                    // ACK for the next to trip on.
+                    Ok(Received::Ack { packet_id })
+                        if self.acks_earlier_kdnet_packet(packet_id) =>
+                    {
+                        kd_trace!(
+                            "kd: send_data: late ACK of earlier id={:#x}, waiting on for {:#x}",
+                            packet_id,
+                            self.current_packet_id
+                        );
+                    }
                     Ok(Received::Ack { packet_id }) => {
                         kd_trace!(
                             "kd: send_data: stray ACK id={:#x} (expected {:#x}), retransmitting",
@@ -378,7 +448,7 @@ impl<T: Read + Write> KdFraming<T> {
                     }
                     Ok(Received::Data {
                         packet_id,
-                        packet_type,
+                        packet_type: received_type,
                         payload,
                     }) => {
                         let ack_id = self.remote_ack_id(packet_id);
@@ -386,7 +456,7 @@ impl<T: Read + Write> KdFraming<T> {
                         if !self.accept_remote_packet(packet_id) {
                             kd_trace!(
                                 "kd: send_data: skip stale queued data type={} id={:#x} (expected {:#x}), ACKed",
-                                packet_type,
+                                received_type,
                                 packet_id,
                                 self.remote_packet_id
                             );
@@ -394,14 +464,30 @@ impl<T: Read + Write> KdFraming<T> {
                         }
                         kd_trace!(
                             "kd: send_data: accepted queued data type={} id={:#x} len={}",
-                            packet_type,
+                            received_type,
                             packet_id,
                             payload.len()
                         );
                         self.queued_data.push_back(DataPacket {
-                            packet_type,
+                            packet_type: received_type,
                             payload,
                         });
+                        // Windows answers a manipulate request with one and
+                        // sends none unasked, and reports a stop only after
+                        // a continue: a fresh answer proves this request
+                        // arrived, whatever became of its ACK. Sent again,
+                        // the request is one the target has done and never
+                        // answers, or a continue it runs again.
+                        if packet_type == PACKET_TYPE_KD_STATE_MANIPULATE && received_type == answer
+                        {
+                            kd_trace!(
+                                "kd: send_data: the answer stands for the lost ACK of id={:#x}",
+                                self.current_packet_id
+                            );
+                            self.unanswered = None;
+                            self.next_packet_id();
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -411,6 +497,75 @@ impl<T: Read + Write> KdFraming<T> {
             "no ACK for a {}-byte KD packet after {attempts} attempts",
             payload.len()
         )))
+    }
+
+    /// The id of the packet after the one just delivered.
+    fn next_packet_id(&mut self) {
+        if self.kdnet_packet_ids {
+            self.current_packet_id =
+                self.current_packet_id.wrapping_add(2) | KDNET_INITIAL_PACKET_ID;
+        } else {
+            self.current_packet_id ^= 1;
+            self.current_packet_id &= !SYNC_PACKET_ID;
+        }
+    }
+
+    /// Nothing answers the packet just sent (a reboot): a later repeat of
+    /// the target's last packet is not about it, and it is not sent again.
+    pub fn forget_unanswered(&mut self) {
+        self.unanswered = None;
+    }
+
+    /// Send the unanswered request again, with its id: a target that took it
+    /// treats it as the duplicate it is, ACKing it and sending its answer
+    /// again, and one that dropped it takes it now.
+    fn send_unanswered_again(&mut self, why: &str) -> Result<()> {
+        let Some(unanswered) = self.unanswered else {
+            return Ok(());
+        };
+        kd_trace!("kd: {why}; sending id={:#x} again", unanswered.packet_id);
+        write_data_packet(
+            &mut self.transport,
+            PACKET_TYPE_KD_STATE_MANIPULATE,
+            unanswered.packet_id,
+            &self.unanswered_payload,
+        )?;
+        self.transport.flush()?;
+        Ok(())
+    }
+
+    /// [`Self::recv_data`] for the reply to the request just sent. A reply
+    /// that does not come before the read timeout sends the request again,
+    /// [`REPLY_RESENDS`] times: the target may have dropped it (taken while
+    /// it waited for our ACK of its own last packet, which was lost), or its
+    /// reply may have been lost.
+    pub fn recv_reply(&mut self) -> Result<DataPacket> {
+        let mut resends = 0;
+        loop {
+            match self.recv_data() {
+                Err(Error::Io(error))
+                    if is_temporary_io_error(error.kind())
+                        && resends < REPLY_RESENDS
+                        && self.unanswered.is_some() =>
+                {
+                    resends += 1;
+                    self.send_unanswered_again("no reply before the read timeout")?;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    /// A data packet of `packet_type` came in, which may be the answer to
+    /// the unanswered request. Anything else (a stop the target announces
+    /// again while a request waits, a print) leaves it unanswered.
+    fn note_answered(&mut self, packet_type: u16) {
+        if self
+            .unanswered
+            .is_some_and(|unanswered| unanswered.answer == packet_type)
+        {
+            self.unanswered = None;
+        }
     }
 
     /// Decide whether an incoming data packet should be accepted, advancing
@@ -468,6 +623,7 @@ impl<T: Read + Write> KdFraming<T> {
                 pkt.packet_type,
                 pkt.payload.len()
             );
+            self.note_answered(pkt.packet_type);
             return Ok(pkt);
         }
 
@@ -488,6 +644,20 @@ impl<T: Read + Write> KdFraming<T> {
                             packet_id,
                             self.remote_packet_id
                         );
+                        // A target that ran on a continue cannot send the
+                        // stop it ran from again: it never had our ACK of
+                        // that stop, and dropped the continue it took
+                        // meanwhile. (A request proves nothing this way:
+                        // a target resends its stop before our ACK of it
+                        // reaches it on a sound link, and then takes the
+                        // request; see [`Self::recv_reply`].)
+                        if self.unanswered.is_some_and(|unanswered| {
+                            unanswered.answer == PACKET_TYPE_KD_STATE_CHANGE64
+                        }) {
+                            self.send_unanswered_again(
+                                "the target sent the stop it ran from again",
+                            )?;
+                        }
                         continue;
                     }
                     kd_trace!(
@@ -496,6 +666,7 @@ impl<T: Read + Write> KdFraming<T> {
                         packet_id,
                         payload.len()
                     );
+                    self.note_answered(packet_type);
                     return Ok(DataPacket {
                         packet_type,
                         payload,
@@ -650,6 +821,8 @@ mod tests {
     struct Loopback {
         inbound: Cursor<Vec<u8>>,
         outbound: Vec<u8>,
+        /// Offsets into `inbound` where a read times out once first.
+        timeouts: VecDeque<u64>,
     }
 
     impl Loopback {
@@ -657,12 +830,34 @@ mod tests {
             Self {
                 inbound: Cursor::new(inbound),
                 outbound: Vec::new(),
+                timeouts: VecDeque::new(),
+            }
+        }
+
+        /// `chunks` in turn, a read timing out between each and the next.
+        fn timing_out_between(chunks: &[Vec<u8>]) -> Self {
+            let mut inbound = Vec::new();
+            let mut timeouts = VecDeque::new();
+            for (index, chunk) in chunks.iter().enumerate() {
+                if index > 0 {
+                    timeouts.push_back(inbound.len() as u64);
+                }
+                inbound.extend_from_slice(chunk);
+            }
+            Self {
+                inbound: Cursor::new(inbound),
+                outbound: Vec::new(),
+                timeouts,
             }
         }
     }
 
     impl Read for Loopback {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.timeouts.front() == Some(&self.inbound.position()) {
+                self.timeouts.pop_front();
+                return Err(std::io::Error::from(ErrorKind::WouldBlock));
+            }
             self.inbound.read(buf)
         }
     }
@@ -1110,5 +1305,171 @@ mod tests {
         assert_eq!(framing.remote_packet_id, INITIAL_PACKET_ID ^ 1);
         let out = &framing.transport.outbound;
         assert_eq!(out.len(), (HEADER_SIZE + 1 + 1) + HEADER_SIZE);
+    }
+
+    /// A manipulate reply that arrives without its request's ACK (the ACK
+    /// lost) delivers the request: it is not sent again, the reply is the
+    /// next data, and the next request takes the next id. Sent again, the
+    /// request would never be answered, and nor would any after it.
+    #[test]
+    fn a_reply_without_its_ack_delivers_the_request() {
+        let mut inbound = data_packet(PACKET_TYPE_KD_STATE_MANIPULATE, INITIAL_PACKET_ID, b"reply");
+        inbound.extend(ack_for(INITIAL_PACKET_ID ^ 1));
+        let mut framing = KdFraming::new(Loopback::new(inbound));
+
+        framing
+            .send_data(PACKET_TYPE_KD_STATE_MANIPULATE, b"x")
+            .unwrap();
+        let reply = framing.recv_data().unwrap();
+        assert_eq!(reply.payload, b"reply");
+        // One request and the reply's ACK.
+        assert_eq!(
+            framing.transport.outbound.len(),
+            (HEADER_SIZE + 1 + 1) + HEADER_SIZE
+        );
+
+        framing
+            .send_data(PACKET_TYPE_KD_STATE_MANIPULATE, b"y")
+            .unwrap();
+        let next = Header::decode(
+            framing.transport.outbound[2 * HEADER_SIZE + 2..3 * HEADER_SIZE + 2]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(next.packet_id, INITIAL_PACKET_ID ^ 1);
+    }
+
+    /// The packets `out` holds, as `(type, id)`, data and control alike.
+    fn sent_packets(out: &[u8]) -> Vec<(u16, u32)> {
+        let mut packets = Vec::new();
+        let mut at = 0;
+        while at < out.len() {
+            let header = Header::decode(out[at..at + HEADER_SIZE].try_into().unwrap());
+            packets.push((header.packet_type, header.packet_id));
+            at += if header.is_data() {
+                header.packet_len()
+            } else {
+                HEADER_SIZE
+            };
+        }
+        packets
+    }
+
+    /// A request whose reply does not come before the read timeout is sent
+    /// again with its id, and its reply taken; a stop the target announces
+    /// again meanwhile is no reply. The target sending its own last packet
+    /// again is no reason to: it does so before our ACK of it reaches it on
+    /// a sound link, and then takes the request.
+    #[test]
+    fn a_request_is_sent_again_for_want_of_its_reply() {
+        let stop = |id| data_packet(PACKET_TYPE_KD_STATE_CHANGE64, id, b"stop");
+        let reply = data_packet(
+            PACKET_TYPE_KD_STATE_MANIPULATE,
+            INITIAL_PACKET_ID ^ 1,
+            b"reply",
+        );
+        let request = (PACKET_TYPE_KD_STATE_MANIPULATE, INITIAL_PACKET_ID);
+        let ack = |id| (PACKET_TYPE_KD_ACKNOWLEDGE, id);
+
+        let mut inbound = ack_for(INITIAL_PACKET_ID);
+        inbound.extend(stop(INITIAL_PACKET_ID));
+        inbound.extend(&reply);
+        let mut framing = KdFraming::new(Loopback::new(inbound));
+        framing.remote_packet_id = INITIAL_PACKET_ID ^ 1;
+        framing
+            .send_data(PACKET_TYPE_KD_STATE_MANIPULATE, b"x")
+            .unwrap();
+        assert_eq!(framing.recv_reply().unwrap().payload, b"reply");
+        assert_eq!(
+            sent_packets(&framing.transport.outbound),
+            [request, ack(INITIAL_PACKET_ID), ack(INITIAL_PACKET_ID ^ 1)]
+        );
+
+        let mut announced = ack_for(INITIAL_PACKET_ID);
+        announced.extend(stop(INITIAL_PACKET_ID));
+        let mut framing = KdFraming::new(Loopback::timing_out_between(&[announced, reply.clone()]));
+        framing
+            .send_data(PACKET_TYPE_KD_STATE_MANIPULATE, b"x")
+            .unwrap();
+        assert_eq!(framing.recv_reply().unwrap().payload, b"stop");
+        assert_eq!(framing.recv_reply().unwrap().payload, b"reply");
+        assert_eq!(
+            sent_packets(&framing.transport.outbound),
+            [
+                request,
+                ack(INITIAL_PACKET_ID),
+                request,
+                ack(INITIAL_PACKET_ID ^ 1)
+            ]
+        );
+    }
+
+    /// A continue is answered by the next stop: the target sending the stop
+    /// it ran from again after the continue's ACK dropped the continue,
+    /// which is sent again; a new stop arriving before the ACK stands for
+    /// it, the continue not sent again to run the target twice.
+    #[test]
+    fn a_stop_answers_a_continue() {
+        let request = (PACKET_TYPE_KD_STATE_MANIPULATE, INITIAL_PACKET_ID);
+        let ack = |id| (PACKET_TYPE_KD_ACKNOWLEDGE, id);
+
+        let mut inbound = ack_for(INITIAL_PACKET_ID);
+        inbound.extend(data_packet(
+            PACKET_TYPE_KD_STATE_CHANGE64,
+            INITIAL_PACKET_ID,
+            b"stop",
+        ));
+        inbound.extend(data_packet(
+            PACKET_TYPE_KD_STATE_CHANGE64,
+            INITIAL_PACKET_ID ^ 1,
+            b"next",
+        ));
+        let mut framing = KdFraming::new(Loopback::new(inbound));
+        framing.remote_packet_id = INITIAL_PACKET_ID ^ 1;
+        framing.send_continue(b"continue").unwrap();
+        assert_eq!(framing.recv_data().unwrap().payload, b"next");
+        assert_eq!(
+            sent_packets(&framing.transport.outbound),
+            [
+                request,
+                ack(INITIAL_PACKET_ID),
+                request,
+                ack(INITIAL_PACKET_ID ^ 1)
+            ]
+        );
+
+        let inbound = data_packet(PACKET_TYPE_KD_STATE_CHANGE64, INITIAL_PACKET_ID, b"next");
+        let mut framing = KdFraming::new(Loopback::new(inbound));
+        framing.send_continue(b"continue").unwrap();
+        assert_eq!(framing.recv_data().unwrap().payload, b"next");
+        assert_eq!(
+            sent_packets(&framing.transport.outbound),
+            [request, ack(INITIAL_PACKET_ID)]
+        );
+    }
+
+    /// Over KDNET a late ACK of an earlier packet (one sent twice) is no
+    /// reason to send the packet in flight again; any other ACK is.
+    #[test]
+    fn a_late_kdnet_ack_of_an_earlier_packet_is_waited_past() {
+        let mut framing = KdFraming::new(Loopback::new(Vec::new()));
+        framing.use_kdnet_packet_ids(Arc::new(AtomicU64::new(0)));
+        let current = framing.current_packet_id;
+        let mut inbound = ack_for(current.wrapping_sub(2) | KDNET_INITIAL_PACKET_ID);
+        inbound.extend(ack_for(current));
+        framing.transport = Loopback::new(inbound);
+        framing
+            .send_data(PACKET_TYPE_KD_STATE_MANIPULATE, b"x")
+            .unwrap();
+        assert_eq!(sent_packets(&framing.transport.outbound).len(), 1);
+
+        let current = framing.current_packet_id;
+        let mut inbound = ack_for(current.wrapping_add(2));
+        inbound.extend(ack_for(current));
+        framing.transport = Loopback::new(inbound);
+        framing
+            .send_data(PACKET_TYPE_KD_STATE_MANIPULATE, b"y")
+            .unwrap();
+        assert_eq!(sent_packets(&framing.transport.outbound).len(), 2);
     }
 }

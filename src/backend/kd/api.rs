@@ -153,7 +153,7 @@ fn recv_manipulate_reply(
     let requested_processor = read_u16(request, 6);
     let requested_api = read_u32(request, 0);
     loop {
-        let pkt = framing.recv_data()?;
+        let pkt = framing.recv_reply()?;
         match pkt.packet_type {
             PACKET_TYPE_KD_STATE_MANIPULATE => {
                 let parsed = ManipulateHeader::decode(&pkt.payload)?;
@@ -399,7 +399,9 @@ fn send_manipulate_no_reply<T: Read + Write>(
     framing: &mut KdFraming<T>,
     header: &[u8; MANIPULATE_HEADER_SIZE],
 ) -> Result<()> {
-    framing.send_data(PACKET_TYPE_KD_STATE_MANIPULATE, header)
+    framing.send_data(PACKET_TYPE_KD_STATE_MANIPULATE, header)?;
+    framing.forget_unanswered();
+    Ok(())
 }
 
 /// `DbgKdRebootApi`.
@@ -794,11 +796,7 @@ pub fn continue_api2<T: Read + Write>(
     write_u32(&mut header, UNION_OFFSET, continue_status);
     write_u32(&mut header, UNION_OFFSET + 4, if trace { 1 } else { 0 });
     write_u64(&mut header, UNION_OFFSET + 8, dr7);
-    let payload_len = MANIPULATE_HEADER_SIZE;
-    let mut payload = Vec::with_capacity(payload_len);
-    payload.extend_from_slice(&header);
-    framing.send_data(PACKET_TYPE_KD_STATE_MANIPULATE, &payload)?;
-    Ok(())
+    framing.send_continue(&header)
 }
 
 /// `DbgKdContinueApi2` for ARM64 targets. After ContinueStatus,
@@ -817,11 +815,7 @@ pub fn continue_api2_arm64<T: Read + Write>(
     write_u32(&mut header, UNION_OFFSET, continue_status);
     write_u32(&mut header, UNION_OFFSET + 8, if trace { 1 } else { 0 });
     // CurrentSymbolStart/End stay zero.
-    let payload_len = MANIPULATE_HEADER_SIZE;
-    let mut payload = Vec::with_capacity(payload_len);
-    payload.extend_from_slice(&header);
-    framing.send_data(PACKET_TYPE_KD_STATE_MANIPULATE, &payload)?;
-    Ok(())
+    framing.send_continue(&header)
 }
 
 #[cfg(test)]
