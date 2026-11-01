@@ -7,6 +7,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::backend::dbg_backend::BugcheckInfo;
 use crate::base::bytes::{read_u16, read_u32};
 use crate::base::error::{Error, Result};
 
@@ -143,6 +144,23 @@ pub struct DataPacket {
     pub payload: Vec<u8>,
 }
 
+/// A state change the target sent while it answered a request: a new stop
+/// it reached while halted, as when the processor bugchecks in the debugger
+/// itself, kept for the next wait for a stop (see [`KdFraming::hold_stop`]).
+#[derive(Debug, Clone)]
+pub struct HeldStop {
+    pub key: StopKey,
+    pub payload: Vec<u8>,
+    /// The bugcheck a `*** Fatal System Error` print before it named.
+    pub bugcheck: Option<BugcheckInfo>,
+}
+
+/// Which stop a state change reports: its processor, program counter and
+/// exception code. The target reports the stop it is at again (after a
+/// reconnect, or as it goes back to waiting on the debugger) under a new
+/// packet id; only another key is another stop.
+pub type StopKey = (u16, u64, u32);
+
 /// Send retry budget for RESEND or missing ACK
 const MAX_SEND_RETRIES: usize = 5;
 
@@ -173,6 +191,10 @@ pub struct KdFraming<T> {
     /// (see [`Self::forget_unanswered`]).
     unanswered: Option<Unanswered>,
     unanswered_payload: Vec<u8>,
+    /// See [`HeldStop`]. A reset drops it with the target's other packets.
+    held_stop: Option<HeldStop>,
+    /// The stop the last wait for one reported (see [`StopKey`]).
+    current_stop: Option<StopKey>,
 }
 
 /// A manipulate request the target took (see [`KdFraming::unanswered`]).
@@ -195,6 +217,35 @@ impl<T> KdFraming<T> {
     pub fn transport_ref(&self) -> &T {
         &self.transport
     }
+
+    /// Whether a stop the target reached while answering a request waits
+    /// for the next wait for a stop.
+    pub fn holds_stop(&self) -> bool {
+        self.held_stop.is_some()
+    }
+
+    /// Whether a state change reporting `key` is a stop the target has
+    /// already reported: the one it is at, or the one held for the next
+    /// wait.
+    pub fn knows_stop(&self, key: StopKey) -> bool {
+        self.current_stop == Some(key)
+            || self.held_stop.as_ref().is_some_and(|held| held.key == key)
+    }
+
+    /// Note the stop a wait for one reports.
+    pub fn note_current_stop(&mut self, key: StopKey) {
+        self.current_stop = Some(key);
+    }
+
+    /// Keep `stop` for the next wait for a stop: the target reached it while
+    /// answering a request, which has no way to report it.
+    pub fn hold_stop(&mut self, stop: HeldStop) {
+        self.held_stop = Some(stop);
+    }
+
+    pub fn take_held_stop(&mut self) -> Option<HeldStop> {
+        self.held_stop.take()
+    }
 }
 
 impl<T: Read + Write> KdFraming<T> {
@@ -213,6 +264,8 @@ impl<T: Read + Write> KdFraming<T> {
             kdnet_generation_seen: 0,
             unanswered: None,
             unanswered_payload: Vec::new(),
+            held_stop: None,
+            current_stop: None,
         }
     }
 
@@ -257,6 +310,7 @@ impl<T: Read + Write> KdFraming<T> {
         self.kdnet_remote_high_water = None;
         self.queued_data.clear();
         self.unanswered = None;
+        self.held_stop = None;
         self.peer_reset_seen = true;
     }
 
@@ -314,6 +368,7 @@ impl<T: Read + Write> KdFraming<T> {
         self.kdnet_remote_high_water = None;
         self.queued_data.clear();
         self.unanswered = None;
+        self.held_stop = None;
         self.awaiting_reset_ack = true;
         self.send_control(PACKET_TYPE_KD_RESET, self.current_packet_id)
     }
@@ -327,6 +382,7 @@ impl<T: Read + Write> KdFraming<T> {
         self.kdnet_remote_high_water = None;
         self.queued_data.clear();
         self.unanswered = None;
+        self.held_stop = None;
         self.peer_reset_seen = true;
         if self.awaiting_reset_ack {
             self.awaiting_reset_ack = false;

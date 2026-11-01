@@ -1028,6 +1028,85 @@ fn fatal_system_error_print_marks_the_next_stop_with_captured_bugcheck() {
     assert_eq!(info.driver.as_deref(), Some("myfault.sys"));
 }
 
+/// A processor that bugchecks in the debugger while it answers a request
+/// sends the bugcheck's print and its new stop before the reply. The request
+/// still gets its reply, and the next wait reports the new stop as the
+/// bugcheck, without reading the wire for it, even a poll whose deadline has
+/// passed: resuming instead would run the crashed target on into a reboot,
+/// as though it were still at the old stop.
+/// The target announcing that stop again, during a later request, is no new
+/// stop: held again, it came back without its bugcheck.
+#[test]
+fn a_bugcheck_while_a_request_is_answered_is_the_next_stop() {
+    let (mut kernel, host) = UnixStream::pair().unwrap();
+    host.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let context: Vec<u8> = (0..64u8).collect();
+    let pc = 0xffff_f800_1960_c930;
+    let mut script = control_packet(
+        PACKET_TYPE_KD_ACKNOWLEDGE,
+        api::test_wire::first_outbound_id(),
+    );
+    script.extend(data_packet(
+        PACKET_TYPE_KD_DEBUG_IO,
+        INITIAL_PACKET_ID,
+        &debug_io_print_payload(
+            b"\r\n*** Fatal System Error: 0x0000002b\r\n                       (0xFFFFF800166D9920,0x0,0x0,0x0)\r\n",
+        ),
+    ));
+    script.extend(data_packet(
+        PACKET_TYPE_KD_STATE_CHANGE64,
+        INITIAL_PACKET_ID ^ 1,
+        &exception_state_change_payload(pc),
+    ));
+    script.extend(data_packet(
+        PACKET_TYPE_KD_STATE_MANIPULATE,
+        INITIAL_PACKET_ID,
+        &api::test_wire::build_reply(api::DBGKD_GET_CONTEXT, 0, &[], &context),
+    ));
+    kernel.write_all(&script).unwrap();
+    let mut framing = KdFraming::new(host.into());
+
+    let reply = api::get_context(&mut framing, 0, crate::arch::amd64::CONTEXT_ALL).unwrap();
+    let stop = await_state_change(
+        &mut framing,
+        AwaitStateOptions {
+            arch: Some(Arch::Amd64),
+            saw_kd_refresh: None,
+            filter: StateChangeFilter::Runtime,
+            bugcheck: None,
+            bugcheck_capture: None,
+            deadline: Some(Instant::now()),
+            debug_log: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(reply, context);
+    assert_eq!(stop.program_counter, pc);
+    assert!(stop.is_bugcheck);
+    let info = stop.bugcheck.expect("the print's bugcheck");
+    assert_eq!(info.code, 0x2b);
+    assert_eq!(info.parameters, [0xFFFF_F800_166D_9920, 0, 0, 0]);
+
+    let mut again = control_packet(
+        PACKET_TYPE_KD_ACKNOWLEDGE,
+        api::test_wire::first_outbound_id() ^ 1,
+    );
+    again.extend(data_packet(
+        PACKET_TYPE_KD_STATE_CHANGE64,
+        INITIAL_PACKET_ID ^ 1,
+        &exception_state_change_payload(pc),
+    ));
+    again.extend(data_packet(
+        PACKET_TYPE_KD_STATE_MANIPULATE,
+        INITIAL_PACKET_ID,
+        &api::test_wire::build_reply(api::DBGKD_GET_CONTEXT, 0, &[], &context),
+    ));
+    kernel.write_all(&again).unwrap();
+    api::get_context(&mut framing, 0, crate::arch::amd64::CONTEXT_ALL).unwrap();
+    assert!(!framing.holds_stop());
+}
+
 #[test]
 fn only_exception_state_changes_surface_as_breaks() {
     assert!(!is_transparent_state_change(DBG_KD_EXCEPTION_STATE_CHANGE));

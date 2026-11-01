@@ -316,6 +316,14 @@ impl KdBackend {
     }
 
     pub(super) fn resume_with(&mut self, disposition: ContinueDisposition) -> Result<()> {
+        // A stop the target reached while it answered a request is where
+        // the target is; resuming would run on from it unreported. The pump
+        // reports it first.
+        if self.holds_stop() {
+            kd_trace!("kd: continue: the target holds a new stop; reporting it instead");
+            self.record_running();
+            return self.start_pump(None, None);
+        }
         let resume_processor = self.last_stop_processor;
         self.skip_hardcoded_breakpoint(resume_processor)?;
         // The pump absorbs the re-break a stale break-in byte causes right
@@ -353,6 +361,13 @@ impl KdBackend {
     }
 
     pub(super) fn single_step(&mut self) -> Result<()> {
+        // As for a continue (see `resume_with`): the wait reads the held
+        // stop first.
+        if self.holds_stop() {
+            kd_trace!("kd: step: the target holds a new stop; reporting it instead");
+            self.record_running();
+            return Ok(());
+        }
         // Managed BP step-over needs to execute the original instruction. A
         // single step stops almost immediately, so the caller's wait_for_stop
         // reads it synchronously; no pump needed

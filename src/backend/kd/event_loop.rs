@@ -14,8 +14,8 @@ use crate::arch::{Arch, RegisterMap};
 use crate::backend::dbg_backend::{DebugLog, ExceptionRecord};
 use crate::backend::kd::api;
 use crate::backend::kd::framing::{
-    KdFraming, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO, PACKET_TYPE_KD_STATE_CHANGE64,
-    is_temporary_io_error,
+    DataPacket, KdFraming, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO,
+    PACKET_TYPE_KD_STATE_CHANGE64, is_temporary_io_error,
 };
 use crate::backend::kd::trace_enabled;
 use crate::base::bytes::{read_u16, read_u32, read_u64};
@@ -551,12 +551,32 @@ pub fn await_state_change(
     } = options;
     let mut target_reloaded = false;
     loop {
-        if let Some(deadline) = deadline
+        // A stop the target reached while answering a request comes first:
+        // it has been the target's state since. It takes no wait, so a
+        // deadline already reached (a poll) still reports it.
+        let held = framing.take_held_stop();
+        if held.is_none()
+            && let Some(deadline) = deadline
             && Instant::now() >= deadline
         {
             return Err(Error::Io(std::io::Error::from(ErrorKind::TimedOut)));
         }
-        let pkt = framing.recv_data()?;
+        let held_bugcheck = held.as_ref().and_then(|held| held.bugcheck.clone());
+        if let Some(held) = &held {
+            kd_trace!(
+                "kd: await: reporting the stop held since a request: p{} at {:#x}, bugcheck {:?}",
+                held.key.0 + 1,
+                held.key.1,
+                held_bugcheck.as_ref().map(|info| info.code)
+            );
+        }
+        let pkt = match held {
+            Some(held) => DataPacket {
+                packet_type: PACKET_TYPE_KD_STATE_CHANGE64,
+                payload: held.payload,
+            },
+            None => framing.recv_data()?,
+        };
         match pkt.packet_type {
             PACKET_TYPE_KD_STATE_CHANGE64 => {
                 if trace_enabled() {
@@ -575,7 +595,8 @@ pub fn await_state_change(
                 let mut stop = parse_state_change(&pkt.payload)?;
                 target_reloaded |= framing.take_peer_reset_seen();
                 stop.target_reloaded = target_reloaded;
-                let in_bugcheck = bugcheck.as_deref().copied().unwrap_or(false);
+                let in_bugcheck =
+                    held_bugcheck.is_some() || bugcheck.as_deref().copied().unwrap_or(false);
                 // Surface exception breaks (and anything unrecognised); during a
                 // bugcheck, surface even the notification kinds. Otherwise the
                 // load-symbols notification is surfaced for reconciliation while
@@ -587,16 +608,20 @@ pub fn await_state_change(
                 {
                     if in_bugcheck {
                         stop.is_bugcheck = true;
-                        stop.bugcheck = bugcheck_capture
-                            .as_ref()
-                            .and_then(|capture| capture.finish());
+                        stop.bugcheck = held_bugcheck.or_else(|| {
+                            bugcheck_capture
+                                .as_ref()
+                                .and_then(|capture| capture.finish())
+                        });
                     }
+                    framing.note_current_stop(stop.key());
                     return Ok(stop);
                 }
                 // Load/unload notifications are surfaced to the foreground as
                 // an internal stop. Command-string notifications remain fully
                 // transparent and are acknowledged here as before.
                 if stop.new_state == DBG_KD_LOAD_SYMBOLS_STATE_CHANGE {
+                    framing.note_current_stop(stop.key());
                     return Ok(stop);
                 }
                 kd_trace!(

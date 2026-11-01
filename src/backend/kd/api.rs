@@ -6,11 +6,12 @@ use std::ops::Range;
 
 use crate::backend::dbg_backend::ContinueDisposition;
 use crate::backend::kd::{
+    BugcheckCapture,
     framing::{
-        KdFraming, PACKET_MAX_SIZE, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO,
+        HeldStop, KdFraming, PACKET_MAX_SIZE, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO,
         PACKET_TYPE_KD_STATE_CHANGE64, PACKET_TYPE_KD_STATE_MANIPULATE,
     },
-    handle_debug_io, handle_file_io,
+    handle_debug_io_with_output, handle_file_io, parse_state_change,
 };
 use crate::base::bytes::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
 use crate::base::error::{Error, Result};
@@ -162,6 +163,9 @@ fn recv_manipulate_reply(
 ) -> Result<(ManipulateHeader, [u8; MANIPULATE_HEADER_SIZE], Vec<u8>)> {
     let requested_processor = read_u16(request, 6);
     let requested_api = read_u32(request, 0);
+    // The prints that come with the reply, for a bugcheck a new stop
+    // would be (see the state change below).
+    let mut prints = BugcheckCapture::default();
     loop {
         let pkt = framing.recv_reply()?;
         match pkt.packet_type {
@@ -202,7 +206,15 @@ fn recv_manipulate_reply(
             }
             PACKET_TYPE_KD_DEBUG_IO => {
                 // Debug print emitted mid-request
-                handle_debug_io(framing, &pkt.payload, false)?;
+                handle_debug_io_with_output(
+                    framing,
+                    &pkt.payload,
+                    false,
+                    Some(&mut prints),
+                    false,
+                    None,
+                    &mut std::io::stderr(),
+                )?;
                 continue;
             }
             PACKET_TYPE_KD_FILE_IO => {
@@ -210,13 +222,33 @@ fn recv_manipulate_reply(
                 handle_file_io(framing, &pkt.payload)?;
                 continue;
             }
-            // A manipulate request is only sent to a halted target, and a
-            // halted target cannot reach a new stop: a state change here is
-            // the target re-announcing its current stop after a RESET resync
-            // (a reconnect to a target left waiting on a dead debugger). The
-            // request was ACKed after the resync, so its reply still follows.
+            // A manipulate request is only sent to a halted target. A state
+            // change for a stop it has reported is the target announcing it
+            // again: after a RESET resync (a reconnect to a target left
+            // waiting on a dead debugger), or as it goes back to waiting on
+            // the debugger; the reply still follows. Any other is a new stop
+            // the target reached while halted: the processor bugchecked in
+            // the debugger itself, which then answers the request at the new
+            // stop. It is kept for the next wait, which would otherwise
+            // resume the bugcheck as though the target were still at the old
+            // stop.
             PACKET_TYPE_KD_STATE_CHANGE64 => {
-                kd_trace!("kd: ignoring re-announced state change while awaiting manipulate reply");
+                let key = parse_state_change(&pkt.payload)
+                    .ok()
+                    .map(|stop| stop.key())
+                    .filter(|key| !framing.peer_reset_seen() && !framing.knows_stop(*key));
+                let Some(key) = key else {
+                    kd_trace!(
+                        "kd: ignoring re-announced state change while awaiting manipulate reply"
+                    );
+                    continue;
+                };
+                kd_trace!("kd: holding a new stop that came while awaiting manipulate reply");
+                framing.hold_stop(HeldStop {
+                    key,
+                    payload: pkt.payload,
+                    bugcheck: prints.finish(),
+                });
                 continue;
             }
             other => {

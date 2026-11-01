@@ -70,6 +70,11 @@ pub struct MockBackend {
     /// The backend caught a stop no host has drained yet (a breakpoint hit
     /// while the host was idle); cleared once an event is handed out.
     pending_stop: bool,
+    /// A stop the target reaches while the next queued one is looked at, as
+    /// a processor that bugchecks in the debugger does: pending once that
+    /// one is handed out, and the next wait's.
+    held_after_next: Option<StopEvent>,
+    held: Option<StopEvent>,
     /// Sites the target reports as dropped by its last stop.
     dropped_sites: Vec<u64>,
     /// `set_breakpoint` (true) / `remove_breakpoint` (false) calls in order.
@@ -186,6 +191,8 @@ impl Default for MockBackend {
             target_manages_sites: false,
             halts_only_on_interrupt: false,
             pending_stop: false,
+            held_after_next: None,
+            held: None,
             dropped_sites: Vec::new(),
             site_writes: Arc::new(Mutex::new(Vec::new())),
             hardware_writes: Arc::new(Mutex::new(Vec::new())),
@@ -603,6 +610,11 @@ impl DebugBackend for MockBackend {
         Ok(event)
     }
     fn try_wait_for_stop(&mut self, _timeout: Duration) -> Result<Option<StopEvent>> {
+        if let Some(event) = self.held.take() {
+            self.running = false;
+            self.last_event = Some(event.clone());
+            return Ok(Some(event));
+        }
         if let Some(event) = self.kept.take() {
             self.running = false;
             return Ok(Some(event));
@@ -633,6 +645,7 @@ impl DebugBackend for MockBackend {
             self.running = false;
             self.pending_stop = false;
             self.last_event = Some(event.clone());
+            self.held = self.held_after_next.take();
         }
         Ok(event)
     }
@@ -666,7 +679,7 @@ impl DebugBackend for MockBackend {
         self.running
     }
     fn has_pending_stop(&self) -> bool {
-        self.pending_stop
+        self.pending_stop || self.held.is_some()
     }
     fn supports_msr(&self) -> bool {
         !self.msrs.is_empty()
@@ -4582,6 +4595,37 @@ fn exception_event(code: u32, pc: u64) -> StopEvent {
         program_counter: Some(pc),
         ..breakpoint_event(pc)
     }
+}
+
+/// A stop the target reaches while the one before it is looked at, as a
+/// processor that bugchecks in the debugger does, is the stop a wait ends
+/// on: the one before is no longer where the target is, and shown, it had
+/// the bugcheck's registers.
+#[test]
+fn a_stop_reached_while_the_last_is_looked_at_is_the_one_a_wait_ends_on() {
+    let mut backend = MockBackend::default().running();
+    backend.set("rip", 0x1000);
+    backend.queue_interrupt(breakpoint_event(0x1000));
+    backend.held_after_next = Some(StopEvent {
+        is_bugcheck: true,
+        bugcheck: Some(BugcheckInfo {
+            code: 0x2b,
+            parameters: [0; 4],
+            driver: None,
+        }),
+        ..breakpoint_event(0x2000)
+    });
+    let mut session = session_with_mock(backend);
+
+    let RunOutcome::Stopped(stop) = session.run(Motion::Wait, &Cancel::poll()).unwrap() else {
+        panic!("no stop surfaced");
+    };
+
+    assert!(
+        matches!(&stop.kind, StopKind::Bugcheck { bugcheck: Some(info) } if info.code == 0x2b),
+        "{:?}",
+        stop.kind
+    );
 }
 
 /// A breakpoint hit the idle servicer parked runs its action when a wait

@@ -690,6 +690,12 @@ impl Session {
             && !self.reload_surface_pending
     }
 
+    /// Halted, with a newer stop the backend already holds: the stop just
+    /// classified is not where the target is.
+    fn superseded(&self) -> bool {
+        !self.backend.is_running() && self.backend.has_pending_stop()
+    }
+
     /// Resume with `disposition` unless the target already runs, then wait
     /// for the next stop.
     pub fn continue_stop(
@@ -816,7 +822,14 @@ impl Session {
                 StopResolution::Resumed | StopResolution::ModulesChanged
             ) {
                 let outcome = self.continue_outcome_from_resolution(resolution);
+                // A stop the target reached while this one was looked at (a
+                // processor that bugchecked in the debugger) is where the
+                // target is now; this one would be shown with its registers.
+                // The poll above takes it even past the deadline.
                 if !self.surface_policy(&outcome, hosted)? {
+                    if self.superseded() {
+                        continue;
+                    }
                     return Ok(outcome);
                 }
             }

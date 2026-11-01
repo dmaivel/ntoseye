@@ -130,6 +130,11 @@ pub struct StateChange {
 }
 
 impl StateChange {
+    /// Which stop it reports (see [`framing::StopKey`]).
+    pub fn key(&self) -> framing::StopKey {
+        (self.processor, self.program_counter, self.exception_code)
+    }
+
     /// The bytes from the stop's PC whose breakpoint-table entries the
     /// target deleted before reporting it: `KdpSetCommonState` copies up to
     /// [`api::DBGKD_MAXSTREAM`] bytes from there into the report, fewer when
@@ -499,6 +504,15 @@ impl KdBackend {
     /// drain that outstanding reply
     fn framing_unchecked(&mut self) -> Result<&mut KdFraming<KdTransport>> {
         self.link.framing(self.running_reason)
+    }
+
+    /// Whether the target reached a new stop while it answered a request
+    /// (see `HeldStop`), which the next wait reports.
+    fn holds_stop(&self) -> bool {
+        matches!(
+            &self.link,
+            Link::Halted(framing) | Link::RunningInline(framing) if framing.holds_stop()
+        )
     }
 }
 
@@ -871,8 +885,13 @@ impl DebugBackend for KdBackend {
     }
 
     fn has_pending_stop(&self) -> bool {
-        // The pump reported a stop nobody has drained yet; `is_running` is stale.
-        matches!(&self.link, Link::RunningPumped(pump) if pump.reported_stop.load(Ordering::SeqCst))
+        // The pump reported a stop nobody has drained yet; `is_running` is
+        // stale. Or the target reached a new stop while it answered a
+        // request (see `HeldStop`).
+        match &self.link {
+            Link::RunningPumped(pump) => pump.reported_stop.load(Ordering::SeqCst),
+            _ => self.holds_stop(),
+        }
     }
 
     fn prepare_for_exit(&mut self, leave_running: bool) -> Result<()> {
