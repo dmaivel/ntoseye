@@ -1218,7 +1218,7 @@ fn print_stacks(detail: &ThreadStacks) {
                 );
             }
             if thread.truncated != 0 {
-                outln!("    {}", more_frames(thread.truncated));
+                outln!("    {}", more_frames(Some(thread.truncated)));
             }
             if let Some(error) = stack_error(thread) {
                 outln!("    {}", ui::muted(error));
@@ -1312,7 +1312,7 @@ fn print_findstack(detail: &FindStack) {
                     );
                 }
                 if thread.stack.truncated != 0 {
-                    outln!("      {}", more_frames(thread.stack.truncated));
+                    outln!("      {}", more_frames(Some(thread.stack.truncated)));
                 }
             }
         }
@@ -1377,7 +1377,7 @@ fn print_uniqstack(detail: &UniqStacks, options: UniqStackOptions) {
             );
         }
         if group.stack.truncated != 0 {
-            outln!("    {}", more_frames(group.stack.truncated));
+            outln!("    {}", more_frames(Some(group.stack.truncated)));
         }
         if group.threads.len() > 1 {
             outln!("    threads: {}", thread_ids_by_process(&group.threads));

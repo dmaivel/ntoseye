@@ -275,11 +275,11 @@ fn print_saved_vtl0_context(session: &Session, saved: &HashMap<String, u64>) {
     print_known_registers(saved, session.target.arch(), "registers (saved VTL0)");
     let (trace, rip, stack) = saved_vtl0_code(session, saved);
     print_disasm_context(session, &trace, rip, NextStep::default());
-    print_stacktrace_data(
+    print_stop_stack(
         session.target.arch(),
         &stack,
+        0,
         BREAK_STACKTRACE_DISPLAY_LIMIT,
-        true,
     );
 }
 
@@ -300,7 +300,7 @@ fn saved_vtl0_code(
         debugger,
         &session.register_map,
         saved,
-        BREAK_STACKTRACE_PROBE_LIMIT,
+        BREAK_STACKTRACE_WALK_LIMIT,
     );
     (trace, rip, stack.into_stacktrace())
 }
@@ -422,13 +422,17 @@ fn print_stop_text(session: &Session, stop: &StopContext) {
                 },
             );
             if stack {
-                print_stacktrace(
+                let stack = thread_stacktrace(
                     &session.target,
                     map,
                     &stop.regs,
-                    BREAK_STACKTRACE_PROBE_LIMIT,
+                    BREAK_STACKTRACE_WALK_LIMIT,
+                );
+                print_stop_stack(
+                    session.target.arch(),
+                    &stack,
+                    0,
                     BREAK_STACKTRACE_DISPLAY_LIMIT,
-                    true,
                 );
             }
             print_displays(&stop.displays);
@@ -447,7 +451,13 @@ fn print_stop_text(session: &Session, stop: &StopContext) {
         map,
         &stop.regs,
         session.target.windows_thread_selection.as_ref(),
-        BREAK_STACKTRACE_PROBE_LIMIT,
+        // A bugcheck's stack starts at the frame that faulted, which can be
+        // deep under the bugcheck's own: it is looked for.
+        if live {
+            BREAK_STACKTRACE_WALK_LIMIT
+        } else {
+            BUGCHECK_FAULT_SEARCH_LIMIT
+        },
     );
     let stack = StackTrace {
         frames: recovered

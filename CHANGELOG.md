@@ -34,6 +34,7 @@ Keeping this file:
 - At a stop in the Windows hypervisor whose context is the hypervisor's own (after `.cxr`, or on its VM-exit entry, whose saved VTL0 state may be one exit behind), a `d*` listing or `dx` that cannot read an NT address, and a command that fails on one, add a note that the hypervisor's address space does not map it and that `.vtlcxr` selects where VTL0 left off.
 - Over KD on ARM64, a processor's KPCR is read once a boot instead of at every register read, which makes `~` and a debug adapter's thread list about a third faster.
 - Over KD, a stop no longer reads the kernel's whole module list again, since the target reports every module load and unload, and a processor's process is named without walking the process list and reading each long process name from its process's memory. A REPL stop over a serial link with memory read through KD took 9 to 15 s, and takes 1 to 2.5 s.
+- A stop's stack says `... more frames` under the six frames it shows, without counting them: a stop walked 64 frames to count the ones it leaves out, each a few memory reads, and loaded the symbols of every module they ran in. Over serial KD reading memory through KD, a stop at `nt!NtClose` took 1.7 to 11 s, once 81 s on a deep stack, where it takes 1.3 to 6.7 s. `k` and the other stack listings still count what they leave out.
 
 ### Fixed
 

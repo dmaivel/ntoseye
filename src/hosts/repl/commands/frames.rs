@@ -1347,7 +1347,7 @@ pub fn print_indexed_stacktrace(
     }
     let hidden = trace.frames.len().saturating_sub(display_limit) + trace.truncated;
     if hidden > 0 {
-        outln!("{}", more_frames(hidden));
+        outln!("{}", more_frames(Some(hidden)));
     }
 }
 

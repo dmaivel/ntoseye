@@ -66,7 +66,13 @@ static TERMINATION_REQUESTED: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "cli")]
 pub static NATIVE_PROMPT: AtomicBool = AtomicBool::new(false);
 pub const BREAK_STACKTRACE_DISPLAY_LIMIT: usize = 6;
-pub const BREAK_STACKTRACE_PROBE_LIMIT: usize = 64;
+/// Frames a stop walks: one past those it shows, which tells whether there
+/// are more without walking them all, each frame a few memory reads (slow
+/// ones over KD).
+pub const BREAK_STACKTRACE_WALK_LIMIT: usize = BREAK_STACKTRACE_DISPLAY_LIMIT + 1;
+/// Frames a bugcheck stop walks to find the one that faulted, under the
+/// bugcheck's own.
+pub const BUGCHECK_FAULT_SEARCH_LIMIT: usize = 64;
 #[cfg(feature = "cli")]
 const REPL_HISTORY_SIZE: usize = 5000;
 
