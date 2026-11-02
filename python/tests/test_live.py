@@ -46,6 +46,10 @@ IN_GUEST_VP = "of a guest partition, which the Windows hypervisor put on its pro
 # A step-out refused because the stack walk found no caller, as from code
 # that no module or unwind data covers.
 NO_CALLER = "could not find caller return address"
+# A step-out refused because its return lands in the kernel debugger's own
+# code: on ARM64 a step can stop in an interrupt the processor took while it
+# left the debugger.
+IN_DEBUGGER = "the kernel debugger's own code"
 ATTEMPTS = 3
 # How long to wait for the root partition's next IPI or flush hypercall: at
 # low load the whole root made no synthetic IPI for 44 s, and one VP for 64.
@@ -142,7 +146,8 @@ def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
     # can start, or in code outside every loaded module, which no unwind data
     # leaves; a finished step is always in NT, though it can be in its
     # thread's outermost frame (the idle thread's nt!KiIdleLoop), which has
-    # no caller to step out to.
+    # no caller to step out to, or in an interrupt taken while the processor
+    # left the debugger, whose caller is the debugger's own code.
     try:
         out = halted.step_out(timeout=20.0)
     except ntoseye.NtoseyeError as error:
@@ -151,7 +156,12 @@ def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
             IN_HYPERVISOR in message or IN_GUEST_VP in message or NO_CALLER in message
         )
         outermost = NO_CALLER in message and len(halted.cpus[over.cpu].backtrace(limit=2)) < 2
-        if EXITED not in message and not refused_after_interrupt and not outermost:
+        if (
+            EXITED not in message
+            and IN_DEBUGGER not in message
+            and not refused_after_interrupt
+            and not outermost
+        ):
             raise
         return
     assert isinstance(out, (Stop.Step, Stop.Interrupt))
