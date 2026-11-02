@@ -137,7 +137,7 @@ Put the target options after the subcommand, for example to set the backend and 
 }
 ```
 
-For KDNET, use `["mcp", "--backend", "kdnet", "--kdnet-key", "1.2.3.4"]`. To force target-mediated memory, add `["--memory-source", "kd"]`, and add `--connect` only to change the default `0.0.0.0:50000` listener.
+For KDNET, use `["mcp", "--backend", "kdnet", "--kdnet-key", "1.2.3.4"]`. To force target-mediated memory, add `["--memory-source", "kd"]`, and add `--connect` only to change the default `0.0.0.0:50000` listener. Which memory to trust is the operator's choice, so `open` has no memory-source argument: a `kd` or `kdnet` target it opens uses the server's `--memory-source`, `auto` without one.
 
 The `open` tool accepts the same backend, connect, and key values. Its optional `kd_handshake_timeout` is a positive integer number of seconds for the initial KD/KDNET handshake, for example `{"backend": "kd", "kd_handshake_timeout": 30}`. It is only valid for `kd` and `kdnet`; `gdb`, `memory`, and `dump` reject it. An explicit value overrides `NTOSEYE_KD_TIMEOUT`; when omitted, the environment variable still applies, with a default of 8 seconds. This is separate from the `command` tool's `timeout_ms`.
 

@@ -273,25 +273,56 @@ fn source_without_a_local_file_is_not_advertised_as_openable() {
 
 #[test]
 fn dump_targets_take_precedence_over_live_backend_arguments() {
-    let spec = target_spec(&json!({"dump": "/tmp/crash.dmp", "backend": "gdb"})).unwrap();
+    let spec = target_spec(
+        KdMemorySource::Auto,
+        &json!({"dump": "/tmp/crash.dmp", "backend": "gdb"}),
+    )
+    .unwrap();
     assert!(matches!(spec, TargetSpec::Dump(path) if path.ends_with("crash.dmp")));
 }
 
 /// A `dump` that is not a path is refused, not ignored for a live attach.
 #[test]
 fn a_dump_that_is_not_a_string_is_an_invalid_argument() {
-    assert!(target_spec(&json!({"dump": 123})).is_err());
+    assert!(target_spec(KdMemorySource::Auto, &json!({"dump": 123})).is_err());
+}
+
+/// The command line's `--memory-source` applies to a KD or KDNET target a
+/// request names no `memorySource` for; the request's own wins, and a GDB or
+/// memory target, which takes none, still opens.
+#[test]
+fn a_request_without_a_memory_source_takes_the_command_lines() {
+    let source = |args: Value| match target_spec(KdMemorySource::Kd, &args).unwrap() {
+        TargetSpec::Live { memory_source, .. } => memory_source,
+        TargetSpec::Dump(_) => panic!("a live target"),
+    };
+
+    assert_eq!(source(json!({"backend": "kd"})), KdMemorySource::Kd);
+    assert_eq!(
+        source(json!({"backend": "kdnet", "kdnetKey": "1.2.3.4"})),
+        KdMemorySource::Kd
+    );
+    assert_eq!(
+        source(json!({"backend": "kd", "memorySource": "host"})),
+        KdMemorySource::Host
+    );
+    for backend in ["gdb", "memory"] {
+        assert_eq!(source(json!({"backend": backend})), KdMemorySource::Auto);
+    }
 }
 
 #[test]
 fn kd_handshake_timeout_is_passed_to_kd_and_kdnet() {
     for backend in ["kd", "kdnet"] {
         for timeout in [1, 30] {
-            let spec = target_spec(&json!({
-                "backend": backend,
-                "kdnetKey": if backend == "kdnet" { Some("1.2.3.4") } else { None },
-                "kdHandshakeTimeout": timeout
-            }))
+            let spec = target_spec(
+                KdMemorySource::Auto,
+                &json!({
+                    "backend": backend,
+                    "kdnetKey": if backend == "kdnet" { Some("1.2.3.4") } else { None },
+                    "kdHandshakeTimeout": timeout
+                }),
+            )
             .unwrap();
             assert!(matches!(
                 spec,
@@ -312,7 +343,8 @@ fn kd_handshake_timeout_rejects_invalid_json_types() {
         json!([]),
         json!({}),
     ] {
-        let err = target_spec(&json!({"kdHandshakeTimeout": value})).unwrap_err();
+        let err =
+            target_spec(KdMemorySource::Auto, &json!({"kdHandshakeTimeout": value})).unwrap_err();
         assert!(err.contains("kdHandshakeTimeout"), "{value}: {err}");
     }
 }
@@ -320,7 +352,11 @@ fn kd_handshake_timeout_rejects_invalid_json_types() {
 #[test]
 fn kd_handshake_timeout_rejects_zero_and_too_large_values() {
     for timeout in [0, u64::MAX] {
-        let err = target_spec(&json!({"kdHandshakeTimeout": timeout})).unwrap_err();
+        let err = target_spec(
+            KdMemorySource::Auto,
+            &json!({"kdHandshakeTimeout": timeout}),
+        )
+        .unwrap_err();
         assert!(err.contains("timeout"), "{timeout}: {err}");
     }
 }
@@ -328,9 +364,12 @@ fn kd_handshake_timeout_rejects_zero_and_too_large_values() {
 #[test]
 fn kd_handshake_timeout_rejects_other_live_backends() {
     for backend in ["gdb", "memory"] {
-        let err = target_spec(&json!({
-            "backend": backend, "kdHandshakeTimeout": 30
-        }))
+        let err = target_spec(
+            KdMemorySource::Auto,
+            &json!({
+                "backend": backend, "kdHandshakeTimeout": 30
+            }),
+        )
         .unwrap_err();
         assert!(err.contains("timeout"), "{backend}: {err}");
     }
@@ -339,12 +378,15 @@ fn kd_handshake_timeout_rejects_other_live_backends() {
 #[test]
 fn dump_targets_reject_kd_handshake_timeout_even_with_invalid_live_arguments() {
     for value in [json!(30), json!(null), json!("30")] {
-        let err = target_spec(&json!({
-            "dump": "/tmp/crash.dmp",
-            "backend": "invalid",
-            "memorySource": "invalid",
-            "kdHandshakeTimeout": value
-        }))
+        let err = target_spec(
+            KdMemorySource::Auto,
+            &json!({
+                "dump": "/tmp/crash.dmp",
+                "backend": "invalid",
+                "memorySource": "invalid",
+                "kdHandshakeTimeout": value
+            }),
+        )
         .unwrap_err();
         assert!(
             err.contains("dump") && err.contains("kdHandshakeTimeout"),

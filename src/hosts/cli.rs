@@ -525,7 +525,8 @@ fn run(cli: Cli) -> Result<i32> {
                     &args,
                     backend,
                 )?;
-                mcp::run(spec, mcp_args.http, mcp_args.unsafe_http)
+                let memory_source = args.memory_source.unwrap_or(KdMemorySource::Auto);
+                mcp::run(spec, memory_source, mcp_args.http, mcp_args.unsafe_http)
                     .map_err(|e| Error::DebugInfo(e.to_string()))
             }
             #[cfg(feature = "dap")]
@@ -536,7 +537,8 @@ fn run(cli: Cli) -> Result<i32> {
                     &args,
                     backend,
                 )?;
-                dap::run(spec, dap_args.port)
+                let memory_source = args.memory_source.unwrap_or(KdMemorySource::Auto);
+                dap::run(spec, memory_source, dap_args.port)
             }
             // The protocol has no attach request, so the command line names
             // the target, at the same default endpoint the REPL would use.

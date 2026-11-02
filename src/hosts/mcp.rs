@@ -309,6 +309,10 @@ struct NtoseyeMcp {
     /// Kept here, not on the session actor, so `output` answers while a
     /// long wait holds the actor, and after `close`.
     outputs: SharedOutputs,
+    /// The memory source the operator named (`--memory-source`), for a KD or
+    /// KDNET target the client opens: which memory to trust is the
+    /// operator's call, so `open` takes no such argument.
+    memory_source: KdMemorySource,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
@@ -514,6 +518,7 @@ impl NtoseyeMcp {
             tool_router: Self::tool_router(),
             interrupt,
             outputs: SharedOutputs::default(),
+            memory_source: KdMemorySource::Auto,
         }
     }
 
@@ -643,49 +648,10 @@ impl NtoseyeMcp {
     )]
     async fn open(
         &self,
-        Parameters(OpenArgs {
-            backend,
-            connect,
-            key,
-            kd_handshake_timeout,
-        }): Parameters<OpenArgs>,
+        Parameters(args): Parameters<OpenArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let spec = match backend {
-            BackendArg::Dump => {
-                if kd_handshake_timeout.is_some() {
-                    return Err(invalid_params("dump does not use 'kd_handshake_timeout'"));
-                }
-                if key.is_some() {
-                    return Err(invalid_params("dump does not use 'key'"));
-                }
-                let path = connect
-                    .clone()
-                    .ok_or_else(|| invalid_params("dump requires 'connect' (the .dmp path)"))?;
-                TargetSpec::Dump(PathBuf::from(path))
-            }
-            live => {
-                // The memory source is the operator's call (`--memory-source`
-                // on the CLI); `auto` validates host memory and falls back to
-                // KD, which is right whenever nobody knows better.
-                TargetSpec::Live {
-                    backend: match live {
-                        BackendArg::Kd => Backend::Kd,
-                        BackendArg::KdNet => Backend::KdNet,
-                        BackendArg::Gdb => Backend::Gdb,
-                        BackendArg::Memory => Backend::Memory,
-                        BackendArg::Dump => unreachable!("handled above"),
-                    },
-                    connect: connect.clone(),
-                    kdnet_key: key,
-                    memory_source: KdMemorySource::Auto,
-                    kd_handshake_timeout,
-                }
-            }
-        };
-        spec.validate().map_err(|error| match error {
-            Error::InvalidArgument(message) => invalid_params(message),
-            other => invalid_params(other.to_string()),
-        })?;
+        let connect = args.connect.clone();
+        let spec = self.open_spec(args)?;
         let label = spec_label(&spec);
 
         let opening = OpeningGuard::claim(&self.session)?;
@@ -929,6 +895,7 @@ fn check_http_bind_policy(addr: &str, unsafe_http: bool) -> anyhow::Result<()> {
 /// `unsafe_http` is set. Both transports drive the same single session actor.
 pub fn run(
     spec: Option<TargetSpec>,
+    memory_source: KdMemorySource,
     http: Option<String>,
     unsafe_http: bool,
 ) -> anyhow::Result<()> {
@@ -960,11 +927,14 @@ pub fn run(
             match http {
                 Some(addr) => {
                     eprintln!("ntoseye-mcp: serving Streamable HTTP at http://{addr}/mcp");
-                    serve_http(session, addr, unsafe_http, interrupt).await
+                    serve_http(session, addr, unsafe_http, interrupt, memory_source).await
                 }
                 None => {
                     eprintln!("ntoseye-mcp: serving over stdio");
-                    let service = NtoseyeMcp::new(session, interrupt).serve(stdio()).await?;
+                    let service = NtoseyeMcp::new(session, interrupt)
+                        .with_memory_source(memory_source)
+                        .serve(stdio())
+                        .await?;
                     service.waiting().await?;
                     Ok(())
                 }
@@ -1064,6 +1034,63 @@ fn spec_label(spec: &TargetSpec) -> String {
     }
 }
 
+impl NtoseyeMcp {
+    fn with_memory_source(mut self, memory_source: KdMemorySource) -> Self {
+        self.memory_source = memory_source;
+        self
+    }
+
+    /// The target an `open` names, validated as every host validates one.
+    fn open_spec(&self, args: OpenArgs) -> Result<TargetSpec, McpError> {
+        let OpenArgs {
+            backend,
+            connect,
+            key,
+            kd_handshake_timeout,
+        } = args;
+        let spec = match backend {
+            BackendArg::Dump => {
+                if kd_handshake_timeout.is_some() {
+                    return Err(invalid_params("dump does not use 'kd_handshake_timeout'"));
+                }
+                if key.is_some() {
+                    return Err(invalid_params("dump does not use 'key'"));
+                }
+                let path = connect
+                    .ok_or_else(|| invalid_params("dump requires 'connect' (the .dmp path)"))?;
+                TargetSpec::Dump(PathBuf::from(path))
+            }
+            live => {
+                let backend = match live {
+                    BackendArg::Kd => Backend::Kd,
+                    BackendArg::KdNet => Backend::KdNet,
+                    BackendArg::Gdb => Backend::Gdb,
+                    BackendArg::Memory => Backend::Memory,
+                    BackendArg::Dump => unreachable!("handled above"),
+                };
+                // Only KD and KDNET read memory either way; the others
+                // refuse a memory source.
+                let memory_source = match backend {
+                    Backend::Kd | Backend::KdNet => self.memory_source,
+                    Backend::Gdb | Backend::Memory => KdMemorySource::Auto,
+                };
+                TargetSpec::Live {
+                    backend,
+                    connect,
+                    kdnet_key: key,
+                    memory_source,
+                    kd_handshake_timeout,
+                }
+            }
+        };
+        spec.validate().map_err(|error| match error {
+            Error::InvalidArgument(message) => invalid_params(message),
+            other => invalid_params(other.to_string()),
+        })?;
+        Ok(spec)
+    }
+}
+
 /// Serve the Streamable HTTP transport on `addr`, mounting the MCP service at
 /// `/mcp`. Every HTTP session gets a clone of the handler (cheap; it holds
 /// only the actor's channel sender), so all connections funnel to the one
@@ -1073,8 +1100,9 @@ async fn serve_http(
     addr: String,
     unsafe_http: bool,
     interrupt: Arc<AtomicBool>,
+    memory_source: KdMemorySource,
 ) -> anyhow::Result<()> {
-    let router = http_router(session, unsafe_http, interrupt);
+    let router = http_router(session, unsafe_http, interrupt, memory_source);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, router).await?;
     Ok(())
@@ -1084,12 +1112,13 @@ fn http_router(
     session: SharedSession,
     unsafe_http: bool,
     interrupt: Arc<AtomicBool>,
+    memory_source: KdMemorySource,
 ) -> axum::Router {
     use rmcp::transport::StreamableHttpService;
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
     use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
-    let template = NtoseyeMcp::new(session, interrupt);
+    let template = NtoseyeMcp::new(session, interrupt).with_memory_source(memory_source);
     // rmcp's own Host check accepts only the literal names localhost,
     // 127.0.0.1 and ::1; `require_loopback_host` checks the whole loopback
     // range instead.
@@ -1146,6 +1175,7 @@ mod tests {
                 Arc::new(std::sync::Mutex::new(SessionSlot::Vacant)),
                 unsafe_http,
                 Arc::new(AtomicBool::new(false)),
+                KdMemorySource::Auto,
             );
             let response = router
                 .oneshot(
@@ -1206,6 +1236,38 @@ mod tests {
             Arc::new(std::sync::Mutex::new(SessionSlot::Vacant)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    /// The memory source the operator started the server with applies to a
+    /// KD or KDNET target the client opens later; a GDB or memory target,
+    /// which takes none, still opens.
+    #[test]
+    fn open_takes_the_operators_memory_source() {
+        let mcp = empty_mcp().with_memory_source(KdMemorySource::Kd);
+        let open = |backend, key: Option<&str>| {
+            mcp.open_spec(OpenArgs {
+                backend,
+                connect: None,
+                key: key.map(str::to_string),
+                kd_handshake_timeout: None,
+            })
+        };
+        let source = |spec: TargetSpec| match spec {
+            TargetSpec::Live { memory_source, .. } => memory_source,
+            TargetSpec::Dump(_) => panic!("a live target"),
+        };
+
+        assert_eq!(
+            source(open(BackendArg::Kd, None).unwrap()),
+            KdMemorySource::Kd
+        );
+        assert_eq!(
+            source(open(BackendArg::KdNet, Some("1.2.3.4")).unwrap()),
+            KdMemorySource::Kd
+        );
+        for backend in [BackendArg::Gdb, BackendArg::Memory] {
+            assert_eq!(source(open(backend, None).unwrap()), KdMemorySource::Auto);
+        }
     }
 
     fn fake_active_mcp() -> (NtoseyeMcp, mpsc::UnboundedReceiver<Command>) {

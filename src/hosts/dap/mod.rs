@@ -215,6 +215,9 @@ struct Server {
     supports_invalidated: bool,
     configured: bool,
     done: bool,
+    /// The command line's `--memory-source`, for a KD or KDNET target a
+    /// `launch`/`attach` request names no `memorySource` for.
+    memory_source: KdMemorySource,
 }
 
 /// Serve the Debug Adapter Protocol until the client disconnects.
@@ -222,8 +225,14 @@ struct Server {
 /// `spec` attaches at startup (from the CLI flags); without it the adapter
 /// waits for the `launch`/`attach` request to name a target. `port` serves one
 /// TCP client on loopback instead of stdio, which is what editors configured
-/// with a `debugServer` port expect.
-pub fn run(spec: Option<TargetSpec>, port: Option<u16>) -> Result<()> {
+/// with a `debugServer` port expect. `memory_source` is the command line's
+/// `--memory-source`, for a KD or KDNET target a request opens without
+/// naming one.
+pub fn run(
+    spec: Option<TargetSpec>,
+    memory_source: KdMemorySource,
+    port: Option<u16>,
+) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     // Shared with the reader thread so a `pause` can interrupt a run the loop
     // is already blocked in.
@@ -259,6 +268,7 @@ pub fn run(spec: Option<TargetSpec>, port: Option<u16>) -> Result<()> {
     };
 
     let mut server = Server::new(session, out, rx, Arc::clone(&cancel));
+    server.memory_source = memory_source;
     server.terminating = termination::install(&cancel);
     server.serve();
     if let Some(session) = server.session.as_mut()
@@ -305,6 +315,7 @@ impl Server {
             supports_invalidated: false,
             configured: false,
             done: false,
+            memory_source: KdMemorySource::Auto,
         }
     }
 
@@ -639,7 +650,7 @@ impl Server {
             );
             return Ok(None);
         }
-        let spec = target_spec(args)?;
+        let spec = target_spec(self.memory_source, args)?;
         let mut session = open_session(&spec, &mut |line| eprintln!("{line}"))
             .map_err(|error| error.to_string())?;
         share_cancel(&mut session, &self.cancel);
@@ -842,8 +853,12 @@ fn share_cancel(session: &mut Session, cancel: &Arc<AtomicBool>) {
 }
 
 /// Build a target spec from `launch`/`attach` arguments. Kernel debugging has
-/// no process to launch, so both requests mean the same thing.
-fn target_spec(args: &Value) -> result::Result<TargetSpec, String> {
+/// no process to launch, so both requests mean the same thing. A KD or KDNET
+/// target that names no `memorySource` takes `default_memory_source`.
+fn target_spec(
+    default_memory_source: KdMemorySource,
+    args: &Value,
+) -> result::Result<TargetSpec, String> {
     if let Some(dump) = args.get("dump") {
         let dump = dump
             .as_str()
@@ -867,6 +882,7 @@ fn target_spec(args: &Value) -> result::Result<TargetSpec, String> {
     };
     let memory_source = match arg_str(args, "memorySource") {
         Some(source) => source.parse::<KdMemorySource>()?,
+        None if matches!(backend, Backend::Kd | Backend::KdNet) => default_memory_source,
         None => KdMemorySource::Auto,
     };
     let spec = TargetSpec::Live {
