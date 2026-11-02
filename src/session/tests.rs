@@ -117,6 +117,8 @@ pub struct MockBackend {
     kept: Option<StopEvent>,
     /// Accept selecting (and report) one vCPU, as a stub does.
     one_vcpu: bool,
+    /// Windows' own handlers take the debug traps, as over KD.
+    traps_reach_target: bool,
     /// The `_ETHREAD` each processor runs, shared with the session's target
     /// (see [`MockBackend::scheduling`]).
     threads: Arc<Mutex<HashMap<u16, VirtAddr>>>,
@@ -210,6 +212,7 @@ impl Default for MockBackend {
             last_event: None,
             kept: None,
             one_vcpu: false,
+            traps_reach_target: false,
             threads: Arc::new(Mutex::new(HashMap::new())),
             step_landings: VecDeque::new(),
             step_reported_by: None,
@@ -425,6 +428,9 @@ impl DebugBackend for MockBackend {
     }
     fn target_manages_breakpoint_sites(&self) -> bool {
         self.target_manages_sites
+    }
+    fn debug_traps_reach_target(&self) -> bool {
+        self.traps_reach_target
     }
     /// The tests put code at low addresses, user space by address; a mock
     /// that takes breakpoints takes them there too, as KD does.
@@ -1716,6 +1722,65 @@ fn stepping_session(code: &[u8], backend: MockBackend) -> Session {
     session.backend = Box::new(backend);
     session.register_map = Arch::Amd64.register_map().clone();
     session
+}
+
+/// Over KD, no breakpoint is planted in the kernel debugger's own code, nt's
+/// debugger exit or KD's transport, neither one the user sets nor a run's or
+/// a step out's: Windows runs that code on every trap, so the breakpoint
+/// would enter the debugger again from within it until the target crashes.
+/// Elsewhere it is planted, as it is in that code where the debugger does
+/// not take the trap (a GDB stub).
+#[test]
+fn no_breakpoint_is_planted_in_the_kernel_debuggers_own_code() {
+    // `register_module_for_test` puts module `guid` at 0x1000_0000 * (guid + 1).
+    const NT: u64 = 0x2000_0000;
+    const KDNET: u64 = 0x3000_0000;
+    for over_kd in [true, false] {
+        let backend = MockBackend {
+            allow_breakpoints: true,
+            traps_reach_target: over_kd,
+            ..MockBackend::default()
+        };
+        let writes = Arc::clone(&backend.site_writes);
+        let mut session = stepping_session(&[0x90u8; 0x40], backend);
+        let symbols = &session.target.symbols;
+        let dtb = session.target.kernel_dtb();
+        symbols.set_kernel(Some(1), dtb);
+        symbols.inject_module_for_test(
+            1,
+            Vec::new(),
+            &[("KdExitDebugger", 0x100), ("KiSwapContext", 0x200)],
+        );
+        symbols.register_module_for_test(1, "nt", dtb);
+        symbols.inject_module_for_test(2, Vec::new(), &[("KdSendPacket", 0x10)]);
+        symbols.register_module_for_test(2, "kdnet", dtb);
+
+        let in_exit = session
+            .add_breakpoint(VirtAddr(NT + 0x1b8), None, BreakpointConfig::default())
+            .map(|_| ());
+        let in_transport = session
+            .add_temporary_code(VirtAddr(KDNET + 0x18), None)
+            .map(|_| ());
+        let elsewhere = session.add_temporary_code(VirtAddr(NT + 0x210), None);
+
+        for refused in [&in_exit, &in_transport] {
+            match refused {
+                Err(error) if over_kd => assert!(
+                    error.to_string().contains("the kernel debugger's own code"),
+                    "{error}"
+                ),
+                result => assert_eq!(result.is_ok(), !over_kd, "{result:?}"),
+            }
+        }
+        assert!(elsewhere.is_ok(), "{elsewhere:?}");
+        let planted: Vec<u64> = writes.lock().iter().map(|(address, _)| *address).collect();
+        let expected: Vec<u64> = if over_kd {
+            vec![NT + 0x210]
+        } else {
+            vec![NT + 0x1b8, KDNET + 0x18, NT + 0x210]
+        };
+        assert_eq!(planted, expected);
+    }
 }
 
 /// Where a step that ended as a plain step left its vCPU.

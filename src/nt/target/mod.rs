@@ -7,6 +7,7 @@ use parking_lot::Mutex;
 
 pub mod alpc;
 pub mod apic;
+mod blocklist;
 pub mod breaks;
 pub mod classpnp;
 mod context;
@@ -41,7 +42,6 @@ pub mod smbios;
 pub mod srb;
 pub mod storport;
 mod symbols;
-mod trap_sites;
 pub mod userdump;
 pub mod usermode;
 mod variables;

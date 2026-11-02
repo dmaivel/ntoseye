@@ -1,9 +1,12 @@
 //! Kernel code where a debug trap that Windows takes itself, as it takes
 //! KD's single steps and breakpoints, brings the kernel down instead of
-//! reaching the debugger.
+//! reaching the debugger: the breakpoint blocklist, which
+//! `NTOSEYE_NO_BREAKPOINT_BLOCKLIST` turns off, and the code no single step
+//! may enter.
 
 use std::collections::{HashSet, VecDeque};
 use std::ops::Range;
+use std::sync::LazyLock;
 
 use iced_x86::{Decoder, DecoderOptions, OpKind};
 
@@ -35,6 +38,44 @@ const BUGCHECK: [&str; 2] = ["KeBugCheckEx", "KeBugCheck2"];
 const MAX_DISPATCH_FUNCTIONS: usize = 256;
 const MAX_FUNCTION_BYTES: u64 = 64 * 1024;
 
+/// Whether breakpoints are refused at the sites that bring the target down:
+/// unless a non-empty `NTOSEYE_NO_BREAKPOINT_BLOCKLIST` turned the blocklist
+/// off, for whoever must break there anyway.
+fn blocklist_enabled() -> bool {
+    static ENABLED: LazyLock<bool> = LazyLock::new(|| {
+        std::env::var_os("NTOSEYE_NO_BREAKPOINT_BLOCKLIST").is_none_or(|value| value.is_empty())
+    });
+    *ENABLED
+}
+
+/// The kernel debugger's own code, as `(module, function)` patterns, where a
+/// trailing `*` matches the rest of the name. Windows runs it on each entry
+/// to the debugger and exit from it, so a breakpoint there traps again from
+/// within the debugger. Over KD a declined breakpoint at nt!KdpReport
+/// bugchecked an x64 target with 0x7F at once, one at nt!KdExitDebugger an
+/// ARM64 target with 0x2B within seconds, and with one at
+/// nt!KdEnterDebugger the next break-in never ended. The transports, which
+/// carry every packet of a debugger session, are listed untested.
+const BREAKPOINT_BLOCKLIST: &[(&str, &str)] = &[
+    ("nt", "KdTrap"),
+    ("nt", "KdEnterDebugger"),
+    ("nt", "KdExitDebugger"),
+    ("nt", "Kdp*"),
+    ("kdcom", "*"),
+    ("kdnet", "*"),
+    ("kdstub", "*"),
+    // kdnet's NIC extensions, such as kd_02_8086.
+    ("kd_*", "*"),
+];
+
+/// Whether `name` matches `pattern`, which may end in `*`.
+fn matches_pattern(pattern: &str, name: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => name == pattern,
+    }
+}
+
 impl Target {
     /// Why a debug trap at `address` must not reach Windows, for `what`
     /// takes one there ("a single step", "a breakpoint"): the address is in
@@ -60,17 +101,52 @@ impl Target {
         ))
     }
 
+    /// Whether `address` is in [`BREAKPOINT_BLOCKLIST`].
+    fn in_kernel_debugger(&self, address: VirtAddr) -> bool {
+        let dtb = self.kernel_dtb();
+        let Some(module) = self.symbols.find_module_for_address(dtb, address) else {
+            return false;
+        };
+        let mut function = None;
+        BREAKPOINT_BLOCKLIST
+            .iter()
+            .any(|&(module_pattern, function_pattern)| {
+                matches_pattern(module_pattern, &module.short_name)
+                    && (function_pattern == "*"
+                        || function
+                            .get_or_insert_with(|| {
+                                self.symbols
+                                    .find_closest_symbol_for_address(dtb, address)
+                                    .map(|(_, name, _)| name)
+                            })
+                            .as_deref()
+                            .is_some_and(|name| matches_pattern(function_pattern, name)))
+            })
+    }
+
     /// Why a breakpoint at `address`, software or a debug register, must not
-    /// reach Windows: the address is in the kernel's transition code (see
-    /// [`Self::kernel_transition_refusal`]), or in the code that Windows runs
+    /// reach Windows, unless the blocklist is off (see [`blocklist_enabled`]):
+    /// the address is in the kernel's transition code (see
+    /// [`Self::kernel_transition_refusal`]), in the kernel debugger's own
+    /// code (see [`BREAKPOINT_BLOCKLIST`]), or in the code that Windows runs
     /// to dispatch a trap before it reports the trap to the debugger. Every
     /// trap runs that code, a trap on the breakpoint too, which then traps
     /// again, until the kernel stack overflows into a double fault. A single
     /// step there is taken: the trap flag is clear while the trap is
     /// dispatched.
     pub fn breakpoint_site_refusal(&self, address: VirtAddr) -> Option<String> {
+        if !blocklist_enabled() {
+            return None;
+        }
         if let Some(refusal) = self.kernel_transition_refusal(address, "a breakpoint") {
             return Some(refusal);
+        }
+        if self.in_kernel_debugger(address) {
+            return Some(format!(
+                "{} is in the kernel debugger's own code, which a breakpoint re-enters on \
+                 every trap until the target crashes, so it cannot be set over KD",
+                self.trap_site_name(address)
+            ));
         }
         let code = self
             .guest
