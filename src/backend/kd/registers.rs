@@ -8,7 +8,8 @@ use crate::base::bytes;
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
 
-use super::{KD_REQUEST_TIMEOUT, KdBackend, api, trace_enabled, with_framing_read_timeout};
+use super::{KD_REQUEST_TIMEOUT, KdBackend, api, with_framing_read_timeout};
+use crate::base::env::Trace;
 
 /// The control-space selector for `KSPECIAL_REGISTERS`, on both
 /// architectures.
@@ -267,7 +268,7 @@ impl KdBackend {
         context_payload(self.arch, &ctx)?;
         self.append_control_registers(&mut ctx)?;
         kd_trace!("kd: read_registers: extended to {} bytes", ctx.len());
-        if trace_enabled() {
+        if Trace::Kd.enabled() {
             let cr3 = self.register_map.read_u64("cr3", &ctx).unwrap_or(0);
             let pc = self
                 .register_map

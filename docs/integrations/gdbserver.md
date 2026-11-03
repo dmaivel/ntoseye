@@ -184,7 +184,7 @@ When a client detaches or disconnects, the server removes that client's breakpoi
 
 ## Troubleshooting
 
-`NTOSEYE_GDB_TRACE=1` prints each packet to stderr, and each line shows the seconds since the first line. There are two types of lines, both on the same clock:
+`NTOSEYE_TRACE=gdb` prints each packet to stderr, and each line shows the seconds since the first line. There are two types of lines, both on the same clock:
 
 - `client` lines show the conversation between the server and its client.
 - `stub` lines show the conversation between the `gdb` backend and the hypervisor's stub.

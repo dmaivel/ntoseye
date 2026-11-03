@@ -96,7 +96,7 @@ When you load a map, `ntoseye` validates every host path first and then replaces
 
 ## Troubleshooting
 
-To see every request, set `NTOSEYE_KD_TRACE=1`. The trace shows the name that the target asked for and the byte ranges that it read:
+To see every request, set `NTOSEYE_TRACE=kd`. The trace shows the name that the target asked for and the byte ranges that it read:
 
 ```
 kd: kdfiles: serving /home/me/build/mydriver.sys as \??\C:\...\mydriver.sys (7920 bytes, handle 0x1, ...)

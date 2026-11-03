@@ -17,8 +17,8 @@ use crate::backend::kd::framing::{
     DataPacket, KdFraming, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO,
     PACKET_TYPE_KD_STATE_CHANGE64, is_temporary_io_error,
 };
-use crate::backend::kd::trace_enabled;
 use crate::base::bytes::{read_u16, read_u32, read_u64};
+use crate::base::env::Trace;
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
 
@@ -579,7 +579,7 @@ pub fn await_state_change(
         };
         match pkt.packet_type {
             PACKET_TYPE_KD_STATE_CHANGE64 => {
-                if trace_enabled() {
+                if Trace::Kd.enabled() {
                     eprintln!("kd: state-change payload ({} bytes):", pkt.payload.len());
                     for chunk in pkt.payload.chunks(16) {
                         eprintln!(
@@ -750,7 +750,7 @@ pub fn advance_pc_past_breakpoint(
     with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
         api::set_context(framing, processor, context_flags, &context)
     })?;
-    if trace_enabled()
+    if Trace::Kd.enabled()
         && let Ok(verify_context) =
             with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
                 api::get_context(framing, processor, context_flags)

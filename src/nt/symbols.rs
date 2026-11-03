@@ -1,7 +1,10 @@
 #[cfg(test)]
 use crate::base::error::Result;
 use crate::{
-    base::types::{Dtb, VirtAddr},
+    base::{
+        env,
+        types::{Dtb, VirtAddr},
+    },
     nt::{
         guest::ModuleInfo,
         layout::{EnumDef, ParsedType, TypeInfo},
@@ -48,8 +51,7 @@ pub static NO_PDB_FROM_MEMORY: OnceLock<bool> = OnceLock::new();
 /// turned it off.
 pub fn pdb_from_memory_enabled() -> bool {
     static ENABLED: LazyLock<bool> = LazyLock::new(|| {
-        !*NO_PDB_FROM_MEMORY.get_or_init(|| false)
-            && std::env::var_os("NTOSEYE_NO_PDB_FROM_MEMORY").is_none_or(|value| value.is_empty())
+        !*NO_PDB_FROM_MEMORY.get_or_init(|| false) && !env::switch_on("NTOSEYE_NO_PDB_FROM_MEMORY")
     });
     *ENABLED
 }

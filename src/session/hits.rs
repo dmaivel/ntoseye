@@ -6,6 +6,7 @@ use crate::arch::{Arch, Family, HardwareWatch, HwBreakpointAccess, RegisterMap};
 use crate::backend::dbg_backend::{
     ContinueDisposition, DebugBackend, StopEvent, processor_index_from_backend_thread_id,
 };
+use crate::base::env::Trace;
 use crate::base::error::{Error, Result};
 use crate::base::notice::Notice;
 use crate::nt::breakpoints::{
@@ -17,9 +18,7 @@ use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
 };
 use crate::session::stops::set_current_thread_from_stop;
-use crate::session::{
-    BreakpointStopAction, STATUS_SINGLE_STEP, Session, WatchpointStopAction, step_trace_enabled,
-};
+use crate::session::{BreakpointStopAction, STATUS_SINGLE_STEP, Session, WatchpointStopAction};
 
 impl Session {
     /// Classify a freshly observed stop at (`rip`, `cr3`) against our breakpoints,
@@ -497,7 +496,7 @@ pub fn resolve_watchpoint_stop(
     let Some(breakpoint) =
         hardware_breakpoint_hit(backend, register_map, breakpoints, event, arch)?
     else {
-        if step_trace_enabled() && breakpoints.has_enabled_hardware_breakpoints() {
+        if Trace::Step.enabled() && breakpoints.has_enabled_hardware_breakpoints() {
             let pc = backend
                 .read_registers()
                 .ok()
@@ -595,7 +594,7 @@ pub fn resolve_watchpoint_stop(
     if !caller_matches {
         // Which caller the hit resolved to tells a filter that never matches
         // from a caller that never comes.
-        if step_trace_enabled() {
+        if Trace::Step.enabled() {
             let found = caller.as_ref().map_or_else(
                 || "caller unknown".to_string(),
                 |caller| {

@@ -5,7 +5,6 @@
 //! per architecture, are in its own `unwind` module.
 
 use std::borrow::Cow;
-use std::sync::LazyLock;
 
 use ntoseye_macros::record;
 
@@ -13,19 +12,13 @@ use super::amd64::unwind::Amd64UnwindInfo;
 use super::arm64::unwind::{Arm64PackedUnwind, Arm64XdataUnwind};
 use super::{Arch, amd64, arm64};
 
-static UNWIND_TRACE: LazyLock<bool> =
-    LazyLock::new(|| std::env::var_os("NTOSEYE_UNWIND_TRACE").is_some());
-
-/// Whether per-frame unwinder diagnostics are on (`NTOSEYE_UNWIND_TRACE`):
-/// which branch each step takes, so an early bail-out (no function entry,
-/// bad codes, a failed read) can be told apart from a genuine leaf pop.
-pub fn unwind_trace_enabled() -> bool {
-    *UNWIND_TRACE
-}
-
+/// Per-frame unwinder diagnostics, under
+/// [`Trace::Unwind`](crate::base::env::Trace::Unwind): which branch each step
+/// takes, so an early bail-out (no function entry, bad codes, a failed read)
+/// can be told apart from a genuine leaf pop.
 macro_rules! unwind_trace {
     ($($arg:tt)*) => {
-        if $crate::arch::unwind::unwind_trace_enabled() {
+        if $crate::base::env::Trace::Unwind.enabled() {
             eprintln!($($arg)*);
         }
     };

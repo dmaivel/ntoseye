@@ -811,8 +811,8 @@ impl<T: Read + Write> KdFraming<T> {
     /// Synchronize to a packet leader: read bytes until we see four identical
     /// leader bytes in a row. Mirrors `KdpReceivePacketLeader` in ReactOS
     fn read_packet_leader(&mut self) -> Result<u32> {
-        // Per-byte trace is its own env var; the packet-level NTOSEYE_KD_TRACE
-        // would drown in raw byte noise from kernel retransmissions
+        // The per-byte trace is its own, `kd-bytes`: the packet-level `kd`
+        // trace would drown in raw byte noise from kernel retransmissions
         loop {
             let mut byte = [0u8; 1];
             match self.transport.read_exact(&mut byte) {

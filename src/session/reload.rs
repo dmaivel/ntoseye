@@ -2,7 +2,7 @@
 //! rediscovery that follow it.
 
 use crate::backend::dbg_backend::StopEvent;
-use crate::backend::kd::{kd_files, trace_enabled};
+use crate::backend::kd::kd_files;
 use crate::base::error::Result;
 use crate::base::notice::Notice;
 use crate::base::types::VirtAddr;

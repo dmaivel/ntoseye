@@ -16,7 +16,6 @@ use crate::arch::HwBreakpointAccess;
 use crate::backend::dbg_backend::{
     BugcheckInfo, ContinueDisposition, ModuleEvent, processor_index_from_backend_thread_id,
 };
-use crate::backend::kd::trace_enabled;
 use crate::base::disasm::ControlFlow;
 use crate::base::error::Result;
 use crate::base::notice::Notice;

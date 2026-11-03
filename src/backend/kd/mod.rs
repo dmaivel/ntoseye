@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use ntoseye_macros::record;
@@ -26,7 +26,7 @@ use crate::base::types::{Dtb, KernelLocation, VirtAddr};
 
 macro_rules! kd_trace {
     ($($arg:tt)*) => {
-        if $crate::backend::kd::trace_enabled() {
+        if $crate::base::env::Trace::Kd.enabled() {
             eprintln!("[{:>9.3}] {}", $crate::backend::kd::trace_elapsed().as_secs_f64(), format_args!($($arg)*));
         }
     };
@@ -34,15 +34,10 @@ macro_rules! kd_trace {
 
 macro_rules! kd_trace_bytes {
     ($($arg:tt)*) => {
-        if $crate::backend::kd::trace_bytes_enabled() {
+        if $crate::base::env::Trace::KdBytes.enabled() {
             eprint!($($arg)*);
         }
     };
-}
-
-pub fn trace_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("NTOSEYE_KD_TRACE").is_some())
 }
 
 /// Seconds since the first trace line, so a trace shows what each request
@@ -50,11 +45,6 @@ pub fn trace_enabled() -> bool {
 pub fn trace_elapsed() -> Duration {
     static START: LazyLock<Instant> = LazyLock::new(Instant::now);
     START.elapsed()
-}
-
-pub fn trace_bytes_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("NTOSEYE_KD_TRACE_BYTES").is_some())
 }
 
 mod amd64;

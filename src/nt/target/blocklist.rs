@@ -13,6 +13,7 @@ use iced_x86::{Decoder, DecoderOptions, OpKind};
 use super::Target;
 use crate::arch::Arch;
 use crate::base::disasm::function_extent;
+use crate::base::env;
 use crate::base::memory::MemoryOps;
 use crate::base::types::{CodeMachine, VirtAddr};
 use crate::nt::unwind::{ThreadTraceContext, function_range, resolve_thread_trace_context};
@@ -39,12 +40,11 @@ const MAX_DISPATCH_FUNCTIONS: usize = 256;
 const MAX_FUNCTION_BYTES: u64 = 64 * 1024;
 
 /// Whether breakpoints are refused at the sites that bring the target down:
-/// unless a non-empty `NTOSEYE_NO_BREAKPOINT_BLOCKLIST` turned the blocklist
-/// off, for whoever must break there anyway.
+/// unless `NTOSEYE_NO_BREAKPOINT_BLOCKLIST` turned the blocklist off, for
+/// whoever must break there anyway.
 fn blocklist_enabled() -> bool {
-    static ENABLED: LazyLock<bool> = LazyLock::new(|| {
-        std::env::var_os("NTOSEYE_NO_BREAKPOINT_BLOCKLIST").is_none_or(|value| value.is_empty())
-    });
+    static ENABLED: LazyLock<bool> =
+        LazyLock::new(|| !env::switch_on("NTOSEYE_NO_BREAKPOINT_BLOCKLIST"));
     *ENABLED
 }
 

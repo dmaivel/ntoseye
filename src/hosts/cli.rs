@@ -138,8 +138,8 @@ struct TargetOptions {
     redownload_symbols: bool,
 
     /// Do not rebuild a missing PDB from the pages of the file in guest
-    /// memory. A non-empty NTOSEYE_NO_PDB_FROM_MEMORY environment variable
-    /// has the same effect
+    /// memory. NTOSEYE_NO_PDB_FROM_MEMORY=1 in the environment has the same
+    /// effect
     #[arg(long, global = true)]
     no_pdb_from_memory: bool,
 }

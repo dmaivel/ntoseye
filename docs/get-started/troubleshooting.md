@@ -74,15 +74,15 @@ To download the symbols again when the cache has a copy, use `--force-download-s
 
 ## Diagnostic output
 
-These environment variables make `ntoseye` show what it does on standard error.
+The `NTOSEYE_TRACE` environment variable makes `ntoseye` show what it does on standard error. Set it to a comma-separated list of traces, such as `NTOSEYE_TRACE=kd,step`.
 
-| Variable | Prints |
+| Trace | Prints |
 | --- | --- |
-| `NTOSEYE_KD_TRACE=1` | Each KD request and reply, with the time since the first line |
-| `NTOSEYE_KD_TRACE_BYTES=1` | The raw bytes on the KD transport |
-| `NTOSEYE_GDB_TRACE=1` | Each GDB remote protocol packet to the stub of the hypervisor and, for `ntoseye gdbserver`, each packet to its client |
-| `NTOSEYE_UNWIND_TRACE=1` | Each step of each stack unwind, to diagnose a wrong or short stack |
-| `NTOSEYE_STEP_TRACE=1` | How each hardware breakpoint stop is classified and why a filter declines it (with the armed hardware breakpoints, for a stop that matches none), each break-in after a run's timeout, each step off a breakpoint site with every stop of it and every run of the other vCPUs it waits on, and the state of a thread a walk follows, to diagnose a stop that does not come, a stop that is not taken for its breakpoint, a step that gives up, or a walk that never ends |
+| `kd` | Each KD request and reply, with the time since the first line |
+| `kd-bytes` | The raw bytes on the KD transport |
+| `gdb` | Each GDB remote protocol packet to the stub of the hypervisor and, for `ntoseye gdbserver`, each packet to its client |
+| `unwind` | Each step of each stack unwind, to diagnose a wrong or short stack |
+| `step` | How each hardware breakpoint stop is classified and why a filter declines it (with the armed hardware breakpoints, for a stop that matches none), each break-in after a run's timeout, each step off a breakpoint site with every stop of it and every run of the other vCPUs it waits on, and the state of a thread a walk follows, to diagnose a stop that does not come, a stop that is not taken for its breakpoint, a step that gives up, or a walk that never ends |
 
 ## Reporting a bug
 
@@ -91,4 +91,4 @@ Open an issue on [GitHub](https://github.com/dmaivel/ntoseye/issues) and include
 - The output of `ntoseye --version`.
 - The output of {command}`vertarget` and {command}`capabilities`.
 - The backend and the hypervisor that you use.
-- If it helps, a trace from one of the variables above.
+- If it helps, a trace from `NTOSEYE_TRACE`.

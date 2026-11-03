@@ -15,7 +15,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use crate::backend::kd::trace_enabled;
+use crate::base::env::Trace;
 use crate::base::memory::{MemoryOps, PAGE_SIZE};
 use crate::base::types::{Dtb, PhysAddr, VirtAddr};
 
@@ -228,7 +228,7 @@ impl SiteJournal {
                     state.sites.remove(&address);
                 }
                 Restore::Reused { now } => {
-                    if trace_enabled() {
+                    if Trace::Kd.enabled() {
                         eprintln!(
                             "breakpoint: journaled site at frame {address:#x} dropped: the frame now \
                              holds the page of PTE {now:#x}, not the one it was planted in"

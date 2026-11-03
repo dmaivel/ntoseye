@@ -9,7 +9,7 @@ use super::sites::{CodeSites, PlantedSite, Publish};
 use super::{BreakpointInfo, BreakpointManager, BreakpointScope, same_address_space};
 use crate::arch::{Arch, Family};
 use crate::backend::dbg_backend::{DebugBackend, DebugCapability};
-use crate::backend::kd::trace_enabled;
+use crate::base::env::Trace;
 use crate::base::error::{Error, Result};
 use crate::base::memory::{MemoryOps, PAGE_SIZE, Residency};
 use crate::base::types::{Dtb, PhysAddr, VirtAddr};
@@ -206,7 +206,7 @@ fn lift_user_site(
             )));
         }
     };
-    if trace_enabled() {
+    if Trace::Kd.enabled() {
         eprintln!(
             "breakpoint: site {:#x} no longer translates in address space {dtb:#x} of exited \
              process {pid} ({refused}); {outcome} (frame {frame:#x})",

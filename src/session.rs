@@ -8,7 +8,6 @@ use std::fs::{remove_file, write};
 use std::mem::take;
 #[cfg(test)]
 use std::process::id;
-use std::sync::LazyLock;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -43,30 +42,25 @@ use crate::session::partition::{KeptPartition, PartitionView};
 use ntoseye_macros::record;
 
 /// Trace reload classification (lines prefixed `reload:`), gated on
-/// `NTOSEYE_KD_TRACE` like the KD packet trace so one capture correlates both.
+/// [`Trace::Kd`](crate::base::env::Trace::Kd) like the KD packet trace so one
+/// capture correlates both.
 /// Off by default; pure output.
 macro_rules! reload_trace {
     ($($arg:tt)*) => {
-        if trace_enabled() {
+        if $crate::base::env::Trace::Kd.enabled() {
             eprintln!("reload: {}", format_args!($($arg)*));
         }
     };
 }
 
-/// Whether `NTOSEYE_STEP_TRACE` is set: see [`step_trace`].
-pub fn step_trace_enabled() -> bool {
-    static ENABLED: LazyLock<bool> =
-        LazyLock::new(|| std::env::var_os("NTOSEYE_STEP_TRACE").is_some());
-    *ENABLED
-}
-
 /// Trace breakpoint and step mechanics (lines prefixed `step:`): how each
 /// hardware stop is classified and filtered, and how a run past a
 /// breakpoint site ends when its vCPU had to wait on the others. Gated on
-/// `NTOSEYE_STEP_TRACE`; pure output, for races that only show under load.
+/// [`Trace::Step`](crate::base::env::Trace::Step); pure output, for races
+/// that only show under load.
 macro_rules! step_trace {
     ($($arg:tt)*) => {
-        if $crate::session::step_trace_enabled() {
+        if $crate::base::env::Trace::Step.enabled() {
             eprintln!("step: {}", format_args!($($arg)*));
         }
     };

@@ -13,6 +13,7 @@ use crate::backend::gdb::GdbClient;
 use crate::backend::kd::{KdBackend, KdMemorySource};
 use crate::backend::memory_backend::MemoryBackend;
 use crate::backend::phys::{HaltClock, PhysMem};
+use crate::base::env;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::notice::Notice;
@@ -153,7 +154,7 @@ impl Session {
                 // abort; NTOSEYE_GDB_ON_HVF=1 is for a VM running a fixed one.
                 if *backend == Backend::Gdb
                     && phys.guest_debug_aborts_vm()
-                    && std::env::var_os("NTOSEYE_GDB_ON_HVF").is_none_or(|value| value != "1")
+                    && !env::switch_on("NTOSEYE_GDB_ON_HVF")
                 {
                     return Err(Error::GdbAbortsHvfVm);
                 }
