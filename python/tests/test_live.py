@@ -46,10 +46,10 @@ IN_GUEST_VP = "of a guest partition, which the Windows hypervisor put on its pro
 # A step-out refused because the stack walk found no caller, as from code
 # that no module or unwind data covers.
 NO_CALLER = "could not find caller return address"
-# A step-out refused because its return lands in the kernel debugger's own
-# code: on ARM64 a step can stop in an interrupt the processor took while it
-# left the debugger.
-IN_DEBUGGER = "the kernel debugger's own code"
+# A step refused because its breakpoint lands in code the kernel debugger
+# runs: on ARM64 a step can stop in an interrupt the processor took while it
+# left the debugger, whose caller and callees are the debugger's.
+IN_DEBUGGER = "code the kernel debugger runs"
 ATTEMPTS = 3
 # How long to wait for the root partition's next IPI or flush hypercall: at
 # low load the whole root made no synthetic IPI for 44 s, and one VP for 64.
@@ -132,11 +132,15 @@ def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
     # hits the test is about are declined either way.
     # Under that load the stepped thread can also exit before it gets past
     # its next instruction, which the step reports, and which leaves
-    # nothing to step out of.
+    # nothing to step out of. On ARM64 a step can stop in the exception
+    # dispatch or in an interrupt taken while the processor left the
+    # debugger, where a step over or out would plant its breakpoint in code
+    # the breakpoint blocklist refuses.
+    blocklisted = (IN_TRAP_DISPATCH, IN_DEBUGGER)
     try:
         over = halted.step_over(until="call", timeout=20.0)
     except ntoseye.NtoseyeError as error:
-        if EXITED not in str(error):
+        if not any(reason in str(error) for reason in (EXITED, *blocklisted)):
             raise
         return
     assert isinstance(over, (Stop.Step, Stop.Interrupt))
@@ -158,7 +162,7 @@ def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
         outermost = NO_CALLER in message and len(halted.cpus[over.cpu].backtrace(limit=2)) < 2
         if (
             EXITED not in message
-            and IN_DEBUGGER not in message
+            and not any(reason in message for reason in blocklisted)
             and not refused_after_interrupt
             and not outermost
         ):

@@ -1724,14 +1724,15 @@ fn stepping_session(code: &[u8], backend: MockBackend) -> Session {
     session
 }
 
-/// Over KD, no breakpoint is planted in the kernel debugger's own code, nt's
-/// debugger exit or KD's transport, neither one the user sets nor a run's or
-/// a step out's: Windows runs that code on every trap, so the breakpoint
-/// would enter the debugger again from within it until the target crashes.
+/// Over KD, no breakpoint is planted in the code on the breakpoint
+/// blocklist, the kernel debugger's own (nt's debugger exit, KD's transport)
+/// or ARM64's trap dispatch, neither one the user sets nor a run's or a step
+/// out's: Windows runs that code on every trap, so the breakpoint would trap
+/// again from within it until the target crashes. The refusal says which.
 /// Elsewhere it is planted, as it is in that code where the debugger does
 /// not take the trap (a GDB stub).
 #[test]
-fn no_breakpoint_is_planted_in_the_kernel_debuggers_own_code() {
+fn no_breakpoint_is_planted_in_blocklisted_code() {
     // `register_module_for_test` puts module `guid` at 0x1000_0000 * (guid + 1).
     const NT: u64 = 0x2000_0000;
     const KDNET: u64 = 0x3000_0000;
@@ -1749,7 +1750,11 @@ fn no_breakpoint_is_planted_in_the_kernel_debuggers_own_code() {
         symbols.inject_module_for_test(
             1,
             Vec::new(),
-            &[("KdExitDebugger", 0x100), ("KiSwapContext", 0x200)],
+            &[
+                ("KdExitDebugger", 0x100),
+                ("KiSwapContext", 0x200),
+                ("KiSynchronousException", 0x300),
+            ],
         );
         symbols.register_module_for_test(1, "nt", dtb);
         symbols.inject_module_for_test(2, Vec::new(), &[("KdSendPacket", 0x10)]);
@@ -1761,14 +1766,18 @@ fn no_breakpoint_is_planted_in_the_kernel_debuggers_own_code() {
         let in_transport = session
             .add_temporary_code(VirtAddr(KDNET + 0x18), None)
             .map(|_| ());
+        let in_dispatch = session
+            .add_temporary_code(VirtAddr(NT + 0x328), None)
+            .map(|_| ());
         let elsewhere = session.add_temporary_code(VirtAddr(NT + 0x210), None);
 
-        for refused in [&in_exit, &in_transport] {
+        for (refused, why) in [
+            (&in_exit, "code the kernel debugger runs"),
+            (&in_transport, "code the kernel debugger runs"),
+            (&in_dispatch, "dispatch a debug trap"),
+        ] {
             match refused {
-                Err(error) if over_kd => assert!(
-                    error.to_string().contains("the kernel debugger's own code"),
-                    "{error}"
-                ),
+                Err(error) if over_kd => assert!(error.to_string().contains(why), "{error}"),
                 result => assert_eq!(result.is_ok(), !over_kd, "{result:?}"),
             }
         }
@@ -1777,7 +1786,7 @@ fn no_breakpoint_is_planted_in_the_kernel_debuggers_own_code() {
         let expected: Vec<u64> = if over_kd {
             vec![NT + 0x210]
         } else {
-            vec![NT + 0x1b8, KDNET + 0x18, NT + 0x210]
+            vec![NT + 0x1b8, KDNET + 0x18, NT + 0x328, NT + 0x210]
         };
         assert_eq!(planted, expected);
     }
