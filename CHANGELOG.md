@@ -13,7 +13,9 @@ Keeping this file:
 - To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes, under the tag as the release title.
 -->
 
-## Unreleased
+## v0.53.0 (2026-11-06)
+
+Stops over KD are several times faster, `dx` and `dt` show typed globals from private PDBs, and many bugs are fixed, in `!heap` and `!pool` on recent Windows 11 builds, in stack walks, and in symbols.
 
 ### Added
 
@@ -23,20 +25,20 @@ Keeping this file:
 
 ### Changed
 
+- **Breaking:** `PteWalk`, the SDK's `!pte` result, lists the entries the walk read as `levels`, root first, as `VtopDetail` does, in place of its `pxe`, `ppe`, `pde` and `pte` fields.
+- **Breaking:** `sx` aliases follow WinDbg's event table: `cc` is Ctrl+C (0x40010005), where it named the C++ exception (`eh`); `asrt` is an assertion failure (0xC0000420); the breakpoint exception is `bpe`, where it was `bp`; and `bpec`, `ssec`, `cce`, `ch`, `hc`, `wkd`, `aph`, `dbce`, `vcpp`, `clr` and `clrn` are added.
+- **Breaking:** `dt -a` counts above 16 and `dl` sizes above 64 are errors, where they were cut silently, and `dt`'s help says arrays show their first 16 elements.
+- **Breaking:** The diagnostic traces are turned on by one environment variable, `NTOSEYE_TRACE`, a comma-separated list of `kd`, `kd-bytes`, `gdb`, `step` and `unwind`, in place of `NTOSEYE_KD_TRACE`, `NTOSEYE_KD_TRACE_BYTES`, `NTOSEYE_GDB_TRACE`, `NTOSEYE_STEP_TRACE` and `NTOSEYE_UNWIND_TRACE`, which any value turned on, `0` included.
+- **Breaking:** `NTOSEYE_NO_PDB_FROM_MEMORY` and `NTOSEYE_GDB_ON_HVF` are off when empty or `0`, and on for any other value: `NTOSEYE_NO_PDB_FROM_MEMORY=0` turned the rebuild from memory off, and `NTOSEYE_GDB_ON_HVF` was on only at `1`.
 - `ProcessDetail.vad_count` gives the number of VADs, `Peb.api_set_map` and `ProcessParameters.environment_size` are `None` on a build without the field, and `!chkimg`'s `SelfPatchKind` and `ImageSelfPatchCounts` have the import address table, service table and processor patch site kinds.
-- `PteWalk`, the SDK's `!pte` result, lists the entries the walk read as `levels`, root first, as `VtopDetail` does, in place of its `pxe`, `ppe`, `pde` and `pte` fields.
 - `SystemPteTypeDetail.used` is `None` where `SystemPteTypeDetail.counters_hold` is false, and `SystemPtesDetail.uncounted` names the allocators its totals leave out.
 - `LfhSubsegment.block_count` counts the blocks a subsegment withholds, and `LfhSubsegment.bit_stride` gives its bitmap's bits per block; `LfhSubsegment.bucket` is `None` for a subsegment that names no bucket, and `VtopDetail.physical_walk` says whether its entry addresses are physical (an explicit DTB) or in the self-map.
-- `sx` aliases follow WinDbg's event table: `cc` is Ctrl+C (0x40010005), where it named the C++ exception (`eh`); `asrt` is an assertion failure (0xC0000420); the breakpoint exception is `bpe`, where it was `bp`; and `bpec`, `ssec`, `cce`, `ch`, `hc`, `wkd`, `aph`, `dbce`, `vcpp`, `clr` and `clrn` are added.
 - `bp`, `ba` and `bm` with `/p <pid>` evaluate the address or pattern in that process, as after `.process /p` and without changing the current process context, so `ba e1 /p <pid> kernelbase!GetFileAttributesExW+0x60` works from a break-in in the System process or the hypervisor; the SDK's `breakpoints.add(hardware=True, process=...)` and `breakpoints.watch(..., process=...)` do the same.
-- `dt -a` counts above 16 and `dl` sizes above 64 are errors, where they were cut silently, and `dt`'s help says arrays show their first 16 elements.
 - `.process` takes a process's image name, as `!process` does (`.process /p /r explorer.exe`), besides its EPROCESS address and PID; a name several processes share is refused with a hint to give the PID.
 - At a stop in the Windows hypervisor whose context is the hypervisor's own (after `.cxr`, or on its VM-exit entry, whose saved VTL0 state may be one exit behind), a `d*` listing or `dx` that cannot read an NT address, and a command that fails on one, add a note that the hypervisor's address space does not map it and that `.vtlcxr` selects where VTL0 left off.
 - Over KD on ARM64, a processor's KPCR is read once a boot instead of at every register read, which makes `~` and a debug adapter's thread list about a third faster.
 - Over KD, a stop no longer reads the kernel's whole module list again, since the target reports every module load and unload, and a processor's process is named without walking the process list and reading each long process name from its process's memory. A REPL stop over a serial link with memory read through KD took 9 to 15 s, and takes 1 to 2.5 s.
 - A stop's stack says `... more frames` under the six frames it shows, without counting them: a stop walked 64 frames to count the ones it leaves out, each a few memory reads, and loaded the symbols of every module they ran in. Over serial KD reading memory through KD, a stop at `nt!NtClose` took 1.7 to 11 s, once 81 s on a deep stack, where it takes 1.3 to 6.7 s. `k` and the other stack listings still count what they leave out.
-- The diagnostic traces are turned on by one environment variable, `NTOSEYE_TRACE`, a comma-separated list of `kd`, `kd-bytes`, `gdb`, `step` and `unwind`, in place of `NTOSEYE_KD_TRACE`, `NTOSEYE_KD_TRACE_BYTES`, `NTOSEYE_GDB_TRACE`, `NTOSEYE_STEP_TRACE` and `NTOSEYE_UNWIND_TRACE`, which any value turned on, `0` included.
-- `NTOSEYE_NO_PDB_FROM_MEMORY` and `NTOSEYE_GDB_ON_HVF` are off when empty or `0`, and on for any other value: `NTOSEYE_NO_PDB_FROM_MEMORY=0` turned the rebuild from memory off, and `NTOSEYE_GDB_ON_HVF` was on only at `1`.
 
 ### Fixed
 
