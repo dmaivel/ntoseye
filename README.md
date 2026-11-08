@@ -7,7 +7,7 @@
 [![crates.io](https://img.shields.io/crates/v/ntoseye?style=flat-square&labelColor=1c1c1c&logo=rust&logoColor=white)](https://crates.io/crates/ntoseye)
 [![docs.rs](https://img.shields.io/docsrs/ntoseye?style=flat-square&labelColor=1c1c1c&logo=docsdotrs&logoColor=white)](https://docs.rs/ntoseye)
 
-A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode and user-mode debugging of virtual and physical machines, and offline crash-dump analysis.
+A WinDbg-like Windows debugger for Linux, macOS, and Windows hosts, with support for kernel-mode and user-mode debugging of virtual and physical machines, and offline crash-dump analysis.
 
 ## Showcase
 
@@ -51,7 +51,7 @@ A WinDbg-like Windows debugger for Linux and macOS, with support for kernel-mode
 
 ## Install
 
-`ntoseye` runs on Linux (x86-64, ARM64) and macOS on Apple Silicon. Every method below installs the same debugger; they differ in whether it embeds Python, which [custom commands](https://ntoseye.com/scripting/commands/) need, and in what they need installed first:
+`ntoseye` runs on Linux (x86-64, ARM64), on macOS on Apple Silicon, and on Windows on x86-64. Every method below installs the same debugger; they differ in whether it embeds Python, which [custom commands](https://ntoseye.com/scripting/commands/) need, and in what they need installed first:
 
 | Method | Custom commands | Needs |
 |---|---|---|

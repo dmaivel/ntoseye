@@ -35,8 +35,12 @@ You can debug any Windows 10/11 target that is reachable over the network with `
 | Linux | KVM/QEMU | AMD64 | Yes | Yes | Yes | Yes |
 | Linux | VMware Workstation | AMD64 | Yes | Yes | Yes | Yes |
 | macOS | UTM (QEMU/HVF) | ARM64 | Yes | Yes | Yes (see below) | Yes |
+| Windows | QEMU | AMD64 | Yes | Yes | Yes | Yes |
+| Windows | VMware Workstation | AMD64 | Yes | Yes | Yes | Yes |
 
 We did not test these integrations with other hypervisors. Crash-dump analysis supports AMD64 and ARM64 dumps.
+
+On Windows, the `kd` backend connects to a named pipe instead of a Unix socket (`--connect \\.\pipe\ntoseye-kd`, the default; a bare name is taken relative to `\\.\pipe\`), as QEMU's `-chardev pipe,id=kd,path=ntoseye-kd` creates, and the `memory` backend finds a running `qemu-system-*.exe` or `vmware-vmx.exe` by its process image. `ntoseye configure` has no hypervisor to edit there, so it prints the guest commands and the QEMU arguments instead: see the [KVM/QEMU guide](kvm-qemu.md#kd-over-a-named-pipe-windows-host).
 
 On UTM, the `gdb` backend needs "Use Hypervisor" turned off, because QEMU versions before 10.1 abort the VM when a debugger enables guest debugging on HVF. If "Use Hypervisor" is on, `ntoseye` does not connect. If your QEMU version has the fix, set `NTOSEYE_GDB_ON_HVF=1` to override this check. The [UTM guide](utm.md) has the details. The other backends do not have this problem, because they do not ask the hypervisor for debug traps.
 

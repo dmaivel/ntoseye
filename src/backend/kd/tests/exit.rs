@@ -3,7 +3,6 @@
 use super::*;
 
 use std::io::Write;
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::thread::spawn;
@@ -14,10 +13,11 @@ use crate::backend::kd::framing::{
     PACKET_TYPE_KD_ACKNOWLEDGE, PACKET_TYPE_KD_STATE_CHANGE64, PACKET_TYPE_KD_STATE_MANIPULATE,
     control_packet, data_packet,
 };
+use crate::backend::kd::transport::serial_pair;
 
 #[test]
 fn exit_restores_breakpoints_the_host_left_installed() {
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.link.halt();
     backend.bp_handles.insert(0xfffff80000003000, 4);
@@ -41,7 +41,7 @@ fn exit_restores_breakpoints_the_host_left_installed() {
 
 #[test]
 fn exit_resume_consumes_pump_stop_before_final_continue() {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     let breakin_clone = host.try_clone().unwrap();
     let framing = KdFraming::new(host.into());
     let (tx, rx) = mpsc::channel();
@@ -154,7 +154,7 @@ fn exit_resume_consumes_pump_stop_before_final_continue() {
 
 #[test]
 fn explicit_halted_exit_suppresses_drop_resume() {
-    let (host, _kernel) = UnixStream::pair().unwrap();
+    let (host, _kernel) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.link.halt();
 

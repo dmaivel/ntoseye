@@ -2,7 +2,6 @@ use super::*;
 use crate::base::bytes;
 
 use std::io::{Cursor, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::thread::{JoinHandle, spawn};
 
 use crate::arch::{amd64, arm64};
@@ -13,6 +12,7 @@ use crate::backend::kd::framing::{
 };
 use crate::backend::kd::memory::{KD_REMOTE_MEMORY_CHUNK, LineCache};
 use crate::backend::kd::registers::CONTROL_SPACE_KSPECIAL;
+use crate::backend::kd::transport::{SerialStream, serial_pair};
 
 mod breakpoints;
 mod connect;
@@ -35,7 +35,7 @@ fn kd_memory_source_parses_supported_values() {
 
 #[test]
 fn arm64_capabilities_include_debug_breakpoints() {
-    let (_kernel, host) = UnixStream::pair().unwrap();
+    let (_kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.arch = Arch::Arm64;
 
@@ -124,7 +124,7 @@ fn wire_header(packet: &[u8]) -> Header {
 }
 
 /// Read one whole packet, header through trailer, off the host's side of the wire.
-fn try_read_wire_packet(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
+fn try_read_wire_packet(stream: &mut SerialStream) -> std::io::Result<Vec<u8>> {
     let mut packet = vec![0u8; HEADER_SIZE];
     stream.read_exact(&mut packet)?;
     packet.resize(wire_header(&packet).packet_len(), 0);
@@ -132,13 +132,13 @@ fn try_read_wire_packet(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
     Ok(packet)
 }
 
-fn read_wire_packet(stream: &mut UnixStream) -> Vec<u8> {
+fn read_wire_packet(stream: &mut SerialStream) -> Vec<u8> {
     try_read_wire_packet(stream).unwrap()
 }
 
 /// ACK and return the payload of the host's next data packet, skipping the
 /// host's ACKs of our replies; `None` once the host hangs up.
-fn recv_host_request(kernel: &mut UnixStream) -> Option<Vec<u8>> {
+fn recv_host_request(kernel: &mut SerialStream) -> Option<Vec<u8>> {
     loop {
         let packet = try_read_wire_packet(kernel).ok()?;
         let header = wire_header(&packet);
@@ -168,7 +168,7 @@ fn exception_state_change_payload(pc: u64) -> Vec<u8> {
     state_change_payload(DBG_KD_EXCEPTION_STATE_CHANGE, pc)
 }
 
-fn kd_backend_with_pump(pump: PumpHandle, breakin_clone: UnixStream) -> KdBackend {
+fn kd_backend_with_pump(pump: PumpHandle, breakin_clone: SerialStream) -> KdBackend {
     KdBackend {
         link: Link::RunningPumped(pump),
         breakin_clone: breakin_clone.into(),
@@ -217,7 +217,7 @@ fn scripted_target(replies: &[Vec<u8>]) -> Vec<u8> {
     stream
 }
 
-fn kd_backend_with_framing(host: UnixStream) -> KdBackend {
+fn kd_backend_with_framing(host: SerialStream) -> KdBackend {
     let breakin_clone = host.try_clone().unwrap();
     KdBackend {
         link: Link::RunningInline(KdFraming::new(host.into())),
@@ -275,7 +275,7 @@ fn manipulate_reply_payload(api_number: u32, processor: u16, union_body: &[u8]) 
 /// trailing data. Yields the `(api, union)` pairs the host actually sent -
 /// a breakpoint address for a write, a table handle for a restore.
 fn serve_breakpoints(
-    mut kernel: UnixStream,
+    mut kernel: SerialStream,
     script: Vec<(u32, u32, u32)>,
 ) -> JoinHandle<Vec<(u32, u64)>> {
     const UNION: usize = 16;

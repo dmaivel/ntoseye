@@ -668,17 +668,26 @@ fn resolve_ntoseye_home() -> Option<PathBuf> {
 }
 
 fn user_home_dir() -> Option<PathBuf> {
-    std::env::var("SUDO_USER")
-        .ok()
-        .filter(|user| !user.is_empty())
-        .map(|user| {
-            if cfg!(target_os = "macos") {
-                PathBuf::from(format!("/Users/{user}"))
-            } else {
-                PathBuf::from(format!("/home/{user}"))
-            }
-        })
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+    #[cfg(unix)]
+    {
+        std::env::var("SUDO_USER")
+            .ok()
+            .filter(|user| !user.is_empty())
+            .map(|user| {
+                if cfg!(target_os = "macos") {
+                    PathBuf::from(format!("/Users/{user}"))
+                } else {
+                    PathBuf::from(format!("/home/{user}"))
+                }
+            })
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+    }
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+    }
 }
 
 /// Whether a lookup in the image cache may download a missing image.

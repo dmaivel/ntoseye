@@ -84,7 +84,7 @@ impl DownloadJob {
             let _ = std::fs::remove_file(&tmp_path);
             return Err(error.into());
         }
-        std::fs::rename(tmp_path, &self.path)?;
+        crate::base::files::replace(&tmp_path, &self.path)?;
         Ok(())
     }
 }
@@ -172,7 +172,7 @@ fn download_url_to_path(url: &str, path: &Path, filename: &str, pb: &ProgressBar
         let _ = std::fs::remove_file(&tmp_path);
         return Err(e.into());
     }
-    std::fs::rename(&tmp_path, path)?;
+    crate::base::files::replace(&tmp_path, path)?;
     Ok(())
 }
 
@@ -306,7 +306,7 @@ pub fn install_local_file(source: &Path, destination: &Path) -> Result<()> {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(err.into());
     }
-    std::fs::rename(tmp_path, destination)?;
+    crate::base::files::replace(&tmp_path, destination)?;
     Ok(())
 }
 
@@ -390,7 +390,7 @@ fn resolve_pdb_job(job: &DownloadJob, request: &PdbRequest, pb: ProgressBar) -> 
                             if let Some(parent) = job.path.parent() {
                                 std::fs::create_dir_all(parent)?;
                             }
-                            std::fs::rename(&tmp_path, &job.path)?;
+                            crate::base::files::replace(&tmp_path, &job.path)?;
                             pb.finish_and_clear();
                             return Ok(());
                         }

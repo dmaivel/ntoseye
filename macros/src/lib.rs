@@ -2,6 +2,11 @@
 //! crate (`crate::hosts::python::record`, `crate::hosts::repl`, `crate::hosts::python::command`),
 //! so only that crate can use them.
 
+// On MSVC, a proc-macro's cdylib makes link.exe print "Creating library
+// ...", which rustc reports as `linker_messages`; the line says nothing
+// about the build.
+#![allow(linker_messages)]
+
 mod collection;
 mod command;
 mod docstring;

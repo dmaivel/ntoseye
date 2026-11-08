@@ -49,7 +49,7 @@ use crate::hosts::ui;
 use crate::nt::expr::NumberRadix;
 use crate::nt::guest::ModuleSymbolLoadReport;
 use crate::nt::symbols::ntoseye_home;
-#[cfg(all(unix, feature = "cli"))]
+#[cfg(all(any(unix, windows), feature = "cli"))]
 use crate::nt::target::InterruptRequester;
 #[cfg(feature = "cli")]
 use crate::nt::target::Target;
@@ -61,6 +61,10 @@ use crate::session::Session;
 /// signal leaves through the same teardown as `q`.
 #[cfg(feature = "cli")]
 static TERMINATION_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Set by the Windows console handler for Ctrl+C and Ctrl+Break, which mean
+/// "interrupt the guest" rather than "stop": the bridge below raises it.
+#[cfg(all(windows, feature = "cli"))]
+static INTERRUPT_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// Set while Tern's own prompt reads the line: it polls for termination
 /// itself, and its session needs the real terminal to close.
 #[cfg(feature = "cli")]
@@ -664,11 +668,34 @@ fn install_termination_handler() {
     }
 }
 
-#[cfg(all(not(unix), feature = "cli"))]
-fn install_termination_handler() {}
+/// Turn a console event into an ordinary exit so the teardown below runs
+/// (Windows). Ctrl+C and Ctrl+Break only interrupt the guest: `ctrlc` is
+/// installed just above and stays authoritative for them, while this handler
+/// covers a console in raw mode and a closed, logged-off, or shutting-down
+/// console, where the default disposition would kill the process with
+/// breakpoints still installed in the guest.
+#[cfg(all(windows, feature = "cli"))]
+fn install_termination_handler() {
+    unsafe extern "system" fn handler(event: u32) -> i32 {
+        match event {
+            // CTRL_C_EVENT / CTRL_BREAK_EVENT.
+            0 | 1 => {
+                INTERRUPT_REQUESTED.store(true, Ordering::SeqCst);
+                0
+            }
+            // Close, logoff, shutdown: claim the event so teardown runs.
+            _ => {
+                TERMINATION_REQUESTED.store(true, Ordering::SeqCst);
+                1
+            }
+        }
+    }
+    // SAFETY: the handler only performs atomic stores.
+    unsafe { windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(handler), 1) };
+}
 
 /// How often the bridge below looks for a termination signal.
-#[cfg(all(unix, feature = "cli"))]
+#[cfg(all(any(unix, windows), feature = "cli"))]
 const TERMINATION_POLL: Duration = Duration::from_millis(100);
 
 /// Make a termination signal stop a wait on the guest.
@@ -682,16 +709,22 @@ const TERMINATION_POLL: Duration = Duration::from_millis(100);
 /// Raising the interrupt is exactly what Ctrl+C does, so the wait ends through
 /// the path that is already there, and the prompt then leaves through the same
 /// teardown as `q`.
-#[cfg(all(unix, feature = "cli"))]
+#[cfg(all(any(unix, windows), feature = "cli"))]
 fn bridge_termination_to_interrupt(interrupt: InterruptRequester) {
     std::thread::spawn(move || {
         let mut woke = false;
         loop {
+            #[cfg(all(windows, feature = "cli"))]
+            let interrupt_requested = INTERRUPT_REQUESTED.swap(false, Ordering::SeqCst);
+            #[cfg(not(all(windows, feature = "cli")))]
+            let interrupt_requested = false;
             // Re-raised every tick: a wait that takes the flag with `swap`
             // must not be the only one to see it.
-            if termination_requested() {
+            if termination_requested() || interrupt_requested {
                 interrupt.raise();
-                if !woke && !NATIVE_PROMPT.load(Ordering::SeqCst) {
+                // Only a console close/logoff/shutdown wakes the line editor:
+                // Ctrl+C must not inject a key into it.
+                if !woke && termination_requested() && !NATIVE_PROMPT.load(Ordering::SeqCst) {
                     woke = true;
                     wake_line_editor();
                 }
@@ -724,6 +757,43 @@ fn wake_line_editor() {
     // SAFETY: both descriptors are open; dup2 only replaces descriptor 0.
     unsafe { libc::dup2(reader.as_raw_fd(), libc::STDIN_FILENO) };
     std::mem::forget(writer);
+}
+
+/// The Windows counterpart: put an Enter in the console's input buffer, so
+/// the line editor's pending read of the console completes.
+#[cfg(all(windows, feature = "cli"))]
+fn wake_line_editor() {
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, INPUT_RECORD, KEY_EVENT, KEY_EVENT_RECORD, KEY_EVENT_RECORD_0,
+        STD_INPUT_HANDLE, WriteConsoleInputW,
+    };
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
+
+    let mut records = [INPUT_RECORD::default(); 2];
+    for (index, record) in records.iter_mut().enumerate() {
+        record.EventType = KEY_EVENT as u16;
+        record.Event.KeyEvent = KEY_EVENT_RECORD {
+            bKeyDown: i32::from(index == 0),
+            wRepeatCount: 1,
+            wVirtualKeyCode: VK_RETURN,
+            wVirtualScanCode: 0x1c, // the Enter key's scan code
+            uChar: KEY_EVENT_RECORD_0 {
+                UnicodeChar: u16::from(b'\r'),
+            },
+            ..Default::default()
+        };
+    }
+    let mut written = 0u32;
+    // SAFETY: the array is two valid INPUT_RECORDs; a non-console stdin
+    // simply makes the call fail, which has nothing to undo.
+    unsafe {
+        WriteConsoleInputW(
+            GetStdHandle(STD_INPUT_HANDLE),
+            records.as_ptr(),
+            2,
+            &mut written,
+        );
+    }
 }
 
 #[cfg(feature = "cli")]
@@ -896,7 +966,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     let interrupt = debugger.interrupt_requester();
     ctrlc::set_handler(move || interrupt.raise())?;
     install_termination_handler();
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     bridge_termination_to_interrupt(debugger.interrupt_requester());
 
     // Loaded up front so the summary prints with the transport banner and

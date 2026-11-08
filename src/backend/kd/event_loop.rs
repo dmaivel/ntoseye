@@ -145,6 +145,10 @@ fn control_report(payload: &[u8]) -> Option<ControlReport> {
 }
 
 pub fn kd_socket_connect_error(socket_path: &str, err: std::io::Error) -> Error {
+    #[cfg(windows)]
+    use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+
+    #[cfg(unix)]
     let message = match err.kind() {
         ErrorKind::NotFound => format!(
             "KD serial socket '{socket_path}' does not exist.\n\
@@ -161,6 +165,24 @@ pub fn kd_socket_connect_error(socket_path: &str, err: std::io::Error) -> Error 
              Check the socket owner/mode or run ntoseye with sufficient permissions."
         ),
         _ => format!("failed to connect to KD serial socket '{socket_path}': {err}"),
+    };
+    #[cfg(windows)]
+    let message = match err.raw_os_error().map(|code| code as u32) {
+        Some(ERROR_PIPE_BUSY) => format!(
+            "KD serial pipe '{socket_path}' is already connected (QEMU accepts one client).\n\
+             Close the other debugger and retry."
+        ),
+        _ => match err.kind() {
+            ErrorKind::NotFound => format!(
+                "KD serial pipe '{socket_path}' does not exist.\n\
+                 Start QEMU with -chardev pipe,id=kd,path=<name> -serial chardev:kd, \
+                 then connect with --connect \\\\.\\pipe\\<name>."
+            ),
+            ErrorKind::PermissionDenied => {
+                format!("permission denied opening KD serial pipe '{socket_path}'.")
+            }
+            _ => format!("failed to open KD serial pipe '{socket_path}': {err}"),
+        },
     };
     Error::Kd(message)
 }
@@ -901,12 +923,12 @@ pub fn run_pump(
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
-    use std::os::unix::net::UnixStream;
 
     use super::*;
     use crate::arch::amd64;
     use crate::backend::kd::api::test_wire::{ack_then_reply, build_reply, first_outbound_id};
     use crate::backend::kd::framing::INITIAL_PACKET_ID;
+    use crate::backend::kd::transport::serial_pair;
 
     #[test]
     fn advance_pc_refuses_a_program_counter_that_moved_since_the_decision() {
@@ -918,7 +940,7 @@ mod tests {
         let reply = build_reply(api::DBGKD_GET_CONTEXT, 0, &[], &guest_context);
         let stream = ack_then_reply(first_outbound_id(), INITIAL_PACKET_ID, &reply);
 
-        let (local, mut peer) = UnixStream::pair().unwrap();
+        let (local, mut peer) = serial_pair().unwrap();
         peer.write_all(&stream).unwrap();
         let mut framing = KdFraming::new(KdTransport::Serial(local));
 

@@ -257,7 +257,7 @@ fn write_atomically(path: &Path, text: &str) -> bool {
             file.write_all(text.as_bytes())
                 .and_then(|()| file.sync_all())
         })
-        .and_then(|()| fs::rename(&staging, path))
+        .and_then(|()| crate::base::files::replace(&staging, path))
         .is_ok()
 }
 

@@ -271,6 +271,16 @@ pub fn kdnet_instructions(host: Ipv4Addr, elevated: bool) -> Instructions {
 
 pub fn run_interactive() -> Result<()> {
     let configurators = host_configurators();
+    if configurators.is_empty() {
+        // No host-side VM configuration to offer (Windows): the guest is
+        // prepared by hand from the printed commands.
+        let host = prompt_ipv4(
+            "Host IPv4 address reachable from the guest",
+            default_host_ipv4(),
+        )?;
+        print_instructions(&kdnet_instructions(host, false));
+        return Ok(());
+    }
     let probes = configurators
         .iter()
         .map(|configurator| configurator.probe())
@@ -414,6 +424,14 @@ pub fn run_interactive() -> Result<()> {
 
 pub fn print_status() -> Result<()> {
     let configurators = host_configurators();
+    if configurators.is_empty() {
+        println!(
+            "No hypervisor configuration is available on this host; use --backend kdnet \
+             (or a crash dump) and configure the guest with the commands from \
+             'ntoseye configure'."
+        );
+        return Ok(());
+    }
     for (index, configurator) in configurators.iter().enumerate() {
         if index > 0 {
             println!();
@@ -477,6 +495,10 @@ fn host_configurators() -> Vec<Box<dyn Configurator>> {
     #[cfg(target_os = "macos")]
     {
         vec![Box::new(utm::Utm)]
+    }
+    #[cfg(windows)]
+    {
+        Vec::new()
     }
 }
 
@@ -708,16 +730,19 @@ mod tests {
         };
         assert_eq!(
             render_guest_status(&guest, &inspection),
-            concat!(
-                "  Windows (running)\n",
-                "    KD\n",
-                "      Guest port: COM2\n",
-                "      Endpoint: /tmp/ntoseye-kd.sock\n",
-                "    GDB\n",
-                "      Endpoint: 127.0.0.1:1234\n",
-                "    Run\n",
-                "      ntoseye\n",
-                "      ntoseye --backend gdb\n",
+            format!(
+                concat!(
+                    "  Windows (running)\n",
+                    "    KD\n",
+                    "      Guest port: COM2\n",
+                    "      Endpoint: {}\n",
+                    "    GDB\n",
+                    "      Endpoint: 127.0.0.1:1234\n",
+                    "    Run\n",
+                    "      ntoseye\n",
+                    "      ntoseye --backend gdb\n",
+                ),
+                DEFAULT_KD_SOCKET
             )
         );
     }

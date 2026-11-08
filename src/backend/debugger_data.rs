@@ -346,7 +346,7 @@ fn read_counter_from_a64_getter<M: MemoryOps<VirtAddr>>(
     address: VirtAddr,
     expected_system_partition: VirtAddr,
 ) -> Result<MetadataValue<u64>> {
-    use bad64::{Imm, Op, Operand, Shift};
+    use exarmo_aarch64::{Mnemonic, Modifier, ModifierKind, Offset, Operand, decode_word};
 
     let mut code = [0u8; MAX_GETTER_BYTES];
     memory.read_bytes(address, &mut code)?;
@@ -356,10 +356,6 @@ fn read_counter_from_a64_getter<M: MemoryOps<VirtAddr>>(
     registers[31] = Some(0);
     let mut memory_loads = 0usize;
     let mut saw_system_partition = false;
-    let immediate = |imm: &Imm| match *imm {
-        Imm::Signed(value) => value as u64,
-        Imm::Unsigned(value) => value,
-    };
 
     for (index, word) in code
         .as_chunks::<4>()
@@ -369,43 +365,52 @@ fn read_counter_from_a64_getter<M: MemoryOps<VirtAddr>>(
         .enumerate()
     {
         let pc = address.0 + 4 * index as u64;
-        let Ok(instruction) = bad64::decode(u32::from_le_bytes(*word), pc) else {
+        let Ok(instruction) = decode_word(u32::from_le_bytes(*word)) else {
             break;
         };
-        let unsupported = || unsupported_getter_instruction(address, &instruction.to_string());
+        let unsupported =
+            || unsupported_getter_instruction(address, &instruction.at(pc).to_string());
         let read = |registers: &[Option<u64>; 32], operand: &Operand| -> Option<u64> {
             match operand {
-                Operand::Reg { reg, arrspec: None } => {
-                    let (slot, width) = a64_register(*reg)?;
+                Operand::Reg(reg) if reg.arrangement.is_none() => {
+                    let (slot, width) = a64_register(reg.reg)?;
                     Some(registers[slot]? & width_mask(width))
                 }
-                Operand::Imm32 { imm, shift } | Operand::Imm64 { imm, shift } => match shift {
-                    None => Some(immediate(imm)),
-                    Some(Shift::LSL(amount)) => immediate(imm).checked_shl(*amount),
+                Operand::Imm { value, modifier } => match *modifier {
+                    None => Some(*value as u64),
+                    Some(Modifier {
+                        kind: ModifierKind::Lsl,
+                        amount,
+                    }) => (*value as u64).checked_shl(amount?),
                     Some(_) => None,
                 },
-                Operand::Label(imm) => Some(immediate(imm)),
+                Operand::Label {
+                    offset,
+                    pc: pc_read,
+                } => Some(pc_read.target(pc, *offset, 64)),
                 _ => None,
             }
         };
         let operands = instruction.operands();
         let destination = match operands.first() {
-            Some(Operand::Reg { reg, arrspec: None }) => a64_register(*reg),
+            Some(Operand::Reg(reg)) if reg.arrangement.is_none() => a64_register(reg.reg),
             _ => None,
         };
-        let value = match instruction.op() {
-            Op::RET => {
+        let value = match instruction.mnemonic() {
+            Mnemonic::Ret => {
                 return getter_result(address, registers[0], memory_loads, saw_system_partition);
             }
-            Op::NOP => continue,
-            Op::ADRP | Op::MOV => operands.get(1).and_then(|source| read(&registers, source)),
-            Op::ADD => match operands {
-                [_, left, right] => read(&registers, left)
+            Mnemonic::Nop => continue,
+            Mnemonic::Adrp | Mnemonic::Mov => {
+                operands.get(1).and_then(|source| read(&registers, source))
+            }
+            Mnemonic::Add => match (operands.get(1), operands.get(2)) {
+                (Some(left), Some(right)) => read(&registers, left)
                     .zip(read(&registers, right))
                     .map(|(left, right)| left.wrapping_add(right)),
                 _ => None,
             },
-            Op::UBFX => match operands {
+            Mnemonic::Ubfx => match operands.as_slice() {
                 [_, source, lsb, width] => read(&registers, source)
                     .zip(read(&registers, lsb))
                     .zip(read(&registers, width))
@@ -414,36 +419,32 @@ fn read_counter_from_a64_getter<M: MemoryOps<VirtAddr>>(
                     }),
                 _ => None,
             },
-            Op::LDR | Op::LDAR => {
+            Mnemonic::Ldr | Mnemonic::Ldar => {
                 let effective = match operands.get(1) {
-                    Some(Operand::MemReg(base)) => {
-                        a64_register(*base).and_then(|(slot, _)| registers[slot])
-                    }
-                    Some(Operand::MemOffset {
-                        reg,
-                        offset,
-                        mul_vl: false,
-                        arrspec: None,
-                    }) => a64_register(*reg)
-                        .and_then(|(slot, _)| registers[slot])
-                        .map(|base| base.wrapping_add(immediate(offset))),
-                    Some(Operand::MemExt {
-                        regs: [base, index],
-                        shift: None | Some(Shift::LSL(_)),
-                        arrspec: None,
-                    }) => {
-                        let shift = match operands.get(1) {
-                            Some(Operand::MemExt {
-                                shift: Some(Shift::LSL(amount)),
-                                ..
-                            }) => *amount,
-                            _ => 0,
-                        };
-                        let base = a64_register(*base).and_then(|(slot, _)| registers[slot]);
-                        let index = a64_register(*index).and_then(|(slot, _)| registers[slot]);
-                        base.zip(index).and_then(|(base, index)| {
-                            Some(base.wrapping_add(index.checked_shl(shift)?))
-                        })
+                    Some(Operand::Mem(mem)) => {
+                        let base = a64_register(mem.base).and_then(|(slot, _)| registers[slot]);
+                        match mem.offset {
+                            Offset::None => base,
+                            Offset::Imm {
+                                value,
+                                mul_vl: false,
+                            } => base.map(|base| base.wrapping_add(value as u64)),
+                            Offset::Reg { reg, modifier } => {
+                                let shift = match modifier {
+                                    Some(Modifier {
+                                        kind: ModifierKind::Lsl,
+                                        amount: Some(amount),
+                                    }) => amount,
+                                    None => 0,
+                                    Some(_) => return Err(unsupported()),
+                                };
+                                let index = a64_register(reg).and_then(|(slot, _)| registers[slot]);
+                                base.zip(index).and_then(|(base, index)| {
+                                    Some(base.wrapping_add(index.checked_shl(shift)?))
+                                })
+                            }
+                            _ => None,
+                        }
                     }
                     _ => None,
                 };
@@ -475,20 +476,33 @@ fn read_counter_from_a64_getter<M: MemoryOps<VirtAddr>>(
 
 /// An A64 general-purpose register's number (31 for the zero register) and
 /// width in bytes; `None` for any other register (sp, SIMD).
-fn a64_register(register: bad64::Reg) -> Option<(usize, usize)> {
-    use bad64::Reg;
-    let number = register as u32;
-    if (Reg::X0 as u32..=Reg::X30 as u32).contains(&number) {
-        return Some(((number - Reg::X0 as u32) as usize, 8));
-    }
-    if (Reg::W0 as u32..=Reg::W30 as u32).contains(&number) {
-        return Some(((number - Reg::W0 as u32) as usize, 4));
-    }
-    match register {
-        Reg::XZR => Some((31, 8)),
-        Reg::WZR => Some((31, 4)),
-        _ => None,
-    }
+fn a64_register(register: exarmo_aarch64::Reg) -> Option<(usize, usize)> {
+    use exarmo_aarch64::Reg;
+
+    let width = match register {
+        // Slot 31 is the zero register, which is not a place.
+        Reg::X(_) => 8,
+        Reg::W(_) => 4,
+        Reg::XSp(reg) if !reg.is_sp() => 8,
+        Reg::WSp(reg) if !reg.is_sp() => 4,
+        Reg::WX(reg) => {
+            if reg.is_64() {
+                8
+            } else {
+                4
+            }
+        }
+        Reg::WXSp(reg) if !reg.is_sp() => {
+            if reg.is_64() {
+                8
+            } else {
+                4
+            }
+        }
+        // The stack pointer and the vector registers are not modelled.
+        _ => return None,
+    };
+    Some((register.num() as usize, width))
 }
 
 fn width_mask(width: usize) -> u64 {

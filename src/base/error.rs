@@ -175,9 +175,17 @@ pub enum Error {
     NoVmMemoryRegion,
 
     #[error(
-        "VM process not found\n  KVM (QEMU/Linux): no process has /dev/kvm open\n  VMware: no vmware-vmx process found with /dev/vmmon open. Is the VM powered on?\n  macOS (UTM): no qemu-aarch64-softmmu process found. Is the VM powered on?"
+        "VM process not found\n  KVM (QEMU/Linux): no process has /dev/kvm open\n  VMware: no vmware-vmx process found with /dev/vmmon open. Is the VM powered on?\n  macOS (UTM): no qemu-aarch64-softmmu process found. Is the VM powered on?{}",
+        windows_vm_hint()
     )]
     VmNotFound,
+
+    #[error(
+        "permission denied accessing VM process (PID {pid}): {detail}\n\
+         Windows: run ntoseye elevated, or in the same user session as the VM"
+    )]
+    #[cfg(windows)]
+    VmProcessDenied { pid: u32, detail: String },
 
     #[error(
         "permission denied accessing VM process (PID {pid}): {detail}\n\
@@ -247,6 +255,16 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// The extra line [`Error::VmNotFound`] carries on Windows, where the VM is
+/// found by process image name rather than by an open kernel device.
+fn windows_vm_hint() -> &'static str {
+    if cfg!(windows) {
+        "\n  Windows: no qemu-system-*.exe or vmware-vmx.exe process found. Is the VM powered on?"
+    } else {
+        ""
+    }
+}
 
 /// Tolerate a failed read in a best-effort reader (a missing page becomes
 /// `None`), except a running target: that refusal is not about the page and

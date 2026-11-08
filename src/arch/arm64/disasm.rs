@@ -1,6 +1,10 @@
-//! The A64 instruction set, decoded by bad64.
+//! The A64 instruction set, decoded by exarmo.
 
-use crate::base::bytes::before_nul;
+use exarmo_aarch64::{
+    BranchKind, Cond, Instruction, Mnemonic, Modifier, ModifierKind, Offset, Operand, Reg, Token,
+    TokenKind, decode_word, disassemble,
+};
+
 use crate::base::disasm::{
     AsmKind, AsmToken, ControlFlow, DisasmOperand, DisasmRow, Flow, InstructionSet, OperandKind,
 };
@@ -13,53 +17,110 @@ fn word(bytes: &[u8]) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?))
 }
 
+/// The instruction `bytes` start with.
+fn decode(bytes: &[u8]) -> Option<Instruction> {
+    decode_word(word(bytes)?).ok()
+}
+
+/// The tokens exarmo's formatter writes for `instruction` at `ip`.
+fn formatted(instruction: Instruction, ip: u64) -> Vec<Token> {
+    let mut tokens = Vec::new();
+    // A token sink that allocates cannot fail.
+    let _ = instruction.at(ip).write_tokens(&mut tokens);
+    tokens
+}
+
+/// The mnemonic as the assembly writes it, condition included (`b.eq`); the
+/// formatter splits that into `b`, `.` and the condition.
+fn mnemonic_text(tokens: &[Token]) -> String {
+    tokens
+        .iter()
+        .filter(|token| token.kind == TokenKind::Mnemonic)
+        .map(|token| token.text.as_str())
+        .collect()
+}
+
+/// One of exarmo's tokens as ntoseye's: the formatter separates the mnemonic
+/// from the operands with a tab, where ntoseye writes a space.
+fn asm_token(token: &Token) -> AsmToken {
+    if token.text == "\t" {
+        return AsmToken {
+            text: " ".to_string(),
+            kind: AsmKind::Text,
+        };
+    }
+    AsmToken {
+        text: token.text.clone(),
+        kind: token_kind(&token.text, token.kind),
+    }
+}
+
+/// The palette kind of one token. `Text` holds both the punctuation between
+/// operands (`#`, `!`, `,`) and words the template writes (`mul vl`), which
+/// are told apart by spelling.
+fn token_kind(text: &str, kind: TokenKind) -> AsmKind {
+    match kind {
+        TokenKind::Mnemonic => AsmKind::Mnemonic,
+        TokenKind::Register => AsmKind::Register,
+        TokenKind::Symbol => AsmKind::Keyword,
+        TokenKind::Immediate(_)
+        | TokenKind::Integer(_)
+        | TokenKind::Float
+        | TokenKind::Address(_) => AsmKind::Number,
+        TokenKind::Separator | TokenKind::Bracket => AsmKind::Punctuation,
+        TokenKind::Text if text.chars().any(|c| c.is_ascii_alphanumeric()) => AsmKind::Keyword,
+        TokenKind::Text => AsmKind::Punctuation,
+    }
+}
+
+/// Operand `index` as the assembly writes it, from the tokens that belong to
+/// it; empty when the assembly does not write it (`ret`'s register).
+fn operand_text(tokens: &[Token], index: usize) -> String {
+    let index = u8::try_from(index).ok();
+    tokens
+        .iter()
+        .filter(|token| token.operand.is_some() && token.operand == index)
+        .map(|token| token.text.as_str())
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// The semantic token stream for a decoded instruction.
+fn row_tokens(tokens: &[Token]) -> Vec<AsmToken> {
+    tokens.iter().map(asm_token).collect()
+}
+
 impl InstructionSet for Arm64 {
     fn decode_first(&self, bytes: &[u8]) -> Option<(usize, ControlFlow)> {
-        let instruction = bad64::decode(word(bytes)?, 0).ok()?;
-        let mnemonic = instruction.op().mnem();
-        // `blraa`/`blrab`/`blraaz`/`blrabz` are pointer-authenticated
-        // `blr`; Windows ARM64 kernels emit them.
-        let flow = if mnemonic == "bl" || mnemonic.starts_with("blr") {
-            ControlFlow::Call
-        } else if mnemonic.starts_with("ret") {
-            ControlFlow::Ret
-        } else if mnemonic == "b"
-            || mnemonic.starts_with("b.")
-            // `br`, `braa`, `brab`, `braaz`, `brabz`; never `brk`/SVE `brk*`.
-            || mnemonic == "br"
-            || mnemonic.starts_with("bra")
-            || mnemonic == "cbz"
-            || mnemonic == "cbnz"
-            || mnemonic == "tbz"
-            || mnemonic == "tbnz"
-        {
-            ControlFlow::Branch
-        } else {
-            ControlFlow::Other
+        let instruction = decode(bytes)?;
+        let flow = match instruction.at(0).branch().kind {
+            BranchKind::DirectCall | BranchKind::IndirectCall => ControlFlow::Call,
+            BranchKind::Return | BranchKind::ExceptionReturn => ControlFlow::Ret,
+            BranchKind::Direct | BranchKind::Indirect => ControlFlow::Branch,
+            // `brk`, `udf`, `svc`, `hlt`, and everything that does not branch.
+            _ => ControlFlow::Other,
         };
         Some((4, flow))
     }
 
     fn walk_step(&self, bytes: &[u8], ip: u64) -> Option<(u64, Flow)> {
-        let instruction = bad64::decode(word(bytes)?, ip).ok()?;
-        let target = instruction.operands().iter().find_map(|op| match op {
-            bad64::Operand::Label(imm) => Some(immediate_value(*imm) as u64),
-            _ => None,
-        });
-        let mnemonic = instruction.op().mnem();
-        let flow = match (mnemonic, target) {
-            ("b", Some(target)) => Flow::Jump(target),
-            ("cbz" | "cbnz" | "tbz" | "tbnz", Some(target)) => Flow::Fork(target),
-            (_, Some(target)) if mnemonic.starts_with("b.") => Flow::Fork(target),
-            _ if mnemonic.starts_with("ret")
-                || mnemonic == "br"
-                || mnemonic.starts_with("bra")
-                || mnemonic.starts_with("eret")
-                || mnemonic == "brk"
-                || mnemonic == "udf" =>
-            {
-                Flow::End
-            }
+        let instruction = decode(bytes)?;
+        let branch = instruction.at(ip).branch();
+        let flow = match branch.kind {
+            // A conditional branch falls through, an unconditional one does not.
+            BranchKind::Direct => match (branch.conditional, branch.target) {
+                (true, Some(target)) => Flow::Fork(target),
+                (false, Some(target)) => Flow::Jump(target),
+                _ => Flow::Next,
+            },
+            // `ret`, `eret`, `br`, `braa`/`braaz`/…, and `hlt`.
+            BranchKind::Return
+            | BranchKind::ExceptionReturn
+            | BranchKind::Indirect
+            | BranchKind::Halt => Flow::End,
+            // `brk` and `udf` stop the code that follows them from running.
+            BranchKind::Exception => Flow::End,
             _ => Flow::Next,
         };
         Some((ip + 4, flow))
@@ -77,31 +138,27 @@ impl InstructionSet for Arm64 {
 
     /// `.inst` for a word that encodes no instruction.
     fn mnemonic(&self, bytes: &[u8], ip: u64) -> String {
-        word(bytes)
-            .and_then(|word| bad64::decode(word, ip).ok())
-            .map_or_else(
-                || ".inst".to_string(),
-                |instruction| instruction.op().mnem().to_string(),
-            )
+        match decode(bytes) {
+            Some(instruction) => mnemonic_text(&formatted(instruction, ip)),
+            None => ".inst".to_string(),
+        }
     }
 
     fn operands(&self, bytes: &[u8], ip: u64) -> Vec<DisasmOperand> {
-        word(bytes)
-            .and_then(|word| bad64::decode(word, ip).ok())
-            .map(|instruction| {
-                instruction
-                    .operands()
-                    .iter()
-                    .map(|op| {
-                        let text = operand_tokens(op)
-                            .iter()
-                            .map(|token| token.text.as_str())
-                            .collect();
-                        describe_operand(op, text)
-                    })
-                    .collect()
+        let Some(instruction) = decode(bytes) else {
+            return Vec::new();
+        };
+        let tokens = formatted(instruction, ip);
+        instruction
+            .operands()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, operand)| {
+                let text = operand_text(&tokens, index);
+                // An operand the assembly does not write is not a piece of it.
+                (!text.is_empty()).then(|| describe_operand(operand, text, ip))
             })
-            .unwrap_or_default()
+            .collect()
     }
 
     /// Instructions are four aligned bytes.
@@ -125,8 +182,10 @@ impl InstructionSet for Arm64 {
         ip: u64,
         read: &dyn Fn(&str) -> Option<u64>,
     ) -> Option<bool> {
-        let instruction = bad64::decode(word(bytes)?, ip).ok()?;
-        let mnemonic = instruction.op().mnem();
+        let instruction = decode(bytes)?;
+        if !instruction.at(ip).branch().conditional {
+            return None;
+        }
         let operands = self.operands(bytes, ip);
         let register = || -> Option<u64> {
             let operand = operands.first()?;
@@ -137,36 +196,43 @@ impl InstructionSet for Arm64 {
                 .is_some_and(|name| name.starts_with('w'));
             Some(if narrow { value & 0xffff_ffff } else { value })
         };
-        match mnemonic {
-            "cbz" => return Some(register()? == 0),
-            "cbnz" => return Some(register()? != 0),
-            "tbz" | "tbnz" => {
+        match instruction.mnemonic() {
+            Mnemonic::Cbz => return Some(register()? == 0),
+            Mnemonic::Cbnz => return Some(register()? != 0),
+            Mnemonic::Tbz | Mnemonic::Tbnz => {
                 let bit = u32::try_from(operands.get(1)?.immediate?).ok()?;
                 let set = register()?.checked_shr(bit)? & 1 != 0;
-                return Some(set == (mnemonic == "tbnz"));
+                return Some(set == (instruction.mnemonic() == Mnemonic::Tbnz));
             }
             _ => {}
         }
+        // A conditional branch writes the condition it tests as an operand.
+        let condition = instruction
+            .operands()
+            .iter()
+            .find_map(|operand| match operand {
+                Operand::Cond(condition) => Some(*condition),
+                _ => None,
+            })?;
         let cpsr = read("cpsr")?;
         let flag = |bit: u32| cpsr >> bit & 1 != 0;
         let (n, z, c, v) = (flag(31), flag(30), flag(29), flag(28));
-        Some(match mnemonic.strip_prefix("b.")? {
-            "eq" => z,
-            "ne" => !z,
-            "cs" | "hs" => c,
-            "cc" | "lo" => !c,
-            "mi" => n,
-            "pl" => !n,
-            "vs" => v,
-            "vc" => !v,
-            "hi" => c && !z,
-            "ls" => !c || z,
-            "ge" => n == v,
-            "lt" => n != v,
-            "gt" => !z && n == v,
-            "le" => z || n != v,
-            "al" | "nv" => true,
-            _ => return None,
+        Some(match condition {
+            Cond::Eq => z,
+            Cond::Ne => !z,
+            Cond::Cs => c,
+            Cond::Cc => !c,
+            Cond::Mi => n,
+            Cond::Pl => !n,
+            Cond::Vs => v,
+            Cond::Vc => !v,
+            Cond::Hi => c && !z,
+            Cond::Ls => !c || z,
+            Cond::Ge => n == v,
+            Cond::Lt => n != v,
+            Cond::Gt => !z && n == v,
+            Cond::Le => z || n != v,
+            Cond::Al | Cond::Nv => true,
         })
     }
 
@@ -202,444 +268,184 @@ fn decode_rows(
     resolve: &dyn Fn(u64) -> String,
 ) -> Vec<DisasmRow> {
     let mut rows = Vec::new();
-    for result in bad64::disasm(bytes, start_addr) {
+    for (ip, result) in disassemble(bytes, start_addr) {
         if limit.is_some_and(|n| rows.len() >= n) {
             break;
         }
         // A word that encodes no instruction (a literal, a data slot) is
         // shown as the word, as objdump does; the next one starts 4 bytes on.
-        let instruction = match result {
-            Ok(instruction) => instruction,
-            Err(error) => {
-                let ip = error.address();
-                let start_index = (ip - start_addr) as usize;
-                let Some(word) = bytes.get(start_index..start_index + 4) else {
-                    break;
-                };
-                let value = u32::from_le_bytes(word.try_into().expect("4-byte slice"));
-                rows.push(DisasmRow::new(
-                    CodeMachine::Arm64,
-                    ip,
-                    word,
-                    vec![
-                        AsmToken {
-                            text: ".inst".to_string(),
-                            kind: AsmKind::Keyword,
-                        },
-                        AsmToken {
-                            text: format!(" {value:#010x}"),
-                            kind: AsmKind::Number,
-                        },
-                    ],
-                    None,
-                ));
-                continue;
-            }
+        let Ok(instruction) = result else {
+            let start_index = (ip - start_addr) as usize;
+            let Some(word) = bytes.get(start_index..start_index + 4) else {
+                break;
+            };
+            let value = u32::from_le_bytes(word.try_into().expect("4-byte slice"));
+            rows.push(DisasmRow::new(
+                CodeMachine::Arm64,
+                ip,
+                word,
+                vec![
+                    AsmToken {
+                        text: ".inst".to_string(),
+                        kind: AsmKind::Keyword,
+                    },
+                    AsmToken {
+                        text: format!(" {value:#010x}"),
+                        kind: AsmKind::Number,
+                    },
+                ],
+                None,
+            ));
+            continue;
         };
-        let ip = instruction.address();
         let start_index = (ip - start_addr) as usize;
         let instr_bytes = &bytes[start_index..start_index + 4];
-
-        // The x64 path gets semantic tokens from iced's formatter; bad64 has
-        // no formatter callback, but exposes typed operands, so classify those
-        // into the same palette while reproducing the decoder's Display text
-        // exactly (spaces live inside token text, so `asm()` is unchanged).
-        let tokens = row_tokens(&instruction);
-
-        let comment = pcrel_comment(&instruction, resolve);
+        // exarmo writes the instruction as typed tokens, so the row's text
+        // and its structure come from one pass over the same formatter.
+        let stream = formatted(instruction, ip);
+        let comment = pcrel_comment(instruction, ip, resolve);
         rows.push(DisasmRow::new(
             CodeMachine::Arm64,
             ip,
             instr_bytes,
-            tokens,
+            row_tokens(&stream),
             comment,
         ));
     }
     rows
 }
 
-/// Build the semantic token stream for a decoded AArch64 instruction:
-/// mnemonic plus one classified token group per operand, reproducing bad64's
-/// Display text exactly.
-fn row_tokens(instruction: &bad64::Instruction) -> Vec<AsmToken> {
-    let text = instruction.to_string();
-    let mut tokens = Vec::new();
-    match text.split_once(' ') {
-        Some((mnem, _)) => {
-            tokens.push(AsmToken {
-                text: mnem.to_string(),
-                kind: AsmKind::Mnemonic,
-            });
-            for (i, op) in instruction.operands().iter().enumerate() {
-                let mut op_tokens = operand_tokens(op);
-                if let Some(first) = op_tokens.first_mut() {
-                    let sep = if i == 0 { " " } else { ", " };
-                    first.text = format!("{sep}{}", first.text);
-                }
-                tokens.extend(op_tokens);
-            }
-        }
-        None => tokens.push(AsmToken {
-            text,
-            kind: AsmKind::Mnemonic,
-        }),
-    }
-    tokens
-}
-
-/// Classify one bad64 operand. Post-indexed forms (`[x1], #8`) report the
+/// Classify one operand. Post-indexed forms (`[x1], #8`) report the
 /// writeback offset as `displacement`/`index`, although the access uses the
 /// base alone.
-fn describe_operand(op: &bad64::Operand, text: String) -> DisasmOperand {
-    use bad64::Operand;
+fn describe_operand(operand: &Operand, text: String, ip: u64) -> DisasmOperand {
     let mut out = DisasmOperand::new(OperandKind::Other, text);
-    let full = |reg: bad64::Reg| Some(full_register(reg));
-    match *op {
-        Operand::Reg { reg, .. } | Operand::ShiftReg { reg, .. } | Operand::QualReg { reg, .. } => {
+    match *operand {
+        Operand::Reg(reg) => {
             out.kind = OperandKind::Register;
-            out.register = Some(reg.name().to_string());
-            out.full_register = full(reg);
+            // The arrangement (`v0.4s`) is in the text; the register is `v0`.
+            out.register = Some(reg.reg.to_string());
+            out.full_register = Some(full_register(reg.reg));
         }
-        Operand::SysReg(sr) => {
+        Operand::SysReg(sysreg) => {
             out.kind = OperandKind::Register;
-            out.register = Some(sr.name().to_string());
+            out.register = sysreg.name().map(str::to_string);
             out.full_register = out.register.clone();
         }
-        Operand::Imm32 { imm, shift } | Operand::Imm64 { imm, shift } => {
-            let value = immediate_value(imm);
-            let value = match shift {
-                None => Some(value),
-                Some(bad64::Shift::LSL(amount)) => Some(value << amount),
-                Some(bad64::Shift::MSL(amount)) => {
-                    Some((value << amount) | ((1i128 << amount) - 1))
-                }
-                Some(_) => None,
-            };
-            if let Some(value) = value {
+        Operand::Imm { value, modifier } => {
+            if let Some(value) = shifted_immediate(value, modifier) {
                 out.kind = OperandKind::Immediate;
                 out.immediate = Some(value);
             }
         }
-        Operand::MemReg(reg) => {
-            out.kind = OperandKind::Memory;
-            out.base = full(reg);
-        }
-        Operand::MemOffset {
-            reg,
-            offset,
-            mul_vl,
-            ..
-        } => {
-            out.kind = OperandKind::Memory;
-            out.base = full(reg);
-            // `mul vl` scales the offset by the SVE vector length.
-            out.displacement = (!mul_vl).then(|| immediate_value(offset) as i64);
-        }
-        Operand::MemPreIdx { reg, imm } | Operand::MemPostIdxImm { reg, imm } => {
-            out.kind = OperandKind::Memory;
-            out.base = full(reg);
-            out.displacement = Some(immediate_value(imm) as i64);
-        }
-        Operand::MemPostIdxReg([base, index]) => {
-            out.kind = OperandKind::Memory;
-            out.base = full(base);
-            out.index = full(index);
-        }
-        Operand::MemExt { regs, shift, .. } => {
-            out.kind = OperandKind::Memory;
-            out.base = full(regs[0]);
-            out.index = full(regs[1]);
-            out.scale = Some(match shift {
-                Some(
-                    bad64::Shift::LSL(amount)
-                    | bad64::Shift::UXTW(amount)
-                    | bad64::Shift::SXTW(amount)
-                    | bad64::Shift::UXTX(amount)
-                    | bad64::Shift::SXTX(amount),
-                ) => 1 << amount,
-                _ => 1,
-            });
-        }
-        Operand::Label(imm) => {
+        Operand::Label { offset, pc } => {
             out.kind = OperandKind::Branch;
-            out.immediate = Some(i128::from(immediate_value(imm) as u64));
+            out.immediate = Some(i128::from(pc.target(ip, offset, 64)));
         }
-        _ => {}
+        Operand::Mem(mem) => {
+            out.kind = OperandKind::Memory;
+            out.base = Some(full_register(mem.base));
+            match mem.offset {
+                Offset::None => {}
+                // `mul vl` scales the offset by the SVE vector length.
+                Offset::Imm { value, mul_vl } => {
+                    out.displacement = (!mul_vl).then_some(value);
+                }
+                Offset::Reg { reg, modifier } => {
+                    out.index = Some(full_register(reg));
+                    out.scale = Some(index_scale(modifier));
+                }
+                Offset::Vector { reg, modifier, .. } => {
+                    out.index = Some(full_register(reg));
+                    out.scale = Some(index_scale(modifier));
+                }
+            }
+        }
+        _ => out.kind = OperandKind::Other,
     }
     out
 }
 
-fn immediate_value(imm: bad64::Imm) -> i128 {
-    match imm {
-        bad64::Imm::Signed(value) => value.into(),
-        bad64::Imm::Unsigned(value) => value.into(),
+/// An immediate after the shift the assembly writes on it, or `None` when
+/// it is shifted by one this does not model.
+fn shifted_immediate(value: i64, modifier: Option<Modifier>) -> Option<i128> {
+    let value = i128::from(value);
+    match modifier {
+        None => Some(value),
+        Some(Modifier {
+            kind: ModifierKind::Lsl,
+            amount,
+        }) => value.checked_shl(amount?),
+        Some(Modifier {
+            kind: ModifierKind::Msl,
+            amount,
+        }) => {
+            let amount = amount?;
+            Some((value << amount) | ((1i128 << amount) - 1))
+        }
+        Some(_) => None,
     }
 }
 
-/// The X register a W register is the low half of (`w3` -> `x3`, `wzr` ->
-/// `xzr`, `wsp` -> `sp`); every other register is its own.
-fn full_register(reg: bad64::Reg) -> String {
-    let name = reg.name();
+/// How far a register offset is scaled, for the extends the assembly writes
+/// on one.
+fn index_scale(modifier: Option<Modifier>) -> u32 {
+    match modifier {
+        Some(Modifier {
+            kind:
+                ModifierKind::Lsl
+                | ModifierKind::Sxtw
+                | ModifierKind::Uxtw
+                | ModifierKind::Sxtx
+                | ModifierKind::Uxtx,
+            amount: Some(amount),
+        }) => 1 << amount,
+        _ => 1,
+    }
+}
+
+/// The architectural register a written one is part of: `w3` -> `x3`, `wzr`
+/// -> `xzr`, `wsp` -> `sp`, and the assembler's names for the frame pointer
+/// and link register -> `x29` and `x30`. Only the text keeps the spelling.
+fn full_register(reg: Reg) -> String {
+    let name = reg.to_string();
+    match name.as_str() {
+        "fp" => return "x29".to_string(),
+        "lr" => return "x30".to_string(),
+        _ => {}
+    }
     match name.strip_prefix('w') {
         Some("sp") => "sp".to_string(),
         Some(rest) if rest == "zr" || rest.bytes().all(|b| b.is_ascii_digit()) => {
             format!("x{rest}")
         }
-        _ => name.to_string(),
+        _ => name,
     }
 }
 
-/// Accumulates [`AsmToken`]s while reproducing bad64's spacing: a space is
-/// embedded at the start of the next token when one precedes it in the source.
-struct Tokens {
-    items: Vec<AsmToken>,
-    space: bool,
-}
-
-impl Tokens {
-    fn new() -> Self {
-        Self {
-            items: Vec::new(),
-            space: false,
-        }
-    }
-
-    fn push(&mut self, text: &str, kind: AsmKind) {
-        let text = if self.space && !self.items.is_empty() {
-            format!(" {text}")
-        } else {
-            text.to_string()
-        };
-        self.items.push(AsmToken { text, kind });
-        self.space = false;
-    }
-
-    fn space(&mut self) {
-        self.space = true;
-    }
-
-    fn into_vec(self) -> Vec<AsmToken> {
-        self.items
-    }
-}
-
-/// Register text exactly as bad64 renders it: `reg` plus its arrangement
-/// suffix (and element lane when the operand form carries one).
-fn register_text(reg: bad64::Reg, arrspec: Option<bad64::ArrSpec>, lane: bool) -> String {
-    let mut text = reg.to_string();
-    if let Some(arsp) = arrspec {
-        text.push_str(arsp.suffix(reg));
-        if lane && let Some(l) = arsp.lane() {
-            text.push_str(&format!("[{l}]"));
-        }
-    }
-    text
-}
-
-/// The shift/extend suffix, exactly as bad64 formats it (LSL/LSR/ASR/ROR/MSL
-/// always carry an amount; the extend forms print it only when non-zero).
-fn shift_tokens(shift: &bad64::Shift, t: &mut Tokens) {
-    let (name, amount) = match *shift {
-        bad64::Shift::LSL(a) => ("lsl", Some(a)),
-        bad64::Shift::LSR(a) => ("lsr", Some(a)),
-        bad64::Shift::ASR(a) => ("asr", Some(a)),
-        bad64::Shift::ROR(a) => ("ror", Some(a)),
-        bad64::Shift::UXTW(a) => ("uxtw", (a != 0).then_some(a)),
-        bad64::Shift::SXTW(a) => ("sxtw", (a != 0).then_some(a)),
-        bad64::Shift::UXTX(a) => ("uxtx", (a != 0).then_some(a)),
-        bad64::Shift::SXTX(a) => ("sxtx", (a != 0).then_some(a)),
-        bad64::Shift::SXTB(a) => ("sxtb", (a != 0).then_some(a)),
-        bad64::Shift::SXTH(a) => ("sxth", (a != 0).then_some(a)),
-        bad64::Shift::UXTH(a) => ("uxth", (a != 0).then_some(a)),
-        bad64::Shift::UXTB(a) => ("uxtb", (a != 0).then_some(a)),
-        bad64::Shift::MSL(a) => ("msl", Some(a)),
-    };
-    t.push(name, AsmKind::Keyword);
-    if let Some(a) = amount {
-        t.space();
-        t.push(&format!("#{a:#x}"), AsmKind::Number);
-    }
-}
-
-/// Classify one bad64 [`Operand`] into semantic tokens, the AArch64 analog
-/// of the x64 `TokenSink`. Each branch mirrors bad64's `Display` formatting
-/// for that variant, so the joined tokens are byte-identical to its output.
-fn operand_tokens(op: &bad64::Operand) -> Vec<AsmToken> {
-    let mut t = Tokens::new();
-    match op {
-        bad64::Operand::Imm32 { imm, shift } | bad64::Operand::Imm64 { imm, shift } => {
-            t.push(&format!("#{imm}"), AsmKind::Number);
-            if let Some(shift) = shift {
-                t.push(",", AsmKind::Punctuation);
-                t.space();
-                shift_tokens(shift, &mut t);
-            }
-        }
-        bad64::Operand::FImm32(ff) => {
-            t.push(
-                &format!("#{}", f32::from_le_bytes(ff.to_le_bytes())),
-                AsmKind::Number,
-            );
-        }
-        bad64::Operand::ShiftReg { reg, shift } => {
-            t.push(&reg.to_string(), AsmKind::Register);
-            t.push(",", AsmKind::Punctuation);
-            t.space();
-            shift_tokens(shift, &mut t);
-        }
-        bad64::Operand::QualReg { reg, qual } => {
-            t.push(&format!("{reg}/{qual}"), AsmKind::Register);
-        }
-        bad64::Operand::Reg { reg, arrspec } => {
-            t.push(&register_text(*reg, *arrspec, true), AsmKind::Register);
-        }
-        bad64::Operand::MultiReg { regs, arrspec } => {
-            t.push("{", AsmKind::Punctuation);
-            for (i, reg) in regs.iter().flatten().enumerate() {
-                if i > 0 {
-                    t.push(",", AsmKind::Punctuation);
-                    t.space();
-                }
-                t.push(&register_text(*reg, *arrspec, false), AsmKind::Register);
-            }
-            t.push("}", AsmKind::Punctuation);
-            if let Some(lane) = arrspec.and_then(|arsp| arsp.lane()) {
-                t.push("[", AsmKind::Punctuation);
-                t.push(&lane.to_string(), AsmKind::Number);
-                t.push("]", AsmKind::Punctuation);
-            }
-        }
-        bad64::Operand::SysReg(sr) => t.push(&sr.to_string(), AsmKind::Register),
-        bad64::Operand::MemReg(reg) => {
-            t.push("[", AsmKind::Punctuation);
-            t.push(&reg.to_string(), AsmKind::Register);
-            t.push("]", AsmKind::Punctuation);
-        }
-        bad64::Operand::MemPreIdx { reg, imm } => {
-            t.push("[", AsmKind::Punctuation);
-            t.push(&reg.to_string(), AsmKind::Register);
-            t.push(",", AsmKind::Punctuation);
-            t.space();
-            t.push(&format!("#{imm}"), AsmKind::Number);
-            t.push("]", AsmKind::Punctuation);
-            t.push("!", AsmKind::Punctuation);
-        }
-        bad64::Operand::MemPostIdxImm { reg, imm } => {
-            t.push("[", AsmKind::Punctuation);
-            t.push(&reg.to_string(), AsmKind::Register);
-            t.push("]", AsmKind::Punctuation);
-            t.push(",", AsmKind::Punctuation);
-            t.space();
-            t.push(&format!("#{imm}"), AsmKind::Number);
-        }
-        bad64::Operand::MemPostIdxReg(regs) => {
-            t.push("[", AsmKind::Punctuation);
-            t.push(&regs[0].to_string(), AsmKind::Register);
-            t.push("]", AsmKind::Punctuation);
-            t.push(",", AsmKind::Punctuation);
-            t.space();
-            t.push(&regs[1].to_string(), AsmKind::Register);
-        }
-        bad64::Operand::MemExt {
-            regs,
-            shift,
-            arrspec,
-        } => {
-            t.push("[", AsmKind::Punctuation);
-            t.push(&register_text(regs[0], *arrspec, false), AsmKind::Register);
-            t.push(",", AsmKind::Punctuation);
-            t.space();
-            t.push(&register_text(regs[1], *arrspec, false), AsmKind::Register);
-            if let Some(shift) = shift {
-                t.push(",", AsmKind::Punctuation);
-                t.space();
-                shift_tokens(shift, &mut t);
-            }
-            t.push("]", AsmKind::Punctuation);
-        }
-        bad64::Operand::MemOffset {
-            reg,
-            offset,
-            arrspec,
-            mul_vl,
-        } => {
-            t.push("[", AsmKind::Punctuation);
-            t.push(&register_text(*reg, *arrspec, false), AsmKind::Register);
-            if !matches!(offset, bad64::Imm::Signed(0) | bad64::Imm::Unsigned(0)) {
-                t.push(",", AsmKind::Punctuation);
-                t.space();
-                t.push(&format!("#{offset}"), AsmKind::Number);
-                if *mul_vl {
-                    t.push(",", AsmKind::Punctuation);
-                    t.space();
-                    t.push("mul", AsmKind::Keyword);
-                    t.space();
-                    t.push("vl", AsmKind::Keyword);
-                }
-            }
-            t.push("]", AsmKind::Punctuation);
-        }
-        bad64::Operand::SmeTile { .. } => t.push(&op.to_string(), AsmKind::Text),
-        bad64::Operand::AccumArray { reg, imm } => {
-            t.push("ZA", AsmKind::Text);
-            t.push("[", AsmKind::Punctuation);
-            t.push(&reg.to_string(), AsmKind::Register);
-            t.push(",", AsmKind::Punctuation);
-            t.space();
-            t.push(&format!("#{imm}"), AsmKind::Number);
-            t.push("]", AsmKind::Punctuation);
-        }
-        bad64::Operand::IndexedElement { regs, arrspec, imm } => {
-            t.push(&register_text(regs[0], *arrspec, false), AsmKind::Register);
-            t.push("[", AsmKind::Punctuation);
-            t.push(&regs[1].to_string(), AsmKind::Register);
-            if !matches!(imm, bad64::Imm::Signed(0) | bad64::Imm::Unsigned(0)) {
-                t.push(",", AsmKind::Punctuation);
-                t.space();
-                t.push(&format!("#{imm}"), AsmKind::Number);
-            }
-            t.push("]", AsmKind::Punctuation);
-        }
-        bad64::Operand::Label(imm) => t.push(&imm.to_string(), AsmKind::Number),
-        bad64::Operand::ImplSpec { .. } => t.push(&op.to_string(), AsmKind::Keyword),
-        bad64::Operand::Cond(c) => t.push(&c.to_string(), AsmKind::Keyword),
-        bad64::Operand::Name(_) => t.push(&op.to_string(), AsmKind::Text),
-        bad64::Operand::StrImm { str, imm } => {
-            // A NUL-padded ASCII name from the C decoder.
-            let name = std::str::from_utf8(before_nul(str)).unwrap_or("?");
-            t.push(name, AsmKind::Text);
-            t.space();
-            t.push(&format!("#{imm:#x}"), AsmKind::Number);
-        }
-    }
-    t.into_vec()
-}
-
-/// Symbol comment for an AArch64 PC-relative target. bad64 represents branch
-/// and address-load destinations as `Label` operands with absolute addresses.
+/// Symbol comment for an AArch64 PC-relative target: branch destinations and
+/// `adrp`'s page are label operands naming an absolute address.
 fn pcrel_comment(
-    instruction: &bad64::Instruction,
+    instruction: Instruction,
+    ip: u64,
     resolve: impl Fn(u64) -> String,
 ) -> Option<String> {
-    use bad64::{Imm, Operand};
-    let target = instruction.operands().iter().find_map(|op| match op {
-        Operand::Label(imm) => Some(match imm {
-            Imm::Signed(v) => *v,
-            Imm::Unsigned(v) => *v as i64,
-        }),
-        _ => None,
-    })?;
-    Some(resolve(target as u64))
+    let target = instruction
+        .operands()
+        .iter()
+        .find_map(|operand| match operand {
+            Operand::Label { offset, pc } => Some(pc.target(ip, *offset, 64)),
+            _ => None,
+        })?;
+    Some(resolve(target))
 }
 
 #[cfg(test)]
 mod tests {
-    use bad64::decode;
-
     use super::*;
 
     #[test]
-    fn arm64_rows_reproduce_bad64_display() {
+    fn arm64_rows_reproduce_the_decoder_text() {
         let mut checked = 0;
 
         let real = [
@@ -651,11 +457,26 @@ mod tests {
             0xa9bd7bfd,    // stp x29, x30, [sp, #-0x30]!
             0xf9400020,    // ldr x0, [x1]
             0x91000420,    // add x0, x1, #0x10
+            0x54000061,    // b.ne
+            0xf8617820,    // ldr x0, [x1, x1, lsl #3]
+            0x4e21b820,    // a SIMD instruction with arrangements
+            0xd5380000,    // mrs x0, midr_el1
         ];
         for (i, word) in real.iter().enumerate() {
-            let ins = decode(*word, 0x1000 + 4 * i as u64).expect("real instruction");
-            let joined: String = row_tokens(&ins).iter().map(|t| t.text.as_str()).collect();
-            assert_eq!(joined, ins.to_string(), "text drift for {word:#010x}");
+            let ip = 0x1000 + 4 * i as u64;
+            let instruction = decode_word(*word).expect("real instruction");
+            let tokens = formatted(instruction, ip);
+            let joined: String = row_tokens(&tokens)
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect();
+            // The only difference is the formatter's tab after the mnemonic.
+            assert_eq!(
+                joined,
+                instruction.at(ip).to_string().replace('\t', " "),
+                "text drift for {word:#010x}"
+            );
+            assert_eq!(mnemonic_text(&tokens), row_mnemonic(*word), "{word:#010x}");
             checked += 1;
         }
 
@@ -665,11 +486,20 @@ mod tests {
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
             let word = (state >> 32) as u32;
-            let Ok(ins) = decode(word, 0x2000 + 4 * i) else {
+            let ip = 0x2000 + 4 * i;
+            let Ok(instruction) = decode_word(word) else {
                 continue;
             };
-            let joined: String = row_tokens(&ins).iter().map(|t| t.text.as_str()).collect();
-            assert_eq!(joined, ins.to_string(), "text drift for word {word:#010x}");
+            let tokens = formatted(instruction, ip);
+            let joined: String = row_tokens(&tokens)
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect();
+            assert_eq!(
+                joined,
+                instruction.at(ip).to_string().replace('\t', " "),
+                "text drift for word {word:#010x}"
+            );
             checked += 1;
             if checked >= 500 {
                 break;
@@ -682,27 +512,80 @@ mod tests {
         );
     }
 
+    fn row_mnemonic(word: u32) -> String {
+        Arm64.mnemonic(&word.to_le_bytes(), 0x1000)
+    }
+
     #[test]
     fn arm64_pcrel_comments_resolve_targets() {
         // b -0x2d8
-        let ins = decode(0x17fffd28, 0xfffff8009bb34ff8).unwrap();
-        let comment = pcrel_comment(&ins, |t| format!("SYM:{t:#x}"));
+        let instruction = decode_word(0x17fffd28).unwrap();
+        let comment = pcrel_comment(instruction, 0xfffff8009bb34ff8, |t| format!("SYM:{t:#x}"));
         assert_eq!(comment.as_deref(), Some("SYM:0xfffff8009bb34498"));
 
         // cbnz w10, label
-        let ins = decode(0x35ffffca, 0xfffff8009b40c998).unwrap();
-        let comment = pcrel_comment(&ins, |t| format!("SYM:{t:#x}"));
+        let instruction = decode_word(0x35ffffca).unwrap();
+        let comment = pcrel_comment(instruction, 0xfffff8009b40c998, |t| format!("SYM:{t:#x}"));
         assert_eq!(comment.as_deref(), Some("SYM:0xfffff8009b40c990"));
 
-        let ins = decode(0x90000000, 0x1000).unwrap(); // adrp x0, #0
-        let comment = pcrel_comment(&ins, |t| format!("{t:#x}"));
+        // adrp x0, #0 names the page the PC is in
+        let instruction = decode_word(0x90000000).unwrap();
+        let comment = pcrel_comment(instruction, 0x1000, |t| format!("{t:#x}"));
         assert_eq!(comment.as_deref(), Some("0x1000"));
 
-        let ins = decode(0xd65f03c0, 0x1000).unwrap();
-        assert!(pcrel_comment(&ins, |_| String::new()).is_none());
+        let instruction = decode_word(0xd65f03c0).unwrap();
+        assert!(pcrel_comment(instruction, 0x1000, |_| String::new()).is_none());
 
-        let ins = decode(0x94000005, 0x2000).unwrap();
-        let comment = pcrel_comment(&ins, |t| format!("{t:#x}"));
+        let instruction = decode_word(0x94000005).unwrap();
+        let comment = pcrel_comment(instruction, 0x2000, |t| format!("{t:#x}"));
         assert_eq!(comment.as_deref(), Some("0x2014"));
+    }
+
+    /// The tokens split `b.eq` into its mnemonic pieces, and the row's
+    /// mnemonic joins them back.
+    #[test]
+    fn conditional_branches_keep_their_condition_in_the_mnemonic() {
+        let tokens = formatted(decode_word(0x54000061).unwrap(), 0x1000);
+        assert_eq!(mnemonic_text(&tokens), "b.ne");
+    }
+
+    /// An operand the assembly does not write (`ret`'s register) is not one.
+    #[test]
+    fn implicit_operands_are_left_out() {
+        let operands = Arm64.operands(&0xd65f03c0u32.to_le_bytes(), 0x1000);
+        assert!(operands.is_empty(), "{operands:?}");
+    }
+
+    /// The assembly's `fp`/`lr` are `x29`/`x30` in an operand's structure,
+    /// where every consumer of a register already looks, while the text keeps
+    /// the spelling.
+    #[test]
+    fn abi_register_names_stay_canonical_in_the_structure() {
+        // stp fp, lr, [sp, #-0x30]!
+        let operands = Arm64.operands(&0xa9bd7bfdu32.to_le_bytes(), 0x1000);
+        let pairs: Vec<_> = operands
+            .iter()
+            .map(|operand| (operand.text.as_str(), operand.full_register.as_deref()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("fp", Some("x29")),
+                ("lr", Some("x30")),
+                ("[sp, #-0x30]!", None),
+            ]
+        );
+        assert_eq!(operands[2].base.as_deref(), Some("sp"));
+    }
+
+    /// An arrangement is part of the text, not of the register: `v0.8b` is
+    /// `v0`, as every register operand reads.
+    #[test]
+    fn arranged_registers_report_the_register_without_the_arrangement() {
+        // cnt v0.8b, v0.8b
+        let operands = Arm64.operands(&0x0e205800u32.to_le_bytes(), 0x1000);
+        assert_eq!(operands[0].text, "v0.8b");
+        assert_eq!(operands[0].register.as_deref(), Some("v0"));
+        assert_eq!(operands[0].full_register.as_deref(), Some("v0"));
     }
 }
