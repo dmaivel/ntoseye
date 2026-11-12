@@ -285,6 +285,25 @@ enum BackendArg {
     Dump,
 }
 
+/// Where guest memory comes from for a live kd/kdnet session.
+#[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum MemorySourceArg {
+    Auto,
+    Host,
+    Kd,
+}
+
+impl From<MemorySourceArg> for KdMemorySource {
+    fn from(value: MemorySourceArg) -> Self {
+        match value {
+            MemorySourceArg::Auto => Self::Auto,
+            MemorySourceArg::Host => Self::Host,
+            MemorySourceArg::Kd => Self::Kd,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct OpenArgs {
     #[schemars(
@@ -304,6 +323,10 @@ struct OpenArgs {
         description = "KD/KDNET handshake timeout in positive integer seconds. Only valid for kd and kdnet; overrides NTOSEYE_KD_TIMEOUT. When omitted, uses NTOSEYE_KD_TIMEOUT or the default of 8 seconds."
     )]
     kd_handshake_timeout: Option<u64>,
+    #[schemars(
+        description = "Guest memory source for kd and kdnet: auto (default; validate host memory, then fall back to KD reads), host (read the hypervisor process, which needs an elevated ntoseye), or kd (read memory over KD; slower, but works while the target is halted and never relies on the hypervisor's process layout). Use kd for VMware/Hyper-V under ULM/WHP, where the VM process holds several unrelated large mappings."
+    )]
+    memory_source: Option<MemorySourceArg>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -656,6 +679,7 @@ impl NtoseyeMcp {
             connect,
             key,
             kd_handshake_timeout,
+            memory_source,
         }): Parameters<OpenArgs>,
     ) -> Result<CallToolResult, McpError> {
         let spec = match backend {
@@ -666,15 +690,31 @@ impl NtoseyeMcp {
                 if key.is_some() {
                     return Err(invalid_params("dump does not use 'key'"));
                 }
+                if memory_source.is_some() {
+                    return Err(invalid_params("dump does not use 'memory_source'"));
+                }
                 let path = connect
                     .clone()
                     .ok_or_else(|| invalid_params("dump requires 'connect' (the .dmp path)"))?;
                 TargetSpec::Dump(PathBuf::from(path))
             }
             live => {
-                // The memory source is the operator's call (`--memory-source`
-                // on the CLI); `auto` validates host memory and falls back to
-                // KD, which is right whenever nobody knows better.
+                // Host memory is an optimisation only (`--memory-source` on the CLI); `auto`
+                // validates it and falls back to KD. VMware under ULM/WHP exposes several
+                // unrelated large mappings, so callers can force `kd` and skip the guesswork.
+                let source = match live {
+                    BackendArg::Kd | BackendArg::KdNet => memory_source
+                        .map(KdMemorySource::from)
+                        .unwrap_or(KdMemorySource::Auto),
+                    _ => {
+                        if memory_source.is_some() {
+                            return Err(invalid_params(
+                                "'memory_source' is only valid for kd and kdnet",
+                            ));
+                        }
+                        KdMemorySource::Auto
+                    }
+                };
                 TargetSpec::Live {
                     backend: match live {
                         BackendArg::Kd => Backend::Kd,
@@ -685,7 +725,7 @@ impl NtoseyeMcp {
                     },
                     connect: connect.clone(),
                     kdnet_key: key,
-                    memory_source: KdMemorySource::Auto,
+                    memory_source: source,
                     kd_handshake_timeout,
                 }
             }

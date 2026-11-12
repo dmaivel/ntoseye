@@ -182,7 +182,9 @@ pub enum Error {
 
     #[error(
         "permission denied accessing VM process (PID {pid}): {detail}\n\
-         Windows: run ntoseye elevated, or in the same user session as the VM"
+         Windows: ntoseye enables SeDebugPrivilege, which opening a hypervisor's VM process\n\
+         requires; that needs an elevated (administrator) token, so run ntoseye from an\n\
+         elevated prompt. A protected or higher-integrity hypervisor process can still refuse."
     )]
     #[cfg(windows)]
     VmProcessDenied { pid: u32, detail: String },

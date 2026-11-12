@@ -763,7 +763,11 @@ mod platform {
     use std::io;
 
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_ACCESS_DENIED, HANDLE, INVALID_HANDLE_VALUE,
+        CloseHandle, ERROR_ACCESS_DENIED, HANDLE, INVALID_HANDLE_VALUE, LUID,
+    };
+    use windows_sys::Win32::Security::{
+        AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
+        TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
     };
     use windows_sys::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -775,7 +779,8 @@ mod platform {
         VirtualQueryEx,
     };
     use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
+        GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_INFORMATION,
+        PROCESS_VM_READ, PROCESS_VM_WRITE,
     };
 
     use super::MemoryRegion;
@@ -889,7 +894,58 @@ mod platform {
         found
     }
 
+    /// Enable `SeDebugPrivilege` in this process, once.
+    ///
+    /// An elevated token *holds* the privilege but leaves it disabled, and a hypervisor's VM
+    /// process runs at a higher integrity level than an unelevated caller, so neither
+    /// `OpenProcess` nor `ReadProcessMemory` works until the privilege is explicitly enabled.
+    /// A normal (unelevated) token does not hold it at all; the attempt is then a no-op and
+    /// `open_process` reports the access-denied error.
+    fn enable_debug_privilege() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            // SAFETY: the token handle is closed below; `LUID`, `TOKEN_PRIVILEGES` and the
+            // privilege name outlive every call that reads them.
+            unsafe {
+                let mut token: HANDLE = std::ptr::null_mut();
+                if OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                    &mut token,
+                ) == 0
+                {
+                    return;
+                }
+                let name: Vec<u16> = "SeDebugPrivilege\0".encode_utf16().collect();
+                let mut luid = LUID {
+                    LowPart: 0,
+                    HighPart: 0,
+                };
+                if LookupPrivilegeValueW(std::ptr::null(), name.as_ptr(), &mut luid) != 0 {
+                    let privileges = TOKEN_PRIVILEGES {
+                        PrivilegeCount: 1,
+                        Privileges: [LUID_AND_ATTRIBUTES {
+                            Luid: luid,
+                            Attributes: SE_PRIVILEGE_ENABLED,
+                        }],
+                    };
+                    AdjustTokenPrivileges(
+                        token,
+                        0,
+                        &privileges,
+                        0,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    );
+                }
+                CloseHandle(token);
+            }
+        });
+    }
+
     fn open_process(pid: u32) -> Result<HANDLE> {
+        enable_debug_privilege();
         // SAFETY: no attributes are needed to open a process by id.
         let handle = unsafe {
             OpenProcess(
