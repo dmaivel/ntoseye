@@ -176,7 +176,9 @@ impl PipeStream {
                 CloseHandle(dead);
             }
         }
-        self.inner.handle.store(std::ptr::null_mut(), Ordering::Relaxed);
+        self.inner
+            .handle
+            .store(std::ptr::null_mut(), Ordering::Relaxed);
         kd_trace!("pipe: {endpoint} disconnected; waiting for it to come back");
         let deadline = Instant::now() + RECONNECT_TIMEOUT;
         loop {
@@ -398,15 +400,8 @@ impl Write for PipeStream {
             let mut written = 0u32;
             // SAFETY: `buf` is readable for `request` bytes, and both the
             // `OVERLAPPED` and the event outlive the wait below.
-            let started = unsafe {
-                WriteFile(
-                    handle,
-                    buf.as_ptr(),
-                    request,
-                    &mut written,
-                    &mut overlapped,
-                )
-            };
+            let started =
+                unsafe { WriteFile(handle, buf.as_ptr(), request, &mut written, &mut overlapped) };
             if started != 0 {
                 return Ok(written as usize);
             }
@@ -488,7 +483,9 @@ fn new_test_name() -> String {
 #[cfg(test)]
 fn create_test_server(name: &str) -> io::Result<PipeStream> {
     use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
-    use windows_sys::Win32::System::Pipes::{CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT};
+    use windows_sys::Win32::System::Pipes::{
+        CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+    };
 
     let wide_name = wide(name);
     // SAFETY: `wide_name` is NUL-terminated and outlives the call; one
