@@ -35,7 +35,7 @@ A WinDbg-like Windows debugger for Linux, macOS, and Windows hosts, with support
 
 ### Supported hypervisors
 
-`ntoseye` supports any target that Windows can debug over [KDNET](https://ntoseye.com/setup/kdnet/). KVM/QEMU, VMware Workstation, and UTM guests additionally get [KDCOM, GDB, and memory-only backends](https://ntoseye.com/setup/backends/).
+`ntoseye` supports any target that Windows can debug over [KDNET](https://ntoseye.com/setup/kdnet/). KVM/QEMU, VMware Workstation, and UTM guests additionally get [KDCOM, GDB, and memory-only backends](https://ntoseye.com/setup/backends/); Hyper-V guests get KDCOM over a named pipe, but no GDB or host-memory backend.
 
 ### Files and network access
 
