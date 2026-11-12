@@ -1285,6 +1285,7 @@ mod tests {
             connect: Some(connect.into()),
             key: None,
             kd_handshake_timeout: None,
+            memory_source: None,
         }))
     }
 
@@ -1336,6 +1337,7 @@ mod tests {
                 connect: None,
                 key: None,
                 kd_handshake_timeout: None,
+                memory_source: None,
             }))
             .await
             .unwrap_err();
@@ -1347,6 +1349,7 @@ mod tests {
                 connect: Some("127.0.0.1:1234".into()),
                 key: None,
                 kd_handshake_timeout: None,
+                memory_source: None,
             }))
             .await
             .unwrap_err();
@@ -1358,6 +1361,7 @@ mod tests {
                 connect: None,
                 key: None,
                 kd_handshake_timeout: None,
+                memory_source: None,
             }))
             .await
             .unwrap_err();
