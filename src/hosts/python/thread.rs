@@ -20,6 +20,7 @@ use super::process::Process;
 use super::record::PlainDict;
 use super::record::Typed;
 use super::types::{Struct, enum_value};
+use crate::arch::Arch;
 use crate::backend::dbg_backend::processor_index_from_backend_thread_id;
 use crate::base::types::VirtAddr;
 use crate::nt::guest::ProcessInfo;
@@ -913,7 +914,8 @@ impl Cpu {
     }
 }
 
-/// Model-specific registers on one processor (`rdmsr`/`wrmsr`, KD only).
+/// Model-specific registers on one processor, or an ARM64 target's system
+/// registers (`rdmsr`/`wrmsr`, KD only).
 #[pyclass(module = "ntoseye")]
 pub struct Msrs {
     owner: Owner,
@@ -934,7 +936,7 @@ impl Msrs {
         let processor = self.processor;
         self.owner.with_in(py, &context, move |session| {
             require_halted(session, "msr read")?;
-            let msr = key.index()?;
+            let msr = key.index(session.target.arch())?;
             session.read_msr(processor, msr).map_err(err)
         })
     }
@@ -944,7 +946,7 @@ impl Msrs {
         let processor = self.processor;
         self.owner.with_in(py, &context, move |session| {
             require_halted(session, "msr write")?;
-            let msr = key.index()?;
+            let msr = key.index(session.target.arch())?;
             session.write_msr(processor, msr, value).map_err(err)
         })
     }
@@ -1007,7 +1009,8 @@ fn sorted_registers<V: Copy>(values: &HashMap<String, V>) -> Vec<(String, V)> {
     values
 }
 
-/// An MSR by number or by `IA32_*` name.
+/// An MSR by number or by name: `IA32_*` on AMD64, a system register's
+/// (`MIDR_EL1`, `S3_0_C0_C0_0`) on ARM64.
 #[derive(FromPyObject)]
 pub enum MsrKey {
     Index(u32),
@@ -1015,11 +1018,11 @@ pub enum MsrKey {
 }
 
 impl MsrKey {
-    fn index(self) -> PyResult<u32> {
+    fn index(self, arch: Arch) -> PyResult<u32> {
         match self {
             MsrKey::Index(index) => Ok(index),
             MsrKey::Name(name) => {
-                cpu::parse_msr_name(&name).ok_or_else(|| PyKeyError::new_err(name))
+                cpu::parse_msr_name(arch, &name).ok_or_else(|| PyKeyError::new_err(name))
             }
         }
     }

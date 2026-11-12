@@ -1,8 +1,8 @@
 //! Loader-list walks: a process's native and WOW64 module lists, the
 //! kernel's `PsLoadedModuleList`, and module version population.
 
-use super::vad::{MissingOffset, VadTreeOffsets, vad_tree_link};
-use super::{Guest, ModuleInfo, ProcessInfo, ProcessModulesDetail};
+use super::vad::{VadTreeOffsets, vad_root_offset, vad_tree_link};
+use super::{Guest, KeptModules, ModuleInfo, ProcessInfo, ProcessModulesDetail};
 use crate::{
     base::{
         bytes::{read_u16, read_u32, utf16le_lossy},
@@ -14,11 +14,11 @@ use crate::{
     nt::{
         layout::{StructRef, Types},
         pe::read_pe_version_info,
-        target::{ListCursor, ListTermination, links_back_to},
+        target::{ListCursor, ListTermination, fast_ref_address, links_back_to},
     },
 };
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard, PoisonError};
 
 const MAX_LOADER_MODULES: usize = 1000;
 /// The name of a loader entry whose name cannot be read.
@@ -98,7 +98,11 @@ pub(super) fn module_info_from_record(record: &StructRef<'_>) -> Result<Option<M
     {
         info.entry_point = Some(entry_point);
     }
-    if let Ok(tds) = record.read_field::<u32>("TimeDateStamp") {
+    // Windows 8.1 leaves it 0 in a session image's entry: no build's stamp,
+    // and no key to fetch the file by.
+    if let Ok(tds) = record.read_field::<u32>("TimeDateStamp")
+        && tds != 0
+    {
         info = info.with_time_date_stamp(tds);
     }
     if let Ok(cs) = record.read_field::<u32>("CheckSum") {
@@ -338,19 +342,14 @@ impl Guest {
                 .ok()
                 .map(|raw| vad_tree_link(raw.0))
         };
-        let vad_root = types
-            .struct_at("_EPROCESS", info.eprocess)
-            .ok()?
-            .embedded("VadRoot")
-            .ok()?;
-        // `_RTL_AVL_TREE.Root`; before it, the root pointer itself.
-        let root = link(vad_root.addr() + vad_root.layout().field_offset("Root").unwrap_or(0))?;
+        let eprocess = types.layout("_EPROCESS").ok()?;
+        let root = link(info.eprocess + vad_root_offset(types, &eprocess).ok()?)?;
         let short = types.layout("_MMVAD_SHORT").ok()?;
         let VadTreeOffsets {
             vad_node,
             left,
             right,
-        } = VadTreeOffsets::resolve(types, &short, MissingOffset::Default).ok()?;
+        } = VadTreeOffsets::resolve(types, &short).ok()?;
         let read_node = |node: VirtAddr| {
             let vad = types.struct_with_layout(Arc::clone(&short), node - vad_node);
             let vpn = |low: &str, high: &str| -> Option<u64> {
@@ -365,31 +364,62 @@ impl Guest {
             })
         };
         let node = find_vad_starting_at(root, base.0 >> 12, read_node)?;
+        let vad = node - vad_node;
+        // A private VAD is an `_MMVAD_SHORT`: the `_MMVAD` fields the file
+        // path follows lie past its end. The flags are 8 bytes before
+        // Windows 8 and 4 after, with the bits read always below their end.
+        let private = types
+            .layout("_MMVAD_FLAGS")
+            .ok()?
+            .field("PrivateMemory")
+            .ok()?
+            .decode(
+                memory
+                    .read::<u64>(vad + short.field_offset("u").ok()?)
+                    .ok()?,
+            );
+        if private != 0 {
+            return None;
+        }
+        let path = self.vad_file_path(info.dtb, vad)?;
+        let name = path.rsplit(['\\', '/']).next()?;
+        (!name.is_empty()).then(|| name.to_string())
+    }
+
+    /// The path of the file a section-backed VAD maps, as `!ca` names it: the
+    /// VAD's subsection leads to the section's control area, whose
+    /// `FilePointer` is the file object. Windows Server 2003's `_MMVAD` has
+    /// no `Subsection` and points at the control area itself. `None` for
+    /// pagefile-backed sections. Only `_MMVAD`s have either; the caller
+    /// checks the VAD is not private.
+    pub fn vad_file_path(&self, dtb: Dtb, vad: VirtAddr) -> Option<String> {
+        let types = self.ntoskrnl.types_in(dtb);
         let nonzero = |address: VirtAddr| (!address.is_zero()).then_some(address);
-        let subsection = types
-            .struct_at("_MMVAD", node - vad_node)
+        let vad = types.struct_at("_MMVAD", vad).ok()?;
+        let control_area = if vad.layout().fields.contains_key("Subsection") {
+            let subsection = vad.read_pointer("Subsection").ok().and_then(nonzero)?;
+            types
+                .struct_at("_SUBSECTION", subsection)
+                .ok()?
+                .read_pointer("ControlArea")
+        } else {
+            vad.read_pointer("ControlArea")
+        }
+        .ok()
+        .and_then(nonzero)?;
+        let file_object = types
+            .struct_at("_CONTROL_AREA", control_area)
             .ok()?
-            .read_pointer("Subsection")
+            .read_uint("FilePointer")
             .ok()
+            .map(fast_ref_address)
             .and_then(nonzero)?;
-        let control_area = types
-            .struct_at("_SUBSECTION", subsection)
-            .ok()?
-            .read_pointer("ControlArea")
-            .ok()
-            .and_then(nonzero)?;
-        // `FilePointer` is an `_EX_FAST_REF`, a reference count in its low bits.
-        let control_area = types.struct_at("_CONTROL_AREA", control_area).ok()?;
-        let file_object =
-            link(control_area.addr() + control_area.layout().field_offset("FilePointer").ok()?)
-                .and_then(nonzero)?;
         let path = types
             .struct_at("_FILE_OBJECT", file_object)
             .ok()?
             .unicode_string("FileName")
             .ok()?;
-        let name = path.rsplit(['\\', '/']).next()?;
-        (!name.is_empty()).then(|| name.to_string())
+        (!path.is_empty()).then_some(path)
     }
 
     /// The 32-bit loader list of a WOW64 process. `_PEB_LDR_DATA32` and
@@ -408,22 +438,64 @@ impl Guest {
     }
 
     pub fn kernel_modules(&self) -> Result<Vec<ModuleInfo>> {
-        self.memoized(
+        if let KeptModules::Kept(modules) = &*self.kept_kernel_modules() {
+            return Ok(modules.clone());
+        }
+        let (modules, whole) = self.memoized(
             |memo| &mut memo.kernel_modules,
             || self.walk_kernel_modules(),
-        )
+        )?;
+        if whole {
+            let mut kept = self.kept_kernel_modules();
+            if matches!(*kept, KeptModules::Unread) {
+                *kept = KeptModules::Kept(modules.clone());
+            }
+        }
+        Ok(modules)
     }
 
-    fn walk_kernel_modules(&self) -> Result<Vec<ModuleInfo>> {
+    /// Keep the kernel module list across halts from the next one read
+    /// whole, until [`Self::forget_kernel_modules`]: for a backend that
+    /// reports every load and unload (KD), where walking the list again at
+    /// every halt only finds it unchanged, and over a slow link costs a
+    /// request for each module's entry and names.
+    pub fn keep_kernel_modules(&self) {
+        let mut kept = self.kept_kernel_modules();
+        if matches!(*kept, KeptModules::Off) {
+            *kept = KeptModules::Unread;
+        }
+    }
+
+    /// Drop the kept kernel module list (see [`Self::keep_kernel_modules`]):
+    /// a module loaded or unloaded, or the user asked for the list afresh.
+    pub fn forget_kernel_modules(&self) {
+        let mut kept = self.kept_kernel_modules();
+        if matches!(*kept, KeptModules::Kept(_)) {
+            *kept = KeptModules::Unread;
+        }
+    }
+
+    fn kept_kernel_modules(&self) -> MutexGuard<'_, KeptModules> {
+        self.kept_kernel_modules
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The kernel modules, and whether the walk read the whole list: it got
+    /// to the list's last entry past entries that all read.
+    fn walk_kernel_modules(&self) -> Result<(Vec<ModuleInfo>, bool)> {
         let head = self.ntoskrnl.symbol("PsLoadedModuleList")?;
         // At a reboot's first boot notification the list is not built yet,
         // but the kernel itself is loaded; stacks unwind through it.
         if head.read_pointer()?.is_zero() {
-            return Ok(vec![ModuleInfo::new(
-                "ntoskrnl.exe".to_string(),
-                self.ntoskrnl.base_address,
-                self.ntoskrnl.binary_size() as u32,
-            )]);
+            return Ok((
+                vec![ModuleInfo::new(
+                    "ntoskrnl.exe".to_string(),
+                    self.ntoskrnl.base_address,
+                    self.ntoskrnl.binary_size() as u32,
+                )],
+                false,
+            ));
         }
         let head = head.address();
 
@@ -458,11 +530,18 @@ impl Guest {
                 modules.push(module);
             }
         }
+        let memory = self.ntoskrnl.memory();
+        let blink_offset = memory.arch().pointer_size();
+        // The walk read the whole list when it reached the entry the head
+        // links back to, its last: a cycle or the entry cap ends it short
+        // without an error.
+        let whole = broken.is_none()
+            && memory
+                .read_pointer(head + blink_offset)
+                .is_ok_and(|last| reached.contains(&last));
         // An entry that cannot be read ends the walk forward; the modules
         // past it are found backward, and only that entry's is missing.
         if let Some(error) = broken {
-            let memory = self.ntoskrnl.memory();
-            let blink_offset = memory.arch().pointer_size();
             let tail = links_back_to(head, &reached, MAX_LOADER_MODULES, |link| {
                 memory.read_pointer(link + blink_offset)
             });
@@ -479,7 +558,7 @@ impl Guest {
             }
         }
 
-        Ok(modules)
+        Ok((modules, whole))
     }
 
     pub fn populate_kernel_module_versions(&self, modules: &mut [ModuleInfo]) {

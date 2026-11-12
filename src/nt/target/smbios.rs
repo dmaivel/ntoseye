@@ -486,19 +486,25 @@ pc-q35-10.1\0\0\x03\x16\x00\x03\x01\x01\x02\x00\x00\x03\x03\x03\x02\x00\x00\x00\
 
     #[test]
     fn a_truncated_table_says_where_it_stopped() {
-        let (structures, stopped) = parse_structures(&QEMU[..0x20]);
-        assert!(structures.is_empty());
-        assert!(stopped.is_some_and(|why| why.contains("do not end")));
+        // The type 3 structure starts at 0x4c and its formatted area is 0x16
+        // bytes: cut inside its strings.
+        let (structures, stopped) = parse_structures(&QEMU[..0x4c + 0x16 + 3]);
+        let kinds: Vec<u8> = structures.iter().map(|s| s.kind).collect();
+        assert_eq!(kinds, [1]);
+        let why = stopped.unwrap();
+        assert!(
+            why.contains("at 0x4c") && why.contains("do not end"),
+            "{why}"
+        );
         let (_, stopped) = parse_structures(&[0x01, 0x02, 0, 0, 0, 0]);
         assert!(stopped.is_some_and(|why| why.contains("length 2")));
     }
 
     #[test]
-    fn uuids_swap_their_first_three_fields() {
-        let bytes: [u8; 16] = QEMU[8..0x18].try_into().unwrap();
-        assert_eq!(
-            format_guid(&bytes, GuidStyle::BareUpper),
-            "3D0FC3AA-FFC0-4FE1-9F82-5E83C91FEEDB"
-        );
+    fn the_system_uuid_swaps_its_first_three_fields() {
+        let (structures, _) = parse_structures(QEMU);
+        let fields = structure_fields(&structures[0]);
+        let uuid = fields.iter().find(|(name, _)| *name == "UUID").unwrap();
+        assert_eq!(uuid.1, "3D0FC3AA-FFC0-4FE1-9F82-5E83C91FEEDB");
     }
 }

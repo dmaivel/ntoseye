@@ -351,7 +351,7 @@ impl<'a> Line<'a> {
                     return None;
                 }
                 PopupKey::More => {
-                    self.open_palette(ctx.state, initial_tab(&self.draft));
+                    self.open_palette(ctx.state, initial_tab(&self.draft, &ctx.state.caches));
                     return None;
                 }
                 PopupKey::Ignored => {}
@@ -379,7 +379,7 @@ impl<'a> Line<'a> {
         } else if key.is("tab") {
             self.complete(ctx);
         } else if key.is("alt+p") {
-            self.open_palette(ctx.state, initial_tab(&self.draft));
+            self.open_palette(ctx.state, initial_tab(&self.draft, &ctx.state.caches));
         } else if key.is("ctrl+r") {
             self.open_palette(ctx.state, Tab::History);
         } else if key.is("up") || key.is("ctrl+p") {
@@ -826,7 +826,7 @@ fn arguments(tail: &str, offset: usize, mark: &mut impl FnMut(usize, usize, &'st
 
 /// The colored ranges of one argument, in bytes from its start.
 fn argument(token: &str) -> Vec<(usize, usize, &'static str)> {
-    let rest = &token[1..];
+    let rest = token.get(1..).unwrap_or("");
     let word = |text: &str| {
         !text.is_empty()
             && text

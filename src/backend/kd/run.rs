@@ -4,11 +4,14 @@
 use super::machine::machine;
 use std::collections::HashSet;
 use std::io::ErrorKind;
+use std::ops::Range;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::arch::{Family, RegisterMap};
-use crate::backend::dbg_backend::{ContinueDisposition, ModuleEvent, StopEvent};
+use crate::backend::dbg_backend::{
+    ContinueDisposition, DebugBackend, ModuleEvent, ModuleNotification, StopEvent,
+};
 use crate::base::error::{Error, Result};
 
 use super::breakpoints::{
@@ -18,35 +21,51 @@ use super::{
     AwaitStateOptions, ContinueDrain, DBG_KD_EXCEPTION_STATE_CHANGE,
     DBG_KD_LOAD_SYMBOLS_STATE_CHANGE, KD_REQUEST_TIMEOUT, KdBackend, Link, STATUS_BREAKPOINT,
     StateChange, StateChangeFilter, advance_pc_past_breakpoint, api, await_state_change,
-    blocking_read_timeout, breakin_and_wait, read_program_counter, thread_id_for,
-    with_framing_read_timeout,
+    backend_thread_id, blocking_read_timeout, breakin_and_wait, hardware_watch_address,
+    read_program_counter, with_framing_read_timeout,
 };
 
 const POST_BUGCHECK_RECONNECT_ASSIST_DELAY: Duration = Duration::from_secs(20);
 
 pub(super) fn stop_event(stop: StateChange) -> StopEvent {
-    let load_symbols = stop.new_state == DBG_KD_LOAD_SYMBOLS_STATE_CHANGE;
+    // The kernel's module list changes only for a kernel image; a user-mode
+    // one (`!gflag +ksl`) is mapped into one process.
+    let kernel_module_changed = stop.new_state == DBG_KD_LOAD_SYMBOLS_STATE_CHANGE
+        && stop
+            .load_symbols
+            .as_ref()
+            .is_none_or(|image| image.base.0 >> 63 == 1);
+    let module_event = stop.load_symbols.map(|image| {
+        let user = image.base.0 >> 63 == 0;
+        ModuleNotification {
+            kind: if image.unload {
+                ModuleEvent::Unload
+            } else {
+                ModuleEvent::Load
+            },
+            base: image.base,
+            size: image.size,
+            path: image.path,
+            process: user.then_some(image.process & 0xffff_ffff),
+        }
+    });
     StopEvent {
-        thread_id: Some(thread_id_for(stop.processor)),
+        thread_id: Some(backend_thread_id(stop.processor)),
         exception_code: (stop.new_state == DBG_KD_EXCEPTION_STATE_CHANGE)
             .then_some(stop.exception_code),
         first_chance: stop.exception_first_chance,
         exception_address: stop.exception_address,
         program_counter: Some(stop.program_counter),
-        watchpoint_address: None,
+        watchpoint_address: stop
+            .exception_record
+            .as_ref()
+            .and_then(hardware_watch_address),
         is_bugcheck: stop.is_bugcheck,
         bugcheck: stop.bugcheck,
         target_reloaded: stop.target_reloaded,
         target_kernel_base_hint: stop.kernel_base_hint,
-        modules_changed: load_symbols,
-        module_event: stop.kernel_base_hint.filter(|_| load_symbols).map(|base| {
-            let event = if stop.unload_symbols {
-                ModuleEvent::Unload
-            } else {
-                ModuleEvent::Load
-            };
-            (event, base)
-        }),
+        modules_changed: kernel_module_changed,
+        module_event,
         assisted_breakin: stop.assisted_breakin,
         break_in: false,
     }
@@ -77,17 +96,17 @@ impl KdBackend {
     }
 
     pub(super) fn record_stop(&mut self, stop: &StateChange) {
+        self.last_exception_record = stop.exception_record.clone();
         if self.unmanaged_breakpoint_stop(stop) {
             self.late_breakin = false;
         }
         if stop.target_reloaded {
-            kd_trace!("kd: target reload detected; clearing target-owned breakpoint state");
-            self.bp_handles.clear();
-            self.managed_bp_addresses.clear();
+            // The breakpoints are forgotten when the session reloads (see
+            // `forget_target_breakpoints`): a reset need not be a reboot, and
+            // the table keeps its entries across one.
+            kd_trace!("kd: target reload detected");
             self.breakin_addresses.clear();
-            self.retired_bp_addresses.clear();
             self.late_breakin = false;
-            self.pending_write_breakpoint = None;
         } else if stop.is_bugcheck {
             self.reconnect_assist_after_continue = Some(POST_BUGCHECK_RECONNECT_ASSIST_DELAY);
         }
@@ -118,18 +137,20 @@ impl KdBackend {
         self.last_stop_processor = stop.processor;
         self.last_exception_code = stop.exception_code;
         self.last_rip = stop.program_counter;
+        self.drop_report_window(stop.report_window(self.arch));
         self.registers
             .stopped(stop.processor, stop.control_report.clone());
         self.stop_was_managed_breakpoint = managed_breakpoint_stop;
         if self.surface_break_at == Some(stop.program_counter) {
             self.surface_break_at = None;
         }
-        // EFER survives: the guest sets it once entering long mode and a
-        // reload is the only way a processor's value can differ from the one
-        // we read. Re-reading it per stop costs an MSR round trip in every
-        // absorbed breakpoint hit.
+        // EFER and the KPCRs survive: the guest sets EFER once entering long
+        // mode, and places a processor's KPCR when it starts it, so a reload
+        // is the only way either can differ from the one we read. Re-reading
+        // them per stop costs a round trip in every absorbed breakpoint hit.
         if stop.target_reloaded {
             self.efer_cache.clear();
+            self.kpcr_cache.clear();
         }
         self.link.halt();
     }
@@ -198,10 +219,10 @@ impl KdBackend {
             self.link.framing(self.running_reason)?,
             processor,
             &owned,
-            &mut self.released_handles,
-        );
+            &mut self.stranded,
+        )?;
         self.notices.extend(reclaimed_breakpoints_notice(reclaimed));
-        if reclaimed != 0
+        if reclaimed.released != 0
             && !breakpoint_instruction_at(
                 self.link.framing(self.running_reason)?,
                 arch,
@@ -289,17 +310,25 @@ impl KdBackend {
     }
 
     pub(super) fn resume_with(&mut self, disposition: ContinueDisposition) -> Result<()> {
+        // A stop the target reached while it answered a request is where
+        // the target is; resuming would run on from it unreported. The pump
+        // reports it first.
+        if self.holds_stop() {
+            kd_trace!("kd: continue: the target holds a new stop; reporting it instead");
+            self.record_running();
+            return self.start_pump(None, None);
+        }
         let resume_processor = self.last_stop_processor;
-        self.switch_report_pcs.clear();
         self.skip_hardcoded_breakpoint(resume_processor)?;
         // The pump absorbs the re-break a stale break-in byte causes right
         // after resume; it needs to know where we resumed from and which
         // breakpoints are real. Nothing can change either while the VM runs.
+        let retired = std::mem::take(&mut self.retired_bp_addresses);
         let drain = ContinueDrain::new(
             self.last_rip,
             self.managed_bp_addresses.clone(),
             self.breakin_addresses.clone(),
-            std::mem::take(&mut self.retired_bp_addresses),
+            retired.clone(),
             self.register_map.clone(),
             self.surface_break_at,
         );
@@ -308,11 +337,16 @@ impl KdBackend {
             "kd: continue: sending ContinueApi2 on p{}",
             resume_processor + 1
         );
-        self.resume_processor(
+        // A failed continue leaves the target halted, and the next resume must
+        // still absorb re-breaks at breakpoints removed during this halt.
+        if let Err(e) = self.resume_processor(
             resume_processor,
             api::status_for_disposition(disposition),
             false,
-        )?;
+        ) {
+            self.retired_bp_addresses = retired;
+            return Err(e);
+        }
         kd_trace!("kd: continue: ContinueApi2 ACKed, VM should resume");
         self.record_running();
         // Hand the socket to the background pump so prints keep getting ACKed
@@ -321,6 +355,13 @@ impl KdBackend {
     }
 
     pub(super) fn single_step(&mut self) -> Result<()> {
+        // As for a continue (see `resume_with`): the wait reads the held
+        // stop first.
+        if self.holds_stop() {
+            kd_trace!("kd: step: the target holds a new stop; reporting it instead");
+            self.record_running();
+            return Ok(());
+        }
         // Managed BP step-over needs to execute the original instruction. A
         // single step stops almost immediately, so the caller's wait_for_stop
         // reads it synchronously; no pump needed
@@ -332,14 +373,12 @@ impl KdBackend {
         // inside nt!KiFreezeTargetExecution, with debug exceptions masked
         // (PSTATE.D), not as the code the freeze interrupted, so the trace
         // flag is set in a state where no step can occur.
-        if processor != owner && self.arch.family() == Family::Arm {
+        if processor != owner && self.steps_only_the_stopping_processor() {
             return Err(Error::Kd(format!(
-                "{} stopped the target, and on ARM64 only that processor can step; select it \
-                 with ~{owner}s, or resume with g",
-                thread_id_for(owner)
+                "processor {owner} stopped the target, and on ARM64 only that processor can \
+                 step; select it with ~{owner}s, or resume with g"
             )));
         }
-        self.switch_report_pcs.clear();
         // A raw int3 stop still points at the int3; resuming from there would
         // only execute it again and report the same stop.
         self.skip_hardcoded_breakpoint(owner)?;
@@ -398,9 +437,8 @@ impl KdBackend {
             Family::X86 => {}
             Family::Arm => {
                 return Err(Error::Kd(format!(
-                    "{} stopped the target, and on ARM64 the target reads registers only on that \
-                     processor",
-                    thread_id_for(owner)
+                    "processor {owner} stopped the target, and on ARM64 the target reads \
+                     registers only on that processor"
                 )));
             }
         }
@@ -445,14 +483,30 @@ impl KdBackend {
         if stop.processor != processor {
             self.record_stop(&stop);
             return Err(Error::Kd(format!(
-                "expected {} to report during the processor switch, but {} reported",
-                thread_id_for(processor),
-                thread_id_for(stop.processor)
+                "expected processor {processor} to report during the processor switch, but \
+                 processor {} reported",
+                stop.processor
             )));
         }
-        self.switch_report_pcs.push(stop.program_counter);
+        self.drop_report_window(stop.report_window(self.arch));
         self.registers.stopped(processor, stop.control_report);
         Ok(())
+    }
+
+    /// A stop report deleted every table entry in `window` (see
+    /// [`StateChange::report_window`]), freeing its handle before the report
+    /// was on the wire.
+    pub fn drop_report_window(&mut self, window: Range<u64>) {
+        let dropped: Vec<u64> = self
+            .bp_handles
+            .keys()
+            .copied()
+            .filter(|addr| window.contains(addr))
+            .collect();
+        for addr in dropped {
+            self.bp_handles.remove(&addr);
+            self.dropped_bp_addresses.insert(addr);
+        }
     }
 
     pub(super) fn break_in(&mut self) -> Result<StopEvent> {

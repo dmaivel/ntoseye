@@ -6,11 +6,12 @@ use super::event_loop::with_framing_read_timeout;
 use super::framing::KdFraming;
 use super::machine::KdMachine;
 use super::registers::{
-    ARM64_WINDBG_ESR_EL1, ARM64_WINDBG_FAR_EL1, ARM64_WINDBG_TTBR0_EL1, ARM64_WINDBG_TTBR1_EL1,
-    arm64_x18, check_special_size, special_into_context,
+    ARM64_WINDBG_ESR_EL1, ARM64_WINDBG_FAR_EL1, ARM64_WINDBG_ID_AA64DFR0_EL1,
+    ARM64_WINDBG_TTBR0_EL1, ARM64_WINDBG_TTBR1_EL1, arm64_x18, check_special_size,
+    special_into_context,
 };
 use super::transport::KdTransport;
-use super::{KD_REQUEST_TIMEOUT, KdBackend, STATUS_SINGLE_STEP, TrapState, api};
+use super::{ControlReport, KD_REQUEST_TIMEOUT, KdBackend, TrapState, api};
 use crate::arch::Arch;
 use crate::base::error::Result;
 
@@ -21,6 +22,14 @@ impl KdMachine for Arm64Kd {
         with_framing_read_timeout(kd.framing()?, KD_REQUEST_TIMEOUT, |framing| {
             api::read_machine_specific_register(framing, processor, ARM64_WINDBG_TTBR1_EL1)
         })
+    }
+
+    fn debug_features(&self, kd: &mut KdBackend, processor: u16) -> Option<u64> {
+        with_framing_read_timeout(kd.framing().ok()?, KD_REQUEST_TIMEOUT, |framing| {
+            api::read_machine_specific_register(framing, processor, ARM64_WINDBG_ID_AA64DFR0_EL1)
+        })
+        .inspect_err(|error| kd_trace!("kd: ARM64 ID_AA64DFR0_EL1 unavailable: {error}"))
+        .ok()
     }
 
     // ARM64_DBGKD_CONTROL_SET has no Dr7 field; the kernel single-steps via
@@ -44,20 +53,34 @@ impl KdMachine for Arm64Kd {
         None
     }
 
-    // TTBR0 and, after a single step, its syndrome and fault address are
-    // MSRs; x18 holds the TEB; the kernel root fills its own slot.
+    // The ARM64 control report is not read, so a stop is taken to have
+    // deleted the entries in the whole stream window.
+    fn reported_instruction_count(&self, _: &ControlReport) -> Option<u64> {
+        None
+    }
+
+    // TTBR0, the syndrome and the fault address are MSRs, which the target
+    // reads only on the processor that stopped it, whatever processor a
+    // request names: another processor's TTBR0 comes from its current
+    // thread's process, and its syndrome, of no exception, stays 0. x18
+    // holds the KPCR or the TEB; the kernel root fills its own slot.
     fn append_registers(&self, kd: &mut KdBackend, context: &mut Vec<u8>) -> Result<()> {
         let arch = Arch::Arm64;
         let map = arch.register_map();
-        let ttbr0 = kd.system_register_or_zero(ARM64_WINDBG_TTBR0_EL1, "ARM64 TTBR0_EL1")
-            & arch.dtb_page_mask();
-        let fault = (kd.last_exception_code == STATUS_SINGLE_STEP).then(|| {
+        let processor = kd.current_processor;
+        let stopped_here = processor == kd.last_stop_processor;
+        let ttbr0 = if stopped_here {
+            kd.system_register_or_zero(ARM64_WINDBG_TTBR0_EL1, "ARM64 TTBR0_EL1")
+        } else {
+            kd.processor_process_root(processor).unwrap_or(0)
+        } & arch.dtb_page_mask();
+        let fault = stopped_here.then(|| {
             (
                 kd.system_register_or_zero(ARM64_WINDBG_ESR_EL1, "ARM64 ESR_EL1"),
                 kd.system_register_or_zero(ARM64_WINDBG_FAR_EL1, "ARM64 FAR_EL1"),
             )
         });
-        if let Some(x18) = arm64_x18(context, kd.teb_path, kd) {
+        if let Some(x18) = arm64_x18(context, kd.thread_layout, kd) {
             map.write_u64("x18", context, x18)?;
         }
         context.resize(arch.register_buffer_size(), 0);

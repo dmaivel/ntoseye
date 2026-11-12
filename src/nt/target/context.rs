@@ -6,6 +6,7 @@ use super::{
     ThreadInfo, lookup_register, process_matches,
 };
 use crate::arch::Arch;
+use crate::arch::amd64::COMPATIBILITY_MODE_CS;
 use crate::{
     base::{
         bytes::c_string_lossy,
@@ -20,7 +21,6 @@ use crate::{
     },
 };
 
-const COMPATIBILITY_MODE_CS: u64 = 0x23;
 const WOW64_ADDRESS_LIMIT: u64 = 1 << 32;
 
 fn decide_bitness(
@@ -180,10 +180,10 @@ impl Target {
             };
 
         self.process = Some(process_info);
+        self.process_until_run = false;
         self.secure_root = None;
         self.selected_frame = None;
         self.clear_context_dtb_override();
-        self.clear_current_windows_thread_context();
         Ok(AttachReport {
             name,
             symbol_report,
@@ -191,12 +191,52 @@ impl Target {
         })
     }
 
+    /// [`Self::attach_process_info`] for as long as the target stays
+    /// halted: `.process` without `/i`, whose context WinDbg documents as
+    /// lasting only until the target executes again (see
+    /// [`Self::end_process_context_on_run`]).
+    pub fn set_process_context(&mut self, process_info: ProcessInfo) -> Result<AttachReport> {
+        let report = self.attach_process_info(process_info)?;
+        self.process_until_run = true;
+        Ok(report)
+    }
+
+    /// End a [`Self::set_process_context`] context: the target is about to
+    /// execute. Returns the process whose context ended.
+    pub fn end_process_context_on_run(&mut self) -> Option<ProcessInfo> {
+        if !self.process_until_run {
+            return None;
+        }
+        self.process_until_run = false;
+        self.process.take()
+    }
+
+    /// End the attached process's context once the process has left the
+    /// active process list: its `EPROCESS` and page tables are freed, and
+    /// reads through them return whatever reuses the memory. Returns the
+    /// process whose context ended.
+    pub fn end_exited_process_context(&mut self) -> Option<ProcessInfo> {
+        let attached = self.process.as_ref()?;
+        let processes = self.guest.as_ref()?.enumerate_processes().ok()?;
+        if processes
+            .iter()
+            .any(|process| process.eprocess == attached.eprocess && process.pid == attached.pid)
+        {
+            return None;
+        }
+        self.process_until_run = false;
+        self.process.take()
+    }
+
+    /// Leave the process context for the kernel's. The selected Windows
+    /// thread stays: it is the thread's own process that `$proc`, `$teb` and
+    /// `$peb` name again.
     pub fn detach(&mut self) {
         self.secure_root = None;
         self.selected_frame = None;
         self.clear_context_dtb_override();
-        self.clear_current_windows_thread_context();
         self.process = None;
+        self.process_until_run = false;
     }
 
     /// Set the attached process aside, so inspection follows the selected
@@ -214,6 +254,7 @@ impl Target {
     /// kernel-symbol reads need only the page tables.
     pub fn enter_process_scope(&mut self, info: ProcessInfo) {
         self.detach();
+        self.clear_current_windows_thread_context();
         self.process = Some(info);
     }
 
@@ -222,6 +263,7 @@ impl Target {
     pub fn take_selection(&mut self) -> TargetSelection {
         TargetSelection {
             process: self.process.take(),
+            process_until_run: std::mem::take(&mut self.process_until_run),
             secure_root: self.secure_root.take(),
             context_dtb_override: self.context_dtb_override.take(),
             selected_frame: self.selected_frame.take(),
@@ -233,11 +275,34 @@ impl Target {
     /// Put back a scope taken with [`Self::take_selection`].
     pub fn restore_selection(&mut self, selection: TargetSelection) {
         self.process = selection.process;
+        self.process_until_run = selection.process_until_run;
         self.secure_root = selection.secure_root;
         self.context_dtb_override = selection.context_dtb_override;
         self.selected_frame = selection.selected_frame;
         self.windows_thread_selection = selection.windows_thread_selection;
         self.registers = selection.registers;
+    }
+
+    /// Run `f` with `process`'s address space as the inspection scope, as
+    /// `.process /p` selects it but without loading every module's symbols,
+    /// then put the selection back, whatever `f` returned. A command that
+    /// names a process (`bp /p`) evaluates its address there, so the user
+    /// need not switch to the process and back around it.
+    pub fn in_process_scope<R>(&mut self, process: ProcessInfo, f: impl FnOnce(&Self) -> R) -> R {
+        let saved = (
+            self.process.replace(process),
+            self.secure_root.take(),
+            self.context_dtb_override.take(),
+            self.selected_frame.take(),
+        );
+        let result = f(self);
+        (
+            self.process,
+            self.secure_root,
+            self.context_dtb_override,
+            self.selected_frame,
+        ) = saved;
+        result
     }
 
     /// Follow a register-derived root (a halted thread's CR3/TTBR0, or a
@@ -267,6 +332,11 @@ impl Target {
         let Some(guest) = &self.guest else {
             return dtb;
         };
+        // Only a KVA-shadow user root fails to reach the kernel; a kernel
+        // without them is spared the probe, a request per stop over KD.
+        if guest.user_root_offset().is_none() {
+            return dtb;
+        }
         let Ok(process_list) = guest.ntoskrnl.symbol("PsActiveProcessHead") else {
             return dtb;
         };
@@ -373,25 +443,30 @@ impl Target {
     /// first: at a stop that is almost always the answer and costs one
     /// EPROCESS read, where the fallback walks the process list.
     pub fn process_for_cr3(&self, cr3_masked: u64) -> Option<ProcessInfo> {
+        self.process_for_thread_cr3(cr3_masked, self.windows_thread_selection.as_ref())
+    }
+
+    /// [`Self::process_for_cr3`], checking `thread`'s owner first. The
+    /// owner is the only answer for a root two processes share: the Idle
+    /// process runs on the System process's.
+    pub fn process_for_thread_cr3(
+        &self,
+        cr3_masked: u64,
+        thread: Option<&ThreadInfo>,
+    ) -> Option<ProcessInfo> {
         if self.recognize_secure_root(cr3_masked) {
             return None;
         }
         let guest = self.guest.as_ref()?;
         let mask = self.arch().dtb_page_mask();
-        if let Some(eprocess) = self
-            .windows_thread_selection
-            .as_ref()
-            .and_then(|thread| thread.eprocess)
+        if let Some(eprocess) = thread.and_then(|thread| thread.eprocess)
             && let Ok(process) = guest.process_at(eprocess)
             && (process.dtb & mask) == cr3_masked
         {
             return Some(process);
         }
         guest
-            .enumerate_processes()
-            .ok()?
-            .into_iter()
-            .find(|process| (process.dtb & mask) == cr3_masked)
+            .process_for_root(cr3_masked, mask)
             .or_else(|| guest.process_for_user_root(cr3_masked, mask))
     }
 
@@ -444,15 +519,15 @@ impl Target {
             .find_type_across_modules(dtb, "_EPROCESS")
             .ok_or(Error::ExpectedSymbols)?;
 
-        let pid = eprocess_layout
-            .field_offset("UniqueProcessId")
-            .ok()
-            .and_then(|off| {
-                let off = off as usize;
-                (off + pointer_size <= proc_snap.len())
-                    .then(|| arch.decode_pointer(&proc_snap[off..]).0)
-            })
-            .unwrap_or(0);
+        // 0 is the Idle process's PID, so an undecodable one cannot default
+        // to it.
+        let pid_offset = eprocess_layout.field_offset("UniqueProcessId")? as usize;
+        if pid_offset + pointer_size > proc_snap.len() {
+            return Err(Error::DebugInfo(
+                "the triage EPROCESS snapshot ends before UniqueProcessId".into(),
+            ));
+        }
+        let pid = arch.decode_pointer(&proc_snap[pid_offset..]).0;
 
         let name = eprocess_layout
             .field_offset("ImageFileName")
@@ -604,9 +679,10 @@ impl Target {
 mod tests {
     use super::{decide_bitness, select_thread_process_dtb, thread_owner_matches};
     use crate::arch::Arch;
+    use crate::base::error::{Error, Result};
     use crate::base::memory::DTB_IDENTITY;
     use crate::base::types::CodeMachine;
-    use crate::base::types::VirtAddr;
+    use crate::base::types::{Dtb, VirtAddr};
     use crate::nt::guest::{ModuleInfo, ProcessInfo};
     use crate::nt::symbols::CodeFrame;
     use crate::nt::target::SelectedFrame;
@@ -714,6 +790,42 @@ mod tests {
         target.enter_secure_scope(0x5000);
         assert_eq!(target.current_dtb(), 0x5000);
         assert_eq!(target.register_value("rip"), None);
+    }
+
+    #[test]
+    fn a_process_scope_puts_the_selection_back() {
+        let mut session = session_over_memory(0x1000, &[0x90; 0x40]);
+        let target = &mut session.target;
+        let process = |pid, dtb| ProcessInfo {
+            pid,
+            name: format!("{pid}.exe"),
+            dtb,
+            eprocess: VirtAddr(0xffff800000004000 + pid),
+            wow64_peb: None,
+        };
+        target.enter_process_scope(process(42, 0x3000));
+        target.symbols.set_secure_roots(0x5000, [0x6000]);
+        target.set_context_dtb_override(0x6002);
+        assert_eq!(target.current_dtb(), 0x6000);
+        // `bp /p 8` evaluates in process 8 whatever the user selected, and
+        // a failed evaluation leaves that selection as it was.
+        let _: Result<Dtb> = target.in_process_scope(process(8, 0x8000), |scoped| {
+            assert_eq!(
+                scoped.attached_process().map(|process| process.pid),
+                Some(8)
+            );
+            assert_eq!(scoped.current_dtb(), 0x8000);
+            Err(Error::SymbolNotFound(
+                "kernelbase!GetFileAttributesExW".into(),
+            ))
+        });
+        assert_eq!(
+            target.attached_process().map(|process| process.pid),
+            Some(42)
+        );
+        assert_eq!(target.current_dtb(), 0x6000);
+        target.set_context_dtb_override(0x7000);
+        assert_eq!(target.current_dtb(), 0x3000);
     }
 
     #[test]

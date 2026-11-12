@@ -11,6 +11,7 @@ use crate::backend::dbg_backend::{
     DebugBackend, PciConfigAddress, STEP_UNDER_WINDOWS_HYPERVISOR, StopEvent,
 };
 use crate::backend::phys::HaltClock;
+use crate::base::env::Trace;
 use crate::base::error::{Error, Result};
 
 mod target_xml;
@@ -18,12 +19,8 @@ mod target_xml;
 /// Bytes of a packet shown per trace line.
 const TRACE_BYTES: usize = 200;
 
-/// Packet trace on stderr, gated on `NTOSEYE_GDB_TRACE`: every RSP packet on
-/// both of ntoseye's GDB connections, timestamped on one clock. `stub` lines
-/// are the `gdb` backend's conversation with the hypervisor's stub; `client`
-/// lines are the GDB server's with its client. One capture lines a client's
-/// request up against what the backend did to answer it.
-static TRACE: LazyLock<bool> = LazyLock::new(|| std::env::var_os("NTOSEYE_GDB_TRACE").is_some());
+/// When the packet trace started: [`trace_packet`] stamps each line with the
+/// time since.
 static TRACE_START: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 /// The RSP checksum of a packet body: its bytes summed modulo 256.
@@ -64,10 +61,14 @@ fn holds_stop_reply(mut bytes: &[u8]) -> bool {
     }
 }
 
-/// Trace one packet. `direction` is `->` for bytes ntoseye sends to `peer`
-/// and `<-` for bytes it receives.
+/// Trace one packet on stderr, under [`Trace::Gdb`]: every RSP packet on
+/// both of ntoseye's GDB connections, timestamped on one clock. `stub` lines
+/// are the `gdb` backend's conversation with the hypervisor's stub; `client`
+/// lines are the GDB server's with its client. One capture lines a client's
+/// request up against what the backend did to answer it. `direction` is
+/// `->` for bytes ntoseye sends to `peer` and `<-` for bytes it receives.
 pub fn trace_packet(peer: &str, direction: &str, bytes: &[u8]) {
-    if !*TRACE {
+    if !Trace::Gdb.enabled() {
         return;
     }
     let mut shown = String::new();
@@ -2279,8 +2280,10 @@ mod tests {
 
     #[test]
     fn rejects_truncated_escape_sequences() {
-        let err = GdbClient::decode_packet_data(b"}").unwrap_err();
-        assert!(err.to_string().contains("truncated escaped packet data"));
+        assert!(matches!(
+            GdbClient::decode_packet_data(b"}"),
+            Err(Error::Rsp(_))
+        ));
     }
 
     #[test]

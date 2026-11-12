@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::base::error::Result;
 use crate::base::types::VirtAddr;
 use crate::hosts::ui;
-use crate::nt::expr::Expr;
+use crate::nt::expr::{Expr, ExprValue};
 use crate::nt::layout::{
     FieldInfo, ParsedType, TypeInfo, abi_layout, find_field, le_uint, named_type,
     nested_layout_name, unqualified_type_name,
@@ -22,16 +22,30 @@ const MAX_LIST_ENTRIES: usize = 4096;
 pub const MAX_RECURSION_DEPTH: usize = 64;
 const MAX_DL_WORDS: usize = 64;
 
+/// Why `dt` and `dx` cannot show the value of `name`, a symbol or module at
+/// `address` that has no type: public symbols record a global's address but
+/// not its type, so the value is only readable once a cast names the type.
+pub fn untyped_symbol_message(name: &str, address: VirtAddr) -> String {
+    format!(
+        "{name} ({:#x}) has no type information in its symbols; name the type \
+         with a cast, as in `dx *(<type> *){name}`",
+        address.0
+    )
+}
+
 /// Show a type layout or a decoded structure.
 ///
-/// -r expands nested structures, -a expands bounded arrays, and -v shows field
-/// sizes. -y matches names by case-insensitive prefix, and -l <field> walks a
-/// LIST_ENTRY field. ntoseye looks for a bare type name in the kernel PDB
+/// -r expands nested structures, and -v shows field sizes. Arrays show their
+/// first 16 elements; -a<N> shows the first N, up to 16. -y matches names by
+/// case-insensitive prefix, and -l <field> walks a LIST_ENTRY field. ntoseye
+/// looks for a bare type name in the kernel PDB
 /// first, and then in the modules of the current address space. If the PDB of a
 /// module defines a member type, ntoseye names the type with that module
 /// (wdf01000!_WDF_DRIVER_GLOBALS) and expands it from that PDB. If the PDB only
 /// declares the type (a driver's _EPROCESS*), ntoseye resolves it as a bare
-/// name. Nested field paths use dots, and field patterns support * and ?. With
+/// name. Nested field paths use dots, and field patterns support * and ?. A
+/// word that names a field of the type is a field pattern, so the address may
+/// come before or after the fields, as in WinDbg. With
 /// -l, the given address is the first element, as in WinDbg, so the walk
 /// includes all nodes until it returns to that address. In memory, a list head
 /// and a record link look the same, so if you start at a list head instead of
@@ -52,7 +66,7 @@ fn dt(state: &mut ReplState<'_>, #[arg(parse = dt_arguments)] parsed: ParsedDtAr
 
 /// `dt`'s words.
 #[grammar(
-    usage = "[-r[N]] [-a[N]] [-v] [-y] [-l <field>] [module!]<type> [address] [field-pattern]...",
+    usage = "[-r[N]] [-a[N]] [-v] [-y] [-l <field>] [module!]<type> [field-pattern]... [address] [field-pattern]...",
     complete = Type
 )]
 fn dt_arguments(
@@ -282,8 +296,9 @@ struct DtOptions {
 #[derive(Debug, Clone)]
 struct ParsedDtArgs {
     type_name: String,
-    address_text: Option<String>,
-    field_patterns: Vec<String>,
+    /// The words after the type: field patterns and at most one address,
+    /// told apart once the type's fields are known (see `ReplState::dt`).
+    words: Vec<String>,
     options: DtOptions,
 }
 
@@ -317,7 +332,10 @@ fn parse_array_option(arg: &str) -> std::result::Result<usize, String> {
     let value = suffix
         .parse::<usize>()
         .map_err(|_| format!("invalid -a count '{}'", suffix))?;
-    Ok(value.min(MAX_ARRAY_ELEMENTS))
+    if value > MAX_ARRAY_ELEMENTS {
+        return Err(format!("-a count must be at most {MAX_ARRAY_ELEMENTS}"));
+    }
+    Ok(value)
 }
 
 fn parse_dt_args(args: &[Cow<'_, str>]) -> std::result::Result<ParsedDtArgs, String> {
@@ -368,13 +386,13 @@ fn parse_dt_args(args: &[Cow<'_, str>]) -> std::result::Result<ParsedDtArgs, Str
         index += 1;
     }
 
-    let Some(type_name) = positional.first().cloned() else {
+    let mut positional = positional.into_iter();
+    let Some(type_name) = positional.next() else {
         return Err("missing type name".to_string());
     };
     Ok(ParsedDtArgs {
         type_name,
-        address_text: positional.get(1).cloned(),
-        field_patterns: positional.into_iter().skip(2).collect(),
+        words: positional.collect(),
         options,
     })
 }
@@ -403,17 +421,30 @@ fn parse_field_path(path: &str) -> std::result::Result<Vec<String>, String> {
 }
 
 fn field_matches(name: &str, patterns: &[String], prefix_match: bool) -> bool {
-    if patterns.is_empty() {
-        return true;
+    patterns.is_empty()
+        || patterns
+            .iter()
+            .any(|pattern| field_matches_pattern(name, pattern, prefix_match))
+}
+
+fn field_matches_pattern(name: &str, pattern: &str, prefix_match: bool) -> bool {
+    if prefix_match {
+        name.to_ascii_lowercase()
+            .starts_with(&pattern.to_ascii_lowercase())
+    } else {
+        glob_matches(pattern, name, true)
     }
-    patterns.iter().any(|pattern| {
-        if prefix_match {
-            name.to_ascii_lowercase()
-                .starts_with(&pattern.to_ascii_lowercase())
-        } else {
-            glob_matches(pattern, name, true)
-        }
-    })
+}
+
+/// Whether `word` reads as a field pattern of `type_info`: it matches one of
+/// its fields, or starts a dotted path at one (`Pcb.Header`).
+fn names_field(type_info: &TypeInfo, word: &str, prefix_match: bool) -> bool {
+    let first = word.split('.').next().unwrap_or(word);
+    !first.is_empty()
+        && type_info
+            .fields
+            .keys()
+            .any(|name| field_matches_pattern(name, first, prefix_match))
 }
 
 /// What `dt` shows for a type: its header, then its fields (or the
@@ -463,9 +494,6 @@ pub struct DtField {
     /// The decoded value, when `dt` has an address and the field is not a
     /// nested structure or array.
     pub value: Option<String>,
-    /// The value is a number (an integer or a bitfield), not a pointer,
-    /// an enum or a string.
-    pub numeric: bool,
     /// A nested structure's fields or an array's elements.
     pub children: Vec<DtEntry>,
 }
@@ -575,7 +603,6 @@ impl ReplState<'_> {
             type_name: field.type_data.to_string(),
             size: (offset.is_some() && options.verbose).then(|| self.type_view().field_size(field)),
             value: None,
-            numeric: false,
             children: Vec::new(),
         };
         match &field.type_data {
@@ -611,11 +638,6 @@ impl ReplState<'_> {
             _ => {
                 if options.show_values {
                     entry.value = Some(self.type_view().value_text(address, field));
-                    entry.numeric = matches!(
-                        field.type_data,
-                        ParsedType::Primitive(_) | ParsedType::Bitfield { .. }
-                    ) && !named_type(&field.type_data, "_UNICODE_STRING")
-                        && !named_type(&field.type_data, "_LIST_ENTRY");
                 }
             }
         }
@@ -869,6 +891,29 @@ impl ReplState<'_> {
                 if let Some(variants) = self.lookup_enum(&parsed.type_name) {
                     let name = unqualified_type_name(&parsed.type_name);
                     print_enum(name, &variants);
+                } else if let Ok(ExprValue::Raw {
+                    address: Some(address),
+                    ..
+                }) =
+                    Expr::parse(&parsed.type_name).and_then(|expr| expr.evaluate(&self.ctx.target))
+                {
+                    // A variable whose PDB records its type: a structure is
+                    // shown as `dt` shows its type at the variable, any
+                    // other value as `dx` shows it.
+                    let global = self
+                        .ctx
+                        .target
+                        .symbols
+                        .global_type(self.ctx.target.current_dtb(), address);
+                    match global {
+                        Some((ParsedType::Struct(name) | ParsedType::Union(name), _)) => {
+                            parsed.type_name = name;
+                            parsed.words.insert(0, format!("{:#x}", address.0));
+                            return self.dt(parsed);
+                        }
+                        Some(_) => return self.dx(&parsed.type_name),
+                        None => error!("{}", untyped_symbol_message(&parsed.type_name, address)),
+                    }
                 } else {
                     error!("type '{}' not found", parsed.type_name);
                 }
@@ -876,22 +921,33 @@ impl ReplState<'_> {
             }
         };
 
-        let address = parsed
-            .address_text
+        // As in WinDbg, a word that names a field of the type is a field
+        // pattern, even one that would also evaluate (a bare pseudo-register
+        // such as `BasePriority`, or a hex-looking name), and the first word
+        // that names none is the address, before or after the fields.
+        let mut address_text = None;
+        let mut patterns = Vec::with_capacity(parsed.words.len());
+        for word in std::mem::take(&mut parsed.words) {
+            if address_text.is_none()
+                && !names_field(&type_info, &word, parsed.options.prefix_match)
+            {
+                address_text = Some(word);
+            } else {
+                patterns.push(word);
+            }
+        }
+        let address = address_text
             .as_deref()
-            .and_then(|text| Expr::eval_with_radix(text, &self.ctx.target, self.radix).ok());
+            .and_then(|text| Expr::eval_with_radix(text, &self.ctx.target, self.ctx.radix).ok());
         let base = address.filter(|address| !address.is_zero());
         parsed.options.show_values = base.is_some();
-        let patterns = if parsed.address_text.is_some() && address.is_some() {
-            parsed.field_patterns.clone()
-        } else if let Some(address_text) = parsed.address_text {
-            let mut all = Vec::with_capacity(parsed.field_patterns.len() + 1);
-            all.push(address_text);
-            all.extend(parsed.field_patterns);
-            all
-        } else {
-            parsed.field_patterns.clone()
-        };
+        // A word that is neither a field nor an expression is still tried
+        // as a pattern, which reports that nothing matches it.
+        if address.is_none()
+            && let Some(text) = address_text
+        {
+            patterns.insert(0, text);
+        }
 
         let body = if let Some(list_path) = parsed.options.list_field.as_ref() {
             self.dt_list(
@@ -1009,15 +1065,17 @@ impl ReplState<'_> {
         let Some(address) = self.eval_or_report(&positional[0]) else {
             return Ok(());
         };
-        let limit = match self.eval_or_report(&positional[1]) {
-            Some(count) => count.0.min(MAX_LIST_ENTRIES as u64) as usize,
+        let requested = match self.eval_or_report(&positional[1]) {
+            Some(count) => count.0,
             None => return Ok(()),
         };
+        let capped = requested > MAX_LIST_ENTRIES as u64;
+        let limit = requested.min(MAX_LIST_ENTRIES as u64) as usize;
         let display_words = match positional.get(2) {
             Some(size) => match self.eval_or_report(size) {
-                Some(size) if size.0 > 0 => size.0.min(MAX_DL_WORDS as u64) as usize,
+                Some(size) if (1..=MAX_DL_WORDS as u64).contains(&size.0) => size.0 as usize,
                 Some(_) => {
-                    error!("dl size must be greater than zero");
+                    error!("dl size must be 1..{MAX_DL_WORDS}");
                     return Ok(());
                 }
                 None => return Ok(()),
@@ -1031,7 +1089,7 @@ impl ReplState<'_> {
         while let Some(current) = cursor.take_current() {
             let read_words = display_words.max(2);
             let width = read_words * pointer;
-            if let Err(error) = self.ctx.read_masked(current, &mut bytes[..width]) {
+            if let Err(error) = self.ctx.target.read_masked(current, &mut bytes[..width]) {
                 outln!("{}: <unavailable: {}>", ui::addr(current.0), error);
                 cursor.advance(Err(error.to_string()));
                 continue;
@@ -1050,8 +1108,10 @@ impl ReplState<'_> {
         }
         match cursor.finish() {
             // A closed ring or the requested count is the normal stop, and an
-            // unreadable link was already reported against its address.
-            ListTermination::Head | ListTermination::Bound | ListTermination::Corrupt(_) => {}
+            // unreadable link was already reported against its address; the
+            // entry cap cutting a longer request short is reported.
+            ListTermination::Bound if !capped => {}
+            ListTermination::Head | ListTermination::Corrupt(_) => {}
             stop => {
                 if let Some(stop) = stop.diagnostic() {
                     outln!("dl: list walk stopped: {stop}");
@@ -1182,6 +1242,53 @@ mod tests {
             text.contains("+0x028 Links.blink : <?>* = 0x1000"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn dt_reads_a_word_that_names_a_field_as_a_field_in_either_order() {
+        let mut memory = [0u8; 0x10];
+        memory[0] = 0x11;
+        memory[4..8].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        let mut session = session_over_memory(0x1000, &memory);
+        let dtb = session.target.current_dtb();
+        session.target.symbols.set_kernel(Some(1), dtb);
+        let field = |offset, size, name: &str| FieldInfo {
+            offset,
+            size,
+            type_data: ParsedType::Primitive(name.to_string()),
+        };
+        session.target.symbols.inject_module_for_test(
+            1,
+            vec![TypeInfo {
+                name: "_HDR".to_string(),
+                pointer_size: 8,
+                size: 8,
+                fields: [
+                    // `Cafe` also evaluates, as the number 0xcafe.
+                    ("Cafe".to_string(), field(0, 1, "UCHAR")),
+                    ("Value".to_string(), field(4, 4, "ULONG")),
+                ]
+                .into_iter()
+                .collect(),
+            }],
+            &[],
+        );
+        let mut state = ReplState::for_oneshot(&mut session);
+
+        let (result, text) = capture(|| state.dispatch_line("dt _HDR Cafe"));
+        result.unwrap();
+        assert!(text.contains("+0x000 Cafe : UCHAR"), "{text}");
+        assert!(!text.contains("Value"), "the layout, filtered: {text}");
+
+        for line in ["dt _HDR Value 1000", "dt _HDR 1000 Value"] {
+            let (result, text) = capture(|| state.dispatch_line(line));
+            result.unwrap();
+            assert!(
+                text.contains("+0x004 Value : ULONG = 0x12345678"),
+                "{line}: {text}"
+            );
+            assert!(!text.contains("Cafe"), "{line}: {text}");
+        }
     }
 
     #[test]

@@ -17,7 +17,9 @@ use crate::nt::symbols::{
 };
 use crate::nt::target::SelectedFrame;
 use crate::session::exception_policy::ExceptionPolicyMode;
-use crate::session::tests::{MockBackend, session_with_mock};
+use crate::session::tests::{
+    MockBackend, breakpoint_event, session_running_code, session_with_mock,
+};
 use crate::session::{StopKind, session_over_memory};
 
 #[test]
@@ -30,13 +32,62 @@ fn a_disassembly_request_cannot_ask_for_unbounded_work() {
         .on_disassemble(&json!({
             "memoryReference": "0x1000",
             "instructionCount": i64::MAX,
-            "instructionOffset": i64::MIN,
+            "instructionOffset": -(MAX_DISASSEMBLE_INSTRUCTIONS as i64),
         }))
         .expect("the request is answered, not refused")
         .expect("a body is returned");
 
     let instructions = answer["instructions"].as_array().expect("instructions");
     assert_eq!(instructions.len(), MAX_DISASSEMBLE_INSTRUCTIONS);
+
+    // Past the window the rows' instructions are unknown: refused, not
+    // answered with rows from inside it under the wrong offsets.
+    for offset in [i64::MIN, MAX_DISASSEMBLE_INSTRUCTIONS as i64 + 1] {
+        assert!(
+            server
+                .on_disassemble(&json!({
+                    "memoryReference": "0x1000",
+                    "instructionCount": 1,
+                    "instructionOffset": offset,
+                }))
+                .is_err()
+        );
+    }
+}
+
+/// Code that runs into unreadable memory decodes up to it, and the rows
+/// past it are invalid; a skip ahead that runs out is invalid throughout,
+/// never rows from the reference filed under later offsets.
+#[test]
+fn a_decode_into_unreadable_memory_keeps_what_reads() {
+    let session = session_over_memory(0x1000, &[0x90u8; 0x1000]);
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, _sink) = server_with_sink(Some(session), rx);
+    let rows = |server: &mut Server, offset: i64, count: i64| {
+        let answer = server
+            .on_disassemble(&json!({
+                "memoryReference": "0x1fc0",
+                "instructionOffset": offset,
+                "instructionCount": count,
+            }))
+            .unwrap()
+            .unwrap();
+        answer["instructions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["address"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    let decoded = rows(&mut server, 0, 0x48);
+    assert_eq!(decoded[0x3f], "0x1fff");
+    assert!(decoded[0x40..].iter().all(|address| address == "-1"));
+
+    let skipped = rows(&mut server, 0x3e, 2);
+    assert_eq!(skipped, ["0x1ffe", "0x1fff"]);
+    let beyond = rows(&mut server, 0x45, 2);
+    assert!(beyond.iter().all(|address| address == "-1"), "{beyond:?}");
 }
 
 #[test]
@@ -222,19 +273,56 @@ fn source_without_a_local_file_is_not_advertised_as_openable() {
 
 #[test]
 fn dump_targets_take_precedence_over_live_backend_arguments() {
-    let spec = target_spec(&json!({"dump": "/tmp/crash.dmp", "backend": "gdb"})).unwrap();
+    let spec = target_spec(
+        KdMemorySource::Auto,
+        &json!({"dump": "/tmp/crash.dmp", "backend": "gdb"}),
+    )
+    .unwrap();
     assert!(matches!(spec, TargetSpec::Dump(path) if path.ends_with("crash.dmp")));
+}
+
+/// A `dump` that is not a path is refused, not ignored for a live attach.
+#[test]
+fn a_dump_that_is_not_a_string_is_an_invalid_argument() {
+    assert!(target_spec(KdMemorySource::Auto, &json!({"dump": 123})).is_err());
+}
+
+/// The command line's `--memory-source` applies to a KD or KDNET target a
+/// request names no `memorySource` for; the request's own wins, and a GDB or
+/// memory target, which takes none, still opens.
+#[test]
+fn a_request_without_a_memory_source_takes_the_command_lines() {
+    let source = |args: Value| match target_spec(KdMemorySource::Kd, &args).unwrap() {
+        TargetSpec::Live { memory_source, .. } => memory_source,
+        TargetSpec::Dump(_) => panic!("a live target"),
+    };
+
+    assert_eq!(source(json!({"backend": "kd"})), KdMemorySource::Kd);
+    assert_eq!(
+        source(json!({"backend": "kdnet", "kdnetKey": "1.2.3.4"})),
+        KdMemorySource::Kd
+    );
+    assert_eq!(
+        source(json!({"backend": "kd", "memorySource": "host"})),
+        KdMemorySource::Host
+    );
+    for backend in ["gdb", "memory"] {
+        assert_eq!(source(json!({"backend": backend})), KdMemorySource::Auto);
+    }
 }
 
 #[test]
 fn kd_handshake_timeout_is_passed_to_kd_and_kdnet() {
     for backend in ["kd", "kdnet"] {
         for timeout in [1, 30] {
-            let spec = target_spec(&json!({
-                "backend": backend,
-                "kdnetKey": if backend == "kdnet" { Some("1.2.3.4") } else { None },
-                "kdHandshakeTimeout": timeout
-            }))
+            let spec = target_spec(
+                KdMemorySource::Auto,
+                &json!({
+                    "backend": backend,
+                    "kdnetKey": if backend == "kdnet" { Some("1.2.3.4") } else { None },
+                    "kdHandshakeTimeout": timeout
+                }),
+            )
             .unwrap();
             assert!(matches!(
                 spec,
@@ -255,7 +343,8 @@ fn kd_handshake_timeout_rejects_invalid_json_types() {
         json!([]),
         json!({}),
     ] {
-        let err = target_spec(&json!({"kdHandshakeTimeout": value})).unwrap_err();
+        let err =
+            target_spec(KdMemorySource::Auto, &json!({"kdHandshakeTimeout": value})).unwrap_err();
         assert!(err.contains("kdHandshakeTimeout"), "{value}: {err}");
     }
 }
@@ -263,7 +352,11 @@ fn kd_handshake_timeout_rejects_invalid_json_types() {
 #[test]
 fn kd_handshake_timeout_rejects_zero_and_too_large_values() {
     for timeout in [0, u64::MAX] {
-        let err = target_spec(&json!({"kdHandshakeTimeout": timeout})).unwrap_err();
+        let err = target_spec(
+            KdMemorySource::Auto,
+            &json!({"kdHandshakeTimeout": timeout}),
+        )
+        .unwrap_err();
         assert!(err.contains("timeout"), "{timeout}: {err}");
     }
 }
@@ -271,9 +364,12 @@ fn kd_handshake_timeout_rejects_zero_and_too_large_values() {
 #[test]
 fn kd_handshake_timeout_rejects_other_live_backends() {
     for backend in ["gdb", "memory"] {
-        let err = target_spec(&json!({
-            "backend": backend, "kdHandshakeTimeout": 30
-        }))
+        let err = target_spec(
+            KdMemorySource::Auto,
+            &json!({
+                "backend": backend, "kdHandshakeTimeout": 30
+            }),
+        )
         .unwrap_err();
         assert!(err.contains("timeout"), "{backend}: {err}");
     }
@@ -282,14 +378,20 @@ fn kd_handshake_timeout_rejects_other_live_backends() {
 #[test]
 fn dump_targets_reject_kd_handshake_timeout_even_with_invalid_live_arguments() {
     for value in [json!(30), json!(null), json!("30")] {
-        let err = target_spec(&json!({
-            "dump": "/tmp/crash.dmp",
-            "backend": "invalid",
-            "memorySource": "invalid",
-            "kdHandshakeTimeout": value
-        }))
+        let err = target_spec(
+            KdMemorySource::Auto,
+            &json!({
+                "dump": "/tmp/crash.dmp",
+                "backend": "invalid",
+                "memorySource": "invalid",
+                "kdHandshakeTimeout": value
+            }),
+        )
         .unwrap_err();
-        assert_eq!(err, "dump does not use 'kdHandshakeTimeout'");
+        assert!(
+            err.contains("dump") && err.contains("kdHandshakeTimeout"),
+            "{value}: {err}"
+        );
     }
 }
 
@@ -355,6 +457,86 @@ fn decode_sink(sink: &Rc<RefCell<Vec<u8>>>) -> Vec<Value> {
 
 fn request(seq: i64, command: &str) -> Value {
     json!({"seq": seq, "type": "request", "command": command})
+}
+
+/// A step over a call hands the target back running, as a continue does,
+/// instead of waiting for the call to return, so other requests are
+/// answered meanwhile; a `pause` ends it where it is and takes out the
+/// breakpoint it planted at the return address. (The test memory is a
+/// dump, whose `next` request is refused, so the step starts below it.)
+#[test]
+fn a_step_over_a_call_runs_on_until_paused() {
+    // call 0x1010; the return address is 0x1005.
+    let mut code = [0x90u8; 0x40];
+    code[..5].copy_from_slice(&[0xe8, 0x0b, 0x00, 0x00, 0x00]);
+    let mut backend = MockBackend::default()
+        .one_vcpu()
+        .halts_only_on_interrupt()
+        .with_breakpoints();
+    backend.set("rip", 0x1000);
+    backend.queue_interrupt(breakpoint_event(0x1020));
+    let sites = backend.site_log();
+    let session = session_running_code(&code, backend);
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, sink) = server_with_sink(Some(session), rx);
+    server.configured = true;
+    let dispatch = |server: &mut Server, message: Value| {
+        server.dispatch(Request::from_message(&message).unwrap());
+    };
+
+    let outcome = server.start_step(StepRequest::Step(StepMode::Over), true);
+    assert!(matches!(outcome, Ok(RunOutcome::Running)), "{outcome:?}");
+    assert_eq!(sites.lock().last(), Some(&(0x1005, true)));
+    server.state = RunState::Running;
+    dispatch(&mut server, request(1, "threads"));
+    server.cancel.store(true, Ordering::Relaxed);
+    dispatch(&mut server, request(2, "pause"));
+
+    let messages = decode_sink(&sink);
+    let threads = messages
+        .iter()
+        .find(|message| message["command"] == "threads")
+        .unwrap();
+    assert_eq!(threads["success"], true, "{threads:?}");
+    let stopped = messages
+        .iter()
+        .find(|message| message["event"] == "stopped")
+        .unwrap_or_else(|| panic!("no stopped event in {messages:?}"));
+    assert_eq!(stopped["body"]["reason"], "pause");
+    assert_eq!(sites.lock().last(), Some(&(0x1005, false)));
+}
+
+/// A step request while a step still runs is refused, and the running
+/// step keeps its site: replacing it lost the step and left its site armed.
+#[test]
+fn a_step_request_while_a_step_runs_is_refused() {
+    // call 0x1010; the return address is 0x1005.
+    let mut code = [0x90u8; 0x40];
+    code[..5].copy_from_slice(&[0xe8, 0x0b, 0x00, 0x00, 0x00]);
+    let mut backend = MockBackend::default()
+        .one_vcpu()
+        .halts_only_on_interrupt()
+        .with_breakpoints();
+    backend.set("rip", 0x1000);
+    let sites = backend.site_log();
+    let session = session_running_code(&code, backend);
+    let (_tx, rx) = mpsc::channel();
+    let (mut server, sink) = server_with_sink(Some(session), rx);
+    server.configured = true;
+
+    let outcome = server.start_step(StepRequest::Step(StepMode::Over), true);
+    assert!(matches!(outcome, Ok(RunOutcome::Running)), "{outcome:?}");
+    server.state = RunState::Running;
+    server.dispatch(Request::from_message(&request(1, "next")).unwrap());
+
+    let messages = decode_sink(&sink);
+    let next = messages
+        .iter()
+        .find(|message| message["command"] == "next")
+        .unwrap();
+    assert_eq!(next["success"], false, "{next:?}");
+    assert!(server.step.is_some());
+    assert_eq!(sites.lock().last(), Some(&(0x1005, true)));
 }
 
 #[test]

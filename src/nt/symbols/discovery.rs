@@ -12,7 +12,7 @@ use crate::{
     base::{
         error::{Error, Result},
         memory,
-        memory::MemoryOps,
+        memory::{MemoryOps, PAGE_SIZE},
         output,
         types::{Dtb, PhysAddr, VirtAddr},
     },
@@ -176,7 +176,7 @@ impl SymbolStore {
         time_date_stamp: u32,
         size_of_image: u32,
     ) -> Result<Option<u128>> {
-        let image_job = Self::build_image_download_job(name, time_date_stamp, size_of_image)?;
+        let image_job = self.build_image_download_job(name, time_date_stamp, size_of_image)?;
         download_job(&image_job, output::progress_bar(0, "downloading symbols"))?;
 
         let Some((pdb_job, guid)) = self.extract_download_job_from_image_file(&image_job.path)?
@@ -243,19 +243,52 @@ impl SymbolStore {
                 guid,
                 source: ModuleSymbolSource::Memory,
             }),
-            Ok(None) => Self::plan_image_fallback(&addr_space, module_name, base_address),
+            Ok(None) => self.plan_image_fallback(&addr_space, module_name, base_address),
             Err(Error::BadVirtualAddress(_))
             | Err(Error::AddressNotInDump(_))
             | Err(Error::NotCaptured { .. })
             | Err(Error::PartialRead(_))
             | Err(Error::DebugInfo(_)) => {
-                Self::plan_image_fallback(&addr_space, module_name, base_address)
+                // With no stamp to fetch the file by, the record itself may
+                // still be in memory.
+                if module.time_date_stamp.is_none()
+                    && let Some(headers::CodeView::Rsds { guid, age, path }) =
+                        Self::scan_codeview_record(&addr_space, module)
+                {
+                    let (job, guid) = self.build_download_job(&path, guid_to_u128(guid), age)?;
+                    return Ok(ModuleSymbolDiscovery::Ready {
+                        job,
+                        guid,
+                        source: ModuleSymbolSource::Memory,
+                    });
+                }
+                self.plan_image_fallback(&addr_space, module_name, base_address)
             }
             Err(err) => Err(err),
         }
     }
 
-    pub fn load_downloaded_pdb(&self, load: &ModuleSymbolLoad) -> Result<()> {
+    /// Index and register `load`'s PDB. A `background` load commits only
+    /// while its module is still `Fetching`: every cleanup path (process
+    /// exit, invalidation, reboot) drops that status, and registering after
+    /// one would attach symbols to a dead, possibly reused, address space.
+    pub fn load_downloaded_pdb(&self, load: &ModuleSymbolLoad, background: bool) -> Result<()> {
+        let stale = || {
+            Error::DebugInfo(format!(
+                "stale symbol job for {}: module was replaced",
+                load.module.name
+            ))
+        };
+        let unloaded = || {
+            background
+                && !matches!(
+                    self.module_symbol_status(load.dtb, load.module.base_address),
+                    Some(ModuleSymbolStatus::Fetching)
+                )
+        };
+        if unloaded() {
+            return Err(stale());
+        }
         let module_key = Self::module_key(load.dtb, load.module.base_address);
         let existing_guid = self.modules.get(&module_key).map(|existing| existing.guid);
         // The export fallback of this very image, from before its PDB
@@ -266,10 +299,7 @@ impl SymbolStore {
             // A job that outlived a reload/reattach of its module describes a
             // different image; finishing it would mark the wrong PDB loaded.
             if existing_guid != load.guid && image_fallback.is_none() {
-                return Err(Error::DebugInfo(format!(
-                    "stale symbol job for {}: module was replaced",
-                    load.module.name
-                )));
+                return Err(stale());
             }
             // Registered with its PDB already loaded. A registration from the
             // export-table fallback has no PDB yet: load it below, which
@@ -290,6 +320,10 @@ impl SymbolStore {
         }
 
         self.ensure_pdb_loaded(load.job.expected_identity().unwrap(), &load.job.path)?;
+        // Indexing can take long enough for the module to go away meanwhile.
+        if unloaded() {
+            return Err(stale());
+        }
         self.modules.insert(module_key, load.loaded_module());
         if let Some(fallback) = image_fallback
             && !self.modules.iter().any(|module| module.guid == fallback)
@@ -370,14 +404,59 @@ impl SymbolStore {
         Ok(None)
     }
 
+    /// The RSDS record of `module` found in its own resident pages, for an
+    /// image whose headers are out of memory: one naming the module's PDB
+    /// (`cdd.pdb` for `cdd.dll`), since another name would be some other
+    /// build's record carried as data. A Windows 8.1 session image can have
+    /// its header page out and no TimeDateStamp in its loader entry, while
+    /// the `.rdata` page holding its record is in.
+    fn scan_codeview_record<B: MemoryOps<PhysAddr>>(
+        memory: &memory::AddressSpace<'_, B>,
+        module: &ModuleInfo,
+    ) -> Option<headers::CodeView> {
+        // The record's fixed part, and a path as long as Windows' own.
+        const RECORD_BYTES: usize = 24 + 260;
+        let wanted = format!("{}.pdb", ModuleInfo::derive_short_name(&module.name));
+        let names_module = |path: &str| {
+            path.rsplit(['\\', '/'])
+                .next()
+                .is_some_and(|name| name.eq_ignore_ascii_case(&wanted))
+        };
+        let mut page = vec![0u8; PAGE_SIZE];
+        for offset in (0..u64::from(module.size)).step_by(PAGE_SIZE) {
+            let at = module.base_address + offset;
+            if memory.read_bytes(at, &mut page).is_err() {
+                continue;
+            }
+            for found in memchr::memmem::find_iter(&page, b"RSDS") {
+                // The path may run into the next page; the rest of this one
+                // holds it when that page is out.
+                let mut record = vec![0u8; RECORD_BYTES];
+                let bytes = match memory.read_bytes(at + found as u64, &mut record) {
+                    Ok(()) => &record[..],
+                    Err(_) => &page[found..],
+                };
+                if let Ok(codeview @ headers::CodeView::Rsds { .. }) =
+                    headers::decode_codeview(bytes)
+                    && let headers::CodeView::Rsds { path, .. } = &codeview
+                    && names_module(path)
+                {
+                    return Some(codeview);
+                }
+            }
+        }
+        None
+    }
+
     fn plan_image_fallback<B: MemoryOps<PhysAddr>>(
+        &self,
         memory: &memory::AddressSpace<'_, B>,
         module_name: &str,
         base_address: VirtAddr,
     ) -> Result<ModuleSymbolDiscovery> {
         let (time_date_stamp, size_of_image) = Self::read_image_lookup_info(memory, base_address)?;
         let image_job =
-            Self::build_image_download_job(module_name, time_date_stamp, size_of_image)?;
+            self.build_image_download_job(module_name, time_date_stamp, size_of_image)?;
         Ok(ModuleSymbolDiscovery::NeedsImage { image_job })
     }
 
@@ -404,6 +483,7 @@ impl SymbolStore {
     }
 
     pub fn ensure_pdb_loaded(&self, expected: PdbIdentity, path: &Path) -> Result<()> {
+        self.image_ages.entry(expected.guid).or_insert(expected.age);
         if let Some(age) = self.pdb_ages.get(&expected.guid) {
             let validation = expected
                 .matches(PdbIdentity {

@@ -104,16 +104,9 @@ impl Target {
     /// Maps a PTE address to the virtual address it maps, when the PTE lies
     /// in NT's PTE self-map (one top-level slot: 512 GiB of PTEs; AMD64 and
     /// ARM64 lay it out alike), and to `None` for a PTE elsewhere, such as a
-    /// prototype PTE. `None` without `MmPteBase`, which is read once, here.
+    /// prototype PTE. `None` without the PTE base, which is read once, here.
     pub fn va_mapped_by_pte(&self) -> Option<impl Fn(VirtAddr) -> Option<VirtAddr>> {
-        let pte_base: VirtAddr = self
-            .guest()
-            .ok()?
-            .ntoskrnl
-            .symbol("MmPteBase")
-            .ok()?
-            .read()
-            .ok()?;
+        let pte_base = self.guest().ok()?.ntoskrnl.pte_base().ok()?;
         Some(move |pte: VirtAddr| {
             (pte.0.wrapping_sub(pte_base.0) < 1 << 39).then(|| pte_to_va(pte, pte_base))
         })
@@ -140,7 +133,10 @@ impl Target {
             .layout("_MI_SYSTEM_INFORMATION")
             .map_err(|error| unsupported(error.to_string()))?;
         let mi_state = ntos.symbol("MiState")?.address();
-        let pte_base: Option<VirtAddr> = ntos.symbol("MmPteBase").and_then(|s| s.read()).ok();
+        let displacement = self.mi_state_displacement();
+        let va_type_offset = pte_layout.field_offset("VaType").ok();
+        let memory = ntos.memory();
+        let pte_base = ntos.pte_base().ok();
         let va_types = self
             .symbols
             .find_enum_across_modules(ntos.dtb(), "_MI_SYSTEM_VA_TYPE")
@@ -157,11 +153,32 @@ impl Target {
                 continue;
             };
             let layout = types.layout(container_type)?;
-            let base = mi_state + field.offset as u64;
+            let base = match container {
+                "Vs" => self.visible_state()?,
+                _ => mi_state + field.offset as u64,
+            };
+            // Outside `Vs`, an allocator at its PDB offset that says it
+            // allocates nothing is looked for where the kernel's later
+            // `MiState` members are (`mi_state_displacement`).
+            let placed = |at: VirtAddr| -> VirtAddr {
+                if container == "Vs" || displacement == 0 {
+                    return at;
+                }
+                let in_use = |at: VirtAddr| {
+                    va_type_offset
+                        .and_then(|offset| memory.read::<u32>(at + offset).ok())
+                        .is_some_and(|va_type| va_type != 0)
+                };
+                if !in_use(at) && in_use(at + displacement) {
+                    at + displacement
+                } else {
+                    at
+                }
+            };
             let mut members: Vec<_> = layout.fields.iter().collect();
             members.sort_by_key(|(_, member)| member.offset);
             for (name, member) in members {
-                let at = base + member.offset as u64;
+                let at = placed(base + member.offset as u64);
                 match &member.type_data {
                     ty if is_pte_type(ty) => allocators.push((format!("{container}.{name}"), at)),
                     ParsedType::Array(inner, count) if is_pte_type(inner) => {
@@ -182,11 +199,11 @@ impl Target {
             ));
         }
 
-        let memory = ntos.memory();
         let mut detail = SystemPtesDetail {
             types: Vec::with_capacity(allocators.len()),
             total: 0,
             free: 0,
+            uncounted: Vec::new(),
         };
         for (name, address) in allocators {
             let pte_type = types.struct_at(PTE_TYPE, address)?.prefetch();
@@ -246,9 +263,7 @@ impl Target {
 
             let total = pte_type.read_uint("TotalSystemPtes")?;
             let free = pte_type.read_uint("TotalFreeSystemPtes")?;
-            detail.total += total;
-            detail.free += free;
-            detail.types.push(SystemPteTypeDetail {
+            let allocator = SystemPteTypeDetail {
                 name,
                 address,
                 va_type,
@@ -271,7 +286,14 @@ impl Target {
                 free_runs,
                 free_runs_truncated: list_free_runs && runs.truncated,
                 tracking,
-            });
+            };
+            if allocator.counters_hold() {
+                detail.total = detail.total.saturating_add(total);
+                detail.free = detail.free.saturating_add(allocator.counted_free());
+            } else {
+                detail.uncounted.push(allocator.name.clone());
+            }
+            detail.types.push(allocator);
         }
         Ok(detail)
     }

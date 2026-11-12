@@ -217,12 +217,14 @@ impl Target {
         triage_modules_cache: Option<Vec<ModuleInfo>>,
         notices: Vec<crate::base::notice::Notice>,
     ) -> Self {
+        let interrupt = phys.interrupt_flag();
         Self {
             phys,
             symbols,
             guest,
             debugger_data: None,
             process: None,
+            process_until_run: false,
             secure_root: None,
             effmach: None,
             triage_modules_cache,
@@ -237,11 +239,13 @@ impl Target {
             results_origin: None,
             last_exception_code: None,
             breakpoint_stop: None,
-            interrupt: Arc::new(AtomicBool::new(false)),
+            interrupt,
             interrupt_requests: Arc::new(AtomicU64::new(0)),
             notices,
             generation: Arc::new(AtomicU64::new(0)),
+            keep_kernel_modules: false,
             site_journal: None,
+            code_sites: Arc::default(),
             #[cfg(test)]
             test_current_threads: None,
             #[cfg(test)]
@@ -272,8 +276,15 @@ impl Target {
     /// in the REPL), and work this target does, a run from the view among
     /// it, must see it.
     pub fn share_interrupt(&mut self, other: &Target) {
-        self.interrupt = Arc::clone(&other.interrupt);
+        self.set_interrupt(Arc::clone(&other.interrupt));
         self.interrupt_requests = Arc::clone(&other.interrupt_requests);
+    }
+
+    /// Make `flag` the interrupt flag, this target's and its memory's, so
+    /// Ctrl+C on it stops the work either does.
+    pub fn set_interrupt(&mut self, flag: Arc<AtomicBool>) {
+        self.phys.set_interrupt_flag(Arc::clone(&flag));
+        self.interrupt = flag;
     }
 
     /// Count a rebuild without one, so a host takes the handles it minted
@@ -368,6 +379,9 @@ impl Target {
                 Err(e) => (None, Some(e.to_string())),
             };
 
+        if self.keep_kernel_modules {
+            guest.keep_kernel_modules();
+        }
         self.guest = Some(guest);
         self.triage_modules_cache = None;
         self.generation.fetch_add(1, Ordering::AcqRel);
@@ -396,9 +410,11 @@ impl Target {
         };
         let memory = guest.ntoskrnl.memory();
         let mut signature = [0u8; 2];
-        memory
-            .read_bytes(guest.ntoskrnl.base_address, &mut signature)
-            .is_ok_and(|()| signature == *b"MZ")
+        kernel_image_still_mapped(
+            memory
+                .read_bytes(guest.ntoskrnl.base_address, &mut signature)
+                .map(|()| signature),
+        )
     }
 
     pub fn rediscovered_kernel_identity_changed(&self) -> Result<bool> {
@@ -440,5 +456,60 @@ impl Target {
             base_address,
             loaded_module_list,
         })
+    }
+}
+
+/// Whether `read`, the first two bytes at the kernel's base, leaves the
+/// image mapped where the session found it. Only the page tables or the
+/// target saying the bytes are not there, or bytes that are not `MZ`, show
+/// it gone. A read the transport did not finish (a KD request that timed
+/// out while a flood of stops kept the target busy, a target that runs)
+/// says nothing about the kernel; taken for a reboot, it rebuilt the
+/// session and forgot the breakpoints still planted in guest memory.
+fn kernel_image_still_mapped(read: Result<[u8; 2]>) -> bool {
+    match read {
+        Ok(signature) => signature == *b"MZ",
+        Err(
+            Error::BadVirtualAddress(_)
+            | Error::BadPhysicalAddress(_)
+            | Error::AddressNotInDump(_)
+            | Error::NotCaptured { .. }
+            | Error::PartialRead(_)
+            | Error::KdStatus { .. },
+        ) => false,
+        Err(_) => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_memory_evidence_shows_the_kernel_image_gone() {
+        assert!(kernel_image_still_mapped(Ok(*b"MZ")));
+        assert!(!kernel_image_still_mapped(Ok([0, 0])));
+        assert!(!kernel_image_still_mapped(Err(Error::BadVirtualAddress(
+            VirtAddr(0xfffff800_00000000)
+        ))));
+        assert!(!kernel_image_still_mapped(Err(Error::BadPhysicalAddress(
+            0x1_0000_0000
+        ))));
+        assert!(!kernel_image_still_mapped(Err(Error::KdStatus {
+            ntstatus: 0xc000_0001,
+            api: 0x3130,
+        })));
+        assert!(kernel_image_still_mapped(Err(Error::Kd(
+            "KD request timed out after 5s".into()
+        ))));
+        assert!(kernel_image_still_mapped(Err(Error::TargetRunning(
+            "a read"
+        ))));
+        // A partition's EPT reports an address it does not map as a bad
+        // physical address, as a native target does one past its RAM;
+        // what is left of its errors says nothing about the guest's memory.
+        assert!(kernel_image_still_mapped(Err(Error::Hypervisor(
+            "the EPT pointer does not describe a 4-level walk".into()
+        ))));
     }
 }

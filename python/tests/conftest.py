@@ -23,17 +23,25 @@ import pytest
 import ntoseye
 
 
-@pytest.fixture(scope="session")
-def dbg() -> Iterator[ntoseye.Debugger]:
+def attach_from_env() -> ntoseye.Debugger:
+    """A debugger attached to the guest the environment names, or a skip."""
     backend = os.environ.get("NTOSEYE_TEST_BACKEND")
     if not backend:
         pytest.skip("set NTOSEYE_TEST_BACKEND (and NTOSEYE_TEST_CONNECT) to test against a guest")
-    with ntoseye.attach(
+    return ntoseye.attach(
         backend,  # type: ignore[arg-type]
         os.environ.get("NTOSEYE_TEST_CONNECT"),
         key=os.environ.get("NTOSEYE_TEST_KEY"),
         memory_source=os.environ.get("NTOSEYE_TEST_MEMORY_SOURCE", "auto"),  # type: ignore[arg-type]
-    ) as dbg:
+    )
+
+
+# One session per test file: a target takes one session at a time, so a
+# file that closes its session and attaches again (to check what a detach
+# left behind) must not find another file's session still holding it.
+@pytest.fixture(scope="module")
+def dbg() -> Iterator[ntoseye.Debugger]:
+    with attach_from_env() as dbg:
         yield dbg
 
 

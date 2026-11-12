@@ -50,7 +50,17 @@ impl GdbTarget<'_> {
         });
         match added {
             Ok(id) => {
-                self.planted.push(Planted { kind, address, id });
+                let serial = self
+                    .session
+                    .breakpoints
+                    .listed(id)
+                    .map_or(0, |bp| bp.serial);
+                self.planted.push(Planted {
+                    kind,
+                    address,
+                    id,
+                    serial,
+                });
                 Ok(true)
             }
             Err(error) => {
@@ -68,15 +78,28 @@ impl GdbTarget<'_> {
         else {
             return Ok(false);
         };
-        let id = self.planted.remove(index).id;
+        let Planted { id, serial, .. } = self.planted[index];
+        // Cleared through `monitor` already, possibly with the id reused
+        // since by a breakpoint the client does not own.
+        if self.session.breakpoints.live(id, serial).is_none() {
+            self.planted.remove(index);
+            return Ok(true);
+        }
         let removed = self
             .session
             .with_target_halted(|session| session.remove_breakpoint(id));
-        if let Err(error) = removed {
-            eprintln!("ntoseye-gdbserver: removing breakpoint at {address:#x} failed: {error}");
-            return Err(TargetError::NonFatal);
+        match removed {
+            Ok(()) | Err(Error::BPNotFound(_)) => {
+                self.planted.remove(index);
+                Ok(true)
+            }
+            // The site is still installed: keep owning it, so its hits stay
+            // the client's and a detach retries the removal.
+            Err(error) => {
+                eprintln!("ntoseye-gdbserver: removing breakpoint at {address:#x} failed: {error}");
+                Err(TargetError::NonFatal)
+            }
         }
-        Ok(true)
     }
 }
 

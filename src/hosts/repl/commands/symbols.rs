@@ -16,51 +16,53 @@ use crate::nt::layout::{FieldInfo, nested_layout_name};
 use crate::nt::symbols::{
     CodeFrame, ImageSource, LocalSourceState, ModuleListing, ModuleSymbolStatus, SourceLocation,
     SourcePath, Symbol, SymbolPath, glob_matches, parse_source_paths, parse_symbol_sources,
+    split_query_module,
 };
 use crate::nt::target::{ReloadScope, Target, UserVar};
 use crate::session::Session;
 use crate::session::typeview::TypeView;
 
-/// The first word; `x` ignores the words after it, as it always did.
+/// Every word: a symbol must match all the terms.
 #[grammar(usage = "[module!]<query>", complete = Symbol)]
-fn first_word(
+fn query_terms(
     _: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<String, ArgError> {
-    let first = cursor.word().ok_or(ArgError::Missing)?.into_owned();
-    cursor.rest();
-    Ok(first)
+    let query = cursor.rest();
+    if query.is_empty() {
+        return Err(ArgError::Missing);
+    }
+    Ok(query)
 }
 
 /// Search for symbols by fuzzy name match.
 ///
-/// `*` and `?` are glob characters. The operators are `^` prefix, `$`
-/// suffix, `'` exact match, and `!` negation. If you separate terms with
-/// spaces, a symbol must match all the terms.
+/// `module!` searches the modules whose names match it, which may use `*`
+/// and `?`. A query with `*` or `?` is a wildcard pattern. Otherwise each
+/// space-separated term must match, fuzzily or by its operator: `^` prefix,
+/// `$` suffix, `'` exact substring (quote such a term: `x "'Heap"`), `!`
+/// must not match.
 #[command(
     names = ["x"],
     category = "symbols, types, and expressions",
     kind = Query,
     python = none,
 )]
-fn x(state: &mut ReplState<'_>, #[arg(parse = first_word)] query: String) -> Result<()> {
+fn x(state: &mut ReplState<'_>, #[arg(parse = query_terms)] query: String) -> Result<()> {
     // bounded purely for terminal-output sanity (resolution
     // is O(1) now); a huge match set just floods the screen
     const X_LIMIT: usize = 4096;
     let query = query.as_str();
     let dtb = state.ctx.target.current_dtb();
-    // `module!query` scopes the search to one module; a bare query
-    // fuzzy-matches the cached merged index, whose names are already
+    // `module!query` scopes the search to the modules it names; a bare
+    // query fuzzy-matches the cached merged index, whose names are already
     // module-qualified.
-    let names: Vec<String> = match query.split_once('!') {
-        Some((module, q)) => state
+    let names: Vec<String> = match split_query_module(query) {
+        Some((module, terms)) => state
             .ctx
             .target
             .symbols
-            .search_symbols_in_module(dtb, module, q, X_LIMIT)
-            .into_iter()
-            .map(|name| format!("{module}!{name}"))
-            .collect(),
+            .search_symbols_in_modules(dtb, module, terms, X_LIMIT),
         None => {
             state.caches.refresh_loaded_symbols(&state.ctx.target);
             state.caches.symbols.read().unwrap().search(query, X_LIMIT)
@@ -139,8 +141,8 @@ fn ln(
     Ok(session.target.nearest_symbol(address))
 }
 
-/// `ln`: the symbol, or where the address is when its module has no
-/// symbols (WinDbg's `module+offset`).
+/// `ln`: the symbol, or where the address is when no symbol covers it
+/// (WinDbg's `module+offset`), noting a module whose symbols are not loaded.
 impl Render<VirtAddr> for Option<Symbol> {
     fn render(&self, repl: &mut ReplState<'_>, address: VirtAddr) {
         match self {
@@ -154,6 +156,16 @@ impl Render<VirtAddr> for Option<Symbol> {
             None => {
                 let dtb = repl.ctx.target.current_dtb();
                 match repl.ctx.target.format_code_address(dtb, address) {
+                    Some(label)
+                        if repl
+                            .ctx
+                            .target
+                            .symbols
+                            .find_module_for_address(dtb, address)
+                            .is_some() =>
+                    {
+                        outln!("{}  {}", ui::addr(address.0), ui::symbol(&label));
+                    }
                     Some(label) => {
                         outln!(
                             "{}  {}  {}",
@@ -186,21 +198,21 @@ fn ev(
     #[arg(raw, usage = "<expression>", complete = Expression)] expression: String,
 ) -> Result<()> {
     if expression.is_empty() {
-        outln!("{}", command_help("ev"));
+        ArgError::Missing.report("ev");
         return Ok(());
     }
 
-    let value = match Expr::parse_with_radix(&expression, state.radix)
+    let value = match Expr::parse_with_radix(&expression, state.ctx.radix)
         .and_then(|expr| expr.evaluate(&state.ctx.target))
     {
         Ok(value) => value,
         Err(e) => {
-            error!("{}", e);
+            crate::hosts::repl::report_error(state, &e);
             return Ok(());
         }
     };
     if let Err(e) = state.print_expr_value(&value) {
-        error!("{}", e);
+        crate::hosts::repl::report_error(state, &e);
     }
 
     Ok(())
@@ -635,6 +647,7 @@ fn reload_symbols(
         .map_err(|error| Error::DebugInfo(format!("symbol reload failed: {error}")))?;
     if let Err(error) = session
         .breakpoints
+        .edit()
         .resolve_symbolic(session.backend.as_mut(), &session.target)
     {
         report.breakpoint_error = Some(error.to_string());
@@ -754,7 +767,7 @@ struct ModuleWords<'w> {
     containing: Option<Option<&'w str>>,
 }
 
-fn module_words<'w>(line: &[&'w str]) -> ModuleWords<'w> {
+fn module_words<'w>(line: &[&'w str]) -> std::result::Result<ModuleWords<'w>, &'static str> {
     let mut words = ModuleWords {
         display: ModuleDisplay::default(),
         pattern: None,
@@ -772,9 +785,12 @@ fn module_words<'w>(line: &[&'w str]) -> ModuleWords<'w> {
             "k" => words.kernel = true,
             "t" => words.display.timestamp = true,
             "m" => {
+                if words.pattern.is_some() {
+                    return Err("give one module pattern");
+                }
                 words.glob = true;
                 index += 1;
-                words.pattern = line.get(index).copied();
+                words.pattern = Some(*line.get(index).ok_or("m needs a pattern")?);
             }
             "a" => {
                 index += 1;
@@ -784,21 +800,25 @@ fn module_words<'w>(line: &[&'w str]) -> ModuleWords<'w> {
                 }
             }
             _ if words.pattern.is_none() => words.pattern = Some(arg),
-            _ => {}
+            _ => return Err("give one module pattern"),
         }
         index += 1;
     }
-    words
+    if words.user && words.kernel {
+        return Err("give u or k, not both");
+    }
+    Ok(words)
 }
 
 /// `lm`'s display words, left for [`module_filter`].
 #[grammar(usage = "")]
 fn module_display(
-    _: &mut ArgCx<'_, '_>,
+    cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<ModuleDisplay, ArgError> {
     let line: Vec<&str> = cursor.words().collect();
-    let words = module_words(&line);
+    let words = module_words(&line)
+        .map_err(|reason| ArgError::usage(cx.name, format!("{}: {reason}", cx.name)))?;
     Ok(ModuleDisplay {
         pattern: words.pattern.map(str::to_string),
         ..words.display
@@ -825,7 +845,8 @@ fn module_filter(
 ) -> std::result::Result<ModuleFilter, ArgError> {
     let taken = cursor.take_all(|_| true);
     let line: Vec<&str> = taken.iter().map(AsRef::as_ref).collect();
-    let words = module_words(&line);
+    let words = module_words(&line)
+        .map_err(|reason| ArgError::usage(cx.name, format!("{}: {reason}", cx.name)))?;
     let containing = match words.containing {
         Some(Some(text)) => Some(cx.eval(text)?),
         Some(None) => return Err(ArgError::Missing),
@@ -882,9 +903,11 @@ fn lmv(
 fn list_modules(target: &Target, filter: &ModuleFilter) -> Result<Vec<ModuleListing>> {
     let mut kernel = filter.kernel;
     // An address names its own list: a kernel address is in a kernel
-    // module even while a process is selected, as in WinDbg.
+    // module even while a process is selected, as in WinDbg. In the secure
+    // address space the current list is already the secure kernel's.
     if let Some(address) = filter.containing
         && !filter.user
+        && !target.in_secure_address_space()
     {
         kernel |= target.arch().paging().is_kernel_address(address);
     }
@@ -1006,7 +1029,7 @@ fn set(
     #[arg(rest, usage = "<$name> <expression>", complete = [None, Expression])] rest: String,
 ) -> Result<()> {
     let Some((lhs, rhs)) = rest.split_once(char::is_whitespace) else {
-        outln!("{}", command_help("set"));
+        ArgError::Missing.report("set");
         return Ok(());
     };
     let name = lhs.trim().strip_prefix('$').unwrap_or(lhs.trim()).trim();
@@ -1026,7 +1049,7 @@ fn set(
         return Ok(());
     }
     let source = rhs.trim().to_string();
-    match Expr::eval_with_radix(&source, &state.ctx.target, state.radix) {
+    match Expr::eval_with_radix(&source, &state.ctx.target, state.ctx.radix) {
         Ok(v) => {
             state
                 .ctx
@@ -1035,7 +1058,7 @@ fn set(
                 .insert(name.to_string(), UserVar { value: v.0, source });
             outln!("${} = {}", name, ui::addr(v.0));
         }
-        Err(e) => error!("{}", e),
+        Err(e) => crate::hosts::repl::report_error(state, &e),
     }
 
     Ok(())

@@ -1,7 +1,7 @@
 //! Pseudo-registers: the `$` names resolved from target and thread state,
 //! the `vars` inventory of them, and the result slots commands fill.
 
-use super::{BuiltinVar, Target, ThreadInfo};
+use super::{BuiltinVar, ProcessInfo, Target, ThreadInfo};
 use crate::{
     base::{memory::PAGE_SIZE, types::VirtAddr},
     nt::unwind::return_address_for_register_values,
@@ -230,29 +230,34 @@ impl Target {
         return_address_for_register_values(self, registers)
     }
 
-    /// `$peb`: the user-mode PEB of the process context, read from its
-    /// `_EPROCESS`. A System-context stop has none, which stays `None` so the
-    /// expression reports an error rather than handing back zero.
+    /// `$peb`: the user-mode PEB of the current process (see
+    /// [`Self::current_process`]), read from its `_EPROCESS`. A System-context
+    /// stop has none, which stays `None` so the expression reports an error
+    /// rather than handing back zero.
     fn current_process_peb(&self) -> Option<u64> {
-        let eprocess_va = self.process.as_ref()?.eprocess;
+        self.process_peb(&self.current_process()?)
+    }
+
+    fn process_peb(&self, process: &ProcessInfo) -> Option<u64> {
         let peb = self
             .guest()
             .ok()?
             .ntoskrnl
             .types_in(self.kernel_dtb())
-            .struct_at("_EPROCESS", eprocess_va)
+            .struct_at("_EPROCESS", process.eprocess)
             .ok()?
             .read_pointer("Peb")
             .ok()?;
         (!peb.is_zero()).then_some(peb.0)
     }
 
-    /// `$processbase`: the attached process's main image base, from its PEB's
+    /// `$processbase`: the current process's main image base, from its PEB's
     /// `ImageBaseAddress`. `None` for a kernel-only process.
     fn current_process_image_base(&self) -> Option<u64> {
-        let peb = VirtAddr(self.current_process_peb()?);
+        let process = self.current_process()?;
+        let peb = VirtAddr(self.process_peb(&process)?);
         let base = self
-            .types_in(self.process_dtb())
+            .types_in(process.dtb)
             .struct_at("_PEB", peb)
             .ok()?
             .read_pointer("ImageBaseAddress")
@@ -422,6 +427,28 @@ mod tests {
         thread.teb = None;
         assert_eq!(thread.pseudo_register("TEB"), Some(None));
         assert_eq!(thread.pseudo_register("unknown"), None);
+    }
+
+    /// `.process 0` leaves the process context, not the thread: `$thread`
+    /// and `$teb` still name the selected thread without a `.thread`.
+    #[test]
+    fn leaving_the_process_context_keeps_the_thread_registers() {
+        let mut session = session_over_memory(0x1000, &[0u8; 0x80]);
+        let thread = sample_thread();
+        session
+            .target
+            .set_current_windows_thread_context(thread.clone());
+
+        session.target.detach();
+
+        assert_eq!(
+            session.target.builtin_variable_value("thread"),
+            Some(thread.ethread.0)
+        );
+        assert_eq!(
+            session.target.builtin_variable_value("teb"),
+            thread.teb.map(|teb| teb.0)
+        );
     }
 
     #[test]

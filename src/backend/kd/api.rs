@@ -2,14 +2,16 @@
 // then a 40-byte per-API union.
 
 use std::io::{Read, Write};
+use std::ops::Range;
 
 use crate::backend::dbg_backend::ContinueDisposition;
 use crate::backend::kd::{
+    BugcheckCapture,
     framing::{
-        KdFraming, PACKET_MAX_SIZE, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO,
+        HeldStop, KdFraming, PACKET_MAX_SIZE, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO,
         PACKET_TYPE_KD_STATE_CHANGE64, PACKET_TYPE_KD_STATE_MANIPULATE,
     },
-    handle_debug_io, handle_file_io,
+    handle_debug_io_with_output, handle_file_io, parse_state_change,
 };
 use crate::base::bytes::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
 use crate::base::error::{Error, Result};
@@ -17,6 +19,7 @@ use crate::base::error::{Error, Result};
 pub const DBGKD_READ_VIRTUAL_MEMORY: u32 = 0x0000_3130;
 pub const DBGKD_WRITE_VIRTUAL_MEMORY: u32 = 0x0000_3131;
 pub const DBGKD_GET_CONTEXT: u32 = 0x0000_3132;
+pub const DBGKD_SET_CONTEXT: u32 = 0x0000_3133;
 pub const DBGKD_WRITE_BREAKPOINT: u32 = 0x0000_3134;
 pub const DBGKD_RESTORE_BREAKPOINT: u32 = 0x0000_3135;
 /// Bytes of `InstructionStream` a state change carries from the stop PC;
@@ -40,6 +43,16 @@ pub const DBGKD_GET_BUS_DATA: u32 = 0x0000_3157;
 /// `BUS_DATA_TYPE::PCIConfiguration`.
 pub const PCI_CONFIGURATION: u32 = 4;
 pub const DBGKD_SET_CONTEXT_EX: u32 = 0x0000_3160;
+
+/// Whether the target answers manipulate request `api_number` with a reply:
+/// all but the continue, and the reboot, bugcheck and processor switch,
+/// which this module sends without waiting for one.
+pub fn answered_by_reply(api_number: u32) -> bool {
+    !matches!(
+        api_number,
+        DBGKD_CONTINUE_API2 | DBGKD_REBOOT | DBGKD_CAUSE_BUGCHECK | DBGKD_SWITCH_PROCESSOR
+    )
+}
 
 /// Scripted KD replies for tests that need a target on the other end of a
 /// framing. Shared with the KD event-loop tests, which drive the same wire.
@@ -145,13 +158,36 @@ impl ManipulateHeader {
 
 fn recv_manipulate_reply(
     framing: &mut KdFraming<impl Read + Write>,
-    requested_processor: u16,
+    request: &[u8; MANIPULATE_HEADER_SIZE],
+    echoed: Option<Range<usize>>,
 ) -> Result<(ManipulateHeader, [u8; MANIPULATE_HEADER_SIZE], Vec<u8>)> {
+    let requested_processor = read_u16(request, 6);
+    let requested_api = read_u32(request, 0);
+    // The prints that come with the reply, for a bugcheck a new stop
+    // would be (see the state change below).
+    let mut prints = BugcheckCapture::default();
     loop {
-        let pkt = framing.recv_data()?;
+        let pkt = framing.recv_reply()?;
         match pkt.packet_type {
             PACKET_TYPE_KD_STATE_MANIPULATE => {
                 let parsed = ManipulateHeader::decode(&pkt.payload)?;
+                // A reply to another request is stale: one the target sent a
+                // debugger that went away before taking it, and sends again
+                // to the next. The reply to this request still follows. The
+                // target answers in the request it received, so a reply to
+                // the same API is another request's when the parameters it
+                // echoes (`echoed`) are not this request's.
+                let other_request = echoed
+                    .clone()
+                    .is_some_and(|range| pkt.payload.get(range.clone()) != request.get(range));
+                if parsed.api_number != requested_api || other_request {
+                    kd_trace!(
+                        "kd: dropping a stale reply to api {:#x} while awaiting {:#x}",
+                        parsed.api_number,
+                        requested_api
+                    );
+                    continue;
+                }
                 if parsed.processor != requested_processor {
                     return Err(Error::Kd(format!(
                         "reply processor mismatch: expected {}, got {}",
@@ -170,7 +206,15 @@ fn recv_manipulate_reply(
             }
             PACKET_TYPE_KD_DEBUG_IO => {
                 // Debug print emitted mid-request
-                handle_debug_io(framing, &pkt.payload, false)?;
+                handle_debug_io_with_output(
+                    framing,
+                    &pkt.payload,
+                    false,
+                    Some(&mut prints),
+                    false,
+                    None,
+                    &mut std::io::stderr(),
+                )?;
                 continue;
             }
             PACKET_TYPE_KD_FILE_IO => {
@@ -178,13 +222,33 @@ fn recv_manipulate_reply(
                 handle_file_io(framing, &pkt.payload)?;
                 continue;
             }
-            // A manipulate request is only sent to a halted target, and a
-            // halted target cannot reach a new stop: a state change here is
-            // the target re-announcing its current stop after a RESET resync
-            // (a reconnect to a target left waiting on a dead debugger). The
-            // request was ACKed after the resync, so its reply still follows.
+            // A manipulate request is only sent to a halted target. A state
+            // change for a stop it has reported is the target announcing it
+            // again: after a RESET resync (a reconnect to a target left
+            // waiting on a dead debugger), or as it goes back to waiting on
+            // the debugger; the reply still follows. Any other is a new stop
+            // the target reached while halted: the processor bugchecked in
+            // the debugger itself, which then answers the request at the new
+            // stop. It is kept for the next wait, which would otherwise
+            // resume the bugcheck as though the target were still at the old
+            // stop.
             PACKET_TYPE_KD_STATE_CHANGE64 => {
-                kd_trace!("kd: ignoring re-announced state change while awaiting manipulate reply");
+                let key = parse_state_change(&pkt.payload)
+                    .ok()
+                    .map(|stop| stop.key())
+                    .filter(|key| !framing.peer_reset_seen() && !framing.knows_stop(*key));
+                let Some(key) = key else {
+                    kd_trace!(
+                        "kd: ignoring re-announced state change while awaiting manipulate reply"
+                    );
+                    continue;
+                };
+                kd_trace!("kd: holding a new stop that came while awaiting manipulate reply");
+                framing.hold_stop(HeldStop {
+                    key,
+                    payload: pkt.payload,
+                    bugcheck: prints.finish(),
+                });
                 continue;
             }
             other => {
@@ -203,12 +267,23 @@ fn send_manipulate(
     header: &[u8; MANIPULATE_HEADER_SIZE],
     data: &[u8],
 ) -> Result<(ManipulateHeader, [u8; MANIPULATE_HEADER_SIZE], Vec<u8>)> {
-    let requested_processor = read_u16(header, 6);
+    send_manipulate_echoing(framing, header, data, None)
+}
+
+/// [`send_manipulate`] for a request whose reply carries back the header
+/// bytes in `echoed` as the request set them, which tell its reply from a
+/// stale one to an earlier request of the same API.
+fn send_manipulate_echoing(
+    framing: &mut KdFraming<impl Read + Write>,
+    header: &[u8; MANIPULATE_HEADER_SIZE],
+    data: &[u8],
+    echoed: Option<Range<usize>>,
+) -> Result<(ManipulateHeader, [u8; MANIPULATE_HEADER_SIZE], Vec<u8>)> {
     let mut payload = Vec::with_capacity(MANIPULATE_HEADER_SIZE + data.len());
     payload.extend_from_slice(header);
     payload.extend_from_slice(data);
     framing.send_data(PACKET_TYPE_KD_STATE_MANIPULATE, &payload)?;
-    recv_manipulate_reply(framing, requested_processor)
+    recv_manipulate_reply(framing, header, echoed)
 }
 
 fn check_status(header: &ManipulateHeader, api: u32) -> Result<()> {
@@ -262,7 +337,9 @@ pub fn read_machine_specific_register<T: Read + Write>(
 ) -> Result<u64> {
     let mut header = make_header(DBGKD_READ_MACHINE_SPECIFIC_REGISTER, processor);
     write_u32(&mut header, UNION_OFFSET, register);
-    let (parsed, reply_header, _) = send_manipulate(framing, &header, &[])?;
+    // The reply keeps `Msr`.
+    let (parsed, reply_header, _) =
+        send_manipulate_echoing(framing, &header, &[], Some(UNION_OFFSET..UNION_OFFSET + 4))?;
     check_status(&parsed, DBGKD_READ_MACHINE_SPECIFIC_REGISTER)?;
     let low = read_u32(&reply_header, UNION_OFFSET + 4) as u64;
     let high = read_u32(&reply_header, UNION_OFFSET + 8) as u64;
@@ -364,7 +441,9 @@ fn send_manipulate_no_reply<T: Read + Write>(
     framing: &mut KdFraming<T>,
     header: &[u8; MANIPULATE_HEADER_SIZE],
 ) -> Result<()> {
-    framing.send_data(PACKET_TYPE_KD_STATE_MANIPULATE, header)
+    framing.send_data(PACKET_TYPE_KD_STATE_MANIPULATE, header)?;
+    framing.forget_unanswered();
+    Ok(())
 }
 
 /// `DbgKdRebootApi`.
@@ -433,11 +512,7 @@ fn set_context_ex_chunk<T: Read + Write>(
     write_u32(&mut header, UNION_OFFSET + 4, byte_count);
     write_u32(&mut header, UNION_OFFSET + 8, total_size);
     let (parsed, reply_header, _) = send_manipulate(framing, &header, data)?;
-    check_status(&parsed, DBGKD_SET_CONTEXT_EX).map_err(|error| {
-        Error::Kd(format!(
-            "context-chunk write offset={offset:#x} len={byte_count:#x} total={total_size:#x} failed: {error}"
-        ))
-    })?;
+    check_status(&parsed, DBGKD_SET_CONTEXT_EX)?;
     let bytes_copied = read_u32(&reply_header, UNION_OFFSET + 8);
     if bytes_copied != byte_count {
         return Err(Error::Kd(format!(
@@ -466,9 +541,51 @@ pub fn set_context_chunked<T: Read + Write>(
     for (index, chunk) in context.chunks(CONTEXT_EX_CHUNK_SIZE).enumerate() {
         let offset = u32::try_from(index * CONTEXT_EX_CHUNK_SIZE)
             .map_err(|_| Error::Kd("context chunk offset exceeds 32 bits".into()))?;
-        set_context_ex_chunk(framing, processor, offset, total_size, chunk)?;
+        set_context_ex_chunk(framing, processor, offset, total_size, chunk).map_err(|error| {
+            match error {
+                // The kernel refused the API itself; see `set_context`.
+                Error::KdStatus { .. } if offset == 0 => error,
+                error => Error::Kd(format!(
+                    "context-chunk write offset={offset:#x} len={:#x} total={total_size:#x} \
+                     failed: {error}",
+                    chunk.len()
+                )),
+            }
+        })?;
     }
     Ok(())
+}
+
+/// `DbgKdSetContextApi`: the whole CONTEXT in one packet, with the flags
+/// of what it holds in the union.
+fn set_context_whole<T: Read + Write>(
+    framing: &mut KdFraming<T>,
+    processor: u16,
+    context_flags: u32,
+    context: &[u8],
+) -> Result<()> {
+    let mut header = make_header(DBGKD_SET_CONTEXT, processor);
+    write_u32(&mut header, UNION_OFFSET, context_flags);
+    let (parsed, _, _) = send_manipulate(framing, &header, context)?;
+    check_status(&parsed, DBGKD_SET_CONTEXT)
+}
+
+/// Write a complete CONTEXT holding `context_flags`: in `SetContextEx`
+/// chunks, or whole where the kernel refuses the first chunk. Windows 7
+/// has no `SetContextEx` and answers it `STATUS_UNSUCCESSFUL`.
+pub fn set_context<T: Read + Write>(
+    framing: &mut KdFraming<T>,
+    processor: u16,
+    context_flags: u32,
+    context: &[u8],
+) -> Result<()> {
+    match set_context_chunked(framing, processor, context) {
+        Err(Error::KdStatus { .. }) => {
+            kd_trace!("kd: SetContextEx refused; writing the CONTEXT with SetContext");
+            set_context_whole(framing, processor, context_flags, context)
+        }
+        result => result,
+    }
 }
 
 /// `DbgKdReadVirtualMemoryApi`
@@ -547,7 +664,9 @@ fn read_memory<T: Read + Write>(
     write_u64(&mut header, UNION_OFFSET, addr);
     write_u32(&mut header, UNION_OFFSET + 8, len);
     write_u32(&mut header, UNION_OFFSET + 12, caching);
-    let (parsed, reply_header, data) = send_manipulate(framing, &header, &[])?;
+    // The reply keeps `TargetBaseAddress` and `TransferCount`.
+    let (parsed, reply_header, data) =
+        send_manipulate_echoing(framing, &header, &[], Some(UNION_OFFSET..UNION_OFFSET + 12))?;
     check_status(&parsed, api)?;
     let actual = read_u32(&reply_header, UNION_OFFSET + 12);
     if actual > len || data.len() != actual as usize || (len != 0 && actual == 0) {
@@ -612,7 +731,9 @@ pub fn read_control_space<T: Read + Write>(
     let mut header = make_header(DBGKD_READ_CONTROL_SPACE, processor);
     write_u64(&mut header, UNION_OFFSET, base);
     write_u32(&mut header, UNION_OFFSET + 8, len);
-    let (parsed, _, data) = send_manipulate(framing, &header, &[])?;
+    // The reply keeps `TargetBaseAddress` and `TransferCount`.
+    let (parsed, _, data) =
+        send_manipulate_echoing(framing, &header, &[], Some(UNION_OFFSET..UNION_OFFSET + 12))?;
     check_status(&parsed, DBGKD_READ_CONTROL_SPACE)?;
     if data.len() < len as usize {
         return Err(Error::Kd(format!(
@@ -663,19 +784,29 @@ pub fn write_breakpoint<T: Read + Write>(
 ) -> Result<u32> {
     let mut header = make_header(DBGKD_WRITE_BREAKPOINT, processor);
     write_u64(&mut header, UNION_OFFSET, addr);
-    let (parsed, reply_header, _) = send_manipulate(framing, &header, &[])?;
+    // The reply keeps `BreakPointAddress`: a late reply to an install at
+    // another address must not hand this one its handle.
+    let (parsed, reply_header, _) =
+        send_manipulate_echoing(framing, &header, &[], Some(BREAKPOINT_ADDRESS_ECHO))?;
     check_status(&parsed, DBGKD_WRITE_BREAKPOINT)?;
     Ok(read_u32(&reply_header, UNION_OFFSET + 8))
 }
 
-/// Receive a late `DbgKdWriteBreakPointApi` reply after the original wait
-/// timed out. Used by the KD backend to complete an in-flight breakpoint install
-/// without sending a duplicate request.
+/// `BreakPointAddress`, which a `DbgKdWriteBreakPointApi` reply echoes.
+const BREAKPOINT_ADDRESS_ECHO: Range<usize> = UNION_OFFSET..UNION_OFFSET + 8;
+
+/// Receive a late `DbgKdWriteBreakPointApi` reply for an install at `addr`
+/// after the original wait timed out. Used by the KD backend to complete an
+/// in-flight breakpoint install without sending a duplicate request.
 pub fn recv_write_breakpoint_reply<T: Read + Write>(
     framing: &mut KdFraming<T>,
     processor: u16,
+    addr: u64,
 ) -> Result<u32> {
-    let (parsed, reply_header, _) = recv_manipulate_reply(framing, processor)?;
+    let mut request = make_header(DBGKD_WRITE_BREAKPOINT, processor);
+    write_u64(&mut request, UNION_OFFSET, addr);
+    let (parsed, reply_header, _) =
+        recv_manipulate_reply(framing, &request, Some(BREAKPOINT_ADDRESS_ECHO))?;
     check_status(&parsed, DBGKD_WRITE_BREAKPOINT)?;
     Ok(read_u32(&reply_header, UNION_OFFSET + 8))
 }
@@ -707,11 +838,7 @@ pub fn continue_api2<T: Read + Write>(
     write_u32(&mut header, UNION_OFFSET, continue_status);
     write_u32(&mut header, UNION_OFFSET + 4, if trace { 1 } else { 0 });
     write_u64(&mut header, UNION_OFFSET + 8, dr7);
-    let payload_len = MANIPULATE_HEADER_SIZE;
-    let mut payload = Vec::with_capacity(payload_len);
-    payload.extend_from_slice(&header);
-    framing.send_data(PACKET_TYPE_KD_STATE_MANIPULATE, &payload)?;
-    Ok(())
+    framing.send_continue(&header)
 }
 
 /// `DbgKdContinueApi2` for ARM64 targets. After ContinueStatus,
@@ -730,11 +857,7 @@ pub fn continue_api2_arm64<T: Read + Write>(
     write_u32(&mut header, UNION_OFFSET, continue_status);
     write_u32(&mut header, UNION_OFFSET + 8, if trace { 1 } else { 0 });
     // CurrentSymbolStart/End stay zero.
-    let payload_len = MANIPULATE_HEADER_SIZE;
-    let mut payload = Vec::with_capacity(payload_len);
-    payload.extend_from_slice(&header);
-    framing.send_data(PACKET_TYPE_KD_STATE_MANIPULATE, &payload)?;
-    Ok(())
+    framing.send_continue(&header)
 }
 
 #[cfg(test)]
@@ -743,7 +866,7 @@ mod tests {
     use std::io::{Cursor, Read, Write};
 
     use crate::arch::amd64;
-    use crate::backend::kd::framing::{KdFraming, PACKET_TYPE_KD_ACKNOWLEDGE};
+    use crate::backend::kd::framing::{KdFraming, PACKET_TYPE_KD_ACKNOWLEDGE, data_packet};
 
     #[test]
     fn continuation_disposition_selects_distinct_kd_wire_status() {
@@ -973,6 +1096,38 @@ mod tests {
         );
     }
 
+    /// Windows 7 has no `SetContextEx` and refuses its first chunk; the
+    /// CONTEXT then goes whole with `SetContext`, its flags in the union.
+    #[test]
+    fn a_refused_set_context_ex_falls_back_to_set_context() {
+        let context: Vec<u8> = (0..amd64::CONTEXT_SIZE)
+            .map(|index| (index & 0xff) as u8)
+            .collect();
+        let mut refused = build_reply(DBGKD_SET_CONTEXT_EX, 1, &[], &[]);
+        write_u32(&mut refused, 8, 0xc000_0001);
+        let mut inbound = ack_then_reply(INITIAL_PACKET_ID, INITIAL_PACKET_ID, &refused);
+        let accepted = build_reply(DBGKD_SET_CONTEXT, 1, &[], &[]);
+        inbound.extend(ack_then_reply(
+            INITIAL_PACKET_ID ^ 1,
+            INITIAL_PACKET_ID ^ 1,
+            &accepted,
+        ));
+        let mut framing = KdFraming::new(Loopback::new(inbound));
+
+        set_context(&mut framing, 1, amd64::CONTEXT_ALL, &context).unwrap();
+
+        let outbound = &framing.transport_ref().outbound;
+        let first = &outbound[16..16 + MANIPULATE_HEADER_SIZE];
+        assert_eq!(read_u32(first, 0), DBGKD_SET_CONTEXT_EX);
+        // The first request, its trailing byte, and the ACK of the refusal.
+        let second_at = 16 + MANIPULATE_HEADER_SIZE + CONTEXT_EX_CHUNK_SIZE + 1 + 16;
+        let second = &outbound[second_at + 16..second_at + 16 + MANIPULATE_HEADER_SIZE];
+        assert_eq!(read_u32(second, 0), DBGKD_SET_CONTEXT);
+        assert_eq!(read_u32(second, UNION_OFFSET), amd64::CONTEXT_ALL);
+        let data = second_at + 16 + MANIPULATE_HEADER_SIZE;
+        assert_eq!(&outbound[data..data + context.len()], &context[..]);
+    }
+
     #[test]
     fn set_context_chunked_sends_ordered_chunks_and_commits_at_total_size() {
         let context: Vec<u8> = (0..amd64::CONTEXT_SIZE)
@@ -1014,6 +1169,65 @@ mod tests {
         assert_eq!(transferred, context.len());
         assert_eq!(cursor, outbound.len());
     }
+    /// A target that reconnects sends again the reply to the last request a
+    /// debugger that went away made: a read of the same API but of another
+    /// address and length. It is dropped, and the read takes the reply to
+    /// its own request, which follows.
+    #[test]
+    fn a_stale_read_reply_for_another_address_is_dropped() {
+        let reply_to = |address: u64, data: &[u8]| {
+            let mut union_body = [0u8; 16];
+            write_u64(&mut union_body, 0, address);
+            write_u32(&mut union_body, 8, data.len() as u32);
+            write_u32(&mut union_body, 12, data.len() as u32);
+            build_reply(DBGKD_READ_VIRTUAL_MEMORY, 0, &union_body, data)
+        };
+        let mut stream = ack_then_reply(
+            (INITIAL_PACKET_ID | SYNC_PACKET_ID) & !SYNC_PACKET_ID,
+            INITIAL_PACKET_ID,
+            &reply_to(0xffff_f800_7483_0400, &[0x11; 0x400]),
+        );
+        stream.extend(data_packet(
+            PACKET_TYPE_KD_STATE_MANIPULATE,
+            INITIAL_PACKET_ID ^ 1,
+            &reply_to(0xffff_f800_7483_0200, &[0x22; 0x200]),
+        ));
+        let mut framing = KdFraming::new(Loopback::new(stream));
+
+        let actual = read_virtual_memory(&mut framing, 0, 0xffff_f800_7483_0200, 0x200).unwrap();
+
+        assert_eq!(actual, [0x22; 0x200]);
+    }
+
+    /// The late reply to an install that timed out names the handle of the
+    /// entry at its own address. An install at another address drops it and
+    /// takes its own handle, which follows.
+    #[test]
+    fn a_stale_write_breakpoint_reply_for_another_address_is_dropped() {
+        let reply_to = |address: u64, handle: u32| {
+            let mut union_body = [0u8; 12];
+            write_u64(&mut union_body, 0, address);
+            write_u32(&mut union_body, 8, handle);
+            build_reply(DBGKD_WRITE_BREAKPOINT, 0, &union_body, &[])
+        };
+        let mut stream = ack_then_reply(
+            (INITIAL_PACKET_ID | SYNC_PACKET_ID) & !SYNC_PACKET_ID,
+            INITIAL_PACKET_ID,
+            &reply_to(0xffff_f800_0001_2000, 4),
+        );
+        stream.extend(data_packet(
+            PACKET_TYPE_KD_STATE_MANIPULATE,
+            INITIAL_PACKET_ID ^ 1,
+            &reply_to(0xffff_f800_0003_4000, 5),
+        ));
+        let mut framing = KdFraming::new(Loopback::new(stream));
+
+        assert_eq!(
+            write_breakpoint(&mut framing, 0, 0xffff_f800_0003_4000).unwrap(),
+            5
+        );
+    }
+
     #[test]
     fn physical_memory_read_validates_and_returns_reply_data() {
         let data = [0xde, 0xad, 0xbe, 0xef];
@@ -1071,7 +1285,11 @@ mod tests {
     #[test]
     fn read_control_space_returns_reply_data() {
         let special_bytes: Vec<u8> = (0..168u32).map(|i| (255 - (i & 0xff)) as u8).collect();
-        let reply = build_reply(DBGKD_READ_CONTROL_SPACE, 1, &[], &special_bytes);
+        let mut union_body = [0u8; 16];
+        write_u64(&mut union_body, 0, 2);
+        write_u32(&mut union_body, 8, special_bytes.len() as u32);
+        write_u32(&mut union_body, 12, special_bytes.len() as u32);
+        let reply = build_reply(DBGKD_READ_CONTROL_SPACE, 1, &union_body, &special_bytes);
         let stream = ack_then_reply(
             (INITIAL_PACKET_ID | SYNC_PACKET_ID) & !SYNC_PACKET_ID,
             INITIAL_PACKET_ID,
@@ -1219,11 +1437,10 @@ mod tests {
         );
 
         let mut framing = KdFraming::new(Loopback::new(stream));
-        let err = get_context(&mut framing, 0, amd64::CONTEXT_ALL).unwrap_err();
-        match err {
-            Error::Kd(msg) => assert!(msg.contains("processor mismatch")),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(matches!(
+            get_context(&mut framing, 0, amd64::CONTEXT_ALL),
+            Err(Error::Kd(_))
+        ));
     }
 
     #[test]

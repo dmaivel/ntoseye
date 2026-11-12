@@ -86,6 +86,9 @@ impl Render<Option<String>> for Vec<DriverObjectInfo> {
             "Driver unload",
         ]);
 
+        // The loaded-module list, which names modules whose symbols did not
+        // load too.
+        let modules = target.kernel_modules().unwrap_or_default();
         let mut count = 0;
         for driver in self {
             if let Some(ref f) = filter
@@ -95,11 +98,10 @@ impl Render<Option<String>> for Vec<DriverObjectInfo> {
                 continue;
             }
             count += 1;
-            let module = target
-                .symbols
-                .find_module_for_address(target.kernel_dtb(), driver.driver_start)
-                .map(|module| module.name)
-                .unwrap_or_else(|| "-".to_string());
+            let module = modules
+                .iter()
+                .find(|module| module.contains_address(driver.driver_start))
+                .map_or("-", |module| module.name.as_str());
             builder.push_record(vec![
                 ui::addr(driver.object.0).to_string(),
                 driver.name.to_string(),
@@ -125,8 +127,10 @@ impl Render<Option<String>> for Vec<DriverObjectInfo> {
     }
 }
 
-/// The driver object that `!drvobj` names: an expression, or else a driver
-/// name (`ACPI` or `\Driver\ACPI`).
+/// The driver object that `!drvobj` names: a driver name (`ACPI` or
+/// `\Driver\ACPI`), or else an address expression. The name comes first:
+/// nearly every driver's is also its module's, which evaluates to the
+/// image base.
 #[grammar(usage = "<driver-object|driver-name>", complete = [Driver])]
 fn driver_argument(
     cx: &mut ArgCx<'_, '_>,
@@ -135,11 +139,11 @@ fn driver_argument(
     let Some(text) = cursor.word() else {
         return Err(ArgError::Missing);
     };
-    if let Ok(address) = cx.eval(&text) {
-        return Ok(address);
-    }
     let full;
-    let needle = if text.starts_with("\\Driver\\") {
+    let needle = if text
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("\\Driver\\"))
+    {
         &*text
     } else {
         full = format!("\\Driver\\{text}");
@@ -156,14 +160,94 @@ fn driver_argument(
                 .find(|driver| driver.name.eq_ignore_ascii_case(needle))
         })
         .map(|driver| driver.object)
-        .ok_or_else(|| {
+        .map_or_else(
+            || {
+                cx.eval(&text).map_err(|_| {
+                    ArgError::Message(format!(
+                        "driver '{text}' not found, and it is not an address expression"
+                    ))
+                })
+            },
+            Ok,
+        )
+}
+
+/// The parts of a driver object `!drvobj` shows, by WinDbg's flags: 1 its
+/// device objects, 2 its dispatch routines; 4, detail on the devices,
+/// implies 1. Both without flags.
+#[derive(Clone, Copy)]
+pub struct DriverSections {
+    devices: bool,
+    dispatch: bool,
+}
+
+#[grammar(usage = "[flags]", complete = [Expression])]
+fn drvobj_flags(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<DriverSections, ArgError> {
+    let Some(word) = cursor.word() else {
+        return Ok(DriverSections {
+            devices: true,
+            dispatch: true,
+        });
+    };
+    let flags = cx.eval(&word)?.0;
+    cursor.finish(cx.name)?;
+    Ok(DriverSections {
+        devices: flags & 0x5 != 0,
+        dispatch: flags & 0x2 != 0,
+    })
+}
+
+/// The device object a word names: an object path, where a bare name is
+/// one in `\Device` (`Null` for `\Device\Null`), or else an address
+/// expression. The name comes first, as for `!drvobj`: `Null` is also
+/// null.sys's module. A long number is an address and nothing else, so it
+/// skips the directory walk, which costs a read per entry over KD.
+pub fn device_object_named(
+    cx: &mut ArgCx<'_, '_>,
+    text: &str,
+) -> std::result::Result<VirtAddr, ArgError> {
+    let digits: String = text
+        .trim_start_matches("0x")
+        .chars()
+        .filter(|c| *c != '`')
+        .collect();
+    if digits.len() > 8 && digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return cx.eval(text);
+    }
+    let path = if text.starts_with('\\') {
+        text.to_string()
+    } else {
+        format!("\\Device\\{text}")
+    };
+    match cx.state.ctx.target.object_at_path(&path) {
+        Ok(object) => Ok(object),
+        Err(error) => cx.eval(text).map_err(|_| {
             ArgError::Message(format!(
-                "driver '{text}' not found, and it is not an address expression"
+                "device '{text}' not found ({error}), and it is not an address expression"
             ))
-        })
+        }),
+    }
+}
+
+/// The device object that `!devobj` names.
+#[grammar(usage = "<device-object|device-name>", complete = [Expression])]
+fn device_argument(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<VirtAddr, ArgError> {
+    let Some(text) = cursor.word() else {
+        return Err(ArgError::Missing);
+    };
+    device_object_named(cx, &text)
 }
 
 /// Show a DRIVER_OBJECT with its device chain and dispatch table.
+///
+/// The flags follow WinDbg: 1 shows the device objects, 2 the dispatch
+/// routines; without flags, both.
 #[command(
     names = ["!drvobj", "drvobj"],
     category = "objects and I/O",
@@ -175,12 +259,13 @@ fn driver_argument(
 fn drvobj(
     session: &Session,
     #[arg(receiver, parse = driver_argument)] driver: VirtAddr,
+    #[arg(render, parse = drvobj_flags)] sections: DriverSections,
 ) -> Result<DriverObjectDetail> {
     session.target.inspect_driver_object(driver)
 }
 
-impl Render for DriverObjectDetail {
-    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
+impl Render<DriverSections> for DriverObjectDetail {
+    fn render(&self, repl: &mut ReplState<'_>, sections: DriverSections) {
         let target = &repl.ctx.target;
         let mode = if self.via_pointer {
             "pointer"
@@ -197,10 +282,14 @@ impl Render for DriverObjectDetail {
             kernel_symbol_or_dash(target, self.driver_unload)
         );
 
-        print_section("devices");
-        if self.devices.is_empty() {
+        // A table ends with the blank line that separates sections.
+        let mut after_table = false;
+        if sections.devices {
+            print_section("devices");
+        }
+        if !sections.devices {
+        } else if self.devices.is_empty() {
             outln!("  {}", ui::muted("no device objects"));
-            print_section("dispatch table");
         } else {
             let mut builder = Builder::default();
             builder.push_record([
@@ -222,8 +311,15 @@ impl Render for DriverObjectDetail {
                 ]);
             }
             print_padded_table(builder);
-            // The table already ends with the blank line that separates sections.
+            after_table = true;
+        }
+        if !sections.dispatch {
+            return;
+        }
+        if after_table {
             outln!("{}", ui::label("dispatch table"));
+        } else {
+            print_section("dispatch table");
         }
         for routine in &self.dispatch {
             outln!(
@@ -250,7 +346,7 @@ impl Render for DriverObjectDetail {
 )]
 fn devobj(
     session: &Session,
-    #[arg(receiver, name = "device-object")] device: VirtAddr,
+    #[arg(receiver, parse = device_argument)] device: VirtAddr,
 ) -> Result<DeviceObjectDetail> {
     session.target.inspect_device_object(device)
 }
@@ -634,7 +730,7 @@ fn irpfind(
     #[arg(parse = irpfind_pool)] pool_type: Option<IrpPool>,
     #[arg(name = "restart-address")] restart: Option<VirtAddr>,
     criteria: Option<IrpCriteriaKind>,
-    #[arg(default = 0, name = "data")] value: u64,
+    #[arg(default = 0, name = "data", paired)] value: u64,
 ) -> Result<IrpFindDetail> {
     let criteria = criteria.map(|kind| IrpCriteria::new(kind, value));
     session.target.irp_find(
@@ -941,6 +1037,21 @@ fn ssdt(session: &Session) -> Result<Vec<SsdtTable>> {
     session.target.dump_ssdt()
 }
 
+/// Whether `module` is where a service table's entries belong: the kernel's
+/// image for the native table, a win32k image for the shadow table.
+fn ssdt_owner(module: &str, shadow: bool) -> bool {
+    let starts = |prefix: &str| {
+        module
+            .get(..prefix.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+    };
+    if shadow {
+        starts("win32k")
+    } else {
+        module.eq_ignore_ascii_case("nt") || starts("ntoskrnl") || starts("ntkrnl")
+    }
+}
+
 impl Render for Vec<SsdtTable> {
     fn render(&self, _: &mut ReplState<'_>, (): ()) {
         for (i, t) in self.iter().enumerate() {
@@ -953,11 +1064,7 @@ impl Render for Vec<SsdtTable> {
                 ui::addr(t.base.0),
                 t.limit
             );
-            let expected = if t.label.contains("win32k") {
-                "win32k"
-            } else {
-                "nt"
-            };
+            let shadow = t.label.contains("win32k");
             let mut hooks = 0;
             for e in &t.entries {
                 let display = e
@@ -965,11 +1072,12 @@ impl Render for Vec<SsdtTable> {
                     .as_deref()
                     .map(ui::symbol)
                     .unwrap_or_else(|| ui::addr(e.target.0));
-                let hooked = e
+                // A target in no module (pool shellcode) is as suspect as
+                // one in the wrong module.
+                let hooked = !e
                     .module
                     .as_deref()
-                    .map(|m| !m.to_lowercase().contains(expected))
-                    .unwrap_or(false);
+                    .is_some_and(|module| ssdt_owner(module, shadow));
                 let mark = if hooked {
                     hooks += 1;
                     "  [HOOK]".red().to_string()

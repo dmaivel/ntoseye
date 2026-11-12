@@ -31,8 +31,6 @@ use crate::session::{
 
 use crate::hosts::repl::*;
 
-pub const STATUS_BREAKPOINT: u32 = 0x8000_0003;
-
 pub use crate::session::context::refresh_windows_thread_context_for_backend_thread;
 
 /// One-line summary in `!thread`'s words: `thread <addr>  TID 0  PID 0
@@ -89,6 +87,7 @@ pub fn refresh_stop_caches_pre(session: &mut Session, caches: &ReplCaches) -> bo
         print_module_symbol_report(report);
     }
     if modules_changed {
+        caches.invalidate_symbol_indexes();
         caches.refresh_symbol_context(&session.target);
         caches.refresh_breakpoints(&session.breakpoints);
     }
@@ -276,11 +275,11 @@ fn print_saved_vtl0_context(session: &Session, saved: &HashMap<String, u64>) {
     print_known_registers(saved, session.target.arch(), "registers (saved VTL0)");
     let (trace, rip, stack) = saved_vtl0_code(session, saved);
     print_disasm_context(session, &trace, rip, NextStep::default());
-    print_stacktrace_data(
+    print_stop_stack(
         session.target.arch(),
         &stack,
+        0,
         BREAK_STACKTRACE_DISPLAY_LIMIT,
-        true,
     );
 }
 
@@ -301,7 +300,7 @@ fn saved_vtl0_code(
         debugger,
         &session.register_map,
         saved,
-        BREAK_STACKTRACE_PROBE_LIMIT,
+        BREAK_STACKTRACE_WALK_LIMIT,
     );
     (trace, rip, stack.into_stacktrace())
 }
@@ -423,13 +422,17 @@ fn print_stop_text(session: &Session, stop: &StopContext) {
                 },
             );
             if stack {
-                print_stacktrace(
+                let stack = thread_stacktrace(
                     &session.target,
                     map,
                     &stop.regs,
-                    BREAK_STACKTRACE_PROBE_LIMIT,
+                    BREAK_STACKTRACE_WALK_LIMIT,
+                );
+                print_stop_stack(
+                    session.target.arch(),
+                    &stack,
+                    0,
                     BREAK_STACKTRACE_DISPLAY_LIMIT,
-                    true,
                 );
             }
             print_displays(&stop.displays);
@@ -448,7 +451,13 @@ fn print_stop_text(session: &Session, stop: &StopContext) {
         map,
         &stop.regs,
         session.target.windows_thread_selection.as_ref(),
-        BREAK_STACKTRACE_PROBE_LIMIT,
+        // A bugcheck's stack starts at the frame that faulted, which can be
+        // deep under the bugcheck's own: it is looked for.
+        if live {
+            BREAK_STACKTRACE_WALK_LIMIT
+        } else {
+            BUGCHECK_FAULT_SEARCH_LIMIT
+        },
     );
     let stack = StackTrace {
         frames: recovered
@@ -575,6 +584,9 @@ pub fn print_break_context_at(
         Ok(r) => r,
         Err(e) => {
             session.target.registers = None;
+            // The notification for this stop must not name the last one's
+            // symbol and thread.
+            session.shown_stop = None;
             outln!(
                 "{}{}\n",
                 ui::badge("BREAK"),
@@ -617,6 +629,13 @@ pub fn print_break_context_at(
             format!("{} {}", ui::muted("stopped at"), ui::symbol(&stop_symbol))
         });
     let mut children: Vec<String> = Vec::new();
+    // An int3 Windows makes on purpose says why it made it. One of the
+    // debugger's own breakpoints is not one, its site masked or not.
+    if session.breakpoints.breakpoint_id_at_address(rip).is_none()
+        && let Some(reason) = debugger.windows_break_reason(VirtAddr(rip))
+    {
+        children.push(reason.to_string());
+    }
     // At a stop in the Windows hypervisor NT is what is inspected: where it
     // left off becomes the context, `.cxr` returns to the hypervisor's.
     let saved_context = debugger.select_saved_vtl0(&thread_id);

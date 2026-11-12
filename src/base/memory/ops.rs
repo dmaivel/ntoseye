@@ -3,8 +3,12 @@ use std::sync::Arc;
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
 
 use crate::base::error::Result;
-use crate::base::memory::{SectionViews, TranslationCache};
+use crate::base::memory::{CompressedPages, PAGE_SIZE, SectionViews, TranslationCache};
 use crate::base::types::{Dtb, VirtAddr};
+
+/// Where a software PTE's page-file number starts on kernels with the L1TF
+/// mitigation; see [`MemoryOps::page_file_low`].
+pub const PAGE_FILE_LOW: u32 = 12;
 
 /// Reads and writes of guest memory at addresses of type `A`: physical
 /// memory ([`crate::backend::phys::PhysMem`]), or a virtual address space walked
@@ -54,6 +58,13 @@ pub trait MemoryOps<A> {
         self.read_bytes(addr, buf)
     }
 
+    /// Whether `addr` is in the guest's page-table self-map, whose pages
+    /// are page tables: [`crate::base::memory::AddressSpace`] reads their
+    /// frames with [`Self::read_page_table_bytes`].
+    fn in_page_table_map(&self, _addr: VirtAddr) -> bool {
+        false
+    }
+
     /// The bits the guest sets in a non-present page-table entry to point it
     /// at no real memory (Windows' L1TF mitigation, `InvalidPteMask`), which
     /// a transition entry's frame must have cleared; 0 when there are none.
@@ -61,9 +72,34 @@ pub trait MemoryOps<A> {
         0
     }
 
+    /// The first bit of a software PTE's page-file number (`PageFileLow`):
+    /// 12 on kernels with the L1TF mitigation (Windows 10 1809, and 1703 to
+    /// 1803 from their 2018 updates), 1 before.
+    fn page_file_low(&self) -> u32 {
+        PAGE_FILE_LOW
+    }
+
+    /// A page of the memory-compression store this backend decompressed
+    /// earlier while the guest has been halted, by its page-file number and
+    /// page (`file << 32 | offset`); see [`Self::cache_store_page`].
+    fn cached_store_page(&self, _key: u64) -> Option<Arc<[u8; PAGE_SIZE]>> {
+        None
+    }
+
+    /// Keep a page decompressed from the memory-compression store until the
+    /// guest runs again; a backend that cannot tell when it runs keeps none.
+    fn cache_store_page(&self, _key: u64, _page: Arc<[u8; PAGE_SIZE]>) {}
+
     /// The guest's mapped views, for pages a process's page tables do not
     /// map (see [`SectionViews`]); `None` until a kernel is found.
     fn section_views(&self) -> Option<Arc<SectionViews>> {
+        None
+    }
+
+    /// The guest's memory-compression store, for pages whose PTE is in the
+    /// store's page file (see [`CompressedPages`]); `None` when the guest has
+    /// none or its layout is not known.
+    fn compressed_pages(&self) -> Option<Arc<CompressedPages>> {
         None
     }
 
@@ -114,11 +150,31 @@ impl<A, B: MemoryOps<A>> MemoryOps<A> for Arc<B> {
         (**self).read_page_table_bytes(addr, buf)
     }
 
+    fn in_page_table_map(&self, addr: VirtAddr) -> bool {
+        (**self).in_page_table_map(addr)
+    }
+
     fn invalid_pte_mask(&self) -> u64 {
         (**self).invalid_pte_mask()
     }
 
+    fn page_file_low(&self) -> u32 {
+        (**self).page_file_low()
+    }
+
+    fn cached_store_page(&self, key: u64) -> Option<Arc<[u8; PAGE_SIZE]>> {
+        (**self).cached_store_page(key)
+    }
+
+    fn cache_store_page(&self, key: u64, page: Arc<[u8; PAGE_SIZE]>) {
+        (**self).cache_store_page(key, page);
+    }
+
     fn section_views(&self) -> Option<Arc<SectionViews>> {
         (**self).section_views()
+    }
+
+    fn compressed_pages(&self) -> Option<Arc<CompressedPages>> {
+        (**self).compressed_pages()
     }
 }

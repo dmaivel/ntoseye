@@ -8,6 +8,7 @@ import re
 import signal
 import threading
 import time
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -45,7 +46,14 @@ IN_GUEST_VP = "of a guest partition, which the Windows hypervisor put on its pro
 # A step-out refused because the stack walk found no caller, as from code
 # that no module or unwind data covers.
 NO_CALLER = "could not find caller return address"
+# A step refused because its breakpoint lands in code the kernel debugger
+# runs: on ARM64 a step can stop in an interrupt the processor took while it
+# left the debugger, whose caller and callees are the debugger's.
+IN_DEBUGGER = "code the kernel debugger runs"
 ATTEMPTS = 3
+# How long to wait for the root partition's next IPI or flush hypercall: at
+# low load the whole root made no synthetic IPI for 44 s, and one VP for 64.
+HYPERCALL_WAIT = 90.0
 
 
 @contextmanager
@@ -124,11 +132,15 @@ def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
     # hits the test is about are declined either way.
     # Under that load the stepped thread can also exit before it gets past
     # its next instruction, which the step reports, and which leaves
-    # nothing to step out of.
+    # nothing to step out of. On ARM64 a step can stop in the exception
+    # dispatch or in an interrupt taken while the processor left the
+    # debugger, where a step over or out would plant its breakpoint in code
+    # the breakpoint blocklist refuses.
+    blocklisted = (IN_TRAP_DISPATCH, IN_DEBUGGER)
     try:
         over = halted.step_over(until="call", timeout=20.0)
     except ntoseye.NtoseyeError as error:
-        if EXITED not in str(error):
+        if not any(reason in str(error) for reason in (EXITED, *blocklisted)):
             raise
         return
     assert isinstance(over, (Stop.Step, Stop.Interrupt))
@@ -136,7 +148,10 @@ def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
     # too. The interrupt can also halt the vCPU taking a VM exit, in the
     # Windows hypervisor, or running a guest partition's VP, where no step
     # can start, or in code outside every loaded module, which no unwind data
-    # leaves; a finished step is always in NT.
+    # leaves; a finished step is always in NT, though it can be in its
+    # thread's outermost frame (the idle thread's nt!KiIdleLoop), which has
+    # no caller to step out to, or in an interrupt taken while the processor
+    # left the debugger, whose caller is the debugger's own code.
     try:
         out = halted.step_out(timeout=20.0)
     except ntoseye.NtoseyeError as error:
@@ -144,7 +159,13 @@ def test_steps_resume_past_false_predicates(halted: Debugger) -> None:
         refused_after_interrupt = isinstance(over, Stop.Interrupt) and (
             IN_HYPERVISOR in message or IN_GUEST_VP in message or NO_CALLER in message
         )
-        if EXITED not in message and not refused_after_interrupt:
+        outermost = NO_CALLER in message and len(halted.cpus[over.cpu].backtrace(limit=2)) < 2
+        if (
+            EXITED not in message
+            and not any(reason in message for reason in blocklisted)
+            and not refused_after_interrupt
+            and not outermost
+        ):
             raise
         return
     assert isinstance(out, (Stop.Step, Stop.Interrupt))
@@ -171,11 +192,12 @@ def test_trace_calls_returns_a_call_tree(halted: Debugger) -> None:
     for _ in range(ATTEMPTS):
         require_single_step(halted)
         # gdb single-steps at a few hundred instructions a second, KDCOM at a
-        # few dozen, so 2,000 take about a minute. A step the trace follows
-        # its thread through can wait on that thread while others keep
-        # reaching the instruction first, so a busy guest gets another
-        # attempt from where the last one stopped.
-        trace = halted.trace_calls(limit=2_000, timeout=120.0)
+        # few dozen, and KDNET to an ARM64 guest at 5 to 15 (measured over
+        # 15 s traces from nt!NtClose), so 400 fit the timeout on each. A
+        # step the trace follows its thread through can wait on that thread
+        # while others keep reaching the instruction first, so a busy guest
+        # gets another attempt from where the last one stopped.
+        trace = halted.trace_calls(limit=400, timeout=120.0)
         if trace.end not in ("diverted", "interrupted") and not (
             trace.end == "failed"
             and any(
@@ -269,6 +291,27 @@ def test_kernel_memory_reads_at_a_stop_in_the_hypervisor(halted: Debugger) -> No
     # scope still reads NT.
     address = halted.symbols["nt!KeBugCheckEx"]
     assert halted.memory.read(address, 1) == halted.processes[4].memory.read(address, 1)
+
+
+def test_an_nt_read_in_the_hypervisors_context_says_why_it_fails(halted: Debugger) -> None:
+    """In the hypervisor's own context (`.cxr` at a stop there; a stop on its
+    VM-exit entry keeps it) no NT address reads, and `dq` and `dx` say that
+    the context's address space is why and that `.vtlcxr` selects NT."""
+    cpu = next((cpu for cpu in halted.cpus if cpu.saved_vtl), None)
+    if cpu is None:
+        pytest.skip("no vCPU halted in the Windows hypervisor with saved VTL state (needs VBS and hv-evmcs)")
+    reason = "not mapped in the Windows hypervisor's address space"
+    halted.command(f"~{cpu.number}s")
+    halted.command(".cxr")
+    try:
+        assert reason in halted.command("dq nt!PsActiveProcessHead L1")
+        assert reason in halted.command("dx -r0 *(void**)&nt!PsActiveProcessHead")
+        halted.command(".vtlcxr")
+        listing = halted.command("dq nt!PsActiveProcessHead L1")
+        assert "?" not in listing and reason not in listing
+    finally:
+        # Back to the stopped processor and its own context.
+        halted.command(f"~{halted.stop.cpu}s" if halted.stop and halted.stop.cpu is not None else ".thread")
 
 
 def test_hypervisor_memory_is_its_own_and_read_only(halted: Debugger) -> None:
@@ -674,9 +717,11 @@ def test_hypercall_breakpoint_stops_only_for_its_call_and_caller(halted: Debugge
     state holds the code in RCX's low 16 bits. With a VP index, the stop is
     on that VP's processor, as the root's VPs are pinned to the processors
     with their numbers. A hit whose caller is unknown stops too, so only the
-    stops with a known caller are checked. A root VP can go many seconds
-    without the call (its processor parked by Windows at low load), so the
-    VP is one seen making it."""
+    stops with a known caller are checked. The root's VPs make the call at
+    very different rates (one several times a second, another once in
+    several seconds), and the whole root can go a minute without it at low
+    load, so the VP is the one seen making it most and each wait is long; a
+    filter that declined that VP's calls would still time out."""
     if os.environ.get("NTOSEYE_TEST_BACKEND") != "gdb":
         pytest.skip("breakpoints in the Windows hypervisor require the host GDB backend")
     try:
@@ -697,9 +742,9 @@ def test_hypercall_breakpoint_stops_only_for_its_call_and_caller(halted: Debugge
             assert hypercall is not None
             assert (hypercall.code, hypercall.partition, hypercall.vp) == (0x000B, root.id, index)
             for _ in range(ATTEMPTS * 3):
-                stop = halted.run(timeout=30.0)
+                stop = halted.run(timeout=HYPERCALL_WAIT)
                 who = "the root" if index is None else f"the root's VP {index}"
-                assert stop is not None, f"no synthetic IPI from {who} in 30 s"
+                assert stop is not None, f"no synthetic IPI from {who} in {HYPERCALL_WAIT:.0f} s"
                 assert stop.hit(bp)
                 assert stop.cpu is not None  # a kernel stop is on a processor
                 cpu = halted.cpus[stop.cpu]
@@ -716,7 +761,7 @@ def test_hypercall_breakpoint_stops_only_for_its_call_and_caller(halted: Debugge
         assert callers, "no stop had a known caller"
         return callers
 
-    caller = known_callers(None)[-1]
+    caller = Counter(known_callers(None)).most_common(1)[0][0]
     known_callers(list(halted.cpus).index(caller))
 
 
@@ -736,7 +781,7 @@ def test_a_hypercall_stop_decodes_the_call_from_the_callers_registers(halted: De
     decoded = 0
     try:
         for _ in range(ATTEMPTS * 3):
-            stop = halted.run(timeout=10.0)
+            stop = halted.run(timeout=HYPERCALL_WAIT)
             assert stop is not None and stop.hit(bp)
             assert stop.cpu is not None  # a kernel stop is on a processor
             cpu = halted.cpus[stop.cpu]
@@ -818,7 +863,7 @@ def test_flush_gva_ranges_decode_in_the_format_their_flags_select(halted: Debugg
     extended = 0
     try:
         for _ in range(ATTEMPTS):
-            stop = halted.run(timeout=10.0)
+            stop = halted.run(timeout=HYPERCALL_WAIT)
             assert stop is not None and stop.hit(bp)
             assert stop.cpu is not None  # a kernel stop is on a processor
             caller = halted.cpus[stop.cpu].hypercall_caller()
@@ -855,7 +900,7 @@ def test_a_hypercall_condition_reads_the_callers_memory(halted: Debugger) -> Non
     bp = halted.breakpoints.add_hypercall(0x0003, root.id, condition=AT_VMCALL)
     try:
         for _ in range(ATTEMPTS):
-            stop = halted.run(timeout=10.0)
+            stop = halted.run(timeout=HYPERCALL_WAIT)
             assert isinstance(stop, Stop.Breakpoint) and stop.hit(bp)
             assert stop.breakpoint.condition_error is None
     finally:
@@ -872,8 +917,10 @@ def test_a_hypercall_condition_reads_the_callers_memory(halted: Debugger) -> Non
         0x0003, root.id, condition=f"{SLOW} && $pqwo(rdx) == 0 && $pqwo(rdx + 8) == {flags:#x}"
     )
     try:
-        stop = halted.run(timeout=30.0)
-        assert isinstance(stop, Stop.Breakpoint) and stop.hit(bp), "no slow flush of the root in 30 s"
+        stop = halted.run(timeout=HYPERCALL_WAIT)
+        assert isinstance(stop, Stop.Breakpoint) and stop.hit(bp), (
+            f"no slow flush of the root in {HYPERCALL_WAIT:.0f} s"
+        )
         assert stop.breakpoint.condition_error is None
         assert stop.cpu is not None  # a kernel stop is on a processor
         caller = halted.cpus[stop.cpu].hypercall_caller()
@@ -887,12 +934,11 @@ def test_a_hypercall_condition_reads_the_callers_memory(halted: Debugger) -> Non
 
 def test_a_hypercall_callback_reads_its_caller(halted: Debugger) -> None:
     """In a `when=` callback, `Cpu.hypercall_caller()` reads the caller at
-    its VMCALL: the call's bytes at its RIP, and for a slow call the input
-    GPA in its RDX. A vCPU that runs NT, not the hypervisor, has no caller."""
+    its VMCALL: the call's bytes at its RIP. A vCPU that runs NT, not the
+    hypervisor, has no caller."""
     root = hypervisor_root(halted)
     callers: list[ntoseye.HypercallCaller | None] = []
     code: list[bytes] = []
-    inputs: list[tuple[int, int | None]] = []
     in_nt: list[ntoseye.HypercallCaller | None] = []
 
     def check(stop: Stop) -> bool:
@@ -902,27 +948,52 @@ def test_a_hypercall_callback_reads_its_caller(halted: Debugger) -> None:
         if caller is None or caller.hypercall is None:
             return True
         code.append(caller.read(caller.registers["rip"], len(VMCALL)))
-        if not caller.hypercall.fast:
-            inputs.append((caller.registers["rdx"], caller.hypercall.input_gpa))
-        # Most flushes are fast; a slow one can take a hundred hits.
         if len(in_nt) < ATTEMPTS:
             in_nt.extend(cpu.hypercall_caller() for cpu in halted.cpus if cpu.process is not None)
-        return len(code) >= ATTEMPTS and bool(inputs) and bool(in_nt)
+        return len(code) >= ATTEMPTS and bool(in_nt)
 
     bp = halted.breakpoints.add_hypercall(0x0003, root.id, when=check)
     try:
-        stop = halted.run(timeout=30.0)
+        stop = halted.run(timeout=HYPERCALL_WAIT)
     finally:
         halted.interrupt()
         bp.delete()
     assert isinstance(stop, Stop.Breakpoint) and stop.hit(bp), (
-        "no slow flush of the root, or no vCPU in NT at a flush, in 30 s"
+        f"{len(code)} flushes of the root, or no vCPU in NT at one, in {HYPERCALL_WAIT:.0f} s"
     )
     assert stop.breakpoint.condition_error is None
     assert all(caller is not None and caller.partition_id == root.id and caller.root for caller in callers)
     assert set(code) == {VMCALL}
-    assert all(rdx == gpa for rdx, gpa in inputs)
     assert in_nt and all(caller is None for caller in in_nt)
+
+
+def test_a_slow_hypercall_callback_reads_its_input(halted: Debugger) -> None:
+    """For a slow call, `Cpu.hypercall_caller()` reads the input GPA the
+    caller passed in RDX. Most flushes are fast: a slow one took from 3 to
+    190 hits, and a quiet guest makes few flushes at all, so this waits
+    longer and skips when the guest made none."""
+    root = hypervisor_root(halted)
+    inputs: list[tuple[int, int | None]] = []
+
+    def slow(stop: Stop) -> bool:
+        assert stop.cpu is not None
+        caller = halted.cpus[stop.cpu].hypercall_caller()
+        if caller is None or caller.hypercall is None or caller.hypercall.fast:
+            return False
+        inputs.append((caller.registers["rdx"], caller.hypercall.input_gpa))
+        return True
+
+    bp = halted.breakpoints.add_hypercall(0x0003, root.id, when=slow)
+    try:
+        stop = halted.run(timeout=HYPERCALL_WAIT)
+    finally:
+        halted.interrupt()
+        bp.delete()
+    if stop is None:
+        pytest.skip(f"the guest made no slow flush of the root in {HYPERCALL_WAIT:.0f} s")
+    assert isinstance(stop, Stop.Breakpoint) and stop.hit(bp)
+    assert stop.breakpoint.condition_error is None
+    assert inputs and all(rdx == gpa for rdx, gpa in inputs)
 
 
 def test_secure_hardware_breakpoint_preserves_code_and_cpu_identity(halted: Debugger) -> None:
@@ -1149,6 +1220,10 @@ def test_dx_queries_agree_with_the_sdk(halted: Debugger) -> None:
     a `Where` on a name keeps their IDs as keys and a `Select` reads them,
     `FromListEntry` over `nt!PsActiveProcessHead` walks as many records as
     the session has processes."""
+    # A break-in under VBS often lands in the Windows hypervisor, whose page
+    # tables do not map NT's: stop in NT, where `&nt!PsActiveProcessHead`
+    # reads.
+    halted.run(timeout=10.0, address="nt!NtClose")
     name = "svchost.exe"
     pids = sorted(p.pid for p in halted.processes.find(name))
     assert pids, f"no {name}"

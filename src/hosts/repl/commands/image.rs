@@ -15,7 +15,7 @@ use ntoseye_macros::{command, grammar};
 /// its address evaluated in the current radix.
 fn resolve_image(cx: &ArgCx<'_, '_>, text: &str) -> Result<ImageRef> {
     let target = &cx.state.ctx.target;
-    let radix = cx.state.radix;
+    let radix = cx.state.ctx.radix;
     let (base, module) =
         target.resolve_image(text, |text| Expr::eval_with_radix(text, target, radix))?;
     Ok(ImageRef {

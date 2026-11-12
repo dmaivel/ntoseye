@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use ntoseye_macros::record;
 
+use crate::base::bytes;
 use crate::base::error::{Error, Result};
 use crate::base::memory::{MemoryOps, PAGE_SIZE};
 use crate::base::types::VirtAddr;
@@ -527,15 +528,57 @@ pub struct ResourceList {
     pub termination: ListTermination,
 }
 
+/// The most resources `!locks` walks: a guard against a corrupt list, far
+/// above what a system has.
+pub const MAX_RESOURCES: usize = 1 << 20;
+
+/// `_ERESOURCE.Flag` of a resource owned exclusively.
+pub const RESOURCE_OWNED_EXCLUSIVE: u16 = 0x80;
+
+/// `_CM_KEY_NODE` (and KCB) flag of a hive's root key.
+const KEY_HIVE_ENTRY: u64 = 0x4;
+
 struct ObjectNameLayout {
     body_offset: u64,
-    info_mask_offset: u64,
+    name_info_at: NameInfoAt,
     creator_info_size: Option<u64>,
     name_info_size: u64,
     name_offset: u64,
+    /// `_OBJECT_HEADER_NAME_INFO.Directory`, the directory the object is
+    /// named in.
+    directory_offset: Option<u64>,
+}
+
+/// Where an object header records where its name info is.
+#[derive(Clone, Copy)]
+enum NameInfoAt {
+    /// The offset of `InfoMask` (Windows 7 on), whose bits say which
+    /// optional headers precede the header.
+    InfoMask(u64),
+    /// The offset of `NameInfoOffset` (Vista and earlier): how far before
+    /// the header the name info starts, 0 for none.
+    Offset(u64),
 }
 
 impl ObjectNameLayout {
+    /// The `_OBJECT_HEADER_NAME_INFO` of the object whose header is at
+    /// `header`; `None` for an unnamed object.
+    fn name_info(
+        &self,
+        memory: &impl MemoryOps<VirtAddr>,
+        header: VirtAddr,
+    ) -> Result<Option<VirtAddr>> {
+        match self.name_info_at {
+            NameInfoAt::InfoMask(offset) => {
+                self.name_info_address(header, memory.read(header + offset)?)
+            }
+            NameInfoAt::Offset(offset) => {
+                let back: u8 = memory.read(header + offset)?;
+                Ok((back != 0).then(|| header - u64::from(back)))
+            }
+        }
+    }
+
     fn name_info_address(&self, header: VirtAddr, info_mask: u8) -> Result<Option<VirtAddr>> {
         const CREATOR_INFO_BIT: u8 = 0x01;
         const NAME_INFO_BIT: u8 = 0x02;
@@ -575,7 +618,7 @@ struct ObjectDirectoryLayout {
 
 /// `_IRP.Thread` is a direct field on some builds and inside the `Tail.Overlay`
 /// union on others; read whichever is present, else null (never fatal).
-pub(crate) fn irp_thread(irp: &StructRef) -> VirtAddr {
+pub fn irp_thread(irp: &StructRef) -> VirtAddr {
     if let Ok(t) = irp.read_pointer("Thread") {
         return t;
     }
@@ -664,7 +707,9 @@ impl Target {
         self.guest()?.ntoskrnl.types().struct_at(name, base)
     }
 
-    fn read_kernel_unicode_string(&self, addr: VirtAddr) -> Result<String> {
+    /// The kernel `UNICODE_STRING` at `addr`, laid out as the kernel's PDB
+    /// says.
+    pub fn read_kernel_unicode_string(&self, addr: VirtAddr) -> Result<String> {
         self.kernel_struct("_UNICODE_STRING", addr)?
             .read_unicode_string()
     }
@@ -683,13 +728,196 @@ impl Target {
             .symbols
             .find_type_across_modules(dtb, "_OBJECT_HEADER_NAME_INFO")
             .ok_or_else(|| Error::StructNotFound("_OBJECT_HEADER_NAME_INFO".to_string()))?;
+        let name_info_at = match header_type.field_offset("InfoMask") {
+            Ok(offset) => NameInfoAt::InfoMask(offset),
+            Err(_) => NameInfoAt::Offset(header_type.field_offset("NameInfoOffset")?),
+        };
         Ok(ObjectNameLayout {
             body_offset: header_type.field_offset("Body")?,
-            info_mask_offset: header_type.field_offset("InfoMask")?,
+            name_info_at,
             creator_info_size,
             name_info_size: name_info_type.size as u64,
             name_offset: name_info_type.field_offset("Name")?,
+            directory_offset: name_info_type.field_offset("Directory").ok(),
         })
+    }
+
+    /// The full path of a named object, through the directories it is named
+    /// in (`\Device\HarddiskVolume3`); `None` for an unnamed one.
+    fn kernel_object_path(&self, object: VirtAddr) -> Result<Option<String>> {
+        const MAX_DEPTH: usize = 32;
+        let layout = self.object_name_layout()?;
+        let memory = self.guest()?.ntoskrnl.memory();
+        let mut components = Vec::new();
+        let mut current = object;
+        for _ in 0..MAX_DEPTH {
+            let header = current - layout.body_offset;
+            let Some(name_info) = layout.name_info(&memory, header)? else {
+                break;
+            };
+            let name = self.read_kernel_unicode_string(name_info + layout.name_offset)?;
+            // The root directory is named `\`.
+            if name != "\\" {
+                components.push(name);
+            }
+            let Some(directory) = layout
+                .directory_offset
+                .map(|offset| memory.read_pointer(name_info + offset))
+                .transpose()?
+                .filter(|directory| !directory.is_zero())
+            else {
+                break;
+            };
+            current = directory;
+        }
+        if components.is_empty() {
+            return Ok(None);
+        }
+        components.reverse();
+        Ok(Some(format!("\\{}", components.join("\\"))))
+    }
+
+    /// A name for the object at `body` of type `type_name` that has none in
+    /// its header, as WinDbg's `!handle` gives one: a file's path on its
+    /// device, a process's image and PID, a thread's TID and process.
+    /// `None` for other types; keys are named by [`Self::name_key_handles`].
+    fn unnamed_object_name(&self, type_name: &str, body: VirtAddr) -> Result<Option<String>> {
+        let types = self.guest()?.ntoskrnl.types_in(self.kernel_dtb());
+        match type_name {
+            "File" => {
+                let file = types.struct_at("_FILE_OBJECT", body)?;
+                let name = file.unicode_string("FileName").unwrap_or_default();
+                let device = file
+                    .read_pointer("DeviceObject")
+                    .ok()
+                    .filter(|device| !device.is_zero())
+                    .and_then(|device| self.kernel_object_path(device).ok().flatten());
+                Ok(match (device, name.is_empty()) {
+                    (Some(device), _) => Some(format!("{device}{name}")),
+                    (None, false) => Some(name),
+                    (None, true) => None,
+                })
+            }
+            // Named in one pass per listing (see `name_key_handles`), which
+            // reads the registry once.
+            "Key" => Ok(None),
+            "Process" => {
+                let process = types.struct_at("_EPROCESS", body)?;
+                let pid = process.read_pointer("UniqueProcessId")?.0;
+                let image = process.read_field_bytes("ImageFileName", 15)?;
+                let end = image
+                    .iter()
+                    .position(|&byte| byte == 0)
+                    .unwrap_or(image.len());
+                Ok(Some(format!(
+                    "{} (PID {pid})",
+                    String::from_utf8_lossy(&image[..end])
+                )))
+            }
+            "Thread" => {
+                let thread = self.thread_info_from_ethread(body)?;
+                Ok(thread
+                    .tid
+                    .map(|tid| match (&thread.process_name, thread.pid) {
+                        (Some(process), Some(pid)) => format!("TID {tid} ({process}, PID {pid})"),
+                        _ => format!("TID {tid}"),
+                    }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Name the key handles of `entries` with their registry paths, reading
+    /// the registry once: as the hives name the keys, else, upper-cased, from
+    /// the names their control blocks keep.
+    fn name_key_handles(&self, entries: &mut [HandleEntry]) {
+        let Ok(types) = self
+            .guest()
+            .map(|guest| guest.ntoskrnl.types_in(self.kernel_dtb()))
+        else {
+            return;
+        };
+        let keys: Vec<(usize, VirtAddr)> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                matches!(&entry.type_name, DiagnosticValue::Available(Some(name)) if name == "Key")
+                    && matches!(entry.name, DiagnosticValue::Available(None))
+            })
+            .filter_map(|(index, entry)| {
+                let DiagnosticValue::Available(body) = entry.object else {
+                    return None;
+                };
+                let kcb = types
+                    .struct_at("_CM_KEY_BODY", body)
+                    .and_then(|key| key.read_pointer("KeyControlBlock"))
+                    .ok()?;
+                Some((index, kcb))
+            })
+            .collect();
+        if keys.is_empty() {
+            return;
+        }
+        let kcbs: Vec<VirtAddr> = keys.iter().map(|&(_, kcb)| kcb).collect();
+        let paths = self.registry_key_paths(&kcbs);
+        for ((index, kcb), path) in keys.into_iter().zip(paths) {
+            if let Some(path) = path.or_else(|| self.key_path(kcb).ok()) {
+                entries[index].name = DiagnosticValue::Available(Some(path));
+            }
+        }
+    }
+
+    /// The registry path of the key whose control block is `kcb`, from the
+    /// names it and its parents keep, upper-cased
+    /// (`\REGISTRY\MACHINE\SOFTWARE`).
+    fn key_path(&self, kcb: VirtAddr) -> Result<String> {
+        const MAX_DEPTH: usize = 512;
+        let types = self.guest()?.ntoskrnl.types_in(self.kernel_dtb());
+        let kcb_layout = types.layout("_CM_KEY_CONTROL_BLOCK")?;
+        let name_layout = types.layout("_CM_NAME_CONTROL_BLOCK")?;
+        let name_offset = name_layout.field_offset("Name")?;
+        let memory = self.kernel_address_space();
+        let mut components = Vec::new();
+        let mut current = kcb;
+        for _ in 0..MAX_DEPTH {
+            if current.is_zero() {
+                break;
+            }
+            let block: VirtAddr =
+                VirtAddr(self.read_kernel_layout_field(&kcb_layout, current, "NameBlock")?);
+            let compressed =
+                self.extract_kernel_layout_bits(&name_layout, block, "Compressed")? != 0;
+            let length: u16 = self.read_kernel_layout_field(&name_layout, block, "NameLength")?;
+            let mut bytes = vec![0u8; usize::from(length)];
+            memory.read_bytes(block + name_offset, &mut bytes)?;
+            // A compressed name keeps one byte per character.
+            components.push(if compressed {
+                bytes.iter().map(|&byte| char::from(byte)).collect()
+            } else {
+                let units: Vec<u16> = bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&pair| u16::from_le_bytes(pair))
+                    .collect();
+                String::from_utf16_lossy(&units)
+            });
+            let parent =
+                VirtAddr(self.read_kernel_layout_field(&kcb_layout, current, "ParentKcb")?);
+            // A hive's root (KEY_HIVE_ENTRY) hangs under the hive's link in
+            // the master hive, which has the same name: the path names it
+            // once.
+            let hive_root = self.extract_kernel_layout_bits(&kcb_layout, current, "Flags")?
+                & KEY_HIVE_ENTRY
+                != 0;
+            current = if hive_root && !parent.is_zero() {
+                VirtAddr(self.read_kernel_layout_field(&kcb_layout, parent, "ParentKcb")?)
+            } else {
+                parent
+            };
+        }
+        components.reverse();
+        Ok(format!("\\{}", components.join("\\")))
     }
 
     fn read_kernel_object_name(
@@ -699,8 +927,7 @@ impl Target {
     ) -> Result<Option<String>> {
         let memory = self.guest()?.ntoskrnl.memory();
         let header = object - object_name.body_offset;
-        let info_mask: u8 = memory.read(header + object_name.info_mask_offset)?;
-        let Some(name_info) = object_name.name_info_address(header, info_mask)? else {
+        let Some(name_info) = object_name.name_info(&memory, header)? else {
             return Ok(None);
         };
         Ok(Some(self.read_kernel_unicode_string(
@@ -878,7 +1105,7 @@ impl Target {
 
     /// [`Self::inspect_irp`] of the `_IRP` under the cursor `irp`, which may
     /// hold a prefetched copy.
-    pub(crate) fn irp_info(&self, irp: &StructRef<'_>) -> Result<IrpInfo> {
+    pub fn irp_info(&self, irp: &StructRef<'_>) -> Result<IrpInfo> {
         let address = irp.addr();
         let io_status = irp
             .embedded("IoStatus")
@@ -1165,6 +1392,13 @@ impl Target {
             })
             .unwrap_or_else(|| Err(Error::FieldNotFound("GrantedAccessBits".to_string())))
             .map(|value| value as u32);
+        // Before Windows 8, `ObAttributes` overlays the object pointer, whose
+        // low three bits are the attributes.
+        let overlaid = entry_layout
+            .field_offset("ObAttributes")
+            .ok()
+            .zip(entry_layout.field_offset("Object").ok())
+            .is_some_and(|(attributes, object)| attributes == object);
         let attributes = ["ObAttributes", "Attributes"]
             .into_iter()
             .find_map(|name| {
@@ -1174,7 +1408,7 @@ impl Target {
                     .then(|| self.extract_kernel_layout_bits(entry_layout, entry, name))
             })
             .unwrap_or_else(|| Err(Error::FieldNotFound("ObAttributes".to_string())))
-            .map(|value| value as u32);
+            .map(|value| if overlaid { value & 0x7 } else { value } as u32);
 
         // The entry holds the object's header; the body follows it, and is
         // what the record names and what `!object` and `!fileobj` take.
@@ -1203,7 +1437,12 @@ impl Target {
             Err(error) => DiagnosticValue::unavailable(error.to_string()),
         };
         let name = match &header {
-            Ok(header) => DiagnosticValue::Available(header.name.clone()),
+            Ok(header) => DiagnosticValue::Available(header.name.clone().or_else(|| {
+                let type_name = header.type_name.as_deref()?;
+                self.unnamed_object_name(type_name, header.body)
+                    .ok()
+                    .flatten()
+            })),
             Err(error) => DiagnosticValue::unavailable(error.to_string()),
         };
 
@@ -1244,8 +1483,12 @@ impl Target {
                 "unsupported HANDLE_TABLE level {level}"
             )));
         }
-        let next_handle: u64 =
-            self.read_kernel_layout_field(&table_layout, table, "NextHandleNeedingPool")?;
+        // A ULONG; the field after it is not part of the count.
+        let next_handle = u64::from(self.read_kernel_layout_field::<u32>(
+            &table_layout,
+            table,
+            "NextHandleNeedingPool",
+        )?);
         let entry_layout = types.layout("_HANDLE_TABLE_ENTRY")?;
         Ok((
             process,
@@ -1292,6 +1535,7 @@ impl Target {
                 entries.push(decoded);
             }
         }
+        self.name_key_handles(&mut entries);
         Ok(HandleTable {
             process,
             table,
@@ -1321,7 +1565,10 @@ impl Target {
             )));
         }
         let entry = self.handle_entry_address(table_base, level, index, entry_layout.size)?;
-        Ok(self.decode_handle_entry(&entry_layout, entry, handle))
+        let mut entries = [self.decode_handle_entry(&entry_layout, entry, handle)];
+        self.name_key_handles(&mut entries);
+        let [entry] = entries;
+        Ok(entry)
     }
 
     /// Decode a `_FILE_OBJECT` strictly from the loaded kernel PDB layout.
@@ -1411,12 +1658,16 @@ impl Target {
                 .read_pointer("OwnerThread")?
                 .0)
         };
+        // A 29-bit field above three flags from Windows 10, a whole LONG
+        // before.
+        let owner_count = |entry: VirtAddr| -> Result<i32> {
+            Ok(self.extract_kernel_layout_bits(&owner_layout, entry, "OwnerCount")? as i32)
+        };
         let owners = DiagnosticValue::from_result((|| -> Result<Vec<ResourceOwner>> {
             let mut owners = Vec::new();
             let owner_entry = address + layout.field_offset("OwnerEntry")?;
             let thread = owner_thread(owner_entry)?;
-            let count: i32 =
-                self.read_kernel_layout_field(&owner_layout, owner_entry, "OwnerCount")?;
+            let count = owner_count(owner_entry)?;
             if thread & !3 != 0 && count != 0 {
                 owners.push(ResourceOwner {
                     thread: VirtAddr(thread & !3),
@@ -1424,6 +1675,12 @@ impl Target {
                 });
             }
 
+            // An exclusive owner is OwnerEntry alone; the table keeps the
+            // entries of the shared owners before it, which no longer own.
+            let flag: u16 = self.read_kernel_layout_field(&layout, address, "Flag")?;
+            if flag & RESOURCE_OWNED_EXCLUSIVE != 0 {
+                return Ok(owners);
+            }
             let table = types
                 .struct_with_layout(Arc::clone(&layout), address)
                 .read_pointer("OwnerTable")?;
@@ -1440,8 +1697,7 @@ impl Target {
             for index in 1..table_size as usize {
                 let entry = table + (index * owner_layout.size) as u64;
                 let thread = owner_thread(entry)?;
-                let count: i32 =
-                    self.read_kernel_layout_field(&owner_layout, entry, "OwnerCount")?;
+                let count = owner_count(entry)?;
                 if thread & !3 != 0 && count != 0 {
                     owners.push(ResourceOwner {
                         thread: VirtAddr(thread & !3),
@@ -1485,23 +1741,77 @@ impl Target {
     /// list-head symbol and `_ERESOURCE.SystemResourcesList` metadata exist.
     /// There is deliberately no memory-scan fallback.
     pub fn enumerate_resources(&self, limit: usize) -> Result<ResourceList> {
-        let limit = limit.clamp(1, 1024);
+        let limit = limit.clamp(1, MAX_RESOURCES);
         let guest = self.guest()?;
         let head = guest.ntoskrnl.symbol("ExpSystemResourcesList")?.address();
         let layout = guest.ntoskrnl.types().layout("_ERESOURCE")?;
         let link_offset = layout.field_offset("SystemResourcesList")?;
         let memory = self.kernel_address_space();
-        let (records, termination) =
-            bounded_record_list_walk(head, link_offset, limit, |link| memory.read_pointer(link));
+        // Each resource is read whole, once: its link to the next is in it.
+        let mut read = Vec::new();
+        let (records, termination) = bounded_record_list_walk(head, link_offset, limit, |link| {
+            if link == head {
+                return memory.read_pointer(link);
+            }
+            let mut bytes = vec![0u8; layout.size];
+            memory.read_bytes(link - link_offset, &mut bytes)?;
+            let next = bytes::get_u64(&bytes, link_offset as usize)
+                .ok_or_else(|| Error::DebugInfo("_ERESOURCE link out of bounds".to_string()))?;
+            read.push(bytes);
+            Ok(VirtAddr(next))
+        });
         let resources = records
             .into_iter()
-            .map(|resource| self.inspect_resource(resource))
-            .collect::<Result<Vec<_>>>()?;
+            .zip(read)
+            .map(|(address, bytes)| self.resource_from_bytes(&layout, address, &bytes))
+            .collect();
         Ok(ResourceList {
             head,
             resources,
             termination,
         })
+    }
+
+    /// The resource at `address` from its bytes, `bytes`; its owners are read
+    /// only when it is held (a nonzero `ActiveCount`).
+    fn resource_from_bytes(
+        &self,
+        layout: &TypeInfo,
+        address: VirtAddr,
+        bytes: &[u8],
+    ) -> ExecutiveResource {
+        let field = |name: &str, size: usize| -> Result<u64> {
+            let offset = layout.field_offset(name)? as usize;
+            let raw = bytes
+                .get(offset..offset + size)
+                .ok_or_else(|| Error::DebugInfo(format!("_ERESOURCE.{name} out of bounds")))?;
+            let mut value = [0u8; 8];
+            value[..size].copy_from_slice(raw);
+            Ok(u64::from_le_bytes(value))
+        };
+        let active_count = field("ActiveCount", 2).map(|value| value as u16 as i16);
+        let owners = match active_count {
+            Ok(0) => DiagnosticValue::Available(Vec::new()),
+            _ => self.inspect_resource(address).map_or_else(
+                |error| DiagnosticValue::unavailable(error.to_string()),
+                |held| held.owners,
+            ),
+        };
+        ExecutiveResource {
+            address,
+            active_count: DiagnosticValue::from_result(active_count),
+            flags: DiagnosticValue::from_result(field("Flag", 2).map(|value| value as u16)),
+            contention_count: DiagnosticValue::from_result(
+                field("ContentionCount", 4).map(|value| value as u32),
+            ),
+            shared_waiters: DiagnosticValue::from_result(
+                field("NumberOfSharedWaiters", 4).map(|value| value as u32),
+            ),
+            exclusive_waiters: DiagnosticValue::from_result(
+                field("NumberOfExclusiveWaiters", 4).map(|value| value as u32),
+            ),
+            owners,
+        }
     }
 
     /// Decode the executive `_OBJECT_HEADER` for `addr`, accepting either the
@@ -1512,12 +1822,25 @@ impl Target {
         let layout = guest.ntoskrnl.types().layout("_OBJECT_HEADER")?;
         let header_size = layout.size as u64;
         let body_off = layout.field_offset("Body")?;
-        let type_index_off = layout.field_offset("TypeIndex")?;
+        // Windows 7 on index their type; before, a header holds the type
+        // object's address in `Type`.
+        let type_index_off = layout.field_offset("TypeIndex").ok();
+        let type_pointer_off = match type_index_off {
+            Some(_) => None,
+            None => Some(layout.field_offset("Type")?),
+        };
         let object_name = self.object_name_layout().ok();
+        // Windows 10 stores TypeIndex obfuscated: the real index is the
+        // stored one ^ the second byte of the header's address ^
+        // nt!ObHeaderCookie. Before, there is no cookie and it is stored as
+        // is.
         let cookie = match guest.ntoskrnl.symbol("ObHeaderCookie") {
-            Ok(symbol) => symbol.read::<u8>()?,
-            Err(Error::SymbolNotFound(_)) => 0,
+            Ok(symbol) => Some(symbol.read::<u8>()?),
+            Err(Error::SymbolNotFound(_)) => None,
             Err(error) => return Err(error),
+        };
+        let decode = |raw: u8, header: VirtAddr| -> u64 {
+            u64::from(cookie.map_or(raw, |cookie| raw ^ (header.0 >> 8) as u8 ^ cookie))
         };
         let type_table = guest
             .ntoskrnl
@@ -1533,9 +1856,15 @@ impl Target {
                 .is_some_and(|end| mem.read::<u8>(header).is_ok() && mem.read::<u8>(end).is_ok())
         };
         let candidate_type_object = |header: VirtAddr| -> Option<VirtAddr> {
-            let raw: u8 = mem.read(header + type_index_off).ok()?;
-            let index = u64::from(raw ^ ((header.0 >> 8) as u8) ^ cookie);
-            mem.read_pointer(type_table? + index * mem.arch().pointer_size())
+            let object = match (type_index_off, type_pointer_off) {
+                (Some(offset), _) => {
+                    let index = decode(mem.read(header + offset).ok()?, header);
+                    mem.read_pointer(type_table? + index * mem.arch().pointer_size())
+                }
+                (None, Some(offset)) => mem.read_pointer(header + offset),
+                (None, None) => return None,
+            };
+            object
                 .ok()
                 .filter(|object| looks_like_kernel_pointer(self.arch(), object.0))
         };
@@ -1566,44 +1895,36 @@ impl Target {
         let h = self.kernel_struct("_OBJECT_HEADER", header)?;
         let info_mask: Option<u8> = h.read_field("InfoMask").ok();
 
-        // On Win10+ the stored TypeIndex is obfuscated; the real index is
-        // raw ^ (second byte of the header address) ^ nt!ObHeaderCookie. The
-        // cookie symbol is absent on older builds (treat as 0 -> raw index).
         let type_index: Option<u64> = h
             .read_field::<u8>("TypeIndex")
             .ok()
-            .map(|raw| (raw ^ ((header.0 >> 8) as u8) ^ cookie) as u64);
+            .map(|raw| decode(raw, header));
 
-        // Resolve the type object via ObTypeIndexTable[index] and read its name.
-        // ObTypeIndexTable is the array itself, so index it directly.
-        let (type_object, type_name) = match (type_table, type_index) {
-            (Some(table), Some(index)) => {
-                let resolved = mem
-                    .read_pointer(table + index * mem.arch().pointer_size())
-                    .ok()
-                    .filter(|object| looks_like_kernel_pointer(self.arch(), object.0));
-                let name = resolved.and_then(|t| {
-                    let off = guest
-                        .ntoskrnl
-                        .types()
-                        .layout("_OBJECT_TYPE")
-                        .ok()?
-                        .field_offset("Name")
-                        .ok()?;
-                    self.read_kernel_unicode_string(t + off)
-                        .ok()
-                        .filter(|s| !s.is_empty())
-                });
-                (resolved, name)
-            }
-            _ => (None, None),
+        // The type object: ObTypeIndexTable[index] (the symbol is the array
+        // itself), or the header's own pointer before indexes.
+        let type_object = match (type_table, type_index) {
+            (Some(table), Some(index)) => mem
+                .read_pointer(table + index * mem.arch().pointer_size())
+                .ok()
+                .filter(|object| looks_like_kernel_pointer(self.arch(), object.0)),
+            _ => candidate_type_object(header),
         };
-
-        let name_info = info_mask.and_then(|mask| {
-            object_name
-                .as_ref()
-                .and_then(|layout| layout.name_info_address(header, mask).ok().flatten())
+        let type_name = type_object.and_then(|object| {
+            let off = guest
+                .ntoskrnl
+                .types()
+                .layout("_OBJECT_TYPE")
+                .ok()?
+                .field_offset("Name")
+                .ok()?;
+            self.read_kernel_unicode_string(object + off)
+                .ok()
+                .filter(|s| !s.is_empty())
         });
+
+        let name_info = object_name
+            .as_ref()
+            .and_then(|layout| layout.name_info(&mem, header).ok().flatten());
         let name = name_info.and_then(|info| {
             object_name.as_ref().and_then(|layout| {
                 self.read_kernel_unicode_string(info + layout.name_offset)
@@ -1667,12 +1988,25 @@ impl Target {
         let dtb = self.kernel_dtb();
         let mut out = Vec::new();
 
-        for (kind, symbol) in sets {
+        for &(kind, symbol) in &sets {
             let Ok(sym) = guest.ntoskrnl.symbol(symbol) else {
                 continue;
             };
             let base = sym.address();
-            for i in 0..MAX_NOTIFY {
+            // The array's size is in no global; it ends before the next of
+            // these arrays and their counts. XP's hold 8 slots each, packed
+            // together.
+            let slots = sets
+                .iter()
+                .flat_map(|(_, array)| {
+                    ["", "Count", "ExCount"].map(|suffix| format!("{array}{suffix}"))
+                })
+                .filter_map(|name| guest.ntoskrnl.symbol(name).ok())
+                .map(|global| global.address())
+                .filter(|global| *global > base)
+                .map(|global| (global.0 - base.0) / ex_callback_size)
+                .fold(MAX_NOTIFY, u64::min);
+            for i in 0..slots {
                 let entry = base + i * ex_callback_size;
                 let Ok(raw) = mem.read_pointer(entry) else {
                     continue;
@@ -1731,14 +2065,15 @@ impl Target {
             // base + (entry >> 4) with arithmetic shift.
             let offset = (raw as i32 >> 4) as i64;
             let target = VirtAddr((base.0 as i64 + offset) as u64);
-            let resolved = self.symbols.find_closest_symbol_for_address(dtb, target);
-            let (symbol, module) = match resolved {
-                Some((module, name, off)) => (
-                    Some(format_symbol_with_offset(&module, &name, off)),
-                    Some(module),
-                ),
-                None => (None, None),
-            };
+            let symbol = self
+                .symbols
+                .find_closest_symbol_for_address(dtb, target)
+                .map(|(module, name, off)| format_symbol_with_offset(&module, &name, off));
+            // A module without symbols still contains the routine.
+            let module = self
+                .symbols
+                .find_module_for_address(dtb, target)
+                .map(|module| module.short_name);
             entries.push(SsdtEntry {
                 index: i,
                 target,
@@ -1764,25 +2099,18 @@ impl Target {
         let mut tables = vec![self.dump_ssdt_table("SSDT", base, limit, guest)];
 
         // Shadow table: [0] is the kernel SSDT, [1] is win32k. Only present once
-        // a GUI thread has initialized it.
-        if let Ok(sdt) = guest.ntoskrnl.symbol("KeServiceDescriptorTableShadow") {
-            let desc = guest.ntoskrnl.types().layout("_KSERVICE_TABLE_DESCRIPTOR");
-            let desc_size = desc.as_ref().ok().map(|l| l.size as u64).unwrap_or(0x20);
-            let base_off = desc
-                .as_ref()
-                .ok()
-                .and_then(|l| l.field_offset("Base").ok())
-                .unwrap_or(0);
-            let limit_off = desc
-                .as_ref()
-                .ok()
-                .and_then(|l| l.field_offset("Limit").ok())
-                .unwrap_or(0x10);
-            let win32k = sdt.address() + desc_size;
+        // a GUI thread has initialized it; skipped where the PDB lacks the
+        // descriptor's layout or its fields do not read.
+        if let Ok(sdt) = guest.ntoskrnl.symbol("KeServiceDescriptorTableShadow")
+            && let Ok(desc) = guest.ntoskrnl.types().layout("_KSERVICE_TABLE_DESCRIPTOR")
+            && let Ok(base_off) = desc.field_offset("Base")
+            && let Ok(limit_off) = desc.field_offset("Limit")
+        {
+            let win32k = sdt.address() + desc.size as u64;
             if let Ok(w_base) = mem.read_pointer(win32k + base_off)
                 && !w_base.is_zero()
+                && let Ok(w_limit) = mem.read::<u32>(win32k + limit_off)
             {
-                let w_limit = mem.read::<u32>(win32k + limit_off).unwrap_or(0);
                 tables.push(self.dump_ssdt_table("shadow SSDT (win32k)", w_base, w_limit, guest));
             }
         }
@@ -2040,10 +2368,11 @@ mod tests {
     fn object_name_info_address_accounts_for_creator_info_only() {
         let layout = ObjectNameLayout {
             body_offset: 0x30,
-            info_mask_offset: 0x1a,
+            name_info_at: NameInfoAt::InfoMask(0x1a),
             creator_info_size: Some(0x20),
             name_info_size: 0x20,
             name_offset: 0x08,
+            directory_offset: Some(0x00),
         };
         let header = VirtAddr(0x1000);
 
@@ -2066,10 +2395,11 @@ mod tests {
     fn object_name_info_address_requires_present_creator_layout() {
         let layout = ObjectNameLayout {
             body_offset: 0x30,
-            info_mask_offset: 0x1a,
+            name_info_at: NameInfoAt::InfoMask(0x1a),
             creator_info_size: None,
             name_info_size: 0x20,
             name_offset: 0x08,
+            directory_offset: Some(0x00),
         };
 
         let error = layout

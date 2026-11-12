@@ -2,10 +2,10 @@
 
 use super::{BlackboxFinding, BlackboxKind, BlackboxState};
 use crate::analysis::blackbox::{
-    BSD_TAG, NTFS_OPLOCK_BREAK_TIMEOUT, NTFS_SLOW_IO_TIMEOUT, NTFS_TAG, PNP_TAG, WINLOGON_TAG,
-    decode_boot_status, decode_ntfs, decode_pnp, decode_winlogon, tagged_data,
+    NTFS_OPLOCK_BREAK_TIMEOUT, NTFS_SLOW_IO_TIMEOUT, decode_boot_status, decode_ntfs, decode_pnp,
+    decode_winlogon, tagged_data,
 };
-use crate::nt::dmp::tagged::TaggedBlock;
+use crate::nt::dmp::tagged::{BSD_TAG, NTFS_TAG, PNP_TAG, TaggedBlock, WINLOGON_TAG};
 
 /// The blackboxes WinDbg's `!analyze` lists, each decoded to one line.
 pub(super) fn blackbox_findings(blocks: &[TaggedBlock]) -> Vec<BlackboxFinding> {
@@ -22,7 +22,7 @@ pub(super) fn blackbox_findings(blocks: &[TaggedBlock]) -> Vec<BlackboxFinding> 
     ]
     .into_iter()
     .map(|(kind, name, tag, command)| {
-        let data = tagged_data(blocks, tag);
+        let data = tagged_data(blocks, &tag);
         BlackboxFinding {
             kind,
             name: name.into(),

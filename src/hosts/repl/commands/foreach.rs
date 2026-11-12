@@ -76,7 +76,7 @@ fn foreach(
     #[arg(invoked)] name: &str,
 ) -> Result<Flow> {
     if tail.is_empty() {
-        outln!("{}", command_help(name));
+        args::ArgError::Missing.report(name);
         return Ok(Flow::Continue);
     }
     let spec = match parse_foreach(&tail) {
@@ -350,7 +350,6 @@ fn for_each_frame(
             state.ctx.target.arch(),
             &trace,
             FOR_EACH_FRAME_LIMIT,
-            0,
             crate::hosts::repl::disasm::StackColumns::default(),
             selected,
         );
@@ -817,7 +816,7 @@ impl ReplState<'_> {
         let Some(text) = text else {
             return Some(0);
         };
-        match Expr::eval_with_radix(text, &self.ctx.target, self.radix) {
+        match Expr::eval_with_radix(text, &self.ctx.target, self.ctx.radix) {
             Ok(value) => match usize::try_from(value.0) {
                 Ok(count) => Some(count),
                 Err(_) => {

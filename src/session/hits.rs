@@ -6,6 +6,7 @@ use crate::arch::{Arch, Family, HardwareWatch, HwBreakpointAccess, RegisterMap};
 use crate::backend::dbg_backend::{
     ContinueDisposition, DebugBackend, StopEvent, processor_index_from_backend_thread_id,
 };
+use crate::base::env::Trace;
 use crate::base::error::{Error, Result};
 use crate::base::notice::Notice;
 use crate::nt::breakpoints::{
@@ -17,9 +18,7 @@ use crate::session::context::{
     refresh_windows_thread_context_for_backend_thread, update_target_context_from_registers,
 };
 use crate::session::stops::set_current_thread_from_stop;
-use crate::session::{
-    BreakpointStopAction, STATUS_SINGLE_STEP, Session, WatchpointStopAction, step_trace_enabled,
-};
+use crate::session::{BreakpointStopAction, STATUS_SINGLE_STEP, Session, WatchpointStopAction};
 
 impl Session {
     /// Classify a freshly observed stop at (`rip`, `cr3`) against our breakpoints,
@@ -30,18 +29,19 @@ impl Session {
     /// stop) and returns its details. The caller must have read registers and
     /// established (`rip`, `cr3`) for the stopped thread first.
     ///
-    /// Shared by [`Self::continue_until_break`] and the REPL's continue loop so
-    /// they can't drift on which int3 hits surface and which are silently resumed.
+    /// Only [`Self::classify_stop_event`] calls it, so every wait
+    /// ([`Self::run`], [`Self::wait_stop`]) agrees on which int3 hits surface
+    /// and which are silently resumed.
     pub fn resolve_breakpoint_stop(&mut self, rip: u64, cr3: u64) -> Result<BreakpointStopAction> {
         if self.returned_to_interrupted_hit(rip)? {
-            self.step_over_and_resume()?;
-            return Ok(BreakpointStopAction::Resumed);
+            return self.decline_hit();
         }
         match self
             .breakpoints
             .check_breakpoint_hit(rip, cr3, self.target.arch())
         {
             BreakpointHitResult::Hit(bp) => {
+                let bp = bp.clone();
                 // A thread filter is resolved here rather than in the hit
                 // predicate: the predicate matches on the address space,
                 // which is known from the registers, while the Windows thread
@@ -50,29 +50,34 @@ impl Session {
                     || !stopped_processor_matches(bp.processor, &self.current_thread)
                     || !self.stopped_stack_reaches(bp.min_stack_pointer)
                 {
-                    self.step_over_and_resume()?;
-                    return Ok(BreakpointStopAction::Resumed);
+                    return self.decline_hit();
                 }
                 let (caller_matches, caller) =
                     stopped_caller_matches(&mut self.target, &bp, &self.current_thread, cr3, rip);
                 if !caller_matches {
-                    self.step_over_and_resume()?;
-                    return Ok(BreakpointStopAction::Resumed);
+                    return self.decline_hit();
                 }
                 // Count every scoped physical hit before pass-count and
                 // condition evaluation. A pass skip uses the same canonical
                 // step-over/resume path as a false condition.
-                if self.breakpoints.record_hit(bp.id)? == BreakpointHitDisposition::SkipPass {
-                    self.step_over_and_resume()?;
-                    return Ok(BreakpointStopAction::Resumed);
+                if self.breakpoints.edit().record_hit(bp.id)? == BreakpointHitDisposition::SkipPass
+                {
+                    return self.decline_hit();
                 }
                 // A false condition is absorbed. Evaluation errors fail safe:
                 // surface the stop and carry the error to every host.
+                // A condition may name the stopped thread (`$tid`, `$proc`),
+                // which the stop selects only once it surfaces.
+                if bp.condition_expr.is_some() {
+                    refresh_windows_thread_context_for_backend_thread(
+                        &mut self.target,
+                        &self.current_thread,
+                    );
+                }
                 let condition_error =
                     match evaluate_hit_condition(&mut self.target, &bp, caller.as_ref()) {
                         Ok(false) => {
-                            self.step_over_and_resume()?;
-                            return Ok(BreakpointStopAction::Resumed);
+                            return self.decline_hit();
                         }
                         Ok(true) => None,
                         Err(error) => Some(error.to_string()),
@@ -82,6 +87,7 @@ impl Session {
                 // so they survive the next resume.
                 if let Err(error) = self
                     .breakpoints
+                    .edit()
                     .refresh_enabled(self.backend.as_mut(), &self.target)
                 {
                     self.notices.push(Notice::warning(format!(
@@ -89,7 +95,7 @@ impl Session {
                     )));
                 }
 
-                self.breakpoints.mark_one_shot_hit(bp.id)?;
+                self.breakpoints.edit().mark_one_shot_hit(bp.id)?;
                 Ok(BreakpointStopAction::Hit {
                     breakpoint: bp,
                     condition_error,
@@ -100,8 +106,7 @@ impl Session {
                 // different address space): silently step over so the wrong
                 // process keeps running, then resume waiting for the right one.
                 if self.breakpoints.breakpoint_id_at_address(rip).is_some() {
-                    self.step_over_and_resume()?;
-                    return Ok(BreakpointStopAction::Resumed);
+                    return self.decline_hit();
                 }
 
                 Ok(BreakpointStopAction::NotBreakpoint)
@@ -134,11 +139,22 @@ impl Session {
             .is_none_or(|sp| sp >= min)
     }
 
+    /// Pass a hit no filter accepts: step over its site and resume; or,
+    /// while a break-in's last try holds declined hits, stay on it.
+    fn decline_hit(&mut self) -> Result<BreakpointStopAction> {
+        if self.hold_declined_hits {
+            return Ok(BreakpointStopAction::Held);
+        }
+        self.step_over_and_resume()?;
+        Ok(BreakpointStopAction::Resumed)
+    }
+
     /// Silently continue past the breakpoint at the PC: step over it, rewrite
     /// whatever sites the stop dropped, and resume without surfacing anything.
     fn step_over_and_resume(&mut self) -> Result<()> {
         self.step_over_site_at_pc()?;
         self.breakpoints
+            .edit()
             .refresh_enabled(self.backend.as_mut(), &self.target)?;
         self.continue_backend(ContinueDisposition::Handled)
     }
@@ -153,6 +169,7 @@ impl Session {
         }
         self.step_over_site_at_pc()?;
         self.breakpoints
+            .edit()
             .refresh_enabled(self.backend.as_mut(), &self.target)?;
         self.set_current_thread(stepping)
     }
@@ -168,19 +185,10 @@ impl Session {
         let rsp = self
             .register_map
             .read_u64(self.target.arch().sp_register(), &regs)?;
-        Ok(self.breakpoints.take_interrupted_hit(rip, rsp))
+        Ok(self.breakpoints.edit().take_interrupted_hit(rip, rsp))
     }
 }
 
-/// Parse a backend vCPU/thread id into a zero-based processor index. Returns
-/// `None` for ids that aren't processor contexts. Shared by the REPL
-/// (re-exported from `repl::stop`) and `Session`.
-///
-/// KD synthesizes its ids as `p1.<one-based-hex>`. A GDB stub prints its own,
-/// and QEMU pads both fields: its first vCPU is `p01.01`. Both are the same
-/// `p<pid>.<tid>` syntax, so the process field is skipped rather than matched
-/// against a literal. The qualifier is still required: an unqualified id is
-/// bare hex, which would make any hex-shaped string name a processor.
 /// Whether a hit reported on `stopped` belongs to the processor a `/c`
 /// breakpoint names.
 ///
@@ -320,7 +328,7 @@ pub fn hardware_breakpoint_hit(
         event.watchpoint_address,
         event.program_counter,
     ) {
-        return Ok(Some(hit));
+        return Ok(Some(hit.clone()));
     }
 
     // Debug-register evidence only means anything on the debug exception, and
@@ -358,7 +366,8 @@ pub fn hardware_breakpoint_hit(
     };
     let hit = debug_registers
         .fired_slot(register_map, &regs, pc, &armed)
-        .and_then(|slot| breakpoints.hardware_breakpoint_for_slot(slot));
+        .and_then(|slot| breakpoints.hardware_breakpoint_for_slot(slot))
+        .cloned();
 
     let mut dirty = debug_registers.clear_status(register_map, &mut regs);
     if hit
@@ -384,7 +393,7 @@ pub fn reported_watch_hit(
     slots: usize,
     watch: Option<u64>,
     pc: Option<u64>,
-) -> Option<BreakpointInfo> {
+) -> Option<&BreakpointInfo> {
     let hit = watchpoint_covering(breakpoints, slots, watch?)?;
     (!pc.is_some_and(|pc| execute_site_at(breakpoints, slots, pc))).then_some(hit)
 }
@@ -395,7 +404,7 @@ fn watchpoint_covering(
     breakpoints: &BreakpointManager,
     slots: usize,
     address: u64,
-) -> Option<BreakpointInfo> {
+) -> Option<&BreakpointInfo> {
     (0..slots)
         .filter_map(|slot| breakpoints.hardware_breakpoint_for_slot(slot))
         .find(|bp| {
@@ -455,7 +464,8 @@ fn execute_breakpoint_at_pc(
                 && bp
                     .hardware
                     .is_some_and(|hw| hw.access == HwBreakpointAccess::Execute)
-        });
+        })
+        .cloned();
 
     if hit.is_some()
         && arch
@@ -486,7 +496,7 @@ pub fn resolve_watchpoint_stop(
     let Some(breakpoint) =
         hardware_breakpoint_hit(backend, register_map, breakpoints, event, arch)?
     else {
-        if step_trace_enabled() && breakpoints.has_enabled_hardware_breakpoints() {
+        if Trace::Step.enabled() && breakpoints.has_enabled_hardware_breakpoints() {
             let pc = backend
                 .read_registers()
                 .ok()
@@ -584,7 +594,7 @@ pub fn resolve_watchpoint_stop(
     if !caller_matches {
         // Which caller the hit resolved to tells a filter that never matches
         // from a caller that never comes.
-        if step_trace_enabled() {
+        if Trace::Step.enabled() {
             let found = caller.as_ref().map_or_else(
                 || "caller unknown".to_string(),
                 |caller| {
@@ -608,6 +618,10 @@ pub fn resolve_watchpoint_stop(
         return Ok(WatchpointStopAction::Declined);
     }
 
+    // A condition may name the stopped thread, as at a breakpoint's hit.
+    if breakpoint.condition_expr.is_some() {
+        refresh_windows_thread_context_for_backend_thread(target, current_thread);
+    }
     let condition_error = match evaluate_hit_condition(target, &breakpoint, caller.as_ref()) {
         Ok(false) => {
             declined("condition false");
@@ -652,7 +666,7 @@ pub fn rewind_thread_off_breakpoint(
         Family::X86 => {}
         Family::Arm => return,
     }
-    let Ok(regs) = backend.read_registers() else {
+    let Ok(mut regs) = backend.read_registers() else {
         return;
     };
     let rip = register_map
@@ -670,12 +684,11 @@ pub fn rewind_thread_off_breakpoint(
     ) {
         return;
     }
-    let mut adjusted = regs.clone();
     if register_map
-        .write_u64(arch.pc_register(), &mut adjusted, prev)
+        .write_u64(arch.pc_register(), &mut regs, prev)
         .is_err()
     {
         return;
     }
-    let _ = backend.write_registers(&adjusted);
+    let _ = backend.write_registers(&regs);
 }

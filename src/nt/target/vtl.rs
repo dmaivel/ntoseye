@@ -399,8 +399,10 @@ impl Target {
             .is_some_and(|guest| guest.in_hypervisor_image(address))
     }
 
-    /// Whether inspection is in the hypervisor's address space: a stop in it,
-    /// whose context `.cxr` selected.
+    /// Whether inspection is in the hypervisor's address space, which maps no
+    /// NT memory: a stop in it whose context is the hypervisor's own, which
+    /// `.cxr` selects and a stop on the VM-exit entry keeps (its saved VTL0
+    /// state may be one exit behind, so it is not selected).
     pub fn in_hypervisor_address_space(&self) -> bool {
         self.guest
             .as_ref()
@@ -636,6 +638,38 @@ impl Target {
         Some(vtl0.registers())
     }
 
+    /// The VTL0 state NT waits in on NT processor `processor`, whose vCPU
+    /// runs VTL1 or a guest partition's VP: the hypervisor saved it when
+    /// VTL0 last left, in the VTL0 eVMCS of the processor's root VP, which
+    /// is in kernel mode on an NT root with the processor's KPCR as its GS
+    /// base (a VTL call is made from kernel mode). Without general-purpose
+    /// registers: the hypervisor's exit block has held other exits' since.
+    /// `None` without eVMCS pages, or unless exactly one state matches.
+    pub fn waiting_vtl0_registers(&self, processor: u16) -> Option<HashMap<String, u64>> {
+        if self.arch() != Arch::Amd64 {
+            return None;
+        }
+        let kpcr = kpcr_for_processor(self, processor).ok()?;
+        let pages = self
+            .guest()
+            .ok()?
+            .any_evmcs_pages(&self.phys, &self.interrupt)
+            .ok()?;
+        let mask = self.arch().dtb_page_mask();
+        let kernel = self.kernel_dtb() & mask;
+        let mut states = pages.all_states(&*self.phys).into_iter().filter(|state| {
+            let root = state.cr3 & mask;
+            state.cs & 3 == 0
+                && state.gs_base == kpcr.0
+                && (root == kernel || self.process_for_cr3(root).is_some())
+        });
+        let state = states.next()?;
+        states
+            .next()
+            .is_none()
+            .then(|| exit_registers(&state, None))
+    }
+
     /// Make where NT left off the inspection context of `vcpu`, whose live
     /// registers are [`Self::registers`], when it is halted in the Windows
     /// hypervisor and nothing else is selected: NT is what a stop there is
@@ -708,6 +742,7 @@ impl Target {
     /// [`Self::load_secure_kernel_symbols`].
     pub fn enter_secure_scope(&mut self, root: Dtb) {
         self.detach();
+        self.clear_current_windows_thread_context();
         self.secure_root = Some(root);
     }
 
@@ -817,6 +852,11 @@ impl Target {
             let Ok(table) = hv_layout::hypercall_table(&loaded.view()) else {
                 return Ok(None);
             };
+            // The RAM scan, not the partition walk `vm_exit_entry` uses:
+            // that walk names the addresses it finds, which comes back here
+            // while this root's names are being made. A stale page of a VTL
+            // that is gone adds at most one more entry name; the bound on
+            // its RVA below keeps it inside the image.
             let mut entries: Vec<u64> = match guest.any_evmcs_pages(&self.phys, &self.interrupt) {
                 Ok(pages) => pages
                     .all_states(&*self.phys)
@@ -833,7 +873,11 @@ impl Target {
             entries.dedup();
             let names = hypercalls::hypervisor_symbols(base, &table, &entries);
             let extents = hypercalls::symbol_extents(&names, &loaded.functions, &loaded.bytes);
-            let rva = |address: u64| u32::try_from(address.checked_sub(base)?).ok();
+            let rva = |address: u64| {
+                u32::try_from(address.checked_sub(base)?)
+                    .ok()
+                    .filter(|&rva| rva < image.size)
+            };
             let exit_entries: Vec<u32> = entries.iter().filter_map(|&entry| rva(entry)).collect();
             let mut starts = prolog::function_starts(&loaded.bytes, &loaded.code);
             starts.extend(loaded.functions.keys());
@@ -993,7 +1037,9 @@ fn image_containing<B: MemoryOps<PhysAddr>>(
             && let Ok(view) = PeView::from_bytes(&headers)
         {
             let size = size_of_image(&view);
-            if rip - page >= u64::from(size) {
+            // A `SizeOfImage` past the search window is a corrupt header,
+            // and the image is later copied whole by it.
+            if rip - page >= u64::from(size) || u64::from(size) > IMAGE_SEARCH_BYTES {
                 return None;
             }
             let path = SymbolStore::codeview_pdb_path(memory, VirtAddr(page))

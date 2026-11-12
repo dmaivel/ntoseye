@@ -119,8 +119,9 @@ fn module_event_label(mode: ExceptionPolicyMode) -> &'static str {
 
 /// Break when an exception occurs or a kernel module loads or unloads.
 ///
-/// -c runs commands at the stop, and -f sets an explicit final action:
-/// break, handled, or not handled. `sxe ld` stops when a kernel image loads,
+/// -c runs commands at the event, and -f sets an explicit final action:
+/// break, handled, or not handled. Without -f, the event ends after the
+/// commands as it would without -c. `sxe ld` stops when a kernel image loads,
 /// and `sxe ld:<module>` stops when that module loads. The module name is
 /// case-insensitive, the extension is optional, and you can use `*`/`?`
 /// globs. The stop occurs after ntoseye lists the module and arms its
@@ -131,7 +132,13 @@ fn module_event_label(mode: ExceptionPolicyMode) -> &'static str {
 /// ld` prints a `ModLoad:` line and continues, `sxn ud` prints an `Unload
 /// module` line and continues, and `sxd` and `sxi` let the load or unload
 /// continue with no output. A named filter has precedence over bare `ld` or
-/// `ud`.
+/// `ud`. The load filters apply to the user-mode images processes map too:
+/// while one can name a DLL, ntoseye traps nt!PsCallImageNotifyRoutines,
+/// which runs for every image a process maps. On ARM64 the kernel reaches it
+/// only for a new process's executable and ntdll, so set !gflag +ksl there
+/// for later DLL loads (Windows then reports each image's first mapping).
+/// Over KD with the ksl global flag set, the unload filters apply to
+/// user-mode images.
 // The forms are SDK-only: the line's grammar (`-c`, `-f` and the event in
 // any order, `ld:<module>`) has no form words, so `sxe` parses it and calls
 // the operation the event names.
@@ -195,11 +202,6 @@ fn set_exception(
     command: Option<String>,
     disposition: Option<ExceptionPolicyFinalAction>,
 ) -> Result<ExceptionPolicy> {
-    if command.is_some() && disposition.is_none() {
-        return Err(Error::DebugInfo(
-            "-c requires an explicit final action: -f break, -f gh, or -f gn".to_string(),
-        ));
-    }
     if let Some(event_command) = command.as_deref() {
         validate_exception_command(event_command).map_err(Error::DebugInfo)?;
     }
@@ -243,8 +245,8 @@ fn set_module_filter(
 /// alias (`av`, `bpe`, ...), and return its policy.
 ///
 /// `mode` is `break` (the default), `second_chance`, `notify` or `ignore`.
-/// `command` runs at the stop, which needs an explicit `disposition`: break,
-/// or continue the exception as handled or not handled. For a module load
+/// `command` runs at the event; `disposition` then breaks, or continues the
+/// exception as handled or not handled, and defaults to what `mode` does. For a module load
 /// or unload filter, use `set_module_event`.
 #[command(form_of = sxe, python = Exceptions, python_name = "set")]
 fn set_exception_policy(
@@ -328,8 +330,9 @@ impl Render for EventPolicy {
 
 /// Pass first-chance exceptions and break on second chance.
 ///
-/// -c runs commands at the stop, and -f sets an explicit final action:
-/// break, handled, or not handled. `sxd ld[:<module>]` and `sxd
+/// -c runs commands at the event, and -f sets an explicit final action:
+/// break, handled, or not handled. Without -f, the event ends after the
+/// commands as it would without -c. `sxd ld[:<module>]` and `sxd
 /// ud[:<module>]` let the load or unload continue with no output. See sxe.
 #[command(
     names = ["sxd"],
@@ -354,8 +357,9 @@ fn set_second_chance(
 
 /// Show a notification for exceptions and pass them without a break.
 ///
-/// -c runs commands at the stop, and -f sets an explicit final action:
-/// break, handled, or not handled. `sxn ld[:<module>]` prints a `ModLoad:`
+/// -c runs commands at the event, and -f sets an explicit final action:
+/// break, handled, or not handled. Without -f, the event ends after the
+/// commands as it would without -c. `sxn ld[:<module>]` prints a `ModLoad:`
 /// line at the load and continues, and `sxn ud[:<module>]` prints an `Unload
 /// module` line at the unload and continues. See sxe.
 #[command(
@@ -381,8 +385,9 @@ fn set_notify(
 
 /// Pass exceptions without a break or a notification.
 ///
-/// -c runs commands at the stop, and -f sets an explicit final action:
-/// break, handled, or not handled. `sxi ld[:<module>]` and `sxi
+/// -c runs commands at the event, and -f sets an explicit final action:
+/// break, handled, or not handled. Without -f, the event ends after the
+/// commands as it would without -c. `sxi ld[:<module>]` and `sxi
 /// ud[:<module>]` let the load or unload continue with no output. See sxe.
 #[command(
     names = ["sxi"],

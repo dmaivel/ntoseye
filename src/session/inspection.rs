@@ -155,28 +155,22 @@ impl Session {
         Ok((selected, thread))
     }
 
-    /// Read guest virtual memory in the inspection address space
-    /// ([`Target::current_dtb`](crate::nt::target::Target::current_dtb)) with our
-    /// own breakpoint patch bytes masked back to the original code, so every
-    /// host (REPL, MCP, SDK) sees the same bytes the guest would run.
-    pub fn read_masked(&self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
-        self.read_masked_in(self.target.current_dtb(), addr, buf)
-    }
-
     /// Search the inspection address space for `pattern`
     /// ([`Target::search`](crate::nt::target::Target::search)) as
-    /// [`Self::read_masked`] reads it, so a breakpoint this session planted
-    /// neither hides the original bytes nor matches as an `int3`.
+    /// [`Target::read_masked`](crate::nt::target::Target::read_masked) reads
+    /// it, so a breakpoint this session planted neither hides the original
+    /// bytes nor matches as an `int3`.
     pub fn search(&self, start: VirtAddr, pattern: &[u8], length: usize) -> Result<SearchResult> {
         self.target.search(start, pattern, length, |address, buf| {
-            self.read_masked(address, buf)
+            self.target.read_masked(address, buf)
         })
     }
 
     /// Compare two ranges of the inspection address space
     /// ([`Target::compare`](crate::nt::target::Target::compare)) as
-    /// [`Self::read_masked`] reads them, so a breakpoint this session planted
-    /// is compared as the byte it displaced.
+    /// [`Target::read_masked`](crate::nt::target::Target::read_masked) reads
+    /// them, so a breakpoint this session planted is compared as the byte it
+    /// displaced.
     pub fn compare(
         &self,
         first: VirtAddr,
@@ -184,29 +178,20 @@ impl Session {
         length: usize,
     ) -> Result<CompareResult> {
         self.target.compare(first, second, length, |address, buf| {
-            self.read_masked(address, buf)
+            self.target.read_masked(address, buf)
         })
-    }
-
-    /// [`Self::read_masked`] in the address space `dtb` rather than the
-    /// inspection one, for values that belong to a particular stack frame.
-    pub fn read_masked_in(&self, dtb: Dtb, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
-        self.target.address_space(dtb).read_bytes(addr, buf)?;
-        if self.target.symbols.is_secure_root(dtb) {
-            return Ok(());
-        }
-        self.mask_code(addr, buf, dtb);
-        Ok(())
     }
 
     /// Compare `module`'s executable sections against its cached image
     /// (`!chkimg`), with this session's own breakpoints (and the bugcheck
-    /// trap) masked back to the code they replaced.
+    /// trap) masked back to the code they replaced. The code is what the
+    /// target holds, never the image file a dump's hole would be read from
+    /// for display, which would compare the file with itself.
     pub fn check_image(&self, module: &str, include_diffs: bool) -> Result<ImageCheck> {
         let dtb = self.target.process_dtb();
         self.target
             .check_image(module, include_diffs, &|address, buf| {
-                self.read_masked_in(dtb, address, buf)
+                self.target.read_masked_held(dtb, address, buf)
             })
     }
 
@@ -235,18 +220,21 @@ impl Session {
                     "string address overflows".to_string(),
                 )));
             }
-            self.read_masked(at, buf).map_err(|error| match error {
-                Error::TargetRunning(_) => ScanFault::Fatal(error),
-                error => ScanFault::Unreadable(error),
-            })
+            self.target
+                .read_masked(at, buf)
+                .map_err(|error| match error {
+                    Error::TargetRunning(_) => ScanFault::Fatal(error),
+                    error => ScanFault::Unreadable(error),
+                })
         })
     }
 
-    /// Read as much of `buf` as the guest will give with [`Self::read_masked`],
-    /// one page at a time, returning how many leading bytes are valid: the
-    /// read stops at the first unreadable page.
+    /// Read as much of `buf` as the guest will give with
+    /// [`Target::read_masked`](crate::nt::target::Target::read_masked), one
+    /// page at a time, returning how many leading bytes are valid: the read
+    /// stops at the first unreadable page.
     pub fn read_masked_partial(&self, addr: VirtAddr, buf: &mut [u8]) -> usize {
-        if self.read_masked(addr, buf).is_ok() {
+        if self.target.read_masked(addr, buf).is_ok() {
             return buf.len();
         }
         let mut read = 0;
@@ -254,6 +242,7 @@ impl Session {
             let chunk_address = VirtAddr(addr.0.wrapping_add(read as u64));
             let end = (read + PAGE_SIZE - chunk_address.page_offset() as usize).min(buf.len());
             if self
+                .target
                 .read_masked(chunk_address, &mut buf[read..end])
                 .is_err()
             {
@@ -267,13 +256,21 @@ impl Session {
     /// Disassemble `count` instructions starting at `addr` in the current
     /// address space. Our own breakpoint `int3` bytes are masked back to the
     /// original opcode, and branch / rip-relative targets get symbol comments.
+    /// Near unreadable memory it decodes the instructions that end before
+    /// it, fewer than `count`; it fails only when `addr` itself is unreadable.
     pub fn disassemble(&self, addr: VirtAddr, count: usize) -> Result<Vec<DisasmRow>> {
         let dtb = self.target.current_dtb();
 
         let machine = self.target.code_machine(addr);
         // Over-read so `count` instructions decode even at their longest.
         let mut buf = vec![0u8; count * machine.max_instruction_bytes()];
-        self.read_masked(addr, &mut buf)?;
+        let readable = self.read_masked_partial(addr, &mut buf);
+        if readable == 0 && !buf.is_empty() {
+            // Nothing reads: report why the first byte does not.
+            self.target.read_masked(addr, &mut buf[..1])?;
+        }
+        let bytes = &buf[..readable];
+        let read_end = addr.0.saturating_add(readable as u64);
 
         let symbols = &self.target.symbols;
         let resolve = |target: u64| {
@@ -281,7 +278,17 @@ impl Session {
                 .format_closest_symbol_for_address(dtb, VirtAddr(target))
                 .unwrap_or_default()
         };
-        Ok(decode_code(&buf, addr.0, Some(count), machine, resolve))
+        // An instruction cut off by the unreadable byte would decode from
+        // bytes that are not the target's, so the rows stop before it.
+        let mut rows = decode_code(bytes, addr.0, Some(count), machine, resolve);
+        if let Some(cut) = rows.iter().position(|row| {
+            row.ip
+                .saturating_add(row.hex.split_whitespace().count() as u64)
+                > read_end
+        }) {
+            rows.truncate(cut);
+        }
+        Ok(rows)
     }
 
     /// Whether an instruction starts at `ip` in the address space `dtb`. A
@@ -329,6 +336,7 @@ impl Session {
             from: VirtAddr(from),
         };
         if self
+            .target
             .read_masked_in(dtb, VirtAddr(from), &mut bytes)
             .is_err()
         {
@@ -414,7 +422,7 @@ impl Session {
         }
 
         let mut bytes = vec![0u8; len];
-        self.read_masked(VirtAddr(start), &mut bytes)?;
+        self.target.read_masked(VirtAddr(start), &mut bytes)?;
         let resolve = |target| format_symbol(&self.target, &trace, target);
         let machine = self.target.code_machine(VirtAddr(start));
         let rows = decode_code(&bytes, start, None, machine, resolve);
@@ -450,8 +458,9 @@ impl Session {
             ))
         })?;
         let span = (limit.0 - start.0).min(MAX_LEAF_BYTES) as usize;
-        let (code, valid) =
-            read_page_chunks(start, span, |address, buf| self.read_masked(address, buf))?;
+        let (code, valid) = read_page_chunks(start, span, |address, buf| {
+            self.target.read_masked(address, buf)
+        })?;
         let readable = valid.iter().position(|valid| !valid).unwrap_or(span);
         let machine = self.target.code_machine(start);
         let length = function_extent(&code[..readable], start.0, machine).ok_or_else(|| {
@@ -518,8 +527,9 @@ impl Session {
         let max_bytes = count.saturating_mul(machine.max_instruction_bytes());
         let start = VirtAddr(addr.0.saturating_sub(max_bytes as u64));
         let length = usize::try_from(addr.0 - start.0).unwrap_or(max_bytes);
-        let (data, valid) =
-            read_page_chunks(start, length, |address, buf| self.read_masked(address, buf))?;
+        let (data, valid) = read_page_chunks(start, length, |address, buf| {
+            self.target.read_masked(address, buf)
+        })?;
         let readable_suffix_start = valid
             .iter()
             .rposition(|readable| !readable)
@@ -648,17 +658,23 @@ impl Session {
         running_on: Option<&str>,
         limit: usize,
     ) -> Result<ThreadStackTrace> {
-        if let Some(vcpu) = running_on
-            && let Some(trace) = self.running_thread_stack(vcpu, thread, limit)?
-        {
-            return Ok(trace);
+        if let Some(vcpu) = running_on {
+            // Its saved kernel stack is stale while it runs, so a thread on a
+            // processor whose registers do not read has no stack to show.
+            return self
+                .running_thread_stack(vcpu, thread, limit)?
+                .ok_or_else(|| {
+                    Error::DebugInfo(format!(
+                        "the thread runs on {vcpu}, whose registers cannot be read (the target runs)"
+                    ))
+                });
         }
         build_parked_thread_stack(&self.target, thread, limit)
     }
 
     /// `vcpu`'s register file, read without making it the current vCPU;
     /// `None` while the target runs or when the backend cannot read it.
-    fn read_vcpu_registers(&mut self, vcpu: &str) -> Result<Option<Vec<u8>>> {
+    pub fn read_vcpu_registers(&mut self, vcpu: &str) -> Result<Option<Vec<u8>>> {
         if self.backend.is_running() {
             return Ok(None);
         }

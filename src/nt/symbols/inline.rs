@@ -8,14 +8,91 @@ use crate::base::{
     error::Result,
     types::{Dtb, VirtAddr},
 };
-use pdb2::{FallibleIterator, FileIndex, IdData, IdIndex, SymbolIndex, TypeData};
-use std::{collections::HashMap, io::Cursor, sync::Arc};
+use pdb2::{
+    CrossModuleExports, CrossModuleImports, CrossModuleRef, FallibleIterator, FileIndex, IdData,
+    IdIndex, ItemIndex, ModuleRef, SymbolIndex, TypeData,
+};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    io::Cursor,
+    sync::Arc,
+};
 
 /// `S_INLINESITE` and `S_INLINESITE2`.
 const S_INLINESITE: u16 = 0x114d;
 const S_INLINESITE2: u16 = 0x115d;
 
 const MAX_INLINE_CACHE_ENTRIES: usize = 4096;
+
+/// A module's view of the types and ids other modules of its PDB define.
+///
+/// With link-time code generation the compiler inlines functions across
+/// object files, and the records it writes for them (an inline site's
+/// function, an inlined local's type) name the defining module's own
+/// numbering: an index with the high bit set, which the module's imports map
+/// to that module and its local index, and that module's exports map to the
+/// PDB's global index.
+pub struct CrossModuleRefs<'m> {
+    imports: CrossModuleImports<'m>,
+    /// The exports of the modules referenced so far, loaded on first use;
+    /// `None` for a name no module of the PDB has.
+    exports: HashMap<ModuleRef, Option<CrossModuleExports>>,
+}
+
+impl<'m> CrossModuleRefs<'m> {
+    pub fn new(module_info: &'m pdb2::ModuleInfo<'_>) -> Result<Self> {
+        Ok(Self {
+            imports: module_info.imports()?,
+            exports: HashMap::new(),
+        })
+    }
+
+    /// `index` in the PDB's global type or id stream: `index` itself unless
+    /// it is a cross-module reference, `None` for one the module's imports
+    /// or the defining module's exports do not list.
+    pub fn resolve<I: ItemIndex>(
+        &mut self,
+        pdb: &mut pdb2::PDB<'static, Cursor<&'static [u8]>>,
+        index: I,
+    ) -> Result<Option<I>> {
+        if !index.is_cross_module() {
+            return Ok(Some(index));
+        }
+        let Ok(CrossModuleRef(module, local)) = self.imports.resolve_import(index) else {
+            return Ok(None);
+        };
+        let exports = match self.exports.entry(module) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(module_exports(pdb, module)?),
+        };
+        match exports {
+            Some(exports) => Ok(exports.resolve_import(local)?),
+            None => Ok(None),
+        }
+    }
+}
+
+/// The exports of the module the string table names at `module`. The DBI
+/// stream and the string table are known to spell a module's name in
+/// different cases.
+fn module_exports(
+    pdb: &mut pdb2::PDB<'static, Cursor<&'static [u8]>>,
+    module: ModuleRef,
+) -> Result<Option<CrossModuleExports>> {
+    let string_table = pdb.string_table()?;
+    let name = string_table.get(module.0)?.to_string();
+    let debug_information = pdb.debug_information()?;
+    let mut modules = debug_information.modules()?;
+    while let Some(candidate) = modules.next()? {
+        if candidate.module_name().eq_ignore_ascii_case(&name) {
+            return Ok(match pdb.module_info(&candidate)? {
+                Some(module_info) => Some(module_info.exports()?),
+                None => None,
+            });
+        }
+    }
+    Ok(None)
+}
 
 /// The inline sites of one procedure, in record order: a site's parent comes
 /// before it.
@@ -222,8 +299,15 @@ impl SymbolStore {
         }
 
         if !sites.is_empty() {
-            let names = inlinee_names(&mut pdb, &inlinee_ids)?;
-            for (site, id) in sites.iter_mut().zip(&inlinee_ids) {
+            // The inlinee lines are keyed by the id as the module writes it;
+            // only the name needs the global one.
+            let mut refs = CrossModuleRefs::new(&module_info)?;
+            let global_ids = inlinee_ids
+                .iter()
+                .map(|id| Ok(refs.resolve(&mut pdb, *id)?.unwrap_or(*id)))
+                .collect::<Result<Vec<_>>>()?;
+            let names = inlinee_names(&mut pdb, &global_ids)?;
+            for (site, id) in sites.iter_mut().zip(&global_ids) {
                 site.name = names[id].clone();
             }
         }

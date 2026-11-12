@@ -15,7 +15,8 @@ use crate::base::memory::{AddressSpace, MemoryOps, TranslationCache};
 use crate::base::types::{Dtb, PhysAddr, VirtAddr};
 
 use super::breakpoints::{
-    breakpoint_instruction_at, reclaimed_breakpoints_notice, restore_unowned_breakpoint_handles,
+    StrandedEntries, breakpoint_instruction_at, reclaimed_breakpoints_notice,
+    restore_unowned_breakpoint_handles,
 };
 use super::halt::HaltRegisters;
 use super::kdnet::KdNetStream;
@@ -164,14 +165,21 @@ impl KdBackend {
         // held until the guest reboots. Release them before anything reads
         // guest memory or resumes, so no later decision has to reason about an
         // `int3` nobody can account for.
-        let mut released_handles = HashSet::new();
-        if let Some(notice) = reclaimed_breakpoints_notice(restore_unowned_breakpoint_handles(
+        let mut stranded = StrandedEntries::default();
+        // Best effort: a breakpoint install that later finds the table full
+        // reclaims again and reports its own transport error.
+        match restore_unowned_breakpoint_handles(
             &mut framing,
             initial_stop.processor,
             &HashSet::new(),
-            &mut released_handles,
-        )) {
-            progress(&notice.text);
+            &mut stranded,
+        ) {
+            Ok(reclaim) => {
+                if let Some(notice) = reclaimed_breakpoints_notice(reclaim) {
+                    progress(&notice.text);
+                }
+            }
+            Err(error) => kd_trace!("kd: connect: reclaiming stranded breakpoints failed: {error}"),
         }
 
         // A target left waiting on a debugger that died mid-breakpoint reports
@@ -212,17 +220,18 @@ impl KdBackend {
             register_map,
             arch,
             kernel_dtb_override: 0,
-            teb_path: None,
+            thread_layout: None,
             processor_count: initial_stop.number_processors.max(1),
             current_processor: initial_stop.processor,
             last_stop_processor: initial_stop.processor,
             last_exception_code: initial_stop.exception_code,
             last_rip: initial_stop.program_counter,
-            switch_report_pcs: Vec::new(),
+            dropped_bp_addresses: HashSet::new(),
             bp_handles: HashMap::new(),
             managed_bp_addresses: HashSet::new(),
             retired_bp_addresses: HashSet::new(),
             breakin_addresses,
+            last_exception_record: None,
             late_breakin: !initial_breakin,
             pending_write_breakpoint: None,
             reconnect_assist_after_continue: None,
@@ -231,6 +240,8 @@ impl KdBackend {
             surface_break_at: None,
             special_registers_unsupported: false,
             efer_cache: HashMap::new(),
+            kpcr_cache: HashMap::new(),
+            debug_features: None,
             virtual_lines: LineCache::default(),
             table_lines: LineCache::default(),
             virtual_fill_cap: KD_REMOTE_MEMORY_CHUNK,
@@ -238,7 +249,7 @@ impl KdBackend {
             debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
             translations: Arc::new(TranslationCache::default()),
             notices: Vec::new(),
-            released_handles,
+            stranded,
             running_reason: MEMORY_OVER_KD_CHOSEN,
         })
     }
@@ -266,6 +277,7 @@ impl KdBackend {
             )));
         }
         self.kernel_dtb_override = kernel_dtb;
+        self.debug_features = machine(self.arch).debug_features(self, processor);
         kd_trace!(
             "kd: memory hints: dtb={kernel_dtb:#x} base={:#x} psmods={:#x} arch={:?}",
             version.kern_base,
@@ -296,7 +308,13 @@ impl KdBackend {
             (hints.ps_loaded_module_list, 16usize, "loaded-module list"),
         ] {
             let mut local_bytes = vec![0u8; len];
-            local.read_bytes(address, &mut local_bytes)?;
+            local
+                .read_bytes(address, &mut local_bytes)
+                .map_err(|error| {
+                    Error::Kd(format!(
+                        "host VM memory does not match KD target ({label} unreadable: {error})"
+                    ))
+                })?;
             let processor = self.current_processor;
             let remote_bytes =
                 with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {

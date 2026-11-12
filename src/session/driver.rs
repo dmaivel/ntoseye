@@ -16,10 +16,10 @@ use crate::arch::HwBreakpointAccess;
 use crate::backend::dbg_backend::{
     BugcheckInfo, ContinueDisposition, ModuleEvent, processor_index_from_backend_thread_id,
 };
-use crate::backend::kd::trace_enabled;
 use crate::base::disasm::ControlFlow;
 use crate::base::error::Result;
 use crate::base::notice::Notice;
+use crate::base::ntstatus::exception_code_name;
 use crate::base::types::VirtAddr;
 use crate::nt::breakpoints::{BreakpointInfo, StepFrame};
 use crate::nt::guest::{ModuleInfo, ProcessInfo};
@@ -92,7 +92,9 @@ impl Motion {
     }
 }
 
-/// Where a [`Motion::Walk`] ends: the instruction about to run.
+/// Where a [`Motion::Walk`] ends: the instruction about to run. The walk
+/// executes the current instruction first, so one started on a match moves
+/// past it, as WinDbg's `pc`, `ph` and `pt` do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalkUntil {
     /// The instruction at this address.
@@ -451,6 +453,51 @@ impl BreakpointHit {
     }
 }
 
+impl ExceptionStop {
+    /// The one-line description a protocol host shows for this stop at `rip`.
+    pub fn describe(&self, rip: u64) -> String {
+        let code = self.code;
+        let chance = match self.first_chance {
+            Some(true) => " (first chance)",
+            Some(false) => " (second chance)",
+            None => "",
+        };
+        let name = exception_code_name(code);
+        format!("{name} ({code:#010x}){chance} at {rip:#x}")
+    }
+}
+
+impl ReloadStop {
+    /// The one-line notice a protocol host shows for this reboot.
+    pub fn describe(&self) -> String {
+        let base = self
+            .kernel_base
+            .map(|base| format!("{base:#x}"))
+            .unwrap_or_else(|| "unknown".to_string());
+        let early = if self.coherent {
+            ""
+        } else {
+            " (early boot: modules and processes are not available yet)"
+        };
+        format!("target rebooted; nt base {base}{early}")
+    }
+}
+
+/// The one-line description a protocol host shows for a bugcheck stop.
+pub fn describe_bugcheck(bugcheck: Option<&BugcheckInfo>) -> String {
+    match bugcheck {
+        Some(info) => format!(
+            "bugcheck {:#x} ({:#x}, {:#x}, {:#x}, {:#x})",
+            info.code,
+            info.parameters[0],
+            info.parameters[1],
+            info.parameters[2],
+            info.parameters[3]
+        ),
+        None => "bugcheck (code unavailable from the transport)".to_string(),
+    }
+}
+
 /// The notice for an exception a `notify` policy continued past.
 fn notify_line(code: u32, first_chance: Option<bool>, address: Option<u64>) -> String {
     let chance = match first_chance {
@@ -472,18 +519,28 @@ impl Session {
     /// `Motion::Break`, a cancellation that halts) or the session's
     /// interrupt request arrived meanwhile: halt wins.
     pub fn run(&mut self, motion: Motion, cancel: &Cancel<'_>) -> Result<RunOutcome> {
+        // A new run replaces one handed back running that the host no longer
+        // waits on.
+        if !matches!(motion, Motion::Wait | Motion::Break) {
+            self.end_handed_back_run();
+        }
         let stepping = self.current_thread.clone();
         let mut motion = self.plan(motion)?;
         loop {
             self.halt_requested = false;
             let (outcome, fresh) = self.advance(&motion, cancel)?;
             if matches!(outcome, ContinueOutcome::Running) {
+                self.check_handed_back_run()?;
                 return Ok(RunOutcome::Running);
             }
             if !fresh {
-                return Ok(RunOutcome::Stopped(self.current_snapshot(outcome)));
+                let stop = self.current_snapshot(outcome);
+                self.end_handed_back_run();
+                return Ok(RunOutcome::Stopped(stop));
             }
             self.note_stop(&outcome);
+            // Described (a site of the run's own reads as a step) before the
+            // run's sites come out.
             let stop = self.current_snapshot(outcome);
             // The action runs for every breakpoint stop. A halt that was
             // asked for (`Motion::Break`, a cancellation that halts, Ctrl+C)
@@ -500,6 +557,7 @@ impl Session {
                 motion = self.decline(motion, &stepping)?;
                 continue;
             }
+            self.end_handed_back_run();
             return Ok(RunOutcome::Stopped(stop));
         }
     }
@@ -631,6 +689,12 @@ impl Session {
             && !self.reload_surface_pending
     }
 
+    /// Halted, with a newer stop the backend already holds: the stop just
+    /// classified is not where the target is.
+    fn superseded(&self) -> bool {
+        !self.backend.is_running() && self.backend.has_pending_stop()
+    }
+
     /// Resume with `disposition` unless the target already runs, then wait
     /// for the next stop.
     pub fn continue_stop(
@@ -757,7 +821,14 @@ impl Session {
                 StopResolution::Resumed | StopResolution::ModulesChanged
             ) {
                 let outcome = self.continue_outcome_from_resolution(resolution);
+                // A stop the target reached while this one was looked at (a
+                // processor that bugchecked in the debugger) is where the
+                // target is now; this one would be shown with its registers.
+                // The poll above takes it even past the deadline.
                 if !self.surface_policy(&outcome, hosted)? {
+                    if self.superseded() {
+                        continue;
+                    }
                     return Ok(outcome);
                 }
             }
@@ -931,10 +1002,17 @@ impl Session {
         let mask = self.target.arch().dtb_page_mask();
         let secure = cr3.is_some_and(|cr3| self.target.recognize_secure_root(cr3 & mask));
         let user_dump = self.target.user_dump_info().is_some();
+        let thread = windows_thread_on_backend_thread(&self.target, &self.current_thread);
+        // The thread's owner is checked first: a resume dropped the selected
+        // thread, and without one every stop walks the process list, which
+        // over KD costs seconds a breakpoint a `when=` callback declines.
+        // An idle thread's owner, the Idle process, is on no process list;
+        // its root is System's, which the walk finds, so the stop names a
+        // process `dbg.processes` has.
+        let owner = thread.as_ref().filter(|thread| thread.pid != Some(0));
         let process = cr3
             .filter(|_| !secure && !user_dump)
-            .and_then(|cr3| self.target.process_for_cr3(cr3 & mask));
-        let thread = windows_thread_on_backend_thread(&self.target, &self.current_thread);
+            .and_then(|cr3| self.target.process_for_thread_cr3(cr3 & mask, owner));
         let mut stop = Stop {
             kind: StopKind::Entry,
             cpu: (!user_dump)

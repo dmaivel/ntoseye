@@ -112,7 +112,7 @@ fn analyze_options(
 ) -> std::result::Result<AnalyzeOptions, ArgError> {
     let argv: Vec<String> = cursor.words().map(str::to_string).collect();
     while cursor.word().is_some() {}
-    parse_analyze_options(&argv, &cx.state.ctx.target, cx.state.radix).map_err(|error| {
+    parse_analyze_options(&argv, &cx.state.ctx.target, cx.state.ctx.radix).map_err(|error| {
         outln!("{}\n", command_help(cx.name));
         ArgError::Message(error.to_string())
     })
@@ -228,6 +228,15 @@ fn print_hang_report(arch: Arch, report: &HangReport) {
             ),
         }
     }
+    if report.processors_not_shown > 0 {
+        outln!(
+            "  {}",
+            ui::muted(&format!(
+                "{} processors not shown",
+                report.processors_not_shown
+            ))
+        );
+    }
 
     print_section("waiting threads by pending I/O");
     let threads = match &report.waiting {
@@ -318,6 +327,8 @@ fn print_triage_report(arch: Arch, report: &TriageReport, verbose: bool) {
         }
 
         print_section("faulting context");
+        // The program counter by its own register's name: rip, or pc.
+        let pc = arch.pc_register();
         let mut fields = vec![
             (
                 "state".to_string(),
@@ -348,7 +359,7 @@ fn print_triage_report(arch: Arch, report: &TriageReport, verbose: bool) {
                 .map(|symbol| format!("  {}", ui::symbol(symbol)))
                 .unwrap_or_default();
             fields.push((
-                "rip".to_string(),
+                pc.to_string(),
                 format!("{}{symbol}", ui::addr(frame.instruction_pointer())),
             ));
             fields.push((
@@ -366,7 +377,7 @@ fn print_triage_report(arch: Arch, report: &TriageReport, verbose: bool) {
                 .as_deref()
                 .map(|symbol| format!("  {}", ui::symbol(symbol)))
                 .unwrap_or_default();
-            fields.push(("rip".to_string(), format!("{}{symbol}", ui::addr(rip))));
+            fields.push((pc.to_string(), format!("{}{symbol}", ui::addr(rip))));
         }
         if let Some(process) = &report.status.attached_process {
             fields.push((

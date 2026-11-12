@@ -5,12 +5,13 @@ use quote::{format_ident, quote};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, Error, Expr, ExprLit, FnArg, GenericArgument, Ident, ItemFn, Lit, LitStr, Meta, Pat,
-    Path, PathArguments, Result, ReturnType, Token, Type,
+    Attribute, Error, Expr, ExprLit, FnArg, Ident, ItemFn, Lit, LitStr, Meta, Pat, Path,
+    PathArguments, Result, ReturnType, Token, Type,
 };
 
-use crate::docstring::plain_links;
+use crate::docstring::docs;
 use crate::grammar;
+use crate::syntax::first_type_argument;
 
 /// A local the generated code binds, with `mixed_site` hygiene, so an
 /// argument of the same name (`state`, `values`, `py`) neither shadows it
@@ -29,12 +30,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let receiver = Receiver::parse(&function)?;
     let args = take_args(&mut function)?;
     let output = result_type(&function.sig.output)?;
-    let docs = function
-        .attrs
-        .iter()
-        .filter(|attr| attr.path().is_ident("doc"))
-        .map(docstring_line)
-        .collect();
+    let docs = docs(&function.attrs);
     let command = Command {
         options,
         help,
@@ -129,12 +125,7 @@ fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
         }
     }
     let output = result_type(&function.sig.output)?;
-    let docs: Vec<Attribute> = function
-        .attrs
-        .iter()
-        .filter(|attr| attr.path().is_ident("doc"))
-        .map(docstring_line)
-        .collect();
+    let docs = docs(&function.attrs);
     let base = format_ident!("__FORM_{}_{}", form.command, function.sig.ident);
     let effects = form.effects.over(&base);
     let method = Method {
@@ -162,31 +153,6 @@ fn expand_form(form: FormOptions, mut function: ItemFn) -> Result<TokenStream> {
             #python
         };
     })
-}
-
-/// A doc line as the Python docstring takes it: intra-doc links as plain
-/// text (`docstring::plain_links`), backslashes doubled and `"""` escaped,
-/// because the stub writes the docstring verbatim into a `"""` literal,
-/// where `\R` would be an invalid escape and `"""` would end it. (The help
-/// text keeps the doc comment as written; a record field's doc comment
-/// escapes by hand instead.)
-fn docstring_line(attr: &Attribute) -> Attribute {
-    if let Meta::NameValue(value) = &attr.meta
-        && let Expr::Lit(ExprLit {
-            lit: Lit::Str(text),
-            ..
-        }) = &value.value
-    {
-        let line = text.value();
-        let docstring = plain_links(&line)
-            .replace('\\', "\\\\")
-            .replace("\"\"\"", "\\\"\\\"\\\"");
-        if docstring != line {
-            let docstring = LitStr::new(&docstring, text.span());
-            return syn::parse_quote!(#[doc = #docstring]);
-        }
-    }
-    attr.clone()
 }
 
 /// The `#[command(...)]` attribute.
@@ -618,6 +584,10 @@ struct Arg {
     /// The usage fragment of a `raw` argument, or of one whose
     /// `#[grammar(operation)]` parser hands its words to the operation.
     usage: Option<LitStr>,
+    /// The line gives its word with the optional word before it, never
+    /// alone (`!irpfind`'s criteria and its data): the usage shows the two
+    /// in one bracket.
+    paired: bool,
     span: Span,
 }
 
@@ -688,6 +658,7 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
             name: None,
             complete: None,
             usage: None,
+            paired: false,
             span: typed.span(),
         };
         let mut kept = Vec::new();
@@ -719,12 +690,13 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
                     "name" => arg.name = Some(meta.value()?.parse()?),
                     "complete" => arg.complete = Some(Completion::parse(meta.value()?)?),
                     "usage" => arg.usage = Some(meta.value()?.parse()?),
+                    "paired" => arg.paired = true,
                     _ => {
                         return Err(meta.error(
                             "expected `render`, `default = ...`, `current`, `switch = \"/x\"`, \
                              `rest`, `raw`, `invoked`, `parse = path`, `each = path`, `receiver`, \
                              `sdk`, `positional`, `cancel`, `name = \"...\"`, `complete = \
-                             Strategy` or `usage = \"...\"`",
+                             Strategy`, `usage = \"...\"` or `paired`",
                         ));
                     }
                 }
@@ -733,6 +705,12 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
         }
         typed.attrs = kept;
         let custom = arg.parse.is_some() || arg.each.is_some();
+        if arg.paired && (custom || arg.switch.is_some() || arg.rest || arg.raw) {
+            return Err(Error::new(
+                arg.span,
+                "`paired` marks a typed word the line gives with the optional word before it",
+            ));
+        }
         if arg.usage.is_some() && !(arg.raw || arg.rest || custom) {
             return Err(Error::new(
                 arg.span,
@@ -806,18 +784,8 @@ fn take_args(function: &mut ItemFn) -> Result<Vec<Arg>> {
 
 /// `T` when `ty` is `Option<T>`.
 fn option_inner(ty: &Type) -> Option<Type> {
-    let Type::Path(path) = ty else {
-        return None;
-    };
-    let segment = path.path.segments.last()?;
-    if segment.ident != "Option" {
-        return None;
-    }
-    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-        return None;
-    };
-    match arguments.args.first()? {
-        GenericArgument::Type(inner) => Some(inner.clone()),
+    match first_type_argument(ty)? {
+        (wrapper, inner) if wrapper == "Option" => Some(inner.clone()),
         _ => None,
     }
 }
@@ -828,18 +796,8 @@ fn result_type(output: &ReturnType) -> Result<Type> {
     let ReturnType::Type(_, ty) = output else {
         return Err(error());
     };
-    let Type::Path(path) = &**ty else {
-        return Err(error());
-    };
-    let segment = path.path.segments.last().ok_or_else(error)?;
-    if segment.ident != "Result" {
-        return Err(error());
-    }
-    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-        return Err(error());
-    };
-    match arguments.args.first() {
-        Some(GenericArgument::Type(inner)) => Ok(inner.clone()),
+    match first_type_argument(ty) {
+        Some((wrapper, inner)) if wrapper == "Result" => Ok(inner.clone()),
         _ => Err(error()),
     }
 }
@@ -1046,6 +1004,8 @@ impl Command {
                     "[{}]...".to_owned(),
                     words(Vec::new(), Some(value_completion())),
                 )
+            } else if arg.paired {
+                ("{}".to_owned(), words(vec![value_completion()], None))
             } else if arg.omittable() {
                 ("[{}]".to_owned(), words(vec![value_completion()], None))
             } else {
@@ -1341,7 +1301,7 @@ impl Command {
             _ if self.is_run() && self.returns_motion() => quote! {
                 match self::#function(#receiver, #(#call_args),*) {
                     Ok(#value) => #state.run_motion(#value),
-                    Err(#error) => crate::hosts::repl::error(&#error.to_string()),
+                    Err(#error) => crate::hosts::repl::report_error(#state, &#error),
                 }
                 Ok(())
             },
@@ -1350,7 +1310,7 @@ impl Command {
                 let #cancel = crate::hosts::repl::run_cancel(#state.stop_wait.as_ref());
                 match self::#function(#receiver, #(#call_args),*) {
                     Ok(#value) => crate::hosts::repl::Render::render(&#value, #state, #options),
-                    Err(#error) => crate::hosts::repl::error(&#error.to_string()),
+                    Err(#error) => crate::hosts::repl::report_error(#state, &#error),
                 }
                 Ok(())
             },
@@ -1362,7 +1322,7 @@ impl Command {
                         match self::#function(#receiver, #(#call_args),*) {
                             Ok(#value) => #values.push(#value),
                             Err(#error) => {
-                                crate::hosts::repl::error(&#error.to_string());
+                                crate::hosts::repl::report_error(#state, &#error);
                                 return Ok(());
                             }
                         }
@@ -1374,7 +1334,7 @@ impl Command {
             None => quote! {
                 match self::#function(#receiver, #(#call_args),*) {
                     Ok(#value) => crate::hosts::repl::Render::render(&#value, #state, #options),
-                    Err(#error) => crate::hosts::repl::error(&#error.to_string()),
+                    Err(#error) => crate::hosts::repl::report_error(#state, &#error),
                 }
                 Ok(())
             },

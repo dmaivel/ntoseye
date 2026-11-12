@@ -9,8 +9,8 @@ use super::{
 };
 use crate::base::error::Result;
 use crate::base::memory::MemoryOps;
-use crate::base::types::{Dtb, VirtAddr};
-use crate::nt::guest::vad::{MissingOffset, VadTreeOffsets, vad_tree_link};
+use crate::base::types::VirtAddr;
+use crate::nt::guest::vad::{VadTreeOffsets, vad_root_offset, vad_tree_link};
 use crate::nt::guest::{ModuleInfo, ProcessInfo};
 use crate::nt::layout::{ParsedType, TypeInfo, bitfield_value};
 use crate::nt::pe::section_name_at;
@@ -134,7 +134,7 @@ impl Target {
             return None;
         }
 
-        let vs = ntos.symbol("MiVisibleState").ok()?.read_pointer().ok()?;
+        let vs = self.visible_state().ok()?;
         let type_off = ntos
             .types()
             .layout("_MI_VISIBLE_STATE")
@@ -161,8 +161,8 @@ impl Target {
         let memory = self.address_space(process.dtb);
         let types = guest.ntoskrnl.types_in(process.dtb);
         let eprocess_layout = guest.ntoskrnl.types().layout("_EPROCESS")?;
-        let vad_root_base = process.eprocess + eprocess_layout.field_offset("VadRoot")?;
-        let root = self.read_vad_root(process.dtb, vad_root_base)?;
+        let root_pointer = process.eprocess + vad_root_offset(types, &eprocess_layout)?;
+        let root = vad_tree_link(memory.read_pointer(root_pointer)?.0);
         if root.is_zero() {
             return Ok(Vec::new());
         }
@@ -170,8 +170,9 @@ impl Target {
         let vad_layout = types
             .layout("_MMVAD_SHORT")
             .or_else(|_| types.layout("_MMVAD"))?;
-        let offsets = VadTreeOffsets::resolve(types, &vad_layout, MissingOffset::Default)?;
+        let offsets = VadTreeOffsets::resolve(types, &vad_layout)?;
         let flags_layout = types.layout("_MMVAD_FLAGS").ok();
+        let flags1_layout = types.layout("_MMVAD_FLAGS1").ok();
         let modules = guest.process_modules(process).unwrap_or_default();
 
         let mut regions = Vec::new();
@@ -193,35 +194,30 @@ impl Target {
             }
 
             let vad = node - offsets.vad_node;
-            if let Some(region) = Self::read_vad_region(
+            if let Some(mut region) = Self::read_vad_region(
                 &memory,
                 &vad_layout,
                 flags_layout.as_deref(),
+                flags1_layout.as_deref(),
                 node,
                 level,
                 vad,
                 &modules,
             ) {
+                // A section view names its file through the control area,
+                // which also covers data files and images the loader list
+                // lacks; the loader's name is the fallback.
+                if region.private_memory == Some(false)
+                    && let Some(path) = guest.vad_file_path(process.dtb, vad)
+                {
+                    region.details = Some(path);
+                }
                 regions.push(region);
             }
         }
 
         regions.sort_by_key(|region| region.start.0);
         Ok(regions)
-    }
-
-    fn read_vad_root(&self, dtb: Dtb, vad_root_base: VirtAddr) -> Result<VirtAddr> {
-        let memory = self.address_space(dtb);
-        let types = self.guest()?.ntoskrnl.types_in(dtb);
-
-        if let Ok(tree_layout) = types.layout("_RTL_AVL_TREE")
-            && let Ok(root_offset) = tree_layout.field_offset("Root")
-        {
-            return Ok(vad_tree_link(
-                memory.read_pointer(vad_root_base + root_offset)?.0,
-            ));
-        }
-        Ok(vad_tree_link(memory.read_pointer(vad_root_base)?.0))
     }
 
     fn read_integer_field(
@@ -261,6 +257,7 @@ impl Target {
         memory: &impl MemoryOps<VirtAddr>,
         vad_layout: &TypeInfo,
         flags_layout: Option<&TypeInfo>,
+        flags1_layout: Option<&TypeInfo>,
         node_address: VirtAddr,
         level: usize,
         vad: VirtAddr,
@@ -277,9 +274,10 @@ impl Target {
         let start = VirtAddr(start_vpn.checked_shl(12)?);
         let end = VirtAddr(end_vpn.checked_add(1)?.checked_shl(12)?);
 
+        // 8 bytes before Windows 8 (`PrivateMemory` is bit 63 there), 4
+        // after; the bits read are always below the field's end.
         let flags = Self::vad_flags_base_offset(vad_layout)
-            .and_then(|offset| memory.read::<u32>(vad + offset).ok())
-            .map(u64::from);
+            .and_then(|offset| memory.read::<u64>(vad + offset).ok());
         let protection = flags
             .zip(flags_layout)
             .and_then(|(raw, layout)| Self::bitfield_value(layout, "Protection", raw))
@@ -291,9 +289,37 @@ impl Target {
         let private_memory = flags.zip(flags_layout).and_then(|(raw, layout)| {
             Self::bitfield_value(layout, "PrivateMemory", raw).map(|v| v != 0)
         });
-        let commit_charge = flags
-            .zip(flags_layout)
-            .and_then(|(raw, layout)| Self::bitfield_value(layout, "CommitCharge", raw));
+        // A field of its own from Windows 11 24H2 (with its high bits in
+        // CommitChargeHigh). Before, a bitfield of `u1`'s `_MMVAD_FLAGS1`,
+        // and on Windows 7 of the flags themselves.
+        let commit_charge = match Self::read_integer_field(memory, vad_layout, vad, "CommitCharge")
+        {
+            Some(low) => {
+                let high = Self::read_integer_field(memory, vad_layout, vad, "CommitChargeHigh")
+                    .unwrap_or(0);
+                Some(low | (high << 32))
+            }
+            None => vad_layout
+                .field_offset("u1")
+                .ok()
+                .zip(flags1_layout)
+                .and_then(|(offset, layout)| {
+                    let raw = memory.read::<u32>(vad + offset).ok()?;
+                    Self::bitfield_value(layout, "CommitCharge", raw.into())
+                })
+                .or_else(|| {
+                    // Windows 7 sets every bit of the field in the VAD of
+                    // KUSER_SHARED_DATA: no count.
+                    let (raw, layout) = flags.zip(flags_layout)?;
+                    let charge = Self::bitfield_value(layout, "CommitCharge", raw)?;
+                    let ParsedType::Bitfield { len, .. } =
+                        layout.field("CommitCharge").ok()?.type_data
+                    else {
+                        return Some(charge);
+                    };
+                    (charge != u64::MAX >> (64 - u32::from(len))).then_some(charge)
+                }),
+        };
         let details = modules
             .iter()
             .find(|module| {

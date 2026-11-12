@@ -50,7 +50,7 @@ use crate::arch::Arch;
 use crate::backend::dbg_backend::DebugCapability;
 use crate::backend::gdb::{append_packet, trace_packet};
 use crate::base::error::{Error, Result};
-use crate::hosts::repl::{ReplStore, open_session, supports_capability};
+use crate::hosts::repl::{ReplStore, open_session};
 use crate::hosts::termination;
 use crate::session::{Cancel, Motion, Session, Stop};
 
@@ -142,7 +142,7 @@ fn serve_client(
     // resumes anything. A passive backend cannot stop the guest, so its
     // client inspects memory live.
     if session.backend.is_running()
-        && supports_capability(&session.capabilities(), DebugCapability::InterruptTarget)
+        && session.backend.supports(DebugCapability::InterruptTarget)
         && let Err(error) = session.run(Motion::Break, &Cancel::NEVER)
     {
         eprintln!("ntoseye-gdbserver: could not halt the target for the client: {error}");
@@ -169,9 +169,13 @@ fn drive(target: &mut GdbTarget<'_>, client: Client) -> Result<&'static str> {
                     let client = idle.borrow_conn();
                     let (body, raw) = client.read_packet().map_err(connection_error)?;
                     trace_packet("client", "<-", &raw);
-                    match body.strip_prefix(THREADS_XFER) {
-                        Some(window) => {
-                            let reply = target.threads_xfer(window, client.multiprocess);
+                    let reply = match body.strip_prefix(THREADS_XFER) {
+                        Some(window) => Some(target.threads_xfer(window, client.multiprocess)),
+                        None if body == b"?" => target.halt_reply(client.multiprocess),
+                        None => None,
+                    };
+                    match reply {
+                        Some(reply) => {
                             client.reply(&reply).map_err(connection_error)?;
                             GdbStubStateMachine::Idle(idle)
                         }
@@ -189,6 +193,9 @@ fn drive(target: &mut GdbTarget<'_>, client: Client) -> Result<&'static str> {
                         }
                     }
                 }
+                Ok(Some(byte)) if idle.borrow_conn().drops_acknowledgment(byte) => {
+                    GdbStubStateMachine::Idle(idle)
+                }
                 Ok(Some(byte)) => idle.incoming_data(target, byte).map_err(protocol_error)?,
                 Ok(None) => {
                     if target.terminating() {
@@ -203,6 +210,9 @@ fn drive(target: &mut GdbTarget<'_>, client: Client) -> Result<&'static str> {
                 Ok(Wait::Stopped(reason)) => running
                     .report_stop(target, reason)
                     .map_err(protocol_error)?,
+                Ok(Wait::Data(byte)) if running.borrow_conn().drops_acknowledgment(byte) => {
+                    GdbStubStateMachine::Running(running)
+                }
                 Ok(Wait::Data(byte)) => running
                     .incoming_data(target, byte)
                     .map_err(protocol_error)?,
@@ -319,6 +329,9 @@ struct Planted {
     kind: PlantedKind,
     address: u64,
     id: u32,
+    /// The session breakpoint's serial: `id` alone is reused once the
+    /// session's table empties, by a `monitor bp` the client never planted.
+    serial: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -333,7 +346,7 @@ struct GdbTarget<'a> {
     arch: Arch,
     layout: Layout,
     /// The REPL state `monitor` commands run in, kept between commands so
-    /// aliases, the radix, and caches persist.
+    /// aliases and caches persist.
     repl: Option<ReplStore>,
     /// Backend vCPU ids; RSP thread `n` is `threads[n - 1]`.
     threads: Vec<String>,
@@ -371,7 +384,12 @@ impl<'a> GdbTarget<'a> {
         terminating: Arc<AtomicBool>,
     ) -> Self {
         let arch = session.target.arch();
-        let layout = Layout::new(arch, &session.register_map);
+        let held = if session.target.user_dump().is_some() {
+            arch.context_size()
+        } else {
+            arch.register_buffer_size()
+        };
+        let layout = Layout::new(arch, &session.register_map, held);
         let debug_seq = session.read_debug_output(u64::MAX).next_seq;
         let mut target = Self {
             session,
@@ -403,18 +421,44 @@ impl<'a> GdbTarget<'a> {
 
     /// Remove the client's breakpoints and resume a halted guest: what a
     /// detaching gdb leaves behind. The session and its own breakpoints
-    /// (set through `monitor`) stay for the next client.
+    /// (set through `monitor`) stay for the next client. A breakpoint that
+    /// cannot be removed leaves the guest halted, as `q` and a DAP
+    /// disconnect do (see [`Session::cleanup_for_exit`]): resumed, it would
+    /// trap with no debugger to handle it. It stays in the session, for the
+    /// shutdown cleanup or a later client to remove.
     fn release(&mut self) {
-        let ids: Vec<u32> = self.planted.drain(..).map(|planted| planted.id).collect();
-        if !ids.is_empty() {
-            let removed = self.session.with_target_halted(|session| {
-                for id in ids {
-                    let _ = session.remove_breakpoint(id);
-                }
-                Ok(())
-            });
-            if let Err(error) = removed {
-                eprintln!("ntoseye-gdbserver: could not remove the client's breakpoints: {error}");
+        let planted = std::mem::take(&mut self.planted);
+        if !planted.is_empty() {
+            // Not `with_target_halted`, which resumes a break-in whatever
+            // its edit returns.
+            if self.session.backend.is_running()
+                && let Err(error) = self.session.interrupt()
+            {
+                eprintln!(
+                    "ntoseye-gdbserver: could not halt the guest to remove the client's \
+                     breakpoints: {error}"
+                );
+                return;
+            }
+            let failures: Vec<String> = planted
+                .into_iter()
+                .filter_map(|Planted { id, serial, .. }| {
+                    // Cleared through `monitor` already: no site is left, and
+                    // a breakpoint that reused the id is not the client's.
+                    self.session.breakpoints.live(id, serial)?;
+                    match self.session.remove_breakpoint(id) {
+                        Ok(()) | Err(Error::BPNotFound(_)) => None,
+                        Err(error) => Some(format!("#{id}: {error}")),
+                    }
+                })
+                .collect();
+            if !failures.is_empty() {
+                eprintln!(
+                    "ntoseye-gdbserver: could not remove the client's breakpoints, so the guest \
+                     stays halted: {}",
+                    failures.join("; ")
+                );
+                return;
             }
         }
         if self.terminating() || self.session.backend.is_running() {
@@ -423,10 +467,11 @@ impl<'a> GdbTarget<'a> {
         // Not `Session::run`: the driver resumes to reach and report the
         // next stop, and returns a parked stop instead of resuming. A detach
         // reports nothing and must leave the guest running either way.
-        if supports_capability(
-            &self.session.capabilities(),
-            DebugCapability::ExecutionControl,
-        ) && let Err(error) = self.session.resume()
+        if self
+            .session
+            .backend
+            .supports(DebugCapability::ExecutionControl)
+            && let Err(error) = self.session.resume()
         {
             eprintln!("ntoseye-gdbserver: could not resume the guest: {error}");
         }
@@ -504,7 +549,16 @@ impl Target for GdbTarget<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::current_thread_step;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::{GdbTarget, Planted, PlantedKind, current_thread_step};
+    use crate::arch::{Arch, RegisterMap};
+    use crate::backend::dbg_backend::{DebugBackend, StopEvent};
+    use crate::base::error::{Error, Result};
+    use crate::base::types::VirtAddr;
+    use crate::session::{Session, session_over_memory};
 
     /// A step with no thread id (Binary Ninja's `vCont;s`) becomes a plain
     /// current-thread step instead of a protocol error that drops the client;
@@ -517,5 +571,144 @@ mod tests {
         assert_eq!(current_thread_step(b"vCont;s:p1.3;c"), None);
         assert_eq!(current_thread_step(b"vCont;c"), None);
         assert_eq!(current_thread_step(b"vCont;S"), None);
+    }
+
+    /// A halted live guest that refuses to lift the breakpoint at `refused`,
+    /// counting its resumes.
+    struct Guest {
+        register_map: RegisterMap,
+        refused: u64,
+        continues: Arc<AtomicUsize>,
+    }
+
+    impl DebugBackend for Guest {
+        fn register_map(&self) -> &RegisterMap {
+            &self.register_map
+        }
+        fn read_registers(&mut self) -> Result<Vec<u8>> {
+            Err(Error::NotSupported)
+        }
+        fn write_registers(&mut self, _data: &[u8]) -> Result<()> {
+            Err(Error::NotSupported)
+        }
+        fn set_breakpoint(&mut self, _addr: u64) -> Result<()> {
+            Ok(())
+        }
+        fn remove_breakpoint(&mut self, addr: u64) -> Result<()> {
+            if addr == self.refused {
+                return Err(Error::Breakpoint("the stub refused".into()));
+            }
+            Ok(())
+        }
+        fn continue_execution(&mut self) -> Result<()> {
+            self.continues.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn step(&mut self) -> Result<()> {
+            Err(Error::NotSupported)
+        }
+        fn interrupt(&mut self) -> Result<StopEvent> {
+            Err(Error::NotSupported)
+        }
+        fn wait_for_stop(&mut self) -> Result<StopEvent> {
+            Err(Error::NotSupported)
+        }
+        fn try_wait_for_stop(&mut self, _timeout: Duration) -> Result<Option<StopEvent>> {
+            Ok(None)
+        }
+        fn thread_list(&mut self) -> Result<Vec<String>> {
+            Ok(vec!["1".to_string()])
+        }
+        fn set_current_thread(&mut self, _thread_id: &str) -> Result<()> {
+            Ok(())
+        }
+        fn stopped_thread_id(&mut self) -> Result<String> {
+            Ok("1".to_string())
+        }
+        fn is_running(&self) -> bool {
+            false
+        }
+    }
+
+    /// A session whose guest refuses to lift the breakpoint at `refused`,
+    /// holding a kernel breakpoint at each `(id, address)` of `sites`.
+    fn session(refused: u64, sites: &[(u32, u64)]) -> (Session, Arc<AtomicUsize>) {
+        let continues = Arc::new(AtomicUsize::new(0));
+        let mut session = session_over_memory(0x1000, &[0x90; 0x40]);
+        session.register_map = Arch::Amd64.register_map().clone();
+        session.backend = Box::new(Guest {
+            register_map: session.register_map.clone(),
+            refused,
+            continues: Arc::clone(&continues),
+        });
+        for &(id, address) in sites {
+            session
+                .breakpoints
+                .edit()
+                .insert_for_test(id, VirtAddr(address), true, None);
+        }
+        (session, continues)
+    }
+
+    /// Let a client that planted the breakpoints `ids`, as the session
+    /// holds them now, leave.
+    fn release(session: &mut Session, ids: &[u32]) {
+        let planted = ids
+            .iter()
+            .map(|&id| {
+                let serial = session.breakpoints.get(id).map_or(0, |bp| bp.serial);
+                (id, serial)
+            })
+            .collect::<Vec<_>>();
+        release_planted(session, &planted);
+    }
+
+    /// Let a client that planted the `(id, serial)` breakpoints leave.
+    fn release_planted(session: &mut Session, planted: &[(u32, u64)]) {
+        let flag = || Arc::new(AtomicBool::new(false));
+        let mut target = GdbTarget::new(session, flag(), flag());
+        target.planted = planted
+            .iter()
+            .map(|&(id, serial)| Planted {
+                kind: PlantedKind::Software,
+                address: 0,
+                id,
+                serial,
+            })
+            .collect();
+        target.release();
+    }
+
+    #[test]
+    fn a_client_breakpoint_left_in_the_guest_keeps_it_halted() {
+        let (mut session, continues) = session(0x1000, &[(1, 0x1000), (2, 0x1008)]);
+        release(&mut session, &[1, 2]);
+
+        assert_eq!(continues.load(Ordering::SeqCst), 0);
+        // The one that could be removed is; the other is left for the
+        // shutdown cleanup to retry.
+        assert!(session.breakpoints.get(1).is_some());
+        assert!(session.breakpoints.get(2).is_none());
+    }
+
+    #[test]
+    fn a_client_breakpoint_cleared_through_monitor_does_not_keep_the_guest_halted() {
+        let (mut session, continues) = session(u64::MAX, &[(1, 0x1000)]);
+        // Breakpoint 2 was the client's until `monitor bc 2`.
+        release(&mut session, &[1, 2]);
+
+        assert_eq!(continues.load(Ordering::SeqCst), 1);
+        assert!(session.breakpoints.get(1).is_none());
+    }
+
+    #[test]
+    fn a_monitor_breakpoint_that_reused_a_client_id_survives_the_detach() {
+        let (mut session, _) = session(u64::MAX, &[(1, 0x1000)]);
+        // The client's breakpoint 1 was cleared through `monitor bc`, and
+        // `monitor bp` then created another breakpoint 1.
+        let serial = session.breakpoints.get(1).unwrap().serial;
+        release_planted(&mut session, &[(1, serial.wrapping_add(1))]);
+
+        assert!(session.breakpoints.get(1).is_some());
     }
 }

@@ -3,7 +3,7 @@
 
 use super::SymbolStore;
 use crate::{
-    base::types::Dtb,
+    base::types::{Dtb, VirtAddr},
     nt::layout::{EnumDef, FieldInfo, ParsedType, TypeInfo, aggregate_key},
 };
 use pdb2::{FallibleIterator, PrimitiveKind, TypeData, TypeFinder, TypeIndex};
@@ -197,6 +197,7 @@ impl SymbolStore {
 
                     pdb2::PrimitiveKind::Char
                     | pdb2::PrimitiveKind::RChar
+                    | pdb2::PrimitiveKind::Char8
                     | pdb2::PrimitiveKind::UChar
                     | pdb2::PrimitiveKind::I8
                     | pdb2::PrimitiveKind::U8
@@ -215,7 +216,8 @@ impl SymbolStore {
                     | pdb2::PrimitiveKind::U32
                     | pdb2::PrimitiveKind::Bool32
                     | pdb2::PrimitiveKind::F32
-                    | pdb2::PrimitiveKind::RChar32 => Ok(4),
+                    | pdb2::PrimitiveKind::RChar32
+                    | pdb2::PrimitiveKind::HRESULT => Ok(4),
 
                     pdb2::PrimitiveKind::Quad
                     | pdb2::PrimitiveKind::UQuad
@@ -223,7 +225,10 @@ impl SymbolStore {
                     | pdb2::PrimitiveKind::U64
                     | pdb2::PrimitiveKind::F64 => Ok(8),
 
-                    pdb2::PrimitiveKind::Octa | pdb2::PrimitiveKind::UOcta => Ok(16),
+                    pdb2::PrimitiveKind::Octa
+                    | pdb2::PrimitiveKind::UOcta
+                    | pdb2::PrimitiveKind::I128
+                    | pdb2::PrimitiveKind::U128 => Ok(16),
 
                     _ => Ok(0),
                 }
@@ -254,6 +259,29 @@ impl SymbolStore {
         }
     }
 
+    /// The type of the global or static variable at `address`, and its
+    /// size when known, from the variable's record in its module's PDB:
+    /// a private PDB has them (a driver's own), a public one (Windows')
+    /// has none. `None` when no variable's record is at that address.
+    pub fn global_type(&self, dtb: Dtb, address: VirtAddr) -> Option<(ParsedType, Option<u64>)> {
+        let module = self.find_module_for_address(dtb, address)?;
+        let rva = u32::try_from(address.0.checked_sub(module.base_address.0)?).ok()?;
+        let index = *self.data_types.get(&module.guid)?.get(&rva)?;
+        let pdb = self.pdbs.get_mut(&module.guid)?;
+        let mut pdb_lock = pdb.lock();
+        let type_information = pdb_lock.type_information().ok()?;
+        let mut finder = type_information.finder();
+        let mut types = type_information.iter();
+        while types.next().ok()?.is_some() {
+            finder.update(&types);
+        }
+        let prefix = self.nested_type_prefix(module.guid);
+        let parsed = self
+            .resolve_type(module.guid, &finder, index, &prefix)
+            .ok()?;
+        Some((parsed, self.type_size(module.guid, &finder, index).ok()))
+    }
+
     pub(super) fn resolve_type<'p>(
         &self,
         guid: u128,
@@ -271,6 +299,7 @@ impl SymbolStore {
                     PrimitiveKind::Char | PrimitiveKind::I8 => "CHAR",
                     PrimitiveKind::UChar | PrimitiveKind::U8 => "UCHAR",
                     PrimitiveKind::RChar => "CHAR",
+                    PrimitiveKind::Char8 => "char8_t",
                     PrimitiveKind::WChar => "WCHAR",
                     PrimitiveKind::RChar16 => "char16_t",
                     PrimitiveKind::RChar32 => "char32_t",
@@ -282,11 +311,12 @@ impl SymbolStore {
                     PrimitiveKind::U32 => "UINT",
                     PrimitiveKind::Quad | PrimitiveKind::I64 => "LONGLONG",
                     PrimitiveKind::UQuad | PrimitiveKind::U64 => "ULONGLONG",
-                    PrimitiveKind::Octa => "INT128",
-                    PrimitiveKind::UOcta => "UINT128",
+                    PrimitiveKind::Octa | PrimitiveKind::I128 => "INT128",
+                    PrimitiveKind::UOcta | PrimitiveKind::U128 => "UINT128",
                     PrimitiveKind::F32 => "float",
                     PrimitiveKind::F64 => "double",
                     PrimitiveKind::Bool8 | PrimitiveKind::Bool32 => "bool",
+                    PrimitiveKind::HRESULT => "HRESULT",
                     _ => "__unknown_t",
                 };
                 let primitive = ParsedType::Primitive(name.to_string());

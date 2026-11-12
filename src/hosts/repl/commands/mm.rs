@@ -127,7 +127,7 @@ impl Render for PfnDetail {
 
 /// Translate a virtual address with an explicit directory base.
 ///
-/// The command shows each AMD64 page-table level and the final physical
+/// The command shows each page-table level and the final physical
 /// address. A directory base of zero uses the current context, and for a large
 /// page, the walk stops at its leaf level.
 #[command(
@@ -168,7 +168,8 @@ impl Render for VtopDetail {
 /// address.
 ///
 /// The command walks the page tables in reverse and detects cycles in them. The
-/// walk stops after 32 mappings or 65,536 table pages.
+/// walk stops after 32 mappings or 65,536 table pages. It works on AMD64
+/// targets only.
 #[command(
     names = ["!ptov", "ptov"],
     category = "memory manager",
@@ -193,7 +194,9 @@ impl Render for PtovDetail {
 
 /// Show pool tracker usage by tag.
 ///
-/// The command adds up the usage from the tag table of each processor. The
+/// The command adds up the usage from the tag table of each processor, which
+/// counts big allocations too; the big-page table is read only when those
+/// tables cannot be. Tags with no allocation outstanding are left out. The
 /// flags follow WinDbg: bit 1 (2) sorts by nonpaged bytes, bit 2 (4) sorts by
 /// paged bytes, and bit 0 (1) shows the alloc/free columns. The tag match is
 /// case-sensitive and supports * and ?.
@@ -384,6 +387,11 @@ impl Render for PteWalk {
     fn render(&self, repl: &mut ReplState<'_>, _: ()) {
         let mask = repl.ctx.target.phys.invalid_pte_mask();
         print_pte_walk(self, mask);
+        // What a non-present entry means for the page: where it is, and
+        // whether a read still gets it.
+        if let Some(why) = &self.non_resident {
+            outln!("{}: {why}", ui::addr(self.address.0));
+        }
     }
 }
 
@@ -476,7 +484,12 @@ impl Render for MdlDetail {
 /// PteFailures, and from the bitmap, the number of free blocks and the largest
 /// free block. The command reads all of the bitmap, up to 2^27 bits, a limit
 /// that only a corrupt SizeOfBitMap exceeds. If the free count from the bitmap
-/// differs from the counter, the target made an allocation between the reads.
+/// differs from the counter, the target made an allocation between the reads
+/// or a processor holds PTEs in the allocator's cache; the free count comes
+/// from the bitmap. Where the counters cannot be true of the bitmap (a total
+/// beyond it, a free count below zero or above the total, as on Windows 11
+/// 22631 ARM64), the allocator's total and use are shown as unknown and left
+/// out of the summary, and `!vm` shows no system-PTE totals.
 /// All counts are in PTEs, and each bit of the system-view bitmap covers 16
 /// PTEs. The flags follow WinDbg. 0x1 lists each free block with its first PTE,
 /// the address that it maps, and its length, up to 256 free blocks for each
@@ -640,7 +653,16 @@ fn print_system_ptes(detail: &SystemPtesDetail, flags: u64) {
     outln!("System PTE Information");
     outln!("  total   {}", detail.total);
     outln!("  free    {}", detail.free);
-    outln!("  in use  {}", detail.total.saturating_sub(detail.free));
+    outln!("  in use  {}", detail.used());
+    if !detail.uncounted.is_empty() {
+        outln!(
+            "  {}",
+            ui::muted(&format!(
+                "(not counting {}, whose counters do not hold)",
+                detail.uncounted.join(", ")
+            ))
+        );
+    }
     let field = |label: &str, value: String| outln!("    {label:<18}  {value}");
     for pte_type in &detail.types {
         outln!();
@@ -654,7 +676,7 @@ fn print_system_ptes(detail: &SystemPtesDetail, flags: u64) {
             outln!("    unused (empty bitmap)");
             continue;
         }
-        let span = pte_type.bitmap_bits.saturating_mul(pte_type.ptes_per_bit);
+        let span = pte_type.span();
         if let Some(base) = pte_type.base_va {
             field(
                 "VA range",
@@ -666,22 +688,37 @@ fn print_system_ptes(detail: &SystemPtesDetail, flags: u64) {
             );
         }
         field("first PTE", ui::addr(pte_type.base_pte.0));
-        field("total", pte_type.total.to_string());
-        field("free", pte_type.free.to_string());
+        let unknown = || "-".to_string();
+        let holds = pte_type.counters_hold();
+        field(
+            "total",
+            if holds {
+                pte_type.total.to_string()
+            } else {
+                unknown()
+            },
+        );
+        field("free", pte_type.counted_free().to_string());
         field(
             "in use",
-            pte_type.total.saturating_sub(pte_type.free).to_string(),
+            pte_type
+                .used()
+                .map_or_else(unknown, |used| used.to_string()),
         );
         field("failures", pte_type.failures.to_string());
         field(
             "bitmap",
             format!(
-                "{:#x} bits at {}, {} PTE{} per bit; {} PTEs reserved beyond the total",
+                "{:#x} bits at {}, {} PTE{} per bit{}",
                 pte_type.bitmap_bits,
                 ui::addr(pte_type.bitmap.0),
                 pte_type.ptes_per_bit,
                 if pte_type.ptes_per_bit == 1 { "" } else { "s" },
-                span.saturating_sub(pte_type.total)
+                if holds {
+                    format!("; {} PTEs reserved beyond the total", span - pte_type.total)
+                } else {
+                    String::new()
+                }
             ),
         );
         field("free blocks", pte_type.free_run_count.to_string());
@@ -724,11 +761,20 @@ fn print_system_ptes(detail: &SystemPtesDetail, flags: u64) {
                 pte_type.free_run_count - pte_type.free_runs.len() as u64
             );
         }
-        if pte_type.bitmap_free != pte_type.free {
+        // A counter that went below zero reads as its two's complement.
+        if !holds {
             outln!(
-                "    (the bitmap counts {} free where TotalFreeSystemPtes says {}: the target allocated between the reads)",
-                pte_type.bitmap_free,
-                pte_type.free
+                "    (TotalSystemPtes reads {} and TotalFreeSystemPtes {}, which the bitmap of {} PTEs, {} free, contradicts: the kernel's counters do not hold here, so the total and the PTEs in use are unknown)",
+                pte_type.total,
+                pte_type.free as i64,
+                span,
+                pte_type.bitmap_free
+            );
+        } else if pte_type.bitmap_free != pte_type.free {
+            outln!(
+                "    (TotalFreeSystemPtes reads {} where the bitmap counts {} free; free counts from the bitmap)",
+                pte_type.free as i64,
+                pte_type.bitmap_free
             );
         }
     }
@@ -773,12 +819,8 @@ fn print_vm(detail: &VmDetail) {
     );
     outln!("  nonpaged pool maximum  {maximum}");
     notes.print("  ");
-    if detail.pool.fields.is_empty() {
-        outln!(
-            "  {}",
-            ui::muted("MiState has no pool fields this build locates")
-        );
-    } else {
+    // Builds before Windows 10 have no `MiState` to list.
+    if !detail.pool.fields.is_empty() {
         outln!("  MiState pool fields");
         print_vm_counters(&detail.pool.fields, "    ");
     }
@@ -919,12 +961,14 @@ fn print_pfn(detail: &PfnDetail) {
     notes.print("  ");
 }
 
-fn print_pte_entry(level: &PteLevel) {
+/// `space` is "phys " for an entry address read from physical memory, so a
+/// walk from an explicit DTB isn't mistaken for the self-map's addresses.
+fn print_pte_entry(level: &PteLevel, space: &str) {
     let name = level.level;
     let (address, raw, attributes) = (level.address.0, level.value, &level.attributes);
     if attributes.present {
         outln!(
-            "  {name:<4} @ {} = {:016x}  pfn {:x}  flags {}",
+            "  {name:<4} @ {space}{} = {:016x}  pfn {:x}  flags {}",
             ui::addr(address),
             raw,
             attributes.pfn,
@@ -932,7 +976,7 @@ fn print_pte_entry(level: &PteLevel) {
         );
     } else {
         outln!(
-            "  {name:<4} @ {} = {:016x}  software/transition/prototype PTE",
+            "  {name:<4} @ {space}{} = {:016x}  software/transition/prototype PTE",
             ui::addr(address),
             raw
         );
@@ -946,7 +990,7 @@ fn print_vtop(detail: &VtopDetail) {
         ui::addr(detail.dtb)
     );
     for level in &detail.levels {
-        print_pte_entry(level);
+        print_pte_entry(level, if detail.physical_walk { "phys " } else { "" });
     }
     match detail.physical {
         Some(physical) => outln!("  physical  {}", ui::addr(physical)),
@@ -1115,13 +1159,14 @@ fn print_pool_find(detail: &PoolFindDetail) {
     if let Some(status) = &detail.big_status {
         outln!("big-page table: {status}");
     }
-    if detail.found == 0 {
+    let found = detail.matches.len();
+    if found == 0 {
         outln!("no pool blocks matched '{}'", detail.tag);
     } else {
         outln!(
-            "{} matching pool block{}",
-            detail.found,
-            if detail.found == 1 { "" } else { "s" }
+            "{found}{} matching pool block{}",
+            if detail.truncated { "+" } else { "" },
+            if found == 1 { "" } else { "s" }
         );
     }
     if detail.interrupted {
@@ -1161,8 +1206,23 @@ fn lookaside_tag_cell(notes: &mut UnavailableNotes, detail: &LookasideDetail) ->
 }
 
 fn print_lookaside_lists(detail: &LookasideListsDetail) {
+    // A list cut short, or a root that did not read, is not an empty list.
+    let print_terminations = || {
+        for (list, termination) in [
+            ("nonpaged", &detail.nonpaged_termination),
+            ("paged", &detail.paged_termination),
+        ] {
+            if !matches!(termination.as_str(), "head" | "null link" | "interrupted") {
+                outln!(
+                    "{}",
+                    ui::muted(&format!("{list} walk ended: {termination}"))
+                );
+            }
+        }
+    };
     if detail.records.is_empty() {
         outln!("{}", ui::muted("no lookaside lists"));
+        print_terminations();
         return;
     }
     outln!(
@@ -1197,6 +1257,7 @@ fn print_lookaside_lists(detail: &LookasideListsDetail) {
     }
     print_padded_table(builder);
     notes.print("");
+    print_terminations();
     if detail.interrupted {
         outln!("lookaside walk interrupted");
     }
@@ -1235,7 +1296,8 @@ fn print_pte_walk(result: &PteWalk, invalid_pte_mask: u64) {
     );
     let mut builder = Builder::default();
     let row_strings: Vec<String> = result
-        .levels()
+        .levels
+        .iter()
         .map(|level| pte_level_cell(level, invalid_pte_mask))
         .collect();
     builder.push_record(row_strings);

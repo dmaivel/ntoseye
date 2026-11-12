@@ -18,6 +18,8 @@
 //!   in a row nest, since the line gives them in turn: two arguments whose
 //!   fragments are `[{}]` (an optional word: a typed `Option`, or a parser
 //!   declaring one) read `[address [flags]]`;
+//! - a bare word inside an optional word's bracket comes with it, never
+//!   alone: `[criteria data]`. Its fragment is `{}` (`#[arg(paired)]`);
 //! - ` | ` (spaced) separates whole forms of the line. The usage text shows
 //!   each form on its own line, starting with the command name.
 //!
@@ -146,6 +148,10 @@ const FORM_SEPARATOR: &[u8] = b" | ";
 /// The fragment of an optional positional word, which nests with the next.
 const OPTIONAL_WORD: &[u8] = b"[{}]";
 
+/// The fragment of a word the optional word before it comes with, which
+/// shares its bracket.
+const PAIRED_WORD: &[u8] = b"{}";
+
 /// Write the usage text into `out` (nothing when it is empty) and return
 /// its length: a line per form, each the command name and the arguments'
 /// fragments, optional words in a row nested. One argument at most may have
@@ -180,11 +186,21 @@ const fn render(name: &str, args: &[ArgGrammar], out: &mut [u8]) -> usize {
         while index < args.len() {
             let fragment = fragment_of(args, index, forms_of, form);
             let arg_name = args[index].name.as_bytes();
-            if is_optional_word(fragment) {
-                at = put(out, at, b" [");
+            let optional = is_optional_word(fragment);
+            if optional || is_paired_word(fragment) {
+                if optional {
+                    at = put(out, at, b" [");
+                    open += 1;
+                } else {
+                    assert!(
+                        open > 0,
+                        "a paired word follows the optional word it comes with"
+                    );
+                    at = put(out, at, b" ");
+                }
                 at = put(out, at, arg_name);
-                open += 1;
-                if !is_optional_word(next_fragment(args, index, forms_of, form)) {
+                let next = next_fragment(args, index, forms_of, form);
+                if !is_optional_word(next) && !is_paired_word(next) {
                     while open > 0 {
                         at = put(out, at, b"]");
                         open -= 1;
@@ -235,6 +251,10 @@ const fn next_fragment(
 
 const fn is_optional_word(fragment: &[u8]) -> bool {
     fragment.len() == OPTIONAL_WORD.len() && starts_with(fragment, 0, OPTIONAL_WORD)
+}
+
+const fn is_paired_word(fragment: &[u8]) -> bool {
+    fragment.len() == PAIRED_WORD.len() && starts_with(fragment, 0, PAIRED_WORD)
 }
 
 /// How many forms ` | ` separates in `fragment`.
@@ -354,6 +374,24 @@ mod tests {
                 ]
             ),
             "!sprocess [session [flags]] [-v]"
+        );
+        // A paired word shares the bracket of the optional word before it,
+        // and an optional word after the pair nests inside it.
+        assert_eq!(
+            usage(
+                "!irpfind",
+                &[
+                    arg("x", "[-v]"),
+                    arg("pool-type", "[{}]"),
+                    arg("criteria", "[{}]"),
+                    arg("data", "{}"),
+                ]
+            ),
+            "!irpfind [-v] [pool-type [criteria data]]"
+        );
+        assert_eq!(
+            usage("x", &[arg("a", "[{}]"), arg("b", "{}"), arg("c", "[{}]")]),
+            "x [a b [c]]"
         );
         assert_eq!(
             usage(

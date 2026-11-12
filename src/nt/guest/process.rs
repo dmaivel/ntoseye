@@ -12,11 +12,19 @@ use crate::{
     },
     nt::target::{ListCursor, links_back_to},
 };
-use std::collections::HashSet;
+use std::{collections::HashSet, ops::ControlFlow, sync::PoisonError};
 
 /// `EPROCESS.ImageFileName` capacity: the kernel keeps this many bytes of the
 /// image name, unterminated when the name is at least this long.
 const IMAGE_FILE_NAME_LEN: usize = 15;
+
+/// Whether `name`, an `ImageFileName` up to its NUL, may be the start of a
+/// longer one. The kernel keeps 14 bytes of the image name and a NUL in the
+/// field's 15, so `fontdrvhost.exe` reads `fontdrvhost.ex`; a shorter name
+/// is complete as is.
+fn may_be_truncated(name: &[u8]) -> bool {
+    name.len() >= IMAGE_FILE_NAME_LEN - 1
+}
 
 /// The `_EPROCESS` fields process enumeration needs, fetched with one read
 /// covering their span instead of one request per field over the transport.
@@ -105,10 +113,91 @@ impl EprocessSpan {
 
 impl Guest {
     pub fn enumerate_processes(&self) -> Result<Vec<ProcessInfo>> {
-        self.memoized(|memo| &mut memo.processes, || self.walk_processes())
+        self.memoized(
+            |memo| &mut memo.processes,
+            || self.walk_processes().map(|(processes, _)| processes),
+        )
     }
 
-    fn walk_processes(&self) -> Result<Vec<ProcessInfo>> {
+    /// The process whose page-table root is `root`, compared under `mask`.
+    /// The process the last walk of the list found for the root answers
+    /// while it still has that root and PID and is still on the active list
+    /// (the process after it links back to it); otherwise the list is walked
+    /// again, as far as the process with the root. Stops come back to the
+    /// same few roots (an idle thread runs on whichever process's root its
+    /// processor last loaded), and over KD a walk costs requests for every
+    /// process it passes; naming one can cost a walk of its own page tables
+    /// to its PEB, so only the owner is named.
+    pub fn process_for_root(&self, root: Dtb, mask: u64) -> Option<ProcessInfo> {
+        let known = self
+            .root_owners
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&root)
+            .cloned();
+        if let Some(process) = known
+            && self.still_owns(&process, root, mask)
+        {
+            return Some(process);
+        }
+        let mut owner = None;
+        self.visit_processes(|eprocess, span| {
+            if span.dtb() & mask != root {
+                return ControlFlow::Continue(());
+            }
+            owner = Some(self.process_from_span(eprocess, span));
+            ControlFlow::Break(())
+        })
+        .ok()?;
+        let owner = owner?;
+        self.root_owners
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(root, owner.clone());
+        Some(owner)
+    }
+
+    /// Whether `process` still has page-table root `root` (under `mask`) and
+    /// its PID, and is still on the active process list: removing it relinks
+    /// its neighbours past it but leaves its own links as they were.
+    fn still_owns(&self, process: &ProcessInfo, root: Dtb, mask: u64) -> bool {
+        let Ok(mut span) = EprocessSpan::new(self) else {
+            return false;
+        };
+        let memory = self.ntoskrnl.memory();
+        if span.read(&memory, process.eprocess).is_err()
+            || span.dtb() & mask != root
+            || span.pid() != process.pid
+        {
+            return false;
+        }
+        let links = process.eprocess + span.active_process_links_offset;
+        let blink = span.active_process_links_flink() + memory.arch().pointer_size();
+        memory.read_pointer(blink).is_ok_and(|back| back == links)
+    }
+
+    /// The active processes, and whether the walk read the whole list, which
+    /// it did only if it got back to `PsActiveProcessHead`. Anything else
+    /// that ends it (a process that cannot be read, a root of 0, a null
+    /// link, a loop that misses the head, the entry cap, no head symbol to
+    /// recognise) can leave processes out of a list that is still returned.
+    fn walk_processes(&self) -> Result<(Vec<ProcessInfo>, bool)> {
+        let mut processes = Vec::new();
+        let complete = self.visit_processes(|eprocess, span| {
+            processes.push(self.process_from_span(eprocess, span));
+            ControlFlow::Continue(())
+        })?;
+        Ok((processes, complete))
+    }
+
+    /// Hand `visit` each active process, its `_EPROCESS` address and the
+    /// span just read from it, until it breaks. Whether the walk read the
+    /// whole list, as [`Self::walk_processes`] says it; not when `visit`
+    /// ended it. An error when no process could be read.
+    fn visit_processes(
+        &self,
+        mut visit: impl FnMut(VirtAddr, &EprocessSpan) -> ControlFlow<()>,
+    ) -> Result<bool> {
         let memory = self.ntoskrnl.memory();
         let mut span = EprocessSpan::new(self)?;
 
@@ -123,9 +212,10 @@ impl Guest {
             .map(|s| s.address());
 
         let blink_offset = memory.arch().pointer_size();
-        let mut processes = Vec::new();
+        let mut visited = 0usize;
         let mut reached = HashSet::new();
         let mut broken = None;
+        let mut complete = false;
 
         // Cycle detection handles a corrupt list that loops; the cap handles
         // one that wanders through unrelated memory without repeating.
@@ -140,12 +230,19 @@ impl Guest {
                 break;
             }
             reached.insert(current_eprocess + span.active_process_links_offset);
-            processes.push(self.process_from_span(current_eprocess, &span));
+            visited += 1;
+            if visit(current_eprocess, &span).is_break() {
+                return Ok(false);
+            }
 
             // PsActiveProcessHead is not embedded in an EPROCESS, so reaching
             // it ends the walk before the link becomes a record address.
             let flink = span.active_process_links_flink();
-            if flink.is_zero() || Some(flink) == ps_active_process_head {
+            if flink.is_zero() {
+                break;
+            }
+            if Some(flink) == ps_active_process_head {
+                complete = true;
                 break;
             }
             cursor.advance(Ok(flink - span.active_process_links_offset));
@@ -160,16 +257,19 @@ impl Guest {
                 for link in tail.into_iter().rev() {
                     let eprocess = link - span.active_process_links_offset;
                     if span.read(&memory, eprocess).is_ok() && span.dtb() != 0 {
-                        processes.push(self.process_from_span(eprocess, &span));
+                        visited += 1;
+                        if visit(eprocess, &span).is_break() {
+                            return Ok(false);
+                        }
                     }
                 }
             }
-            if processes.is_empty() {
+            if visited == 0 {
                 return Err(error);
             }
         }
 
-        Ok(processes)
+        Ok(complete)
     }
 
     /// The process whose `_EPROCESS` at `eprocess` `span` has just read.
@@ -193,6 +293,40 @@ impl Guest {
         Ok(self.process_from_span(eprocess_va, &span))
     }
 
+    /// Whether process `pid`, whose page-table root is `dtb`, has exited:
+    /// it has left the active process list, or is still on it with
+    /// `ExitTime` set, its threads gone and its user address space torn down
+    /// or about to be. An error when the list or the process cannot be read,
+    /// which says nothing either way; an empty list was not read either,
+    /// since every system has its System process. Absence counts only from
+    /// a list read whole, so this walks the list afresh rather than taking
+    /// the halt's cached one, which a walk with an unreadable process left
+    /// short.
+    pub fn process_exited(&self, pid: u64, dtb: Dtb) -> Result<bool> {
+        let (processes, complete) = self.walk_processes()?;
+        if processes.is_empty() {
+            return Ok(false);
+        }
+        let Some(process) = processes
+            .into_iter()
+            .find(|process| process.pid == pid && process.dtb == dtb)
+        else {
+            return if complete {
+                Ok(true)
+            } else {
+                Err(Error::DebugInfo(format!(
+                    "process {pid} is not on the part of the process list that could be read"
+                )))
+            };
+        };
+        let exit_time: u64 = self
+            .ntoskrnl
+            .types()
+            .struct_at("_EPROCESS", process.eprocess)?
+            .read_field("ExitTime")?;
+        Ok(exit_time != 0)
+    }
+
     /// The process whose KVA-shadow user root is `user_root`
     /// (`_KPROCESS.UserDirectoryTableBase`), compared under `mask`. `None`
     /// when no process owns it or the kernel has no shadow roots.
@@ -204,8 +338,8 @@ impl Guest {
             .into_iter()
             .find(|process| {
                 memory
-                    .read::<u64>(process.eprocess + user_root_offset)
-                    .is_ok_and(|root| root & mask == user_root)
+                    .read_pointer(process.eprocess + user_root_offset)
+                    .is_ok_and(|root| root.0 & mask == user_root)
             })
     }
 
@@ -216,13 +350,17 @@ impl Guest {
         let root = self
             .ntoskrnl
             .memory()
-            .read::<u64>(process.eprocess + self.user_root_offset()?)
+            .read_pointer(process.eprocess + self.user_root_offset()?)
             .ok()?
+            .0
             & mask;
         (root != 0).then_some(root)
     }
 
-    fn user_root_offset(&self) -> Option<u64> {
+    /// Where `_EPROCESS` keeps the KVA-shadow user root
+    /// (`Pcb.UserDirectoryTableBase`); `None` on a kernel without shadow
+    /// roots, such as ARM64's, whose user root never maps the kernel.
+    pub fn user_root_offset(&self) -> Option<u64> {
         let types = self.ntoskrnl.types();
         Some(
             types.layout("_EPROCESS").ok()?.field_offset("Pcb").ok()?
@@ -250,10 +388,9 @@ impl Guest {
     }
 
     /// Display name for the process at `eprocess_va` given its raw
-    /// `EPROCESS.ImageFileName` bytes. The kernel keeps only the first 15
-    /// bytes of the image name, so the PEB loader list (a page-walked read of
-    /// user memory) is consulted only when the field is full and may be
-    /// truncated; every shorter name is complete as is.
+    /// `EPROCESS.ImageFileName` bytes. The PEB loader list (a page-walked
+    /// read of user memory) is consulted only for a name that may be
+    /// truncated (see [`may_be_truncated`]).
     fn process_name_from_image_file_name(
         &self,
         eprocess_va: VirtAddr,
@@ -261,7 +398,7 @@ impl Guest {
         image_file_name: &[u8],
     ) -> String {
         let name = before_nul(image_file_name);
-        if name.len() == IMAGE_FILE_NAME_LEN
+        if may_be_truncated(name)
             && dtb != 0
             && let Ok(full) = self.full_process_name(eprocess_va, dtb)
         {
@@ -317,5 +454,16 @@ impl Guest {
         }
 
         Err(Error::MissingImage)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::may_be_truncated;
+
+    #[test]
+    fn a_name_that_fills_the_field_may_be_truncated() {
+        assert!(may_be_truncated(b"fontdrvhost.ex"));
+        assert!(!may_be_truncated(b"svchost.exe"));
     }
 }

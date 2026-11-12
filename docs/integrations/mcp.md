@@ -9,7 +9,7 @@ If the agent's harness keeps a Python kernel alive between calls, such as oh-my-
 | Tool | Purpose |
 | --- | --- |
 | `command` | Runs one REPL line and returns its text with a `[target ...]` trailer. A `;` separates commands, and {command}`help` lists them. The arguments are `line` and `timeout_ms` (default 10 s, maximum 5 min). |
-| `output` | Reads more of a long `command` result: the lines from `offset`, or only the lines that contain `filter`. The arguments are `id`, `offset`, `limit`, and `filter`. |
+| `output` | Reads more of a long `command` result: the lines from `offset`, or only the lines that contain `filter`, at most `limit` of them (at least 1) and a page's worth. The arguments are `id`, `offset`, `limit`, and `filter`. |
 | `open` / `close` | `open` attaches to a target using `backend`, `connect`, and, for `kdnet`, `key`. For `kd` and `kdnet`, it also accepts `kd_handshake_timeout` in seconds. For a crash dump or a [user-mode minidump](#user-mode-minidumps), use `backend: dump` with the dump path as `connect`. `close` releases the target. The server holds one session at a time. |
 
 ## Run control
@@ -27,7 +27,7 @@ The `command` tool works like a WinDbg prompt, with one difference: a call never
 - {command}`break` interrupts a running target. On a halted target it does nothing and says so, so `break; bp ...; g` works in either state.
 - A command that reports an error ends its line: the rest does not run, and the result names it. This keeps `bp ...; g` from resuming the guest when the breakpoint failed. A result that contains an error, or a command that ntoseye did not run, is marked as an error (`isError`).
 - A stop can occur between calls, for example when the guest hits a breakpoint while the agent thinks, and the next result shows that stop at the top. If that next call is a resuming command, ntoseye does not run it in this call, so the agent sees the stop before the target continues past it.
-- A multi-step command ({command}`pa`, {command}`pt`, {command}`gu`, {command}`wt`) can take longer than the time limit. The target then keeps running to its next stop, and the next command that needs a halted target collects that stop.
+- A command can take longer than the time limit. A run to an address ({command}`gu`, {command}`p` over a call, `g <address>`) then keeps the target running to its next stop, and the next command that needs a halted target collects that stop, which ends the run and removes its temporary breakpoint. A walk that steps one instruction at a time ({command}`pa`, {command}`pt`, {command}`pc`, {command}`tc`, {command}`wt`) instead stops where it got to and reports that stop; {command}`wt` lists the calls it traced so far.
 - An empty `line` runs no command and only waits.
 
 ### How stops look
@@ -48,7 +48,7 @@ The trailer takes one of three forms:
 - `[target halted @ <vcpu> <rip> <symbol> | process <name> (<pid>) | scope <name> (<pid>)]`
 - `[minidump <name> (pid <pid>), <n> threads | thread ~<n> <pid>.<tid> <rip> <symbol> | exception <code> on ~<n> <pid>.<tid>]`, for a [user-mode minidump](#user-mode-minidumps)
 
-In the halted form, `process` is the process whose page tables the stopped vCPU has loaded, and `scope` is the {command}`.process` inspection scope that memory commands read through. The scope stays after the target resumes, so `process` and `scope` can differ.
+In the halted form, `process` is the process whose page tables the stopped vCPU has loaded, or, where two processes share them, the stopped thread's (Idle, not System, on an idle processor), and `scope` is the {command}`.process` inspection scope that memory commands read through. A plain {command}`.process` scope ends when the target resumes; one that `.process /i` or {command}`attach` selected stays until its process exits, so `process` and `scope` can differ.
 
 A vCPU that runs a guest partition's VP shows that guest's code, and the trailer names the VP: `[target halted @ processor 1 0x56383cc2d7df | runs partition 0x5 VP 2]`. While {command}`.partition` shows a guest partition in place of the target, the trailer ends with `| inspecting partition 0x4`, and everything before it is that guest's: its VPs are the vCPUs (`p4.1`), and the process is its own.
 
@@ -68,7 +68,7 @@ A listing such as `x nt!*`, `!vad` or `!process 0 7` can run to megabytes, which
 [output 3: 35123 lines, offsets 0-611 shown; the output tool reads on from offset 612, or with a filter finds lines in it]
 ```
 
-The `output` tool reads the rest without running the command again: `{"id": 3, "offset": 612}` returns the next page, and `{"id": 3, "filter": "explorer"}` returns only the lines that contain `explorer`, each after its offset, so that a later call can read around a match. The server keeps the latest long results in memory, up to 64 MB, for as long as it runs, and reading them needs no session. ntoseye writes no files for them, so they also work for a client that has no access to the host's file system.
+The `output` tool reads the rest without running the command again: `{"id": 3, "offset": 612}` returns the next page, and `{"id": 3, "filter": "explorer"}` returns only the lines that contain `explorer`, each after its offset, so that a later call can read around a match. A line longer than a page is kept as page-sized pieces, each at its own offset and ending with `[line continues at offset <n>]`, so all of it can be read. The server keeps the latest long results in memory, up to 64 MB, for as long as it runs, and reading them needs no session. ntoseye writes no files for them, so they also work for a client that has no access to the host's file system.
 
 ntoseye also removes the spaces that pad table rows at their ends from every result.
 
@@ -137,7 +137,7 @@ Put the target options after the subcommand, for example to set the backend and 
 }
 ```
 
-For KDNET, use `["mcp", "--backend", "kdnet", "--kdnet-key", "1.2.3.4"]`. To force target-mediated memory, add `["--memory-source", "kd"]`, and add `--connect` only to change the default `0.0.0.0:50000` listener.
+For KDNET, use `["mcp", "--backend", "kdnet", "--kdnet-key", "1.2.3.4"]`. To force target-mediated memory, add `["--memory-source", "kd"]`, and add `--connect` only to change the default `0.0.0.0:50000` listener. Which memory to trust is the operator's choice, so `open` has no memory-source argument: a `kd` or `kdnet` target it opens uses the server's `--memory-source`, `auto` without one.
 
 The `open` tool accepts the same backend, connect, and key values. Its optional `kd_handshake_timeout` is a positive integer number of seconds for the initial KD/KDNET handshake, for example `{"backend": "kd", "kd_handshake_timeout": 30}`. It is only valid for `kd` and `kdnet`; `gdb`, `memory`, and `dump` reject it. An explicit value overrides `NTOSEYE_KD_TIMEOUT`; when omitted, the environment variable still applies, with a default of 8 seconds. This is separate from the `command` tool's `timeout_ms`.
 

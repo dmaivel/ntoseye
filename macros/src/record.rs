@@ -6,10 +6,11 @@ use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{
     Attribute, Error, Fields, FnArg, Ident, ImplItem, Item, ItemEnum, ItemImpl, ItemStruct, LitStr,
-    Path, Result, ReturnType, Token, Type,
+    Path, Result, ReturnType, Token,
 };
 
-use crate::docstring::python_doc;
+use crate::docstring::docs;
+use crate::syntax::self_name;
 
 pub fn expand(attr: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let flags = Flags::parse(attr)?;
@@ -226,7 +227,8 @@ const RESERVED: [&str; 36] = [
     "while", "with", "yield",
 ];
 
-fn unraw(ident: &Ident) -> String {
+/// `ident` without its `r#`, as Python spells it.
+pub fn unraw(ident: &Ident) -> String {
     let name = ident.to_string();
     name.strip_prefix("r#").map_or(name.clone(), str::to_string)
 }
@@ -292,14 +294,6 @@ fn naming(
             ),
         )),
     }
-}
-
-fn docs(attrs: &[Attribute]) -> Vec<Attribute> {
-    attrs
-        .iter()
-        .filter(|attr| attr.path().is_ident("doc"))
-        .map(python_doc)
-        .collect()
 }
 
 /// A property of a record's class.
@@ -489,9 +483,9 @@ fn match_args(class: &Ident, names: &[String]) -> TokenStream {
     }
 }
 
-/// The class of a record: `<Name>Py`, its `wrap`, `Name::into_class`, its
-/// properties (through `methods_macro` when an impl block adds to them) and
-/// `__match_args__` (`match_args`, when given). A struct's class also has the
+/// The class of a record: `<Name>Py`, its `wrap`, its properties (through
+/// `methods_macro` when an impl block adds to them) and `__match_args__`
+/// (`match_args`, when given). A struct's class also has the
 /// `handle_callback` macro, with the impl block's computed properties when
 /// it has one, and its `Field` impls. A `subclass` class is a base, which
 /// a tagged enum's variant classes extend.
@@ -583,19 +577,6 @@ fn class(
             ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
                 let init = pyo3::PyClassInitializer::from(record).add_subclass(#class);
                 ::std::result::Result::Ok(pyo3::Bound::new(py, init)?.into_any())
-            }
-        }
-
-        #[cfg(feature = "python")]
-        impl #name {
-            /// This record as its SDK class, for a handle Rust keeps.
-            #[allow(dead_code)]
-            pub fn into_class<'py>(
-                &self,
-                py: pyo3::Python<'py>,
-            ) -> pyo3::PyResult<pyo3::Bound<'py, #class>> {
-                let typed = crate::hosts::python::record::Typed::<Self>::of(py, self)?;
-                ::std::result::Result::Ok(typed.into_bound().cast_into::<#class>()?)
             }
         }
 
@@ -1469,14 +1450,7 @@ fn implementation(mut item: ItemImpl) -> Result<TokenStream> {
         ));
     }
     no_generics(&item.generics)?;
-    let name = match &*item.self_ty {
-        Type::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
-            path.path.segments[0].ident.clone()
-        }
-        other => {
-            return Err(Error::new_spanned(other, "expected the record's own name"));
-        }
-    };
+    let name = self_name(&item, "expected the record's own name")?;
     let mut getters = Vec::new();
     let mut values = Vec::new();
     let mut python = Vec::new();

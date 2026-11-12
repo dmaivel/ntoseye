@@ -10,7 +10,7 @@ use crate::backend::dbg_backend::ProcessorRead;
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
 use crate::nt::layout::{TypeInfo, Types};
-use crate::nt::target::{Target, bounded_list_walk};
+use crate::nt::target::{DiagnosticValue, Target, bounded_list_walk};
 use ntoseye_macros::record;
 
 /// `IA32_APIC_BASE`.
@@ -410,24 +410,15 @@ impl LocalApic {
             let timer = register == ApicRegister::LvtTimer;
             // The version register says how many LVT entries the APIC has
             // past the first; the thermal and CMCI entries are optional.
-            let optional = matches!(register, ApicRegister::LvtThermal | ApicRegister::Cmci);
             let present = match register {
                 ApicRegister::LvtThermal => max_lvt >= 5,
                 ApicRegister::Cmci => max_lvt >= 6,
                 _ => true,
             };
-            let entry = if present {
-                match read(register) {
-                    Ok(raw) => Some(decode_lvt(name, raw as u32, timer)),
-                    Err(_) if optional => None,
-                    Err(error) => return Err(error),
-                }
+            if present {
+                lvt.push(decode_lvt(name, read(register)? as u32, timer));
             } else {
-                None
-            };
-            match entry {
-                Some(entry) => lvt.push(entry),
-                None => lvt_missing.push(name),
+                lvt_missing.push(name);
             }
         }
         Ok(Self {
@@ -497,7 +488,7 @@ pub struct HalController {
     #[record(hex)]
     pub unit_id: u32,
     /// The ACPI ID the HAL gave the controller's device.
-    pub resource_id: String,
+    pub resource_id: DiagnosticValue<String>,
     pub min_line: i64,
     pub max_line: i64,
     /// `_INTERRUPT_PROBLEM` without its prefix; `None` for no problem.
@@ -684,7 +675,7 @@ impl Target {
                 "InterruptController",
             ),
             unit_id: controller.read_uint("UnitId")? as u32,
-            resource_id: controller.unicode_string("ResourceId").unwrap_or_default(),
+            resource_id: DiagnosticValue::from_result(controller.unicode_string("ResourceId")),
             min_line: controller.read_uint("MinLine")? as u32 as i32 as i64,
             max_line: controller.read_uint("MaxLine")? as u32 as i32 as i64,
             problem: (problem != 0).then(|| {

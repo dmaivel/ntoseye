@@ -20,13 +20,12 @@ use super::symbols::load_scope_symbols;
 use super::{err, plain_dict, raise};
 use crate::base::bytes::c_string_lossy;
 use crate::base::error::Result as CoreResult;
-use crate::base::memory::MemoryOps;
 use crate::base::types::{Dtb, VirtAddr};
 use crate::nt::layout::{
     EnumDef, FieldInfo, FieldValue, ParsedType, TypeInfo, bitfield_mask, le_uint, named_type,
     unqualified_type_name,
 };
-use crate::nt::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86};
+use crate::nt::target::{CODE_BITNESS_AMD64, CODE_BITNESS_X86, MemoryKind};
 
 fn lookup_field<'a>(
     info: &'a TypeInfo,
@@ -356,6 +355,7 @@ impl Struct {
         let read = self.owner.with_in(py, &self.space.context(), |session| {
             let mut bytes = vec![0; size];
             Ok(session
+                .target
                 .read_masked(VirtAddr(addr), &mut bytes)
                 .map(|()| bytes))
         })?;
@@ -435,6 +435,7 @@ impl Struct {
         let read = self.owner.with_in(py, &self.space.context(), |session| {
             let mut bytes = vec![0; length];
             Ok(session
+                .target
                 .read_masked(VirtAddr(addr), &mut bytes)
                 .map(|()| bytes))
         })?;
@@ -483,14 +484,16 @@ impl Struct {
             let pos = u32::from(*pos);
             let size = ((pos + u32::from(*len)).div_ceil(8).clamp(1, 8)) as usize;
             let write = self.owner.with_in(py, &self.space.context(), |session| {
-                let memory = session.target.context_memory();
                 let mut bytes = vec![0; size];
-                Ok(memory
-                    .read_bytes(VirtAddr(addr), &mut bytes)
+                // Read as the write replaces: a breakpoint planted in these
+                // bytes is the code it displaced.
+                Ok(session
+                    .target
+                    .read_masked(VirtAddr(addr), &mut bytes)
                     .and_then(|()| {
                         let raw = (le_uint(&bytes) & !(mask << pos)) | ((integer & mask) << pos);
                         bytes.copy_from_slice(&raw.to_le_bytes()[..size]);
-                        memory.write_bytes(VirtAddr(addr), &bytes)
+                        session.write_memory(MemoryKind::Virtual, addr, &bytes)
                     }))
             })?;
             return write.map_err(err);
@@ -503,10 +506,7 @@ impl Struct {
             let size = pointer_width(name, field.size)?;
             let bytes = integer.to_le_bytes();
             let write = self.owner.with_in(py, &self.space.context(), |session| {
-                Ok(session
-                    .target
-                    .context_memory()
-                    .write_bytes(VirtAddr(addr), &bytes[..size]))
+                Ok(session.write_memory(MemoryKind::Virtual, addr, &bytes[..size]))
             })?;
             return write.map_err(err);
         }
@@ -532,10 +532,7 @@ impl Struct {
             bytes
         };
         let write = self.owner.with_in(py, &self.space.context(), |session| {
-            Ok(session
-                .target
-                .context_memory()
-                .write_bytes(VirtAddr(addr), &bytes))
+            Ok(session.write_memory(MemoryKind::Virtual, addr, &bytes))
         })?;
         write.map_err(err)
     }
@@ -546,6 +543,7 @@ impl Struct {
         let read = self.owner.with_in(py, &self.space.context(), |session| {
             let mut bytes = vec![0; info.size];
             Ok(session
+                .target
                 .read_masked(VirtAddr(addr), &mut bytes)
                 .map(|()| info.decode_fields(&bytes)))
         })?;
@@ -626,6 +624,7 @@ impl Struct {
         let read = self.owner.with_in(py, &self.space.context(), |session| {
             let mut bytes = vec![0; size];
             Ok(session
+                .target
                 .read_masked(VirtAddr(addr), &mut bytes)
                 .map(|()| le_uint(&bytes)))
         })?;

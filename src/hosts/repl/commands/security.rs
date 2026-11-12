@@ -35,7 +35,7 @@ fn single_address(
     cx.eval(&text)
 }
 
-/// `!sd`'s optional `1` (the second word), checked before the address is
+/// `!sd`'s and `!acl`'s optional `1` (the second word), checked before the address is
 /// evaluated: one or two words, and the second one must be `1`.
 #[grammar(usage = "")]
 fn sd_annotate(
@@ -131,6 +131,8 @@ impl Render<bool> for SecurityDescriptor {
 }
 
 /// Decode an ACL and its ACEs.
+///
+/// The optional 1 adds the names of well-known SIDs.
 #[command(
     names = ["!acl", "acl"],
     category = "security",
@@ -138,16 +140,20 @@ impl Render<bool> for SecurityDescriptor {
     target = Nt,
     python = Inspect,
 )]
-fn acl(session: &Session, #[arg(parse = single_address)] address: VirtAddr) -> Result<Acl> {
+fn acl(
+    session: &Session,
+    #[arg(render, parse = sd_annotate)] annotate_well_known: bool,
+    #[arg(parse = single_address_word)] address: VirtAddr,
+) -> Result<Acl> {
     session.target.inspect_acl(address)
 }
 
-impl Render for Acl {
-    fn render(&self, _: &mut ReplState<'_>, _: ()) {
+impl Render<bool> for Acl {
+    fn render(&self, _: &mut ReplState<'_>, annotate_well_known: bool) {
         let mut notes = Vec::new();
         outln!("ACL {}", ui::addr(self.address.0));
         outln!("  {}", acl_summary(self));
-        print_aces(self, false, "  ", &mut notes);
+        print_aces(self, annotate_well_known, "  ", &mut notes);
         print_notes(&notes);
     }
 }
@@ -361,6 +367,7 @@ fn print_descriptor_component(
     value: &DiagnosticValue<Option<Acl>>,
     control: &DiagnosticValue<u16>,
     bit: u16,
+    null_meaning: &str,
     annotate_well_known: bool,
     notes: &mut Vec<String>,
 ) {
@@ -377,7 +384,7 @@ fn print_descriptor_component(
     match available(value, label, notes) {
         None => outln!("  {label:8} : -"),
         Some(None) => {
-            outln!("  {label:8} : - (a NULL DACL grants everyone full access)");
+            outln!("  {label:8} : - ({null_meaning})");
         }
         Some(Some(acl)) => {
             outln!(
@@ -429,6 +436,7 @@ fn print_security_descriptor(detail: &SecurityDescriptor, annotate_well_known: b
         &detail.dacl,
         &detail.control,
         0x0004,
+        "a NULL DACL grants everyone full access",
         annotate_well_known,
         &mut notes,
     );
@@ -437,6 +445,7 @@ fn print_security_descriptor(detail: &SecurityDescriptor, annotate_well_known: b
         &detail.sacl,
         &detail.control,
         0x0010,
+        "a NULL SACL audits nothing",
         annotate_well_known,
         &mut notes,
     );
@@ -466,10 +475,12 @@ fn print_object_security(detail: &ObjectSecurity) {
 }
 
 fn print_session(detail: &security::Session) {
+    // Processes outside every session (System, Registry, smss) group under
+    // no ID, as WinDbg's "none".
     let id = detail
         .id
         .map(|id| id.to_string())
-        .unwrap_or_else(|| "-".to_string());
+        .unwrap_or_else(|| "none".to_string());
     let shown = if detail.processes.len() > MAX_SESSION_DISPLAY {
         format!(" (the first {MAX_SESSION_DISPLAY}; !sprocess {id} lists them all)")
     } else {

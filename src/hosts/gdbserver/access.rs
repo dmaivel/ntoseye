@@ -11,8 +11,8 @@ use gdbstub::target::ext::base::single_register_access::{
 use gdbstub::target::{TargetError, TargetResult};
 
 use crate::base::error::{Error, Result};
-use crate::base::memory::MemoryOps;
 use crate::base::types::VirtAddr;
+use crate::nt::target::MemoryKind;
 use crate::session::Session;
 
 use super::layout::Layout;
@@ -30,7 +30,7 @@ impl GdbTarget<'_> {
         };
     }
 
-    fn tid_of(&self, backend_id: &str) -> Tid {
+    pub(super) fn tid_of(&self, backend_id: &str) -> Tid {
         let index = self
             .threads
             .iter()
@@ -78,6 +78,16 @@ impl GdbTarget<'_> {
     }
 }
 
+/// Whether `file`, the selected thread's registers, records `name`: on a
+/// user-mode minidump only what its `CONTEXT` flags mark present, so an
+/// unrecorded register reads as unavailable, not zero, as `r` leaves it out.
+fn recorded(session: &Session, file: &[u8], name: &str) -> bool {
+    session
+        .target
+        .user_dump_arch()
+        .is_none_or(|arch| arch.context_records(file, name))
+}
+
 /// A session failure the client can recover from: it gets an error reply and
 /// the connection stays up.
 fn nonfatal<T>(result: Result<T>) -> std::result::Result<T, TargetError<Error>> {
@@ -88,7 +98,8 @@ impl MultiThreadBase for GdbTarget<'_> {
     fn read_registers(&mut self, regs: &mut WireRegisters, tid: Tid) -> TargetResult<(), Self> {
         regs.0 = nonfatal(self.with_thread(tid, |session, layout| {
             let file = session.read_registers()?;
-            Ok(layout.encode(&session.register_map, &file))
+            let known = |name: &str| recorded(session, &file, name);
+            Ok(layout.encode(&session.register_map, &file, known))
         }))?;
         Ok(())
     }
@@ -121,9 +132,7 @@ impl MultiThreadBase for GdbTarget<'_> {
     fn write_addrs(&mut self, start_addr: u64, data: &[u8], _tid: Tid) -> TargetResult<(), Self> {
         let written = self
             .session
-            .target
-            .context_memory()
-            .write_bytes(VirtAddr(start_addr), data);
+            .write_memory(MemoryKind::Virtual, start_addr, data);
         written.map_err(|_| TargetError::Errno(EFAULT))
     }
 
@@ -160,8 +169,9 @@ impl SingleRegisterAccess<Tid> for GdbTarget<'_> {
     ) -> TargetResult<usize, Self> {
         let value = nonfatal(self.with_thread(tid, |session, layout| {
             let file = session.read_registers()?;
+            let known = |name: &str| recorded(session, &file, name);
             layout
-                .encode_one(reg_id.0, &session.register_map, &file)
+                .encode_one(reg_id.0, &session.register_map, &file, known)
                 .ok_or(Error::NotSupported)
         }))?;
         let slot = buf.get_mut(..value.len()).ok_or(TargetError::NonFatal)?;

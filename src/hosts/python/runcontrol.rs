@@ -142,7 +142,8 @@ fn surface<'py>(py: Python<'py>, dbg: &Debugger, stop: Stop) -> PyResult<Option<
         dbg.conditions
             .lock()
             .get(&hit.id)
-            .map(|callable| callable.clone_ref(py))
+            .filter(|(serial, _)| *serial == hit.serial)
+            .map(|(_, callable)| callable.clone_ref(py))
     });
     let object = Typed::<Stop>::of(py, &stop)?.into_bound();
     let Some(condition) = condition else {
@@ -174,9 +175,13 @@ pub fn prune_conditions(dbg: &Debugger) -> PyResult<()> {
             .breakpoints
             .managed_ids()
             .into_iter()
+            .filter_map(|id| session.breakpoints.get(id))
+            .map(|bp| (bp.id, bp.serial))
             .collect::<HashSet<_>>())
     })?;
-    dbg.conditions.lock().retain(|id, _| live.contains(id));
+    dbg.conditions
+        .lock()
+        .retain(|&id, (serial, _)| live.contains(&(id, *serial)));
     Ok(())
 }
 

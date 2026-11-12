@@ -29,16 +29,11 @@ use crate::base::bytes::utf16le_lossy;
 use crate::base::bytes::{read_u32, read_u64};
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
+use crate::nt::dmp::tagged::ETW_DUMP_DATA_TAG;
 use crate::nt::expr::Expr;
 use crate::nt::kuser_shared::KuserSharedData;
 use crate::nt::target::Target;
 use ntoseye_macros::record;
-
-/// `nt!EtwSecondaryDumpDataGuid`, {2B88B710-1C93-4F7C-B06C-655ECC50DECC},
-/// as it lies in memory.
-const ETW_DUMP_DATA_TAG: [u8; 16] = [
-    0x10, 0xb7, 0x88, 0x2b, 0x93, 0x1c, 0x7c, 0x4f, 0xb0, 0x6c, 0x65, 0x5e, 0xcc, 0x50, 0xde, 0xcc,
-];
 
 const HEADER_SIZE: usize = 0x20;
 const LOGGER_HEADER_SIZE: usize = 0x30;

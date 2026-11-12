@@ -8,6 +8,7 @@ use iced_x86::{
 };
 use ntoseye_macros::record;
 
+use crate::base::bytes::{get_u16, get_u64};
 use crate::base::error::{Error, Result};
 use crate::nt::guest::hypercalls::tlfs_hypercall;
 
@@ -39,18 +40,6 @@ impl ImageView<'_> {
         va.checked_sub(self.base)
             .and_then(|rva| u32::try_from(rva).ok())
             .is_some_and(|rva| self.code.iter().any(|&(s, e)| (s..e).contains(&rva)))
-    }
-
-    fn u64_at(&self, rva: usize) -> Option<u64> {
-        Some(u64::from_le_bytes(
-            self.bytes.get(rva..rva + 8)?.try_into().ok()?,
-        ))
-    }
-
-    fn u16_at(&self, rva: usize) -> Option<u16> {
-        Some(u16::from_le_bytes(
-            self.bytes.get(rva..rva + 2)?.try_into().ok()?,
-        ))
     }
 
     /// Code starting at `va`, up to the end of its section.
@@ -443,11 +432,13 @@ pub fn hypercall_table(image: &ImageView<'_>) -> Result<Vec<Hypercall>> {
         while rva + ENTRY_BYTES * MIN_ENTRIES <= end {
             let mut entries = Vec::new();
             let mut at = rva;
-            while let (Some(handler), Some(code)) = (image.u64_at(at), image.u16_at(at + 8)) {
+            while let (Some(handler), Some(code)) =
+                (get_u64(image.bytes, at), get_u16(image.bytes, at + 8))
+            {
                 if usize::from(code) != entries.len() || !image.is_code(handler) {
                     break;
                 }
-                let field = |offset| image.u16_at(at + offset).unwrap_or(0);
+                let field = |offset| get_u16(image.bytes, at + offset).unwrap_or(0);
                 entries.push(Hypercall {
                     code,
                     implemented: false,

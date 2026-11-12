@@ -11,7 +11,7 @@ use crate::base::error::{Error, Result};
 use super::{
     ApplyResult, BackendSelection, ConfigurationPlan, Configurator, ConfigureBackend,
     ConfigureRequest, ConfiguredTarget, Guest, GuestInspection, Instructions, ProbeStatus,
-    backup_file, command_detail, kdnet_instructions,
+    backup_file, command_detail, kdnet_instructions, serial_kd_instructions,
 };
 
 const BACKENDS: &[BackendSelection] = &[
@@ -327,15 +327,7 @@ fn utm_instructions(request: ConfigureRequest, socket: &Path) -> Instructions {
             .push("KD-backed memory needs no root access to the UTM process.".to_string());
         return instructions;
     }
-    let mut instructions = Instructions {
-        guest: vec![
-            "bcdedit /debug on".to_string(),
-            "bcdedit /dbgsettings serial debugport:1 baudrate:115200".to_string(),
-            "Restart-Computer".to_string(),
-        ],
-        run: vec![ConfiguredTarget::kd(socket.to_string_lossy(), 1, true).run_command()],
-        notes: Vec::new(),
-    };
+    let mut instructions = serial_kd_instructions(socket.to_string_lossy(), 1, true);
     instructions.notes.push(
         "Secure Boot must be disabled in UTM before Windows allows kernel debugging.".to_string(),
     );

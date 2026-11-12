@@ -18,7 +18,7 @@ use crate::session::typeview::TypeView;
 
 use super::dx_model::{self as model, ModelValue};
 use super::dx_query;
-use super::types::MAX_RECURSION_DEPTH;
+use super::types::{MAX_RECURSION_DEPTH, untyped_symbol_message};
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::hosts::repl::*;
 use ntoseye_macros::{command, grammar};
@@ -176,9 +176,15 @@ fn parse_dx_args(raw: &str) -> std::result::Result<DxArgs<'_>, String> {
 fn split_format(text: &str) -> std::result::Result<(&str, DxFormat), String> {
     let mut nesting = 0i32;
     let mut quoted = false;
+    let mut escaped = false;
     let mut comma = None;
     for (index, ch) in text.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
         match ch {
+            '\\' if quoted => escaped = true,
             '"' => quoted = !quoted,
             '(' | '[' | '{' if !quoted => nesting += 1,
             ')' | ']' | '}' if !quoted => nesting -= 1,
@@ -223,6 +229,17 @@ struct DxLine {
     /// array, a pointer that isn't null), which pads the root's name.
     expandable: bool,
     children: Vec<DxLine>,
+    /// Where the value is, when it is in memory that did not read.
+    unreadable: Option<VirtAddr>,
+}
+
+impl DxLine {
+    /// The first address of the tree, this line's or a line's under it,
+    /// that did not read.
+    fn first_unreadable(&self) -> Option<VirtAddr> {
+        self.unreadable
+            .or_else(|| self.children.iter().find_map(DxLine::first_unreadable))
+    }
 }
 
 /// The root line: an expandable value's name stands apart from its value,
@@ -407,6 +424,13 @@ fn unreadable(address: VirtAddr) -> String {
     format!("Unable to read memory at Address {:#x}", address.0)
 }
 
+/// A signed bitfield's `len` bits as the number they hold: the top bit is
+/// the field's sign, not the underlying type's.
+fn signed_bitfield(bits: u64, len: u8) -> i64 {
+    let shift = 64u32.saturating_sub(u32::from(len));
+    ((bits << shift) as i64).checked_shr(shift).unwrap_or(0)
+}
+
 /// Where a value is: in memory, or held as a number (a register, a cast).
 #[derive(Clone, Copy)]
 enum Place {
@@ -416,7 +440,7 @@ enum Place {
 
 impl ReplState<'_> {
     /// `dx` on a line [`dx_request`] accepted.
-    fn dx(&mut self, raw: &str) -> Result<()> {
+    pub fn dx(&mut self, raw: &str) -> Result<()> {
         let args = parse_dx_args(raw).map_err(Error::DebugInfo)?;
         let text = args.text;
         // A grid shows each element's fields, so it reads two levels.
@@ -440,9 +464,23 @@ impl ReplState<'_> {
             self.dx_typed(args.name, text, depth)
         };
         match root {
-            Ok(root) if args.grid => print_dx_grid(&root),
-            Ok(root) => print_dx(&root),
-            Err(error) => error!("{error}"),
+            Ok(root) => {
+                if args.grid {
+                    print_dx_grid(&root);
+                } else {
+                    print_dx(&root);
+                }
+                // WinDbg's per-value text does not say why; at a stop in the
+                // hypervisor the reason is the address space, not the page.
+                let target = &self.ctx.target;
+                if let Some(address) = root.first_unreadable()
+                    && target.in_hypervisor_address_space()
+                    && let Some(why) = crate::hosts::repl::unreadable_reason(target, address)
+                {
+                    crate::base::diagnostics::print_note(format!("{}: {why}", ui::addr(address.0)));
+                }
+            }
+            Err(error) => crate::hosts::repl::report_error(self, &error),
         }
         Ok(())
     }
@@ -488,11 +526,15 @@ impl ReplState<'_> {
                     for property in model::properties(value) {
                         let child = model::property(&self.ctx.target, value, &property);
                         line.children.push(match (property.as_str(), child) {
-                            ("ObjectName", Ok(ModelValue::Text(object_name))) => DxLine {
-                                name: Some(property),
-                                value: Some(format!("\"{object_name}\"")),
-                                ..DxLine::default()
-                            },
+                            ("ObjectName", Ok(ModelValue::Text(object_name)))
+                                if !object_name.is_empty() =>
+                            {
+                                DxLine {
+                                    name: Some(property),
+                                    value: Some(format!("\"{object_name}\"")),
+                                    ..DxLine::default()
+                                }
+                            }
                             ("ObjectName", _) => continue,
                             (_, Ok(child)) => {
                                 self.dx_model_line(&property, &child, depth - 1, view)
@@ -618,14 +660,34 @@ impl ReplState<'_> {
             } => (Place::Value(value.0), type_data.clone(), *byte_size),
             // A register is an `unsigned __int64` in WinDbg's C++
             // expressions; any other untyped number is an integer, which
-            // `dx` writes in decimal.
-            ExprValue::Raw { value, .. } => {
+            // `dx` writes in decimal. A symbol or module name evaluates to
+            // its address: a variable whose PDB records its type (a private
+            // PDB's) is the value stored there, and with none (public
+            // symbols carry none) `dx` asks for one, as WinDbg's "No type
+            // (or void) for object" does.
+            ExprValue::Raw { value, address } => {
                 if matches!(expr, Expr::Register(_)) {
                     (
                         Place::Value(value.0),
                         ParsedType::Primitive("ULONGLONG".to_string()),
                         Some(8),
                     )
+                } else if let Some(address) = address {
+                    match self
+                        .ctx
+                        .target
+                        .symbols
+                        .global_type(self.ctx.target.current_dtb(), *address)
+                    {
+                        Some((type_data, byte_size)) => {
+                            (Place::Memory(*address), type_data, byte_size)
+                        }
+                        None => {
+                            return Err(Error::InvalidExpression(untyped_symbol_message(
+                                text, *address,
+                            )));
+                        }
+                    }
                 } else {
                     return Ok(DxLine {
                         name: Some(text.to_string()),
@@ -702,7 +764,10 @@ impl ReplState<'_> {
                         .min(MAX_DX_STRING * 2);
                     line.value = Some(match view.read_display_bytes(address, bytes) {
                         Ok(bytes) => format!("\"{}\"", decode_string(&bytes, unit)),
-                        Err(_) => unreadable(address),
+                        Err(_) => {
+                            line.unreadable = Some(address);
+                            unreadable(address)
+                        }
                     });
                     return line;
                 }
@@ -717,6 +782,7 @@ impl ReplState<'_> {
                         Ok(raw) => raw,
                         Err(_) => {
                             line.value = Some(unreadable(address));
+                            line.unreadable = Some(address);
                             line.type_name = None;
                             return line;
                         }
@@ -750,7 +816,9 @@ impl ReplState<'_> {
                 let bits = bitfield_value(raw, *pos, *len);
                 line.value = Some(match underlying.as_ref() {
                     ParsedType::Enum(name) => self.dx_enum(view, name, bits, size),
-                    ParsedType::Primitive(name) if is_signed_primitive(name) => bits.to_string(),
+                    ParsedType::Primitive(name) if is_signed_primitive(name) => {
+                        signed_bitfield(bits, *len).to_string()
+                    }
                     _ => format!("{bits:#x}"),
                 });
             }
@@ -943,28 +1011,19 @@ impl ReplState<'_> {
 
     /// The NUL-terminated string of `unit`-byte characters at `address`,
     /// quoted, read a page at a time so a string that ends just before an
-    /// unmapped page still reads.
+    /// unmapped page or a dump's capture hole still reads. `...` after the
+    /// quote marks a string cut short with no terminator read.
     fn dx_c_string(&self, view: &TypeView<'_>, address: VirtAddr, unit: usize) -> String {
-        let mut bytes = Vec::new();
-        let mut cursor = address;
-        while bytes.len() < MAX_DX_STRING * unit {
-            let to_page_end = 0x1000 - (cursor.0 & 0xfff) as usize;
-            let Ok(chunk) = view.read_display_bytes(cursor, to_page_end) else {
-                if bytes.is_empty() {
-                    return unreadable(address);
-                }
-                break;
-            };
-            bytes.extend_from_slice(&chunk);
-            if chunk
-                .chunks_exact(unit)
-                .any(|ch| ch.iter().all(|byte| *byte == 0))
-            {
-                break;
-            }
-            cursor += to_page_end as u64;
-        }
-        format!("\"{}\"", decode_string(&bytes, unit))
+        let max_bytes = MAX_DX_STRING * unit;
+        let Ok(read) = view.read_display_terminated(address, max_bytes, unit) else {
+            return unreadable(address);
+        };
+        let cut = if read.unreadable || read.bytes.len() >= max_bytes {
+            "..."
+        } else {
+            ""
+        };
+        format!("\"{}\"{cut}", decode_string(&read.bytes, unit))
     }
 
     /// A `_UNICODE_STRING`'s text, quoted: `Length` bytes at `Buffer`.
@@ -1012,6 +1071,22 @@ fn decode_string(bytes: &[u8], unit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A signed bitfield's top bit is its sign: three set bits are -1.
+    #[test]
+    fn signed_bitfields_extend_their_own_sign() {
+        assert_eq!(signed_bitfield(0b111, 3), -1);
+        assert_eq!(signed_bitfield(0b011, 3), 3);
+        assert_eq!(signed_bitfield(u64::MAX, 64), -1);
+    }
+
+    /// An escaped quote does not close a string, so a comma after it is
+    /// still the string's.
+    #[test]
+    fn dx_format_ignores_commas_after_escaped_quotes() {
+        let parsed = parse_dx_args(r#"@$curprocess.Name == "a\", b""#).map(|args| args.text);
+        assert_eq!(parsed, Ok(r#"@$curprocess.Name == "a\", b""#));
+    }
 
     /// `-r<n>` sets the depth (1 without it, and for a bare `-r`), `-g` asks
     /// for a grid, `-nv` changes nothing, a `-` before a digit begins the

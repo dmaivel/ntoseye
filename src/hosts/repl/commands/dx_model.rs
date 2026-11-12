@@ -325,13 +325,14 @@ pub fn property(target: &Target, value: &ModelValue, name: &str) -> Result<Model
             header: handle_field(&handle.object)? - VirtAddr(object_body_offset(target)?),
             kind: handle_field(&handle.type_name).ok().flatten(),
         },
-        // As in WinDbg, only a named object has an `ObjectName`.
+        // An unnamed object's name is empty, so a query over handles can
+        // filter them with `!= ""` rather than fail on the first one; the
+        // field listing leaves it out, as WinDbg's does.
         (ModelValue::ObjectHeader { header, .. }, "ObjectName") => ModelValue::Text(
             target
                 .inspect_object_header(*header + object_body_offset(target)?)?
                 .name
-                .filter(|name| !name.is_empty())
-                .ok_or_else(|| Error::InvalidExpression("the object has no name".into()))?,
+                .unwrap_or_default(),
         ),
         (ModelValue::ObjectHeader { kind, .. }, "ObjectType") => {
             ModelValue::Text(kind.clone().unwrap_or_default())

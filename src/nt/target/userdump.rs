@@ -11,9 +11,7 @@ use crate::arch::{Arch, RegisterMap};
 use crate::{
     base::{
         error::{Error, Result},
-        memory::MemoryOps,
         ntstatus::ntstatus_name,
-        types::VirtAddr,
     },
     nt::{
         guest::ModuleInfo,
@@ -52,11 +50,6 @@ pub enum TargetKind {
     /// One process captured by a user-mode minidump.
     UserDump,
 }
-
-/// `_TEB.ProcessEnvironmentBlock` in a 64-bit TEB, on AMD64 and ARM64 alike:
-/// it follows the 0x38-byte `NT_TIB`, `EnvironmentPointer`, `ClientId`,
-/// `ActiveRpcHandle`, and `ThreadLocalStoragePointer`.
-const TEB64_PEB: u64 = 0x60;
 
 /// The captured process a user-dump target inspects.
 pub struct UserProcess {
@@ -161,15 +154,7 @@ impl Target {
             "teb" => thread.map(|thread| thread.teb).filter(|teb| *teb != 0),
             "tid" => thread.map(|thread| u64::from(thread.tid)),
             "pid" | "tpid" => info.process_id.map(u64::from),
-            "peb" => thread
-                .map(|thread| thread.teb)
-                .filter(|teb| *teb != 0)
-                .and_then(|teb| {
-                    self.context_memory()
-                        .read::<u64>(VirtAddr(teb + TEB64_PEB))
-                        .ok()
-                })
-                .filter(|peb| *peb != 0),
+            "peb" => self.user_process_peb(),
             _ => return None,
         })
     }

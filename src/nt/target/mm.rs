@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use ntoseye_macros::record;
 
 use super::{DiagnosticMetric, DiagnosticValue, Target};
-use crate::base::memory::PAGE_SIZE;
+use crate::base::memory::{NonResident, PAGE_SIZE};
 use crate::base::types::{Dtb, PageTableLevel, PteAttributes, VirtAddr};
 use crate::nt::guest::ProcessInfo;
 use crate::nt::layout::{ParsedType, TypeInfo};
@@ -24,8 +24,10 @@ mod vad;
 mod vm;
 mod vprot;
 
+pub use paging::PteSelfMap;
 pub use vprot::{
-    MEM_COMMIT, MEM_FREE, MEM_IMAGE, memory_state_name, memory_type_name, page_protection_name,
+    MEM_COMMIT, MEM_FREE, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE, MEM_RESERVE, memory_state_name,
+    memory_type_name, page_protection, page_protection_name,
 };
 
 const MAX_MI_FIELDS: usize = 64;
@@ -152,9 +154,9 @@ impl CacheAttribute {
     }
 }
 
-/// A decoded `_MMPFN` record (`!pfn`). A member the layout lacks is decoded
-/// from the record's raw bits at its known offset, so only `page_color`,
-/// which has no such fallback, can be unavailable. Union members that the
+/// A decoded `_MMPFN` record (`!pfn`), each member read where the build's
+/// PDB layout puts it; only `page_color`, which some builds lack, can be
+/// unavailable. Union members that the
 /// page state does not use are `None`: the list links when the page is not
 /// on a list, `share_count` and `ws_index` when the page is not active, and
 /// `event` when the page is not in transition.
@@ -225,6 +227,9 @@ pub struct VtopDetail {
     pub dtb: Dtb,
     /// The levels read, top down.
     pub levels: Vec<PteLevel>,
+    /// Whether the levels' addresses are physical (a walk of the tables
+    /// from the DTB) rather than virtual through NT's self-map.
+    pub physical_walk: bool,
     /// The physical address; `None` when the address is not mapped.
     #[record(hex)]
     pub physical: Option<u64>,
@@ -521,8 +526,6 @@ pub struct PoolFindDetail {
     /// The pool that the search was limited to, if any.
     pub pool_type: Option<PoolType>,
     pub matches: Vec<PoolFindMatch>,
-    /// The number of matches found, including those past the listing limit.
-    pub found: usize,
     pub ranges: Vec<PoolFindRange>,
     /// The read status of the big-pool table, if the search included it.
     pub big_status: Option<String>,
@@ -626,7 +629,6 @@ pub struct MdlDetail {
     pub capacity: u64,
     /// The start of the PFN array, immediately after the header.
     pub pfn_array: VirtAddr,
-    #[record(hex)]
     pub pfns: Vec<u64>,
     /// Whether the list has fewer PFNs than the buffer spans, which happens
     /// when a smaller count was requested.
@@ -667,12 +669,16 @@ pub struct SystemPteTypeDetail {
     pub bitmap_bits: u64,
     /// `TotalSystemPtes`, the number of PTEs made available so far; the rest
     /// of the bitmap is reserved (its bits set) until the allocator expands.
+    /// Not always true: see [`Self::counters_hold`].
     pub total: u64,
-    /// `TotalFreeSystemPtes`.
+    /// `TotalFreeSystemPtes`, as read: one below zero reads as its two's
+    /// complement.
     pub free: u64,
     pub failures: u32,
-    /// The free PTEs, counted from the clear bits of the bitmap. It differs
-    /// from `free` only when the target allocated between the two reads.
+    /// The free PTEs, counted from the clear bits of the bitmap, which the
+    /// allocator hands out from. It differs from `free` when the target
+    /// allocated between the two reads, by the PTEs a processor holds in
+    /// the allocator's `CachedPtes`, or where the counter does not hold.
     pub bitmap_free: u64,
     /// The bitmap bytes that could not be read, which count as allocated.
     pub unreadable_bitmap_bytes: u64,
@@ -690,21 +696,60 @@ pub struct SystemPteTypeDetail {
 
 #[record]
 impl SystemPteTypeDetail {
-    /// `total` minus `free`.
+    /// The PTEs in use, `total` minus the free ones
+    /// ([`Self::counted_free`]); `None` where the counters do not hold.
     #[record(getter)]
-    pub fn used(&self) -> u64 {
-        self.total.saturating_sub(self.free)
+    pub fn used(&self) -> Option<u64> {
+        self.counters_hold()
+            .then(|| self.total - self.counted_free())
+    }
+
+    /// Whether the kernel's `TotalSystemPtes` and `TotalFreeSystemPtes` can
+    /// be true of the bitmap: the total within the PTEs it covers, and
+    /// neither count of free PTEs below zero or above the total. Windows 11
+    /// 22631 ARM64 keeps its SystemPtes allocator's free count below zero
+    /// and its total at three times its bitmap, and its driver-image
+    /// allocator's free count far above its total; there the counters say
+    /// nothing about how many PTEs are in use.
+    #[record(getter)]
+    pub fn counters_hold(&self) -> bool {
+        self.total <= self.span()
+            && (self.free as i64) >= 0
+            && self.free <= self.total
+            && self.counted_free() <= self.total
+    }
+}
+
+impl SystemPteTypeDetail {
+    /// The PTEs the bitmap covers.
+    pub fn span(&self) -> u64 {
+        self.bitmap_bits.saturating_mul(self.ptes_per_bit)
+    }
+
+    /// The free PTEs: counted from the bitmap where it was read whole, else
+    /// `TotalFreeSystemPtes`.
+    pub fn counted_free(&self) -> u64 {
+        if self.unreadable_bitmap_bytes == 0 && self.unscanned_bitmap_bits == 0 {
+            self.bitmap_free
+        } else {
+            self.free
+        }
     }
 }
 
 /// Every system-PTE bitmap allocator in `MiState` (`!sysptes`). Counts
-/// are in PTEs.
+/// are in PTEs, of the allocators whose counters hold.
 #[record(impl)]
 #[derive(Debug, Clone)]
 pub struct SystemPtesDetail {
     pub types: Vec<SystemPteTypeDetail>,
     pub total: u64,
+    /// The free PTEs of those allocators: counted from each bitmap where it
+    /// was read whole, else its `TotalFreeSystemPtes`.
     pub free: u64,
+    /// The allocators left out of `total` and `free`, whose counters do not
+    /// hold ([`SystemPteTypeDetail::counters_hold`]).
+    pub uncounted: Vec<String>,
 }
 
 #[record]
@@ -777,7 +822,7 @@ fn nested_mi_state_fields(
     }
 }
 
-pub(crate) fn find_mi_state_fields(target: &Target, predicates: &[&str]) -> Vec<(String, u64)> {
+pub fn find_mi_state_fields(target: &Target, predicates: &[&str]) -> Vec<(String, u64)> {
     let Ok(base) = kernel_symbol_address(target, "MiState") else {
         return Vec::new();
     };
@@ -852,48 +897,20 @@ impl MemoryRegionInfo {
     }
 }
 
-/// `_MMVAD_FLAGS.Protection`: an index into the memory manager's protection
-/// table, not a `PAGE_*` mask.
+/// `_MMVAD_FLAGS.Protection`: a 5-bit MM protection value, whose low three
+/// bits index the access and whose 0x8 and 0x10 bits add no caching, guard,
+/// or (both) write combining; any value with no access bits is no access
+/// (`MmProtectToValue`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VadProtection {
-    NoAccess,
-    ReadOnly,
-    Execute,
-    ExecuteRead,
-    ReadWrite,
-    WriteCopy,
-    ExecuteReadWrite,
-    ExecuteWriteCopy,
-    Unknown(u64),
-}
+pub struct VadProtection(u64);
 
 impl VadProtection {
     pub fn from_raw(raw: u64) -> Self {
-        match raw {
-            0 => Self::NoAccess,
-            1 => Self::ReadOnly,
-            2 => Self::Execute,
-            3 => Self::ExecuteRead,
-            4 => Self::ReadWrite,
-            5 => Self::WriteCopy,
-            6 => Self::ExecuteReadWrite,
-            7 => Self::ExecuteWriteCopy,
-            other => Self::Unknown(other),
-        }
+        Self(raw)
     }
 
     pub fn raw(self) -> u64 {
-        match self {
-            Self::NoAccess => 0,
-            Self::ReadOnly => 1,
-            Self::Execute => 2,
-            Self::ExecuteRead => 3,
-            Self::ReadWrite => 4,
-            Self::WriteCopy => 5,
-            Self::ExecuteReadWrite => 6,
-            Self::ExecuteWriteCopy => 7,
-            Self::Unknown(raw) => raw,
-        }
+        self.0
     }
 }
 
@@ -1084,24 +1101,11 @@ pub struct PteWalk {
     /// when attached, else the kernel), so callers know what was walked.
     #[record(hex)]
     pub dtb: Dtb,
-    pub pxe: PteLevel,
-    /// The levels below the PXE, each present only when the one above it
-    /// points at a table.
-    pub ppe: Option<PteLevel>,
-    pub pde: Option<PteLevel>,
-    pub pte: Option<PteLevel>,
-}
-
-impl PteWalk {
-    /// The levels reached, top down.
-    pub fn levels(&self) -> impl Iterator<Item = &PteLevel> {
-        [
-            Some(&self.pxe),
-            self.ppe.as_ref(),
-            self.pde.as_ref(),
-            self.pte.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-    }
+    /// The entries read, root first: each below the root only when the one
+    /// above it points at a table.
+    pub levels: Vec<PteLevel>,
+    /// Where the page is when it is not in memory, and whether reads still
+    /// get it (from the memory-compression store); `None` when it is in
+    /// memory.
+    pub non_resident: Option<NonResident>,
 }

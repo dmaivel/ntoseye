@@ -269,6 +269,50 @@ pub fn kdnet_instructions(host: Ipv4Addr, elevated: bool) -> Instructions {
     }
 }
 
+/// The guest steps and the run command for KD over the guest's serial port
+/// `port`, which the host exposes at `socket`.
+pub fn serial_kd_instructions(
+    socket: impl Into<String>,
+    port: usize,
+    elevated: bool,
+) -> Instructions {
+    Instructions {
+        guest: vec![
+            "bcdedit /debug on".to_string(),
+            format!("bcdedit /dbgsettings serial debugport:{port} baudrate:115200"),
+            "Restart-Computer".to_string(),
+        ],
+        run: vec![ConfiguredTarget::kd(socket, port, elevated).run_command()],
+        notes: Vec::new(),
+    }
+}
+
+/// The steps for the transports `backend` selects on a hypervisor that
+/// serves serial KD at the default socket, on the guest port `kd_port`
+/// reports, and the GDB stub at the default address.
+#[cfg(any(target_os = "linux", test))]
+pub fn transport_instructions(
+    backend: ConfigureBackend,
+    kd_port: impl FnOnce() -> usize,
+) -> Instructions {
+    let selected = backend.selection();
+    let mut instructions = match backend {
+        ConfigureBackend::KdNet { host } => kdnet_instructions(host, false),
+        _ => Instructions::default(),
+    };
+    if selected.kd() {
+        let kd = serial_kd_instructions(DEFAULT_KD_SOCKET, kd_port(), false);
+        instructions.guest = kd.guest;
+        instructions.run.extend(kd.run);
+    }
+    if selected.gdb() {
+        instructions
+            .run
+            .push(ConfiguredTarget::gdb(DEFAULT_GDB_ADDR).run_command());
+    }
+    instructions
+}
+
 pub fn run_interactive() -> Result<()> {
     let configurators = host_configurators();
     if configurators.is_empty() {
@@ -712,6 +756,19 @@ mod tests {
             ConfiguredTarget::gdb(DEFAULT_GDB_ADDR).run_command(),
             "ntoseye --backend gdb"
         );
+    }
+
+    /// Each selected transport adds its run command, and only KD sets the
+    /// guest up, on the port the hypervisor reports.
+    #[test]
+    fn transport_instructions_cover_each_selected_transport() {
+        let both = transport_instructions(ConfigureBackend::KdAndGdb, || 2);
+        assert_eq!(both.run, ["ntoseye", "ntoseye --backend gdb"]);
+        assert!(both.guest[1].contains("debugport:2"), "{:?}", both.guest);
+
+        let gdb = transport_instructions(ConfigureBackend::Gdb, || unreachable!());
+        assert_eq!(gdb.run, ["ntoseye --backend gdb"]);
+        assert!(gdb.guest.is_empty(), "{:?}", gdb.guest);
     }
 
     #[test]

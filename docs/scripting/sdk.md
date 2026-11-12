@@ -350,6 +350,8 @@ if cpu.rip is not None:
 - `step(until="call")` steps to the next call instruction, and the values `"ret"` and `"branch"` step to the next instruction of that type.
 - `step(until=addr)` and `step_over(until=addr)` single-step to an address instead of running there, into or over calls.
 
+A step-until walk executes the current instruction before it looks for a match, as {command}`pc` and {command}`pt` do, so a second call moves on from a match instead of returning at once.
+
 `step_over()` across a call and `step_out()` stop only when the stepping thread returns, so if that thread waits, the step waits as long.
 
 A step-until walk (`until=`) also follows the thread that it started in, and so does `trace_calls()`. If an interrupt switches that thread out during a step, the walk waits until the thread executes that instruction at the same call depth, on any vCPU. If the thread exits first, the walk fails with an error that says so, and `trace_calls()` ends as `failed`.

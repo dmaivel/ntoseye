@@ -3,9 +3,9 @@ use std::io::IsTerminal;
 
 use crate::base::bytes::utf16le_nul_terminated;
 use crate::base::error::{Error, Result};
-use crate::base::memory::MemoryOps;
+use crate::base::memory::{MemoryOps, ScanFault, read_terminated};
 use crate::base::output;
-use crate::base::time::filetime_to_iso;
+use crate::base::time::{FILETIME_UNIX_EPOCH_TICKS, filetime_to_iso};
 use crate::base::types::{CodeMachine, VirtAddr};
 #[cfg(feature = "python")]
 use crate::hosts::python::embed;
@@ -85,7 +85,7 @@ fn reload_scripts(state: &mut ReplState<'_>) -> Result<()> {
 )]
 fn radix(state: &mut ReplState<'_>, #[arg(name = "8|10|16")] radix: Option<String>) -> Result<()> {
     if let Some(value) = radix {
-        state.radix = match value.as_str() {
+        state.ctx.radix = match value.as_str() {
             "8" => NumberRadix::Octal,
             "10" => NumberRadix::Decimal,
             "16" => NumberRadix::Hexadecimal,
@@ -97,12 +97,12 @@ fn radix(state: &mut ReplState<'_>, #[arg(name = "8|10|16")] radix: Option<Strin
         };
     }
 
-    let name = match state.radix {
+    let name = match state.ctx.radix {
         NumberRadix::Octal => "octal",
         NumberRadix::Decimal => "decimal",
         NumberRadix::Hexadecimal => "hexadecimal",
     };
-    outln!("radix {} ({name})", state.radix.value());
+    outln!("radix {} ({name})", state.ctx.radix.value());
     Ok(())
 }
 
@@ -185,12 +185,11 @@ fn echo(_state: &mut ReplState<'_>, #[arg(raw, usage = "[text]")] text: String) 
 /// Print the current date and time of the host in UTC.
 #[command(names = [".echotime"], category = "session", kind = Host, python = none)]
 fn echotime(_state: &mut ReplState<'_>) -> Result<()> {
-    const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
         .and_then(|since| u64::try_from(since.as_nanos() / 100).ok())
-        .and_then(|ticks| filetime_to_iso(ticks.checked_add(FILETIME_UNIX_EPOCH)?))
+        .and_then(|ticks| filetime_to_iso(ticks.checked_add(FILETIME_UNIX_EPOCH_TICKS)?))
         .ok_or_else(|| {
             Error::DebugInfo("the host clock is outside the representable range".to_string())
         })?;
@@ -216,13 +215,13 @@ fn printf(
     #[arg(invoked)] name: &str,
 ) -> Result<()> {
     let Some((format, args)) = parse_printf_tail(&tail) else {
-        outln!("{}", command_help(name));
+        ArgError::Missing.report(name);
         return Ok(());
     };
     // An unreadable argument is reported (the REPL prints the error), not
     // propagated: `.printf` is the body of a log point, and a single bad read
     // must not tear down the session that is running it.
-    let text = format_printf(&format, &args, &state.ctx.target, state.radix)?;
+    let text = format_printf(&format, &args, &state.ctx.target, state.ctx.radix)?;
     // WinDbg's `.printf` emits exactly the format's characters, which is
     // why its examples end in `\n`; appending one here would double it.
     out!("{text}");
@@ -291,15 +290,10 @@ fn logclose(_state: &mut ReplState<'_>) -> Result<()> {
 )]
 fn help(state: &mut ReplState<'_>, command: Option<String>) -> Result<()> {
     if let Some(name) = command.as_deref() {
-        if let Some((_, help, _)) = state
-            .caches
-            .user_commands
-            .read()
-            .unwrap()
-            .iter()
-            .find(|(command, _, _)| command == name)
-        {
-            outln!("{name}\n{help}");
+        // In dispatch order: a built-in hides an alias or Python command of
+        // its name, and an alias hides a Python command.
+        if let Some(spec) = command_registry().get(name) {
+            outln!("{}", spec_help(spec));
             return Ok(());
         }
         if let Some((_, expansion)) = state
@@ -311,12 +305,18 @@ fn help(state: &mut ReplState<'_>, command: Option<String>) -> Result<()> {
             outln!("alias {name} {expansion}");
             return Ok(());
         }
-        match command_registry().get(name) {
-            None => error!("unknown command '{name}'"),
-            Some(spec) => {
-                outln!("{}", spec_help(spec));
-            }
+        if let Some((_, help, _)) = state
+            .caches
+            .user_commands
+            .read()
+            .unwrap()
+            .iter()
+            .find(|(command, _, _)| command == name)
+        {
+            outln!("{name}\n{help}");
+            return Ok(());
         }
+        error!("unknown command '{name}'");
         return Ok(());
     }
 
@@ -626,8 +626,13 @@ fn print_target_version(detail: &TargetVersion) {
         .and_then(|kernel| kernel.pdb_guid.as_deref());
     let pdb_age = detail.kernel.as_ref().and_then(|kernel| kernel.pdb_age);
     if let (Some(guid), Some(age)) = (pdb_guid, pdb_age) {
+        let name = detail
+            .kernel
+            .as_ref()
+            .and_then(|kernel| kernel.pdb_name.as_deref())
+            .unwrap_or("-");
         outln!(
-            "  {}  ntoskrnl.pdb GUID {} age {}",
+            "  {}  {name} GUID {} age {}",
             field(width, "pdb"),
             guid,
             age
@@ -939,13 +944,14 @@ fn parse_printf_tail(text: &str) -> Option<(String, Vec<String>)> {
 }
 
 fn read_wide_string(target: &Target, address: VirtAddr, max_chars: usize) -> Option<String> {
-    let count = max_chars.checked_mul(2)?;
-    let mut bytes = vec![0u8; count];
-    target
-        .context_memory()
-        .read_bytes(address, &mut bytes)
-        .ok()?;
-    Some(utf16le_nul_terminated(&bytes))
+    // Page by page, so a string that ends before an unmapped page or a
+    // dump's capture hole still reads.
+    let memory = target.context_memory();
+    let read = read_terminated(address, max_chars.checked_mul(2)?, 2, |at, buf| {
+        memory.read_bytes(at, buf).map_err(ScanFault::Unreadable)
+    })
+    .ok()?;
+    Some(utf16le_nul_terminated(&read.bytes))
 }
 
 fn format_printf(

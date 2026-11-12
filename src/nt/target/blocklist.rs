@@ -1,15 +1,19 @@
 //! Kernel code where a debug trap that Windows takes itself, as it takes
 //! KD's single steps and breakpoints, brings the kernel down instead of
-//! reaching the debugger.
+//! reaching the debugger: the breakpoint blocklist, which
+//! `NTOSEYE_NO_BREAKPOINT_BLOCKLIST` turns off, and the code no single step
+//! may enter.
 
 use std::collections::{HashSet, VecDeque};
 use std::ops::Range;
+use std::sync::LazyLock;
 
 use iced_x86::{Decoder, DecoderOptions, OpKind};
 
 use super::Target;
 use crate::arch::Arch;
 use crate::base::disasm::function_extent;
+use crate::base::env;
 use crate::base::memory::MemoryOps;
 use crate::base::types::{CodeMachine, VirtAddr};
 use crate::nt::unwind::{ThreadTraceContext, function_range, resolve_thread_trace_context};
@@ -34,6 +38,72 @@ const BUGCHECK: [&str; 2] = ["KeBugCheckEx", "KeBugCheck2"];
 /// Bounds on the walk for the dispatch code: a few dozen functions are on it.
 const MAX_DISPATCH_FUNCTIONS: usize = 256;
 const MAX_FUNCTION_BYTES: u64 = 64 * 1024;
+
+/// Whether breakpoints are refused at the sites that bring the target down:
+/// unless `NTOSEYE_NO_BREAKPOINT_BLOCKLIST` turned the blocklist off, for
+/// whoever must break there anyway.
+fn blocklist_enabled() -> bool {
+    static ENABLED: LazyLock<bool> =
+        LazyLock::new(|| !env::switch_on("NTOSEYE_NO_BREAKPOINT_BLOCKLIST"));
+    *ENABLED
+}
+
+/// Why code is on the [`BREAKPOINT_BLOCKLIST`].
+#[derive(Clone, Copy)]
+enum Blocked {
+    /// Code the kernel debugger runs: its own, which Windows runs on each
+    /// entry to the debugger and exit from it, and what it calls while the
+    /// target is halted.
+    Debugger,
+    /// Code that Windows runs to dispatch a debug trap before it reports the
+    /// trap to the debugger, as [`Target::find_trap_dispatch_code`] finds it
+    /// on x64.
+    TrapDispatch,
+}
+
+/// Code a breakpoint over KD brings the target down from, as
+/// `(module, function)` patterns, where a trailing `*` matches the rest of
+/// the name. Every trap runs it, the breakpoint's own too, which traps again
+/// from within. Over KD a declined breakpoint at nt!KdpReport bugchecked an
+/// x64 target with 0x7F at once, one at nt!KdExitDebugger an ARM64 target
+/// with 0x2B within seconds, and with one at nt!KdEnterDebugger the next
+/// break-in never ended; on ARM64 a step over's at
+/// nt!KiSynchronousException brought the target down at its first hit, and
+/// one at nt!KeQueryPerformanceCounter, which the debugger calls to time its
+/// packets, as it was written into the halted target. The transports, which
+/// carry every packet of a debugger session, are listed untested. x64's
+/// trap dispatch is found by its code instead (see
+/// [`Target::find_trap_dispatch_code`]); ARM64's, whose handler takes every
+/// class of synchronous exception, page faults included, reaches most of
+/// the kernel that way, so its handler and dispatch are listed here.
+const BREAKPOINT_BLOCKLIST: &[(&str, &str, Blocked)] = &[
+    ("nt", "KdTrap", Blocked::Debugger),
+    ("nt", "KdEnterDebugger", Blocked::Debugger),
+    ("nt", "KdExitDebugger", Blocked::Debugger),
+    ("nt", "Kdp*", Blocked::Debugger),
+    ("nt", "KeQueryPerformanceCounter", Blocked::Debugger),
+    ("kdcom", "*", Blocked::Debugger),
+    ("kdnet", "*", Blocked::Debugger),
+    ("kdstub", "*", Blocked::Debugger),
+    // kdnet's NIC extensions, such as kd_02_8086.
+    ("kd_*", "*", Blocked::Debugger),
+    ("nt", "KzSynchronousException", Blocked::TrapDispatch),
+    ("nt", "KiSynchronousException", Blocked::TrapDispatch),
+    (
+        "nt",
+        "KxDispatchExceptionOnExceptionStack",
+        Blocked::TrapDispatch,
+    ),
+    ("nt", "KiDispatchException", Blocked::TrapDispatch),
+];
+
+/// Whether `name` matches `pattern`, which may end in `*`.
+fn matches_pattern(pattern: &str, name: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => name == pattern,
+    }
+}
 
 impl Target {
     /// Why a debug trap at `address` must not reach Windows, for `what`
@@ -60,31 +130,67 @@ impl Target {
         ))
     }
 
+    /// Why `address` is on the [`BREAKPOINT_BLOCKLIST`], if it is.
+    fn blocked(&self, address: VirtAddr) -> Option<Blocked> {
+        let dtb = self.kernel_dtb();
+        let module = self.symbols.find_module_for_address(dtb, address)?;
+        let mut function = None;
+        BREAKPOINT_BLOCKLIST
+            .iter()
+            .find(|&&(module_pattern, function_pattern, _)| {
+                matches_pattern(module_pattern, &module.short_name)
+                    && (function_pattern == "*"
+                        || function
+                            .get_or_insert_with(|| {
+                                self.symbols
+                                    .find_closest_symbol_for_address(dtb, address)
+                                    .map(|(_, name, _)| name)
+                            })
+                            .as_deref()
+                            .is_some_and(|name| matches_pattern(function_pattern, name)))
+            })
+            .map(|&(_, _, blocked)| blocked)
+    }
+
     /// Why a breakpoint at `address`, software or a debug register, must not
-    /// reach Windows: the address is in the kernel's transition code (see
-    /// [`Self::kernel_transition_refusal`]), or in the code that Windows runs
+    /// reach Windows, unless the blocklist is off (see [`blocklist_enabled`]):
+    /// the address is in the kernel's transition code (see
+    /// [`Self::kernel_transition_refusal`]), in the kernel debugger's own
+    /// code (see [`BREAKPOINT_BLOCKLIST`]), or in the code that Windows runs
     /// to dispatch a trap before it reports the trap to the debugger. Every
     /// trap runs that code, a trap on the breakpoint too, which then traps
     /// again, until the kernel stack overflows into a double fault. A single
     /// step there is taken: the trap flag is clear while the trap is
     /// dispatched.
     pub fn breakpoint_site_refusal(&self, address: VirtAddr) -> Option<String> {
+        if !blocklist_enabled() {
+            return None;
+        }
         if let Some(refusal) = self.kernel_transition_refusal(address, "a breakpoint") {
             return Some(refusal);
         }
-        let code = self
-            .guest
-            .as_ref()?
-            .trap_dispatch_code(|| self.find_trap_dispatch_code());
-        let index = code.partition_point(|range| range.end <= address);
-        code.get(index).filter(|range| range.contains(&address))?;
-        Some(format!(
-            "{} is in code that Windows runs to dispatch a debug trap before it reports the trap \
-             to KD (from nt!KiBreakpointTrap and nt!KiDebugTrapOrFault to nt!KdTrap); a \
-             breakpoint there traps again while each trap is dispatched, until the stack \
-             overflows (bugcheck UNEXPECTED_KERNEL_MODE_TRAP), so it cannot be set over KD",
-            self.trap_site_name(address)
-        ))
+        let blocked = self.blocked(address).or_else(|| {
+            let code = self
+                .guest
+                .as_ref()?
+                .trap_dispatch_code(|| self.find_trap_dispatch_code());
+            let index = code.partition_point(|range| range.end <= address);
+            code.get(index)
+                .filter(|range| range.contains(&address))
+                .map(|_| Blocked::TrapDispatch)
+        })?;
+        let site = self.trap_site_name(address);
+        Some(match blocked {
+            Blocked::Debugger => format!(
+                "{site} is in code the kernel debugger runs, which a breakpoint re-enters on \
+                 every trap until the target crashes, so it cannot be set over KD"
+            ),
+            Blocked::TrapDispatch => format!(
+                "{site} is in code that Windows runs to dispatch a debug trap before it reports \
+                 the trap to KD; a breakpoint there traps again while each trap is dispatched, \
+                 until the target crashes, so it cannot be set over KD"
+            ),
+        })
     }
 
     fn trap_site_name(&self, address: VirtAddr) -> String {

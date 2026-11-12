@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use owo_colors::OwoColorize;
 
 use crate::arch::{Arch, RegisterMap};
+use crate::backend::dbg_backend::DebugCapability;
 use crate::base::error::Error;
 use crate::base::memory::MemoryOps;
 use crate::base::types::{CodeMachine, VirtAddr};
@@ -297,15 +298,20 @@ const DISASM_CONTEXT_INSTRUCTIONS: usize = 7;
 /// Events": code breakpoint fault is priority 7, faults from fetching the next
 /// instruction priority 8), so the trap is delivered before the page is
 /// faulted in. The bytes appear once the instruction is actually fetched, so a
-/// single step reveals them.
-pub fn non_resident_note(pc: u64, error: &Error) -> String {
+/// single step reveals them: on a target that `runs`, which a dump does not.
+pub fn non_resident_note(pc: u64, error: &Error, runs: bool) -> String {
     match error {
-        Error::BadVirtualAddress(_) | Error::AddressNotInDump(_) | Error::PartialRead(0) => {
+        Error::BadVirtualAddress(_) | Error::AddressNotInDump(_) | Error::PartialRead(0)
+            if runs =>
+        {
             format!(
                 "  (the page holding {pc:#x} is not resident, so there is nothing to decode yet; \
                  an execute breakpoint traps before the fetch that pages it in, and `t` \
                  single-steps through the fetch)"
             )
+        }
+        Error::BadVirtualAddress(_) | Error::AddressNotInDump(_) | Error::PartialRead(0) => {
+            format!("  (the page holding {pc:#x} is not resident, so there is nothing to decode)")
         }
         error => format!("  (could not read memory at {pc:#x}: {error})"),
     }
@@ -393,6 +399,33 @@ pub fn print_disasm_lines(
     }
 }
 
+/// Read the code at `address` as `trace`'s thread sees it, falling back to
+/// the address space of the module holding it when the thread's can't
+/// translate it. The debugger's breakpoints are masked out as the space that
+/// read the bytes places them: a process-scoped breakpoint in another
+/// process is only visible through that process's space.
+pub fn read_code(
+    debugger: &Target,
+    trace: &ThreadTraceContext,
+    address: VirtAddr,
+    buf: &mut [u8],
+) -> std::result::Result<(), Error> {
+    let code_dtb = preferred_code_dtb(trace, address.0);
+    let dtb = match debugger
+        .address_space(trace.active_dtb)
+        .read_bytes(address, buf)
+    {
+        Ok(()) => trace.active_dtb,
+        Err(error) if code_dtb == trace.active_dtb => return Err(error),
+        Err(_) => {
+            debugger.address_space(code_dtb).read_bytes(address, buf)?;
+            code_dtb
+        }
+    };
+    debugger.mask_code(address, buf, dtb);
+    Ok(())
+}
+
 /// The instructions a stop shows from `rip`, or the note saying why they
 /// can't be read.
 pub fn disasm_context_rows(
@@ -401,22 +434,11 @@ pub fn disasm_context_rows(
     rip: u64,
 ) -> std::result::Result<Vec<DisasmRow>, String> {
     let debugger = &session.target;
-
-    let active_memory = debugger.address_space(trace.active_dtb);
-    let code_dtb = preferred_code_dtb(trace, rip);
-    let code_memory = debugger.address_space(code_dtb);
     let mut bytes = [0u8; DISASM_CONTEXT_BYTES];
-
-    let read = match active_memory.read_bytes(VirtAddr(rip), &mut bytes) {
-        Ok(()) => Ok(()),
-        Err(active_error) if code_dtb == trace.active_dtb => Err(active_error),
-        Err(_) => code_memory.read_bytes(VirtAddr(rip), &mut bytes),
-    };
-    if let Err(error) = read {
-        return Err(non_resident_note(rip, &error));
+    if let Err(error) = read_code(debugger, trace, VirtAddr(rip), &mut bytes) {
+        let runs = session.backend.supports(DebugCapability::SingleStep);
+        return Err(non_resident_note(rip, &error, runs));
     }
-
-    session.mask_code(VirtAddr(rip), &mut bytes, trace.active_dtb);
 
     let resolve = |target: u64| format_symbol(debugger, trace, target);
     Ok(decode_disasm_context(
@@ -425,22 +447,6 @@ pub fn disasm_context_rows(
         debugger.code_machine(VirtAddr(rip)),
         resolve,
     ))
-}
-
-/// Print the stack frames. `embedded` is true inside the break/status dump:
-/// bold `stack` header, 2-space indent, and no child-SP column (the return
-/// address is the token you act on). Standalone `k` passes false:
-/// flush-left, full child-SP + retaddr columns.
-pub fn print_stacktrace(
-    debugger: &Target,
-    register_map: &RegisterMap,
-    regs: &[u8],
-    build_limit: usize,
-    display_limit: usize,
-    embedded: bool,
-) {
-    let stacktrace = thread_stacktrace(debugger, register_map, regs, build_limit);
-    print_stacktrace_data(debugger.arch(), &stacktrace, display_limit, embedded);
 }
 
 /// The stack of the selected thread from `regs`, walked `build_limit`
@@ -461,7 +467,10 @@ pub fn thread_stacktrace(
     .into_stacktrace()
 }
 
-/// Render an already-collected stack trace in the same layout as [`print_stacktrace`].
+/// Render an already-collected stack trace. `embedded` is true inside a
+/// longer display: bold `stack` header, 2-space indent, and no child-SP
+/// column (the return address is the token you act on). Standalone `k`
+/// passes false: flush-left, full child-SP + retaddr columns.
 pub fn print_stacktrace_data(
     arch: Arch,
     stacktrace: &StackTrace,
@@ -568,12 +577,14 @@ pub fn print_stacktrace_data_with(
     } else {
         StackPlacement::Standalone
     };
-    print_stack_frames(arch, stacktrace, 0, display_limit, placement, columns);
+    print_stack_frames(arch, stacktrace, 0, display_limit, placement, columns, true);
 }
 
 /// A stop's stack from frame `from`, the frames above it folded into one
 /// line: at a bugcheck, the bugcheck's own frames above the frame that
-/// faulted. Every frame keeps its number, as `.frame` takes it.
+/// faulted. Every frame keeps its number, as `.frame` takes it. The stack
+/// was walked only a frame past those shown, so the frames below are not
+/// counted.
 pub fn print_stop_stack(arch: Arch, stacktrace: &StackTrace, from: usize, display_limit: usize) {
     print_stack_frames(
         arch,
@@ -582,6 +593,7 @@ pub fn print_stop_stack(arch: Arch, stacktrace: &StackTrace, from: usize, displa
         display_limit,
         StackPlacement::Section,
         StackColumns::default(),
+        false,
     );
 }
 
@@ -601,6 +613,7 @@ pub fn print_indented_stack(
         display_limit,
         StackPlacement::Indented(indent),
         StackColumns::default(),
+        true,
     );
 }
 
@@ -623,6 +636,8 @@ fn print_stack_frames(
     display_limit: usize,
     placement: StackPlacement<'_>,
     columns: StackColumns,
+    // Whether the walk went past the frames shown to count those below.
+    counted: bool,
 ) {
     let indent = match placement {
         StackPlacement::Standalone => "",
@@ -685,7 +700,7 @@ fn print_stack_frames(
 
     let hidden = stacktrace.frames.len().saturating_sub(end) + stacktrace.truncated;
     if hidden > 0 {
-        outln!("{indent}{}", more_frames(hidden));
+        outln!("{indent}{}", more_frames(counted.then_some(hidden)));
     }
 }
 
@@ -776,19 +791,71 @@ fn frame_number(number: usize, with_sp: bool) -> String {
     }
 }
 
-/// The note under a stack for the frames not shown or not walked.
-pub fn more_frames(hidden: usize) -> String {
-    let noun = if hidden == 1 { "frame" } else { "frames" };
-    format!("... {hidden} more {noun}")
-        .bright_black()
-        .to_string()
+/// The note under a stack for the frames not shown or not walked: how
+/// many, when the walk counted them.
+pub fn more_frames(hidden: Option<usize>) -> String {
+    match hidden {
+        Some(1) => "... 1 more frame".to_string(),
+        Some(hidden) => format!("... {hidden} more frames"),
+        None => "... more frames".to_string(),
+    }
+    .bright_black()
+    .to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::base::output::strip_ansi;
+    use crate::nt::symbols::CodeFrame;
     use crate::nt::symbols::LocalSource;
+
+    fn stack(depth: usize) -> StackTrace {
+        let frames = (0..depth as u64)
+            .map(|n| StackFrame {
+                ip: 0xffff_f800_0000_1000 + n * 0x10,
+                sp: 0xffff_f800_1000_0000 + n * 0x40,
+                symbol: format!("nt!F{n}"),
+                inline: false,
+                source: FrameSource::Unwind,
+                source_location: None,
+                machine_frame: None,
+                code: CodeFrame::at(VirtAddr(0xffff_f800_0000_1000 + n * 0x10)),
+            })
+            .collect();
+        StackTrace {
+            frames,
+            truncated: 0,
+        }
+    }
+
+    fn last_line(print: impl FnOnce()) -> String {
+        let ((), text) = crate::base::output::capture_output(print);
+        strip_ansi(text.lines().last().unwrap_or_default())
+            .trim()
+            .to_string()
+    }
+
+    /// A stop walks one frame past the six it shows: a seventh says there
+    /// are more, uncounted, and a stack of six says nothing. `k` walks the
+    /// frames it leaves out, so it counts them.
+    #[test]
+    fn a_stop_says_there_are_more_frames_without_counting_them() {
+        let shown = crate::hosts::repl::BREAK_STACKTRACE_DISPLAY_LIMIT;
+        let walked = crate::hosts::repl::BREAK_STACKTRACE_WALK_LIMIT;
+        assert_eq!(
+            last_line(|| print_stop_stack(Arch::Amd64, &stack(walked), 0, shown)),
+            "... more frames"
+        );
+        assert_eq!(
+            last_line(|| print_stop_stack(Arch::Amd64, &stack(shown), 0, shown)),
+            format!("05  fffff80000001050  nt!F{}", shown - 1)
+        );
+        assert_eq!(
+            last_line(|| print_stacktrace_data(Arch::Amd64, &stack(shown + 3), shown, false)),
+            "... 3 more frames"
+        );
+    }
 
     #[test]
     fn source_location_labels_recorded_and_local_paths() {

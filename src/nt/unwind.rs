@@ -1,10 +1,13 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
 
 use ntoseye_macros::record;
-use pelite::pe64::{Pe, PeView, image::IMAGE_DIRECTORY_ENTRY_EXCEPTION};
+use pelite::pe64::{
+    Pe, PeView,
+    image::{IMAGE_DIRECTORY_ENTRY_EXCEPTION, RUNTIME_FUNCTION},
+};
 
 use crate::arch::{Arch, RegisterMap};
 use crate::{
@@ -29,8 +32,8 @@ use crate::{
     },
 };
 
-pub(crate) mod amd64;
-pub(crate) mod arm64;
+pub mod amd64;
+mod arm64;
 mod arm64ec;
 mod tracer;
 mod walk;
@@ -237,6 +240,9 @@ struct StackTracer<'a> {
     stack_pages: RefCell<HashMap<u64, Option<StackPage>>>,
     /// The kernel object, whose image is shared across traces.
     kernel: Option<&'a Image>,
+    /// Each processor's stacks (see `processor_stacks` in `tracer`), read
+    /// the first time an unwind moves sp down.
+    processor_stacks: Option<Vec<Vec<RangeInclusive<u64>>>>,
 }
 
 /// A stack page a trace read. A user-mode minidump may hold only part of a
@@ -397,6 +403,17 @@ impl std::fmt::Display for SymbolName {
     }
 }
 
+/// What a compiler-generated funclet's name has (`Foo$filt$0`, `Foo$fin$1`).
+const FUNCLET_MARK: char = '$';
+
+/// Whether `symbol` names a funclet (see [`nearest_symbol`]).
+fn is_funclet(symbol: &SymbolName) -> bool {
+    symbol
+        .name
+        .as_deref()
+        .is_some_and(|name| name.contains(FUNCLET_MARK))
+}
+
 /// What `addr` is named after in the code `trace` runs: the nearest symbol
 /// below it, a split-off fragment's function, or the module it is in.
 pub fn symbol_name(debugger: &Target, trace: &ThreadTraceContext, addr: u64) -> Option<SymbolName> {
@@ -413,12 +430,18 @@ pub fn symbol_name(debugger: &Target, trace: &ThreadTraceContext, addr: u64) -> 
     };
 
     if let Some(module) = trace.module_for_address(addr) {
-        let symbol = find(module.dtb)
-            .or_else(|| {
-                ensure_module_symbols(debugger, trace, std::iter::once(addr));
-                find(module.dtb)
-            })
-            .or_else(|| split_function(debugger, trace, module.dtb, addr).map(named));
+        let split = || split_function(debugger, trace, module.dtb, addr).map(named);
+        let symbol = match find(module.dtb).or_else(|| {
+            ensure_module_symbols(debugger, trace, std::iter::once(addr));
+            find(module.dtb)
+        }) {
+            // See [`nearest_symbol`].
+            Some(found) if is_funclet(&found) => split()
+                .filter(|fragment| fragment.name != found.name)
+                .or(Some(found)),
+            Some(found) => Some(found),
+            None => split(),
+        };
         return Some(symbol.unwrap_or_else(|| {
             // The module has no PDB, or its fetch is still running.
             SymbolName {
@@ -454,14 +477,26 @@ pub fn nearest_symbol(
     dtb: Dtb,
     address: VirtAddr,
 ) -> Option<(String, String, u32)> {
-    debugger
+    let split = || {
+        let trace = resolve_thread_trace_context(debugger, dtb);
+        let module = trace.module_for_address(address.0)?;
+        split_function(debugger, &trace, module.dtb, address.0)
+    };
+    match debugger
         .symbols
         .find_closest_symbol_for_address(dtb, address)
-        .or_else(|| {
-            let trace = resolve_thread_trace_context(debugger, dtb);
-            let module = trace.module_for_address(address.0)?;
-            split_function(debugger, &trace, module.dtb, address.0)
-        })
+    {
+        // A funclet (`$filt$`, `$fin$`) is a small function the compiler
+        // generates, and the code after it is often a fragment split off
+        // from another function, which the funclet's name would claim:
+        // `nt!KiLockServiceTable$filt$0+0x2fe` is code of
+        // `nt!ExpWaitForResource`. Only then is the function table asked.
+        Some(found) if found.1.contains(FUNCLET_MARK) => split()
+            .filter(|(_, name, _)| *name != found.1)
+            .or(Some(found)),
+        Some(found) => Some(found),
+        None => split(),
+    }
 }
 
 /// `addr` named after its function when no symbol is near it but its code
@@ -604,6 +639,8 @@ pub fn try_format_symbol_at(debugger: &Target, cr3: u64, rip: u64) -> Option<Str
         && let Some(symbol) = debugger
             .symbols
             .format_closest_symbol_for_address(debugger.kernel_dtb(), VirtAddr(rip))
+        // A funclet's name is checked against the function table below.
+        && !symbol.contains(FUNCLET_MARK)
     {
         return Some(symbol);
     }
@@ -967,7 +1004,9 @@ fn runtime_functions(
 /// PE exception metadata is the authoritative function boundary for `uf`: it
 /// remains correct when public symbols are sparse and avoids disassembling into
 /// the next function. A paged-out `.pdata` or `.xdata` range is retried against
-/// the matched on-disk image through the stack unwinder's image cache.
+/// the matched on-disk image through the stack unwinder's image cache. Code no
+/// module holds, such as JIT-compiled code, is looked up in the user dump's
+/// dynamic function tables, as the unwinder does.
 pub fn function_range(
     debugger: &Target,
     trace: &ThreadTraceContext,
@@ -1004,7 +1043,14 @@ pub fn function_range(
     }
 
     let mut tracer = StackTracer::new(debugger, trace);
-    let base = tracer.module_containing(address)?.info.base_address.0;
+    let Some(module) = tracer.module_containing(address) else {
+        let (base, function) = tracer.dynamic_function(address)?;
+        return Some((
+            base + u64::from(function.begin),
+            base + u64::from(function.end),
+        ));
+    };
+    let base = module.info.base_address.0;
     let machine = tracer.code_machine_at(address);
     let (image, layout) = tracer.module_code(address)?;
     if let Some(found) = range(&image, layout.as_deref(), base, address, machine) {
@@ -1022,17 +1068,64 @@ pub fn function_range(
 /// The function-table entry covering `address` and its unwind data
 /// (`.fnent`): AMD64's with its chained parents, or ARM64's packed or
 /// `.xdata` form. Paged-out `.pdata` or `.xdata` is read from the matched
-/// on-disk image, as the unwinder does.
+/// on-disk image, as the unwinder does, and code no module holds from the
+/// user dump's dynamic function tables.
 pub fn function_entry(
     debugger: &Target,
     trace: &ThreadTraceContext,
     address: u64,
 ) -> Result<FunctionEntry> {
     let mut tracer = StackTracer::new(debugger, trace);
+    let symbol = |address| format_symbol(debugger, trace, address);
     let Some(module) = tracer.module_containing(address) else {
-        return Err(Error::DebugInfo(format!(
-            "{address:#x} is not in a loaded module"
-        )));
+        let Some((base, function)) = tracer.dynamic_function(address) else {
+            return Err(Error::DebugInfo(format!(
+                "{address:#x} is neither in a loaded module nor in a dynamic function table"
+            )));
+        };
+        // A dynamic table's unwind data lies in process memory above its base.
+        let machine = tracer.code_machine_at(address);
+        let code = amd64::DynamicCode {
+            memory: &tracer.memory,
+            base,
+        };
+        let found = if machine == CodeMachine::Arm64 {
+            arm64::describe_arm64_entry(
+                &code,
+                base,
+                arm64::Arm64Function {
+                    begin: function.begin,
+                    end: function.end,
+                    unwind_data: function.unwind_data,
+                },
+                symbol,
+            )
+        } else {
+            amd64::describe_entry_chain(
+                &code,
+                base,
+                RUNTIME_FUNCTION {
+                    BeginAddress: function.begin,
+                    EndAddress: function.end,
+                    UnwindData: function.unwind_data,
+                },
+                symbol,
+            )
+        };
+        return match found {
+            amd64::EntryLookup::Found {
+                entries,
+                incomplete,
+            } => Ok(FunctionEntry {
+                module: "a dynamic function table".to_string(),
+                image_base: base,
+                entries,
+                incomplete,
+            }),
+            amd64::EntryLookup::Leaf | amd64::EntryLookup::Holed => Err(Error::DebugInfo(format!(
+                "the unwind data of the dynamic function at {address:#x} is unreadable"
+            ))),
+        };
     };
     let (base, module) = (module.info.base_address.0, module.info.short_name.clone());
     let machine = tracer.code_machine_at(address);
@@ -1041,7 +1134,6 @@ pub fn function_entry(
             "{address:#x} is x86 code, which has no function table"
         )));
     }
-    let symbol = |address| format_symbol(debugger, trace, address);
     let lookup = |tracer: &StackTracer<'_>| {
         let (image, layout) = tracer.module_code(address)?;
         let layout = layout.as_deref();
@@ -1085,15 +1177,7 @@ pub fn build_stacktrace(
     regs: &[u8],
     limit: usize,
 ) -> StackTrace {
-    let recovered = build_stacktrace_with_context(debugger, register_map, regs, limit);
-    StackTrace {
-        frames: recovered
-            .frames
-            .into_iter()
-            .map(|frame| frame.frame)
-            .collect(),
-        truncated: recovered.truncated,
-    }
+    build_stacktrace_with_context(debugger, register_map, regs, limit).into_stacktrace()
 }
 
 /// Build a stack trace while retaining the register values known at every
@@ -1114,8 +1198,9 @@ pub fn build_stacktrace_with_context(
 }
 
 /// [`build_stacktrace_with_context`] for the registers of `thread`, the
-/// Windows thread they belong to: a WOW64 thread's walk goes on into its x86
-/// frames where it left x86 code (see [`wow64`]).
+/// Windows thread they belong to (on a user-mode minidump, its selected
+/// thread): a WOW64 thread's walk goes on into its x86 frames where it left
+/// x86 code (see [`wow64`]).
 pub fn build_thread_stacktrace(
     debugger: &Target,
     register_map: &RegisterMap,
@@ -1124,9 +1209,17 @@ pub fn build_thread_stacktrace(
     limit: usize,
 ) -> RecoveredStackTrace {
     let mut stack = build_stacktrace_with_context(debugger, register_map, regs, limit);
-    if let Some(thread) = thread {
+    // A user-mode minidump's thread is its selected one.
+    let teb = match thread {
+        Some(thread) => thread.teb,
+        None => debugger
+            .user_thread()
+            .map(|thread| VirtAddr(thread.teb))
+            .filter(|teb| !teb.is_zero()),
+    };
+    if let Some(teb) = teb {
         let trace = resolve_thread_trace_context(debugger, stack.dtb);
-        wow64::add_x86_frames(debugger, &trace, thread, &mut stack, limit);
+        wow64::add_x86_frames(debugger, &trace, teb, &mut stack, limit);
     }
     stack
 }
@@ -1168,6 +1261,9 @@ fn build_stacktrace_from_values(
         .unwrap_or(0);
     let context = FrameRegisters::from_lookup(debugger.arch(), |name| values.get(name).copied());
     let trace = resolve_thread_trace_context_at(debugger, cr3, context.pc);
+    if let Some(stack) = wow64::live_x86_stack(debugger, &trace, &values, limit) {
+        return stack;
+    }
     build_recovered_stacktrace_seeded(
         debugger,
         &trace,
@@ -1334,7 +1430,9 @@ pub fn build_parked_thread_recovered_stack(
                     limit,
                     HashMap::from([(debugger.arch().dtb_register().to_string(), process_dtb)]),
                 );
-                wow64::add_x86_frames(debugger, &trace, thread, &mut stacktrace, limit);
+                if let Some(teb) = thread.teb {
+                    wow64::add_x86_frames(debugger, &trace, teb, &mut stacktrace, limit);
+                }
                 stacktrace.thread = Some(thread.ethread);
                 return Ok(ThreadRecoveredStack {
                     source: ThreadStackSource::ContextSwitch { kernel_stack },
@@ -1364,7 +1462,9 @@ pub fn build_parked_thread_recovered_stack(
                     limit,
                     HashMap::from([(debugger.arch().dtb_register().to_string(), process_dtb)]),
                 );
-                wow64::add_x86_frames(debugger, &trace, thread, &mut stacktrace, limit);
+                if let Some(teb) = thread.teb {
+                    wow64::add_x86_frames(debugger, &trace, teb, &mut stacktrace, limit);
+                }
                 stacktrace.thread = Some(thread.ethread);
                 return Ok(ThreadRecoveredStack {
                     source: ThreadStackSource::TrapFrame { address },
@@ -1573,6 +1673,10 @@ mod tests {
             put(header + 36, &characteristics.to_le_bytes());
         }
         put(0x1000, &[0xcc; 0x1000]);
+        // The `call FRAMED` that `RETURN_ADDRESS` follows.
+        let call = CALLER as usize + 0x10 - 5;
+        put(call, &[0xe8]);
+        put(call + 1, &(FRAMED as i32 - (call as i32 + 5)).to_le_bytes());
         for (index, (begin, unwind_info)) in [(FRAMED, 0x2100u32), (CALLER, 0x2110)]
             .into_iter()
             .enumerate()
@@ -1702,6 +1806,33 @@ mod tests {
         );
     }
 
+    /// A scan skips a code address no call precedes: a function pointer or
+    /// a value that lands in code is no return address.
+    #[test]
+    fn a_scan_skips_code_no_call_precedes() {
+        let session = frame_pointer_session_with(&[
+            (8, IMAGE + u64::from(CALLER) + 0x20),
+            (0x18, RETURN_ADDRESS),
+        ]);
+        let seed = registers(&[("rip", FRAMED_RIP), ("rsp", FRAMED_RSP)]);
+
+        let trace =
+            build_stacktrace_with_register_values(&session.target, &session.register_map, &seed, 8);
+
+        let frames: Vec<_> = trace
+            .frames
+            .iter()
+            .map(|frame| (frame.frame.ip, frame.frame.sp, frame.frame.source))
+            .collect();
+        assert_eq!(
+            frames,
+            [
+                (FRAMED_RIP, FRAMED_RSP, FrameSource::Current),
+                (RETURN_ADDRESS, FRAMED_RBP + 0x18, FrameSource::Scan)
+            ]
+        );
+    }
+
     /// A function that called itself returns to its own call site: the
     /// unwind lists both frames and goes on to the outer caller, as the
     /// stack moved between them.
@@ -1742,12 +1873,36 @@ mod tests {
     /// a guest's value, which the scan does not take for a frame.
     #[test]
     fn a_foreign_root_scan_takes_only_its_own_image() {
-        let session = frame_pointer_session();
+        // The fixture image twice: the hypervisor's at `IMAGE`, and an NT
+        // module's copy after the stack. The stack holds a return address
+        // into each, the NT one nearer its top.
+        const NT_IMAGE: u64 = STACK + 0x2000;
+        let nt_return_address = NT_IMAGE + u64::from(CALLER) + 0x10;
+        let mut memory = frame_pointer_image();
+        memory.resize(IMAGE_SIZE + 0x2000, 0);
+        memory.extend_from_slice(&frame_pointer_image());
+        let stack = |address: u64| (address - IMAGE) as usize;
+        for (offset, value) in [
+            (0, CALLER_RBP),
+            (8, nt_return_address),
+            (0x18, RETURN_ADDRESS),
+        ] {
+            let at = stack(FRAMED_RBP) + offset;
+            memory[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        let mut session = session_over_memory(IMAGE, &memory);
+        session
+            .target
+            .set_kernel_modules_for_test(vec![ModuleInfo::new(
+                "fixture.sys".to_string(),
+                VirtAddr(NT_IMAGE),
+                IMAGE_SIZE as u32,
+            )]);
         let mut trace = super::resolve_thread_trace_context(&session.target, 0);
         trace.foreign_image = Some(ModuleInfo::new(
             "hv".to_string(),
-            VirtAddr(0xffff_f847_9860_0000),
-            0x40_0000,
+            VirtAddr(IMAGE),
+            IMAGE_SIZE as u32,
         ));
 
         let walk = super::walk::build_recovered_stacktrace_seeded(
@@ -1760,7 +1915,7 @@ mod tests {
         );
 
         let frames: Vec<_> = walk.frames.iter().map(|frame| frame.frame.ip).collect();
-        assert_eq!(frames, [FRAMED_RIP]);
+        assert_eq!(frames, [FRAMED_RIP, RETURN_ADDRESS]);
     }
 
     /// Windows hypervisor code whose unwind data leaves out its prolog's

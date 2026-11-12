@@ -5,15 +5,15 @@
 
 use owo_colors::OwoColorize;
 
-use crate::base::disasm::{AsmKind, DisasmRow, OperandKind, decode_code, decode_preceding};
-use crate::base::memory::{MemoryOps, read_page_chunks};
+use crate::base::disasm::{
+    AsmKind, DisasmRow, decode_code, decode_preceding, direct_branch_target,
+};
+use crate::base::memory::read_page_chunks;
 use crate::base::output::strip_ansi;
 use crate::base::types::VirtAddr;
-use crate::hosts::repl::disasm_context_rows;
+use crate::hosts::repl::{disasm_context_rows, read_code};
 use crate::hosts::ui;
-use crate::nt::unwind::{
-    SymbolName, ThreadTraceContext, format_symbol, preferred_code_dtb, symbol_name,
-};
+use crate::nt::unwind::{SymbolName, ThreadTraceContext, format_symbol, symbol_name};
 use crate::session::Session;
 
 /// The widest the instruction column grows before its notes.
@@ -121,7 +121,7 @@ pub fn listing_lines(
         .enumerate()
         .map(|(index, row)| {
             let away = away[index];
-            match (direct_target(row), row.jump()) {
+            match (direct_branch_target(&row.operands()), row.jump()) {
                 (Some(target), Some(_)) => {
                     let label = match away {
                         Some(_) => format!("{} {}", arrow(index, target), symbol(target)),
@@ -379,18 +379,6 @@ fn gutter(arcs: &[Arc], rows: usize, max_lanes: usize) -> (Vec<String>, Vec<Stri
     (lines, between, unplaced)
 }
 
-/// The target of a direct jump or call whose only operand is its target
-/// (`jne`, `call`, `b`, `bl`), the instructions whose text can name it in
-/// place of its address.
-fn direct_target(row: &DisasmRow) -> Option<u64> {
-    match row.operands().as_slice() {
-        [operand] if operand.kind == OperandKind::Branch => {
-            operand.immediate.map(|target| target as u64)
-        }
-        _ => None,
-    }
-}
-
 /// The instruction's mnemonic and prefixes, styled, with the spacing before
 /// its first operand.
 fn mnemonic_text(row: &DisasmRow) -> String {
@@ -444,17 +432,9 @@ pub fn code_window(
         _ => rip.saturating_sub(PRECEDING_BYTES),
     };
     let to = rip + FOLLOWING_BYTES;
-    let active = debugger.address_space(trace.active_dtb);
-    let code_dtb = preferred_code_dtb(trace, rip);
-    let code = debugger.address_space(code_dtb);
-    let Ok((mut bytes, valid)) =
+    let Ok((bytes, valid)) =
         read_page_chunks(VirtAddr(from), (to - from) as usize, |address, buf| {
-            active
-                .read_bytes(address, buf)
-                .or_else(|error| match code_dtb == trace.active_dtb {
-                    true => Err(error),
-                    false => code.read_bytes(address, buf),
-                })
+            read_code(debugger, trace, address, buf)
         })
     else {
         return classic();
@@ -463,7 +443,6 @@ pub fn code_window(
     if !valid[at] {
         return classic();
     }
-    session.mask_code(VirtAddr(from), &mut bytes, trace.active_dtb);
     let lo = valid[..at]
         .iter()
         .rposition(|valid| !valid)

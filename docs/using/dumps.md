@@ -171,7 +171,7 @@ The commands that look at one process work on the dump's own records:
    33 0000005ceb90f8e0  00007ff94930caec  ntdll!RtlUserThreadStart+0x2c
   ```
 
-- Memory commands, {command}`u`, {command}`dt`, {command}`dx`, {command}`x`, {command}`ln`, and {command}`s` read the captured memory, and say so when an address was not captured. `$teb` and `$peb` point to the selected thread's TEB and the process's PEB.
+- Memory commands, {command}`u`, {command}`dt`, {command}`dx`, {command}`x`, {command}`ln`, and {command}`s` read the captured memory, and say so when an address was not captured. A module's code and headers that the dump did not capture, as in a small dump, are read from the module's image file, relocated to where the module was loaded, as WinDbg does, so {command}`u`, {command}`uf`, {command}`db`, {command}`!dh`, and {command}`!lmi` work there too; {command}`!chkimg` compares only what the dump holds. `$teb` and `$peb` point to the selected thread's TEB and the process's PEB.
 - {command}`analyze` reports the exception: its code and name, its flags and parameters (an access violation's read, write, or execute and its address, and the parameters of C++ and CLR exceptions), the faulting thread's stack, the module the exception was raised in, a failure signature, and the culprit, the first frame outside the system modules. `!analyze -v` adds the whole stack, the exception's registers, and every module. A dump written without an exception says so and shows the process and the current thread's stack instead.
 
   ```text
@@ -214,6 +214,7 @@ The commands that look at one process work on the dump's own records:
   ```
 
 - {command}`!vprot` shows the same region as `VirtualQuery` would, and {command}`!heap` walks the process's heaps.
+- {command}`!cs` lists the process's critical sections, as ntdll keeps them on `RtlCriticalSectionList`, with each one's owner and waiters; `!cs -l` lists only the held ones. {command}`!runaway` lists the threads by the processor time the dump's thread-info stream records: user-mode time, and with `!runaway 7` kernel-mode time and the time since each thread started.
 - {command}`.time` shows when the dump was written, in UTC and in the time zone the dump records, and the process's creation time, uptime, and CPU time. A user-mode minidump records no system time or system uptime, and `.time` says so rather than guessing. {command}`vertarget` shows the Windows version, the processors, the process, and the kinds of data the dump was written with:
 
   ```text
@@ -259,7 +260,7 @@ To write a dump from a live halted target, use the WinDbg-compatible command:
 .dump [/f] [/ma] <file>
 ```
 
-It streams a `PAGEDU64` full kernel dump one page at a time. It needs a live halted target with memory introspection, so a static crash-dump session cannot write another dump.
+It streams a `PAGEDU64` full kernel dump one page at a time. It needs a live halted target with memory introspection, so a static crash-dump session cannot write another kernel dump; it can write a [minidump of one process](#a-minidump-of-one-process).
 
 The command supports AMD64 and ARM64 targets, and the `MachineImageType` in the header and the embedded `CONTEXT` record follow the architecture of the target. It accepts `/f` and `/ma` as full-dump switches. To open the file again, use `ntoseye --dump <file>`.
 
@@ -268,6 +269,28 @@ The command first writes to a temporary file with mode `0600` in the same direct
 If you press Ctrl+C or the write fails, the command removes the temporary file and an existing dump at the destination does not change. This means that replacing a dump needs disk space for the new file and the old file at the same time.
 
 If the command cannot read a guest page, it writes zeros for that page and shows the number of these pages in its output. If a target has more than 42 physical-memory runs, the command gives an error and does not write a dump, because the full dump would be incomplete.
+
+### A minidump of one process
+
+`.dump /u <file>` writes a user-mode minidump (`MDMP`) of the current process: the process that {command}`.process` or {command}`attach` selected, else the owner of the current thread. It works on a live target and on a kernel dump, so you can take one process out of a kernel dump and open it with `ntoseye --dump`, WinDbg, or another minidump reader. The minidump holds:
+
+- each thread, with the user-mode registers that its stack walk recovers, its TEB, the used part of its user stack, its times, its priority, and its name;
+- each module of the process's loader lists, with its CodeView record, so the PDBs are found without the images, and its version when its version resource is in memory;
+- the modules the process unloaded, from ntdll's unload trace;
+- each handle of the process, with its type, object name, access, attributes, and counts, so {command}`!handle` works on the minidump;
+- the build string and the time-zone bias, so {command}`.time` shows local time;
+- when the target stopped at an exception that a thread of the process raised in user mode, that exception with the thread's context, so {command}`.ecxr` and {command}`!analyze` work on the minidump;
+- the regions of the address space as `VirtualQuery` reports them, so {command}`!address` and {command}`!vprot` work on the minidump;
+- every committed page of the process that is in physical memory, as a full-memory minidump holds it, and every committed page the process has never touched, which holds zeros.
+
+A page that is in the page file is not in the minidump, though a page in the memory-compression store is (see [Compressed memory](memory.md#compressed-memory)), and a region larger than 64 MiB, such as the CFG bitmap's reservation, is split by which of its pages are in memory or in the store. A thread whose kernel stack is not in memory, which is common in a kernel dump, has no registers in the minidump, and the command says how many threads have none. The time zone has its bias but not its names.
+
+```text
+attach 680
+.dump /u /tmp/csrss.dmp
+```
+
+The file is written and replaced the same way as a kernel dump, and Ctrl+C cancels it.
 
 ## Generating dumps
 

@@ -7,7 +7,7 @@ A virtual processor leaves its guest for the hypervisor with a VM exit: to make 
 {command}`!hvcalls` lists the hypercalls that the hypervisor implements, from its own hypercall table: the call code, the name that the Hyper-V TLFS gives it, whether it is a simple or a rep call (`+var` marks a variable-size input header), the sizes of its fixed input and output and of each rep element, and its handler. Codes that share the handler of the reserved code 0 are not implemented, and `-a` lists them too.
 
 ```text
-1: mem> !hvcalls
+0: mem> !hvcalls
 Code    Name                                  Kind        Input   Rep in  Output  Rep out  Handler
 0x0000  -                                     simple      -       -       -       -        hv+0x2868a0
 0x0001  HvCallSwitchVirtualAddressSpace       simple      0x8     -       -       -        hv+0x28fc70
@@ -29,11 +29,11 @@ The addresses are in the address space of the hypervisor. To read them with {com
 {command}`!hvcall` shows the hypercall that the current vCPU's processor handles, at a stop in the hypervisor such as a hit of {command}`!hvbp` or of {command}`ba` `e1 hv!HvCallFlushVirtualAddressList`. It finds the caller as {command}`!hvbp` does, and decodes the call from the caller's registers at its `VMCALL`: the call code and TLFS name, the flags (fast, the size of a variable header, nested), a rep call's start and count, the GPAs of the input and output, and each field of the input as the Hyper-V TLFS lays it out, then each element of a rep call's input list, with the elements before the rep start marked `done`. Fields that have names for their values show them: `HV_PARTITION_ID_SELF`, flags, the VPs of a processor mask or of a sparse processor set (`HV_VP_SET`), a VTL, the TLFS names of the common registers in `HvCallGetVpRegisters` and `HvCallSetVpRegisters`, and the pages of a GVA or GPA range. ntoseye decodes the flushes of virtual and guest physical address spaces and lists and their `Ex` forms, the synthetic IPIs, `HvCallNotifyLongSpinWait`, `HvCallPostMessage`, `HvCallSignalEvent`, the VP register calls, `HvCallModifyVtlProtectionMask`, `HvCallEnablePartitionVtl`, `HvCallEnableVpVtl`, `HvCallStartVirtualProcessor`, `HvCallGetVpIndexFromApicId`, and `HvCallRetargetDeviceInterrupt`. For another call, it shows the first eight qwords of the input, or RDX and R8 for a fast call. For example, a flush of two ranges of an address space on VPs 0 and 1, whose first range is done, shows as follows:
 
 ```text
-1: mem> !hvbp HvCallFlushVirtualAddressList
-1: mem> g
+0: gdb> !hvbp HvCallFlushVirtualAddressList
+0: gdb> g
 ...
 
-1: mem> !hvcall
+0: gdb> !hvcall
 root partition VP 0 VTL0  hypercall 0x0003 HvCallFlushVirtualAddressList fast rep 0/4
 ├─ input value 0x0000000400010003  fast
 ├─ input in RDX and R8

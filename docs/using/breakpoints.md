@@ -4,7 +4,7 @@ All breakpoint commands share one grammar, which follows WinDbg. A code breakpoi
 
 - `/1`: one-shot.
 - `/a`: set a {command}`bp` or {command}`bu` breakpoint without checking that an instruction starts at its address ([below](#where-a-code-breakpoint-can-go)). WinDbg has `/a` only on {command}`bm`, for locations that it would otherwise skip.
-- `/p <pid>`: process scope.
+- `/p <pid>`: process scope. The target is also evaluated in that process ([below](#scope-filters)).
 - `/t <ethread>`: thread scope.
 - `/c <processor>`: processor scope. WinDbg does not have this option.
 - `/w "<expr>"`: conditional shorthand.
@@ -53,10 +53,13 @@ The Python SDK's `dbg.breakpoints.add()` makes the same check, with the same ref
 
 ### Code that Windows cannot take a trap in
 
-On the `kd` and `kdnet` backends, Windows itself takes each single step and breakpoint and hands it to the debugger, and in two places a trap brings it down with bugcheck `UNEXPECTED_KERNEL_MODE_TRAP` (`0x7F`, a double fault) instead. ntoseye refuses traps there, with the reason. The `gdb` backend breaks and steps below Windows, which then sees no exception, so it allows both.
+On the `kd` and `kdnet` backends, Windows itself takes each single step and breakpoint and hands it to the debugger, and in some places a trap brings it down instead. ntoseye refuses traps there, with the reason. The `gdb` backend breaks and steps below Windows, which then sees no exception, so it allows them all.
 
 - ntoskrnl's `KVASCODE` section holds the code that switches between kernel and user mode: the system-call entry `nt!KiSystemCall64Shadow` and the exits back to user mode, such as `nt!KiKernelSysretExit`. An exit uses the stack pointer as a scratch register and switches to the user page tables before it returns to user mode, and a debug exception that comes in between finds no usable kernel stack. ntoseye refuses a code breakpoint, `ba e1` included, and a single step there. A step that reaches the section, such as a {command}`pt` past the return of a system call, stops at its first instruction and says why. Resume with {command}`g`, or stop in user mode with a breakpoint there.
-- Before Windows reports a trap to the debugger, it runs the trap handlers `nt!KiBreakpointTrap` and `nt!KiDebugTrapOrFault`, `nt!KiDispatchException` up to its call of `nt!KdTrap`, and the functions they call, such as `nt!RtlpValidateContextFlags2` and `nt!__memset_spec_ermsb`. Every trap runs that code, so a breakpoint there traps again while each trap is dispatched, until the stack overflows. ntoseye finds that code by following the direct calls and jumps from those handlers in the kernel's code, and refuses a code breakpoint, `ba e1` included, in it. A single step there is allowed, because the trap flag is clear while a trap is dispatched. A {command}`wt` or SDK walk whose thread an interrupt switched out there cannot mark where the thread goes on, so it ends with the reason.
+- Before Windows reports a trap to the debugger, it runs the trap handlers `nt!KiBreakpointTrap` and `nt!KiDebugTrapOrFault`, `nt!KiDispatchException` up to its call of `nt!KdTrap`, and the functions they call, such as `nt!RtlpValidateContextFlags2` and `nt!__memset_spec_ermsb`. Every trap runs that code, so a breakpoint there traps again while each trap is dispatched, until the stack overflows. ntoseye finds that code by following the direct calls and jumps from those handlers in the kernel's code, and refuses a code breakpoint, `ba e1` included, in it. On ARM64 the handler, `nt!KiSynchronousException`, takes every class of synchronous exception, page faults included, so following its calls reaches most of the kernel; ntoseye refuses a code breakpoint in it, `nt!KzSynchronousException`, `nt!KxDispatchExceptionOnExceptionStack` and `nt!KiDispatchException` instead, but not in the functions they call. A {command}`p` over a call in `nt!KiSynchronousException`, where a step can stop, hung the target at its breakpoint's first hit. A single step there is allowed, because the trap flag is clear while a trap is dispatched. A {command}`wt` or SDK walk whose thread an interrupt switched out there cannot mark where the thread goes on, so it ends with the reason.
+- The kernel debugger's own code runs each time Windows enters the debugger and leaves it: `nt!KdTrap`, `nt!KdEnterDebugger`, `nt!KdExitDebugger`, the `nt!Kdp*` functions, and the KD transport (`kdcom`, `kdnet` and its NIC extensions `kd_*`, `kdstub`). The debugger also calls `nt!KeQueryPerformanceCounter` while the target is halted, to time its packets. A breakpoint there enters the debugger again from within it: one at `nt!KdpReport` brings an x64 target down with `0x7F` at once, one at `nt!KdExitDebugger` an ARM64 target with `PANIC_STACK_SWITCH` (`0x2B`) within seconds, one at `nt!KdEnterDebugger` hangs the next break-in, and one at `nt!KeQueryPerformanceCounter` hangs an ARM64 target as it is written. ntoseye refuses a code breakpoint there, its own included: on ARM64 a step can stop in an interrupt the processor took while it left the debugger, and a {command}`gu` from there would return into `nt!KdExitDebugger`, or a {command}`p` from there put its breakpoint in `nt!KeQueryPerformanceCounter`.
+
+The code breakpoint refusals go away when the `NTOSEYE_NO_BREAKPOINT_BLOCKLIST` environment variable is set to `1`, for when a breakpoint there is what you want and the target may go down. The refusal of a single step in `KVASCODE` stays.
 
 ## Breakpoints on non-resident pages
 
@@ -70,11 +73,13 @@ A `ba e1` stop can occur before the instruction page fault, when there are no by
 
 `/p` filters the hits that `ntoseye` reports and does not change how it installs the breakpoint. The target always manages kernel sites, and `ntoseye` patches user-space sites through the page tables of the selected process, so a breakpoint in a shared physical page can also trap other processes. `ntoseye` discards those hits, but each of them still causes debugger round trips.
 
+`/p` also names the process in which {command}`bp`, {command}`bu`, {command}`bm`, and {command}`ba` evaluate their address or pattern, as if you had run {command}`.process` `/p <pid>` first, and `ntoseye` loads the symbols of the modules that the address or pattern names in that process. For example, `ba e1 /p 4140 kernelbase!GetFileAttributesExW+0x60` resolves while the current process context is the System process, or while the target is stopped in the hypervisor. The current process context stays as it was. A kernel symbol resolves the same in every process.
+
 `/t` is the same kind of filter. It compares the Windows thread of the stop with the thread that you specify, and it takes the same values as {command}`!thread`: a thread ID, an ETHREAD, or a KTHREAD.
 
 No target sets a breakpoint for one thread. A software site is a byte in a page that all threads share, and a debug register belongs to a processor on which Windows can schedule any thread. Every thread that executes the site traps, and `ntoseye` discards the hits of the other threads. Each discarded hit costs a step-over and a resume, so a filter on a site that the whole system calls slows the session down. If `ntoseye` cannot find the thread of a hit, it reports the hit instead of discarding it, so a filter does not hide a stop from you.
 
-{command}`p` over a call, {command}`gu`, {command}`wt`, and the SDK's `step_over()`, `step_out()`, and step-until walks wait for their own thread, and they keep this cost down with a free debug register. Such a step watches the thread's `KTHREAD.State` and sets its breakpoints only while Windows is about to run the thread or runs it, so the other threads that run the same code do not stop the target while the thread waits. Without a free slot, or in a remote `dbg.command()` call that hands back a running target, the breakpoints stay set for the whole wait.
+{command}`p` over a call, {command}`gu`, {command}`wt`, and the SDK's `step_over()`, `step_out()`, and step-until walks wait for their own thread, and they keep this cost down with a free debug register. Such a step watches the thread's `KTHREAD.State` and sets its breakpoints only while Windows is about to run the thread or runs it, so the other threads that run the same code do not stop the target while the thread waits. Without a free slot, or in a remote `dbg.command()` call or a step from a DAP editor, either of which hands back a running target, the breakpoints stay set for the whole wait.
 
 `/c` filters on the processor. It takes a processor number as {command}`~` shows it, and `ntoseye` compares this number with the vCPU that reported the stop. Because `ntoseye` gets this vCPU at no cost, `/c` does not add a walk the way `/t` does.
 
@@ -117,6 +122,8 @@ g
 KD has a software-breakpoint table with a fixed size of 32 entries. If you kill a session with `SIGKILL`, its entries stay installed and can prevent later breakpoints at the same addresses.
 
 When `ntoseye` attaches, it reclaims the entries that no live session owns, restores the displaced instructions, and reports how many entries it reclaimed. If an install collides with an entry, it also reclaims stale entries and tries the install again. `bc *` clears only the handles of the current session, and a normal exit, `SIGTERM`, or `SIGHUP` releases them.
+
+Windows releases an entry only where it can put the displaced instruction back: the page must be resident, and the site must still hold the breakpoint instruction. Otherwise it keeps the entry, and `ntoseye` reports the entries it could not release. Windows hands such an entry back, without writing a breakpoint instruction, to the next install at its address; `ntoseye` then releases the entry and installs the breakpoint again, so the breakpoint stops.
 
 ## Stopping at a driver load
 
@@ -178,9 +185,30 @@ k
 
 On the `gdb` backend, `ntoseye` plants an unload trap the same way as the load trap, at `nt!DbgUnLoadImageSymbols` and `nt!DbgUnLoadImageSymbolsUnicode`, the kernel functions that report an unload. The unload trap is in place only while an `sxe`/`sxn ud` filter is set, and a breakpoint that waits for its module does not keep it.
 
+## Stopping at a user-mode DLL load
+
+`sxe ld:mydll` stops when a process maps `mydll.dll`, and `sxn ld` shows a `ModLoad:` line for each user-mode image as well as each kernel image. Windows reports user-mode images to a kernel debugger only while the `ksl` global flag is set, and then only for the first process that maps each image. `ntoseye` therefore sets its own trap, the user-image trap, at `nt!PsCallImageNotifyRoutines`, which the kernel runs for every image that it maps into every process. The trap works on KD, KDNET, and the `gdb` backend.
+
+:::{note}
+On ARM64 (seen on Windows 11 22631), the kernel calls the image-load notify routines inline when it maps a DLL and reaches `nt!PsCallImageNotifyRoutines` only for the images a new process starts with: its executable and `ntdll.dll`. The trap therefore does not see later DLL loads there, and neither `sxe ld:mydll` nor a deferred `bu /p <pid> mydll!...` fires for them. Set {command}`!gflag` `+ksl` instead: Windows then reports user-mode images itself, and the `ld` filters and deferred breakpoints apply to its reports as they do to the trap's. It reports only the first process that maps each image, so a DLL that some process already has loaded is not reported again; load it from a path no process uses yet, or start the process before the DLL is loaded anywhere. Clear the flag afterwards with {command}`!gflag` `-ksl`.
+:::
+
+The trap is in place only while something waits for a user-mode load: a deferred breakpoint scoped to a process, or an `ld` filter that can name a DLL, which is bare `ld` or a filter for any module that is not a `.sys` driver. `ntoseye` sets the trap when the target resumes and says so, and it removes the trap at the first resume after which nothing waits. While the trap is in place, every image that any process maps halts the target briefly, so starting a process takes noticeably longer.
+
+Windows maps some images more than once: the loader can map a DLL again, and an image can be mapped for its resources. `ntoseye` reports each mapping.
+
+A deferred breakpoint scoped to a process waits for the module in that process: `bu /p <pid> mydll!DllMain` is armed as `mydll.dll` is mapped into that process, before its entry point runs. At that point the loader has not yet added the DLL to the process's module lists, so `ntoseye` loads its symbols from the image itself. If the PDB cannot be found, `ntoseye` says so, and the breakpoint stays deferred. The process has not touched the page that holds the breakpoint yet, so on KD `ntoseye` hands the breakpoint to the target's breakpoint table, which writes it when the process first runs that page. The `gdb` backend sets no software breakpoint in user space (see below).
+
+The kernel has no notify routine for a user-mode image that is unmapped. Over KD with {command}`!gflag` `+ksl` set, Windows reports those unloads, and the `ud` filters apply to them.
+
+```text
+bu /p 4140 mydll!DllMain
+g
+```
+
 ## User-mode breakpoints in shared pages
 
-The `gdb` backend sets no software breakpoint in user space, whatever the scope. A GDB stub writes and removes the `int3` through the page tables of the vCPU that it has selected, and that vCPU might not map the page, for example a vCPU that is stopped in the Windows hypervisor or that runs a Hyper-V guest. The byte would then stay in shared code after the session, and the next process to run it would trap in the guest. Under VBS, a step or {command}`wt` that goes on into user space marks each next instruction with a free hardware breakpoint slot instead. A step over a call or a {command}`gu` that returns there ends with an error. Use a hardware breakpoint ({command}`ba` `e1`) to stop in user space.
+The `gdb` backend sets no software breakpoint in user space, whatever the scope. A GDB stub writes and removes the `int3` through the page tables of the vCPU that it has selected, and that vCPU might not map the page, for example a vCPU that is stopped in the Windows hypervisor or that runs a Hyper-V guest. The byte would then stay in shared code after the session, and the next process to run it would trap in the guest. Under VBS, a step or {command}`wt` that goes on into user space marks each next instruction with a free hardware breakpoint slot instead. A step over a call, a {command}`gu` and the other runs to an address that return there ({command}`pc`, {command}`pa`, {command}`pt`) take a free hardware breakpoint slot for the run, and end with an error only when no slot is free. Use a hardware breakpoint ({command}`ba` `e1`) to stop in user space, except in a WOW64 process's 32-bit code: when one fires there while the other vCPUs run, QEMU cannot resume the VM and pauses it with an internal error until it is reset, so `ntoseye` refuses it. Data watches that 32-bit code hits, and stepping through 32-bit code, work.
 
 A software breakpoint is an `int3` byte in a physical frame, and all processes that map an image page share that frame. For example, `bu /p <pid> user32!PeekMessageW` puts the byte in the single frame that backs `user32.dll` for the whole machine, so every process that calls that function traps.
 
@@ -191,17 +219,19 @@ The scope is a filter on the host. `ntoseye` compares the process that trapped w
 3. It writes the byte back.
 4. It resumes the target.
 
-No view shows the injected byte. `ntoseye` hides a site in every read that reaches the frame that contains it, so each process that maps a shared page shows the original instruction. If a process has its own memory at the same address instead of the shared frame, `ntoseye` does not change reads of that memory. Only the debugger views hide the `int3`, and the guest still executes it.
+No view shows the injected byte, and no expression reads it: `by(nt!NtClose)`, `poi`, and a breakpoint condition read the original instruction, as {command}`db` shows it, so `eb nt!NtClose by(nt!NtClose)` writes back the code that is already there. `ntoseye` hides a site in every read that reaches the frame that contains it, so each process that maps a shared page shows the original instruction. If a process has its own memory at the same address instead of the shared frame, `ntoseye` does not change reads of that memory. Only the debugger's reads hide the `int3`, and the guest still executes it.
 
 ### The site journal
 
-The breakpoint table of the target does not contain these bytes, so before `ntoseye` writes a byte, it records the site in `~/.ntoseye/sites/` together with the frame, the kernel base of the boot, and the original bytes.
+The breakpoint table of the target does not contain these bytes, so before `ntoseye` writes a byte, it records the site in `~/.ntoseye/sites/` together with the frame, the page that the frame holds (the `PteAddress` of its `_MMPFN`), the kernel base of the boot, and the original bytes.
 
 When `ntoseye` exits, detaches, or gets a terminating signal, it removes the byte and the record. If a session ends without this cleanup, for example because it is killed or crashes, the byte and the record stay.
 
+After the process of a site exits, its page tables are gone, and `ntoseye` cannot remove the byte through them. The page of a shared image stays in memory while other processes map it, so `ntoseye` writes the original bytes through the recorded frame instead, but only while the frame still contains the breakpoint and still holds the same page. Otherwise it leaves the frame unchanged. In both cases the breakpoint is removed, so a detach still resumes the guest.
+
 The next attach to the same boot writes the original bytes back and shows how many sites it restored. This attach can use the same endpoint or a different one, for example a `kdnet` attach after a `gdb` session was killed.
 
-`ntoseye` restores a site only while the frame still contains the breakpoint followed by the recorded bytes. If the guest has restored or reused the frame since the session ended, `ntoseye` leaves the frame unchanged.
+`ntoseye` restores a site only while the frame still contains the breakpoint followed by the recorded bytes and still holds the same page. If the guest has restored or reused the frame since the session ended, `ntoseye` leaves the frame unchanged. A record from an older version of `ntoseye` has no page, and `ntoseye` restores it by its bytes alone, as that version did.
 
 `ntoseye` sets kernel breakpoints through the breakpoint API of the target. The Windows KD breakpoint table keeps its entries after a session ends without cleanup, and the next session releases them, but the breakpoint table of a GDB stub does not always keep its entries. Under VBS, an `int3` that such a session set in kernel code stays after the next connect. On the `gdb` backend, `ntoseye` therefore also records kernel sites in the journal, including the [bugcheck trap](bugchecks.md#how-the-crash-is-caught).
 

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use ntoseye_macros::record;
 
-use super::{SymbolSearchMatch, Target, lookup_register};
+use super::{SymbolSearchMatch, Target, lookup_register, memory::read_filling_from_image_files};
 use crate::{
     base::{
         error::{Error, Result},
@@ -20,7 +20,7 @@ use crate::{
         symbols::{
             CodeFrame, InlineFrame, LocalVariableLocation, ProcedureLocal, SourceLineExtent,
             SourceLocation, Symbol, SymbolCandidate, SymbolIndex, SymbolStore,
-            format_symbol_with_offset, glob_matches,
+            format_symbol_with_offset, glob_matches, split_query_module,
         },
         unwind::frame_base_for_register_values,
     },
@@ -54,6 +54,25 @@ impl Target {
                 }
             }),
             Err(_) => self.triage_modules(),
+        }
+    }
+
+    /// Keep the kernel module list across halts, in this boot's guest and
+    /// every later one, for a backend that reports each module load and
+    /// unload; the session forgets it at each report (see
+    /// [`Self::forget_kernel_modules`]).
+    pub fn keep_kernel_modules(&mut self) {
+        self.keep_kernel_modules = true;
+        if let Some(guest) = &self.guest {
+            guest.keep_kernel_modules();
+        }
+    }
+
+    /// Read the kernel module list afresh at its next use: a module loaded
+    /// or unloaded.
+    pub fn forget_kernel_modules(&self) {
+        if let Some(guest) = &self.guest {
+            guest.forget_kernel_modules();
         }
     }
 
@@ -178,13 +197,38 @@ impl Target {
     /// The exports of the module mapped at `base` in `dtb`'s address space,
     /// read from its in-memory export directory ([`read_pe_exports`]).
     pub fn module_exports(&self, dtb: Dtb, base: VirtAddr) -> Result<Vec<ModuleExportInfo>> {
-        let image = self.mapped_pe_image(dtb, base)?;
+        let image = self.image_backed_pe_image(dtb, base)?;
         Ok(read_pe_exports(&image, base)?.exports)
     }
 
-    /// Load symbols for one module (by short name, e.g. `user32`) or, with
-    /// `None`, every module of process `pid`, without changing the inspection
-    /// scope. A process-scoped breakpoint names the address space it wants;
+    /// [`Self::mapped_pe_image`] read for display as
+    /// [`Self::read_image_backed`] reads: what a user-mode minidump did not
+    /// capture of the module at `base` comes from its image file.
+    pub fn image_backed_pe_image(&self, dtb: Dtb, base: VirtAddr) -> Result<PeImage> {
+        let (phys, kernel_dtb, arch) = (Arc::clone(&self.phys), self.kernel_dtb(), self.arch());
+        let symbols = Arc::clone(&self.symbols);
+        let module = self
+            .user_modules()
+            .unwrap_or_default()
+            .iter()
+            .find(|module| module.base_address == base)
+            .cloned();
+        read_pe_image(base, move |address, buf| {
+            let memory = AddressSpace::for_arch(&phys, dtb, kernel_dtb, arch);
+            read_filling_from_image_files(
+                &symbols,
+                module.as_slice(),
+                |address, buf| memory.read_bytes(address, buf),
+                address,
+                buf,
+            )
+        })
+    }
+
+    /// Load symbols for the modules whose short name matches the glob
+    /// `module_short` (`user32`, `kernel*`) or, with `None`, every module of
+    /// process `pid`, without changing the inspection scope. A
+    /// process-scoped breakpoint names the address space it wants;
     /// the debugger can read that process's loader list and its PDBs itself
     /// rather than defer until someone runs `.process /p`. Modules already
     /// attempted are left alone. Returns whether any load was attempted.
@@ -204,7 +248,7 @@ impl Target {
             .process_modules(&info)?
             .into_iter()
             .filter(|module| {
-                module_short.is_none_or(|short| module.short_name.eq_ignore_ascii_case(short))
+                module_short.is_none_or(|short| glob_matches(short, &module.short_name, true))
             })
             .filter(|module| {
                 self.symbols
@@ -225,6 +269,33 @@ impl Target {
         Ok(true)
     }
 
+    /// Load the symbols of `module`, an image just mapped into the address
+    /// space `dtb`, before its process's loader lists hold it: a load
+    /// notification arrives as the image is mapped. `None` when they were
+    /// loaded (or tried) already.
+    pub fn load_mapped_module_symbols(
+        &self,
+        dtb: Dtb,
+        module: ModuleInfo,
+    ) -> Result<Option<ModuleSymbolLoadReport>> {
+        if self
+            .symbols
+            .module_symbol_status(dtb, module.base_address)
+            .is_some()
+        {
+            return Ok(None);
+        }
+        self.guest()?
+            .load_symbols_for_modules(
+                &self.phys,
+                &self.symbols,
+                vec![module],
+                dtb,
+                PdbRecovery::Automatic,
+            )
+            .map(Some)
+    }
+
     pub fn refresh_kernel_module_symbols(&self) -> Result<ModuleSymbolLoadReport> {
         self.guest
             .as_ref()
@@ -241,6 +312,8 @@ impl Target {
         scope: ReloadScope,
         pattern: Option<&str>,
     ) -> Result<ModuleSymbolLoadReport> {
+        // A reload asks for the module lists as they are now.
+        self.forget_kernel_modules();
         let (mut modules, dtb) = match scope {
             ReloadScope::Current => (self.modules()?, self.process_dtb()),
             ReloadScope::Kernel => (self.kernel_modules()?, self.kernel_dtb()),
@@ -319,16 +392,14 @@ impl Target {
     }
 
     /// Fuzzy-search the active symbol index and resolve only unambiguous
-    /// module/address identities. `module!query` restricts the search.
+    /// module/address identities. `module!query` restricts the search to the
+    /// modules `module` names.
     pub fn search_symbols(&self, query: &str, limit: usize) -> Vec<SymbolSearchMatch> {
         let dtb = self.current_dtb();
-        let names: Vec<String> = match query.split_once('!') {
+        let names: Vec<String> = match split_query_module(query) {
             Some((module, query)) => self
                 .symbols
-                .search_symbols_in_module(dtb, module, query, limit)
-                .into_iter()
-                .map(|name| format!("{module}!{name}"))
-                .collect(),
+                .search_symbols_in_modules(dtb, module, query, limit),
             None => self.current_symbol_index().search(query, limit),
         };
         self.symbol_matches(names)

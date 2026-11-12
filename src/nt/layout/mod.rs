@@ -193,7 +193,7 @@ impl TypeInfo {
             .iter()
             .filter_map(|(name, field)| match field.type_data {
                 ParsedType::Bitfield { pos, len: 1, .. }
-                    if field.offset == word.offset && value >> pos & 1 != 0 =>
+                    if field.offset == word.offset && bitfield_value(value, pos, 1) != 0 =>
                 {
                     Some((pos, name))
                 }
@@ -204,15 +204,15 @@ impl TypeInfo {
         names.into_iter().map(|(_, name)| name.clone()).collect()
     }
 
-    /// The fields in `dt`'s layout order: by offset, then bit position, then
-    /// name, so every host lists a union's members and a bitfield group the
-    /// same way.
+    /// The fields in `dt`'s layout order: by offset, the whole fields there
+    /// before the bitfields they hold, then bit position, then name, so
+    /// every host lists a union's members and a bitfield group the same way.
     pub fn fields_in_order(&self) -> Vec<(&String, &FieldInfo)> {
         let mut fields: Vec<_> = self.fields.iter().collect();
         fields.sort_by_key(|(name, field)| {
             let bit = match &field.type_data {
-                ParsedType::Bitfield { pos, .. } => *pos,
-                _ => 0,
+                ParsedType::Bitfield { pos, .. } => Some(*pos),
+                _ => None,
             };
             (field.offset, bit, *name)
         });
@@ -302,7 +302,7 @@ pub fn primitive_size(name: &str) -> Option<u64> {
             1,
             &[
                 "char", "schar", "uchar", "int8", "uint8", "i8", "u8", "int8_t", "uint8_t", "bool",
-                "bool8", "boolean",
+                "bool8", "boolean", "char8_t",
             ],
         ),
         (
@@ -327,7 +327,7 @@ pub fn primitive_size(name: &str) -> Option<u64> {
             4,
             &[
                 "long", "ulong", "int", "uint", "int32", "uint32", "i32", "u32", "int32_t",
-                "uint32_t", "bool32", "char32_t", "float",
+                "uint32_t", "bool32", "char32_t", "float", "hresult",
             ],
         ),
         (

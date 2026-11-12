@@ -81,7 +81,7 @@ pub struct SubsectionDetail {
     /// Its first prototype PTE.
     pub base_pte: VirtAddr,
     pub ptes: u64,
-    pub unused_ptes: u64,
+    pub unused_ptes: DiagnosticValue<u64>,
     #[record(hex)]
     pub starting_sector: u64,
     #[record(hex)]
@@ -131,6 +131,12 @@ pub struct FileCacheDetail {
     pub file_count: u64,
     /// Whether an interrupt request stopped the walk early.
     pub interrupted: bool,
+    /// The VACB arrays left out because their slot, header or VACBs could not
+    /// be read; the totals miss their views.
+    pub unreadable_arrays: u64,
+    /// The mapped views whose pages could not all be walked; `valid_bytes`
+    /// misses what they hold past the failure.
+    pub unwalked_views: u64,
 }
 
 /// A file that the cache manager maps a view of.
@@ -234,7 +240,9 @@ impl Target {
                         address: next,
                         base_pte: subsection.read_pointer("SubsectionBase")?,
                         ptes: subsection.read_uint("PtesInSubsection")?,
-                        unused_ptes: subsection.read_bits("UnusedPtes").unwrap_or(0),
+                        unused_ptes: DiagnosticValue::from_result(
+                            subsection.read_bits("UnusedPtes"),
+                        ),
                         starting_sector: subsection.read_uint("StartingSector")?,
                         sectors: subsection.read_uint("NumberOfFullSectors")?,
                         protection,
@@ -344,8 +352,10 @@ impl Target {
         let mut views: BTreeMap<u64, Vec<VirtAddr>> = BTreeMap::new();
         let mut vacb_arrays = 0;
         let mut interrupted = false;
+        let mut unreadable_arrays = 0;
         'arrays: for index in 0..array_count {
             let Ok(header) = memory.read_pointer(arrays + index * pointer_size) else {
+                unreadable_arrays += 1;
                 continue;
             };
             if header.is_zero() {
@@ -354,12 +364,14 @@ impl Target {
             vacb_arrays += 1;
             let header_ref = types.struct_with_layout(header_layout.clone(), header);
             let Ok(highest_mapped) = header_ref.read_uint("HighestMappedIndex") else {
+                unreadable_arrays += 1;
                 continue;
             };
             let first = header + header_layout.size as u64;
             let count = (highest_mapped + 1).min(MAX_VACBS_PER_ARRAY);
             let mut bytes = vec![0u8; count as usize * vacb_layout.size];
             if memory.read_bytes(first, &mut bytes).is_err() {
+                unreadable_arrays += 1;
                 continue;
             }
             for vacb_bytes in bytes.chunks_exact(vacb_layout.size) {
@@ -386,12 +398,13 @@ impl Target {
         }
 
         let active_vacbs: u64 = views.values().map(|bases| bases.len() as u64).sum();
+        let mut unwalked_views = 0;
         let mut maps: Vec<(u64, u64, u64)> = views
             .iter()
             .map(|(map, bases)| {
                 let mut valid = 0;
                 for base in bases {
-                    let _ = memory.for_each_present_page(
+                    let walked = memory.for_each_present_page(
                         *base,
                         *base + VACB_MAPPING_GRANULARITY,
                         |_, _, length| {
@@ -399,6 +412,9 @@ impl Target {
                             ControlFlow::Continue(())
                         },
                     );
+                    if walked.is_err() {
+                        unwalked_views += 1;
+                    }
                 }
                 (*map, bases.len() as u64, valid)
             })
@@ -413,15 +429,14 @@ impl Target {
                 let map_ref = types
                     .struct_with_layout(map_layout.clone(), VirtAddr(map))
                     .prefetch();
-                let file_object = map_ref
-                    .read_uint("FileObjectFastRef")
-                    .map(fast_ref_address)
-                    .unwrap_or(VirtAddr(0));
+                let file_object = map_ref.read_uint("FileObjectFastRef").map(fast_ref_address);
                 let read = |name: &str| DiagnosticValue::from_result(map_ref.read_uint(name));
                 CachedFile {
                     shared_cache_map: VirtAddr(map),
-                    file_object,
-                    file_name: DiagnosticValue::from_result(self.file_object_name(file_object)),
+                    file_object: *file_object.as_ref().unwrap_or(&VirtAddr(0)),
+                    file_name: DiagnosticValue::from_result(
+                        file_object.and_then(|file_object| self.file_object_name(file_object)),
+                    ),
                     file_size: read("FileSize"),
                     valid_data_length: read("ValidDataLength"),
                     open_count: read("OpenCount"),
@@ -440,6 +455,8 @@ impl Target {
             files,
             file_count: views.len() as u64,
             interrupted,
+            unreadable_arrays,
+            unwalked_views,
         })
     }
 }

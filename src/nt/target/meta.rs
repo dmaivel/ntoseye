@@ -19,6 +19,10 @@ use crate::nt::symbols::ModuleSymbolStatus;
 use crate::nt::target::{DiagnosticValue, ListCursor, ListTermination, Target};
 use crate::nt::userdump::UserDumpInfo;
 
+/// Bounds on the verifier AVL walk, whose counts come from guest memory.
+const MAX_VERIFIER_TABLES: usize = 256;
+const MAX_VERIFIER_TABLE_ELEMENTS: usize = 1 << 16;
+
 const VERIFIER_LEVEL_FLAGS: &[(u64, &str)] = &[
     (0x0000_0001, "Special pool"),
     (0x0000_0002, "Force IRQL checking"),
@@ -185,8 +189,9 @@ pub struct VerifierDriver {
     pub contiguous_memory_bytes: u64,
     pub peak_contiguous_memory_bytes: u64,
     /// The suspect-list entry of the driver, with its load history.
-    /// `None` if the driver has no entry.
-    pub suspect: Option<VerifierSuspectDriver>,
+    /// `None` if the driver has no entry; unavailable if its entry does not
+    /// read.
+    pub suspect: Option<DiagnosticValue<VerifierSuspectDriver>>,
 }
 
 #[derive(Clone)]
@@ -243,8 +248,16 @@ struct VerifiedDriver {
     image_size: u64,
     driver_object: VirtAddr,
     data: VerifiedData,
-    suspect: Option<SuspectDriver>,
+    /// `None` if the driver has no suspect-list entry.
+    suspect: Option<DiagnosticValue<SuspectDriver>>,
     module_name: String,
+}
+
+impl VerifiedDriver {
+    /// The suspect-list entry, when the driver has one and it reads.
+    fn readable_suspect(&self) -> Option<&SuspectDriver> {
+        self.suspect.as_ref()?.as_result().ok()
+    }
 }
 
 fn read_verifier_state(guest: &Guest) -> VerifierStateRead {
@@ -387,10 +400,11 @@ fn read_verified_driver(
     let suspect = if data.suspect_entry.is_zero() {
         None
     } else {
-        types
-            .struct_at("_VF_SUSPECT_DRIVER_ENTRY", data.suspect_entry)
-            .ok()
-            .and_then(|record| read_suspect_driver(&record).ok())
+        Some(DiagnosticValue::from_result(
+            types
+                .struct_at("_VF_SUSPECT_DRIVER_ENTRY", data.suspect_entry)
+                .and_then(|record| read_suspect_driver(&record)),
+        ))
     };
     Ok(Some(VerifiedDriver {
         entry,
@@ -411,7 +425,8 @@ fn walk_avl_table(
     let table = types.struct_at("_VF_AVL_TABLE", table_address)?;
     let rtl_table = table.embedded("RtlTable")?;
     let element_count = usize::try_from(rtl_table.read_uint("NumberGenericTableElements")?)
-        .map_err(|_| Error::DebugInfo("invalid verifier AVL element count".into()))?;
+        .map_err(|_| Error::DebugInfo("invalid verifier AVL element count".into()))?
+        .min(MAX_VERIFIER_TABLE_ELEMENTS);
     let root = rtl_table
         .embedded("BalancedRoot")?
         .read_pointer("RightChild")?;
@@ -466,9 +481,13 @@ fn walk_verified_drivers(guest: &Guest) -> Result<(Vec<VerifiedDriver>, bool)> {
     }
 
     let mut drivers = Vec::new();
-    let mut truncated = false;
-    for index in 0..tables_count {
-        let address = tables + (index as u64).wrapping_mul(table_layout.size as u64);
+    let mut truncated = tables_count > MAX_VERIFIER_TABLES;
+    for index in 0..tables_count.min(MAX_VERIFIER_TABLES) {
+        let address = (index as u64)
+            .checked_mul(table_layout.size as u64)
+            .and_then(|offset| tables.0.checked_add(offset))
+            .map(VirtAddr)
+            .ok_or_else(|| Error::DebugInfo("verifier AVL table address overflows".into()))?;
         let (table_drivers, table_truncated) = walk_avl_table(types, address, links_size)?;
         drivers.extend(table_drivers);
         truncated |= table_truncated;
@@ -493,8 +512,7 @@ fn set_module_names(drivers: &mut [VerifiedDriver], modules: &[ModuleInfo]) {
             .map(|module| module.name.clone())
             .or_else(|| {
                 driver
-                    .suspect
-                    .as_ref()
+                    .readable_suspect()
                     .filter(|suspect| !suspect.base_name.is_empty())
                     .map(|suspect| suspect.base_name.clone())
             })
@@ -515,10 +533,12 @@ fn suspect_detail(suspect: &SuspectDriver) -> VerifierSuspectDriver {
 fn loaded_suspect(suspect: &SuspectDriver, drivers: &[VerifiedDriver]) -> bool {
     let key = module_key(&suspect.base_name);
     drivers.iter().any(|driver| {
-        driver
-            .suspect
-            .as_ref()
-            .is_some_and(|loaded| module_key(&loaded.base_name) == key)
+        // A loaded driver whose own suspect entry is unreadable still has the
+        // module name, which is enough to tell it is loaded.
+        module_key(&driver.module_name) == key
+            || driver
+                .readable_suspect()
+                .is_some_and(|loaded| module_key(&loaded.base_name) == key)
     })
 }
 
@@ -563,7 +583,10 @@ fn driver_detail(driver: &VerifiedDriver) -> VerifierDriver {
         peak_pages_for_mdl_bytes: driver.data.peak_pages_for_mdl_bytes,
         contiguous_memory_bytes: driver.data.contiguous_memory_bytes,
         peak_contiguous_memory_bytes: driver.data.peak_contiguous_memory_bytes,
-        suspect: driver.suspect.as_ref().map(suspect_detail),
+        suspect: driver
+            .suspect
+            .as_ref()
+            .map(|suspect| suspect.map(suspect_detail)),
     }
 }
 
@@ -600,9 +623,20 @@ impl Target {
             Err(error) => (DiagnosticValue::unavailable(error.to_string()), None, false),
         };
         let (configured_but_unloaded, suspect_list_termination) = match read_suspect_list(guest) {
-            Ok((suspects, termination)) => {
-                let loaded = loaded_drivers.as_deref().unwrap_or(&[]);
-                (
+            Ok((suspects, termination)) => match loaded_drivers.as_deref() {
+                // Without the full loaded set, every unmatched suspect would
+                // be misreported as not loaded.
+                Some(_) if drivers_truncated => (
+                    DiagnosticValue::unavailable(
+                        "the verified driver walk was truncated".to_string(),
+                    ),
+                    termination,
+                ),
+                None => (
+                    DiagnosticValue::unavailable("the verified driver walk failed".to_string()),
+                    termination,
+                ),
+                Some(loaded) => (
                     DiagnosticValue::Available(
                         suspects
                             .iter()
@@ -611,8 +645,8 @@ impl Target {
                             .collect(),
                     ),
                     termination,
-                )
-            }
+                ),
+            },
             Err(error) => {
                 let error = error.to_string();
                 (
@@ -650,8 +684,7 @@ impl Target {
             .or_else(|| {
                 drivers.iter().find(|driver| {
                     driver
-                        .suspect
-                        .as_ref()
+                        .readable_suspect()
                         .is_some_and(|suspect| module_key(&suspect.base_name) == module_key(module))
                 })
             })
@@ -672,6 +705,8 @@ pub struct TargetKernel {
     pub size: Option<u64>,
     pub file_version: Option<String>,
     pub product_version: Option<String>,
+    /// The file name of the loaded PDB (`ntkrnlmp.pdb`).
+    pub pdb_name: Option<String>,
     /// The GUID of the PDB, which identifies the symbols.
     pub pdb_guid: Option<String>,
     /// The age of the PDB.
@@ -687,7 +722,6 @@ pub struct TargetDump {
     pub directory_table_base: VirtAddr,
     #[record(hex)]
     pub bugcheck_code: u32,
-    #[record(hex)]
     pub bugcheck_parameters: Vec<u64>,
     pub number_processors: u32,
     pub major_version: u32,
@@ -1097,14 +1131,16 @@ impl Target {
         let user_system = self.user_dump_info().map(|info| &info.system);
         // A kernel dump header's MajorVersion is 0xF (free) or 0xC (checked)
         // and its MinorVersion the build number, not the Windows version:
-        // the kernel's KUSER_SHARED_DATA has that.
+        // the kernel's KUSER_SHARED_DATA has that. Early in boot (a KD attach
+        // at the first break) the kernel has not filled it in yet, and a
+        // major version of 0 is no version: both numbers are unknown then.
         let major = user_system
             .map(|system| u64::from(system.major_version))
             .filter(|value| *value != 0)
-            .or_else(|| kuser.nt_major_version());
+            .or_else(|| kuser.nt_major_version().filter(|value| *value != 0));
         let minor = match user_system {
             Some(system) => Some(u64::from(system.minor_version)),
-            None => kuser.nt_minor_version(),
+            None => major.and_then(|_| kuser.nt_minor_version()),
         };
         let build = user_system
             .map(|system| u64::from(system.build_number))
@@ -1167,6 +1203,10 @@ impl Target {
             product_version: kernel_module
                 .as_ref()
                 .and_then(|module| module.product_version.clone()),
+            pdb_name: self
+                .symbols
+                .module_pdb_path(self.kernel_dtb(), base)
+                .and_then(|path| Some(path.file_name()?.to_string_lossy().into_owned())),
             pdb_guid: identity.map(|identity| format!("{:032X}", identity.guid)),
             pdb_age: identity.map(|identity| identity.age),
         });

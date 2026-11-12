@@ -59,9 +59,23 @@ impl Descriptor {
         self.0 & (1 << 6) != 0
     }
 
-    /// AP\[2\] (bit 7) clear: the mapping is not read-only.
+    /// The page may be written: Windows' `Writable` (bit 55, a software
+    /// bit), or a mapping the hardware already lets be written. Windows
+    /// keeps a writable page read-only to the hardware until its first
+    /// write faults, so AP\[2\] alone calls a clean writable page read-only.
     pub const fn is_writable(self) -> bool {
+        self.0 & (1 << 55) != 0 || self.is_dirty()
+    }
+
+    /// AP\[2\] (bit 7, Windows' `NotDirty`) clear: the hardware lets the
+    /// mapping be written, which Windows allows once it has been.
+    pub const fn is_dirty(self) -> bool {
         self.0 & (1 << 7) == 0
+    }
+
+    /// Windows' `CopyOnWrite` (bit 56): a write gets a private copy.
+    pub const fn is_copy_on_write(self) -> bool {
+        self.0 & (1 << 56) != 0
     }
 
     /// Privileged execute-never (PXN, bit 53) on a block/page descriptor.
@@ -176,15 +190,15 @@ impl Paging for Arm64 {
         } else {
             descriptor.is_valid()
         };
-        // A mapping is global with nG (bit 11) clear, accessed with AF (bit
-        // 10) set, and written once writable with DBM (bit 51) set. Table
-        // descriptors have none of these.
+        // A mapping is global with nG (bit 11) clear and accessed with AF
+        // (bit 10) set. Table descriptors have none of these.
         let marks = if table {
             PteMarks::default()
         } else {
             PteMarks {
+                copy_on_write: descriptor.is_copy_on_write(),
                 global: !bit(11),
-                dirty: bit(51) && writable,
+                dirty: descriptor.is_dirty(),
                 accessed: bit(10),
                 ..PteMarks::default()
             }
@@ -204,6 +218,28 @@ impl Paging for Arm64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows keeps a writable page read-only to the hardware (`NotDirty`,
+    /// AP\[2\]) until its first write, and marks it writable in software
+    /// bit 55: such a page is writable and clean, not read-only.
+    #[test]
+    fn flags_follow_windows_writable_and_dirty_bits() {
+        let user = VirtAddr(0x0000_0219_8000_0000);
+        let flags = |entry: u64| {
+            Arm64
+                .entry_attributes(PageTableEntry(entry), PageTableLevel::Pte, user)
+                .flags
+        };
+        // A private page of a 22631 process after its working set was
+        // trimmed and the page read back: Writable, NotDirty, UXN, PXN.
+        let clean = 0x00E0_0001_50E3_7FC3;
+        assert_eq!(flags(clean), "----A--UW-V");
+        assert_eq!(flags(clean & !(1 << 7)), "---DA--UW-V", "written");
+        // Image code: neither Writable nor written, executable at EL0.
+        let code = clean & !(1 << 55) & !(1 << 54);
+        assert_eq!(flags(code), "----A--UREV");
+        assert_eq!(flags(code | 1 << 56), "C---A--UREV", "copy-on-write");
+    }
 
     /// A block descriptor's bits below the block size are `nT` (bit 16) or
     /// RES0, not output address.

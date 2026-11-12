@@ -16,8 +16,9 @@ use crate::{
         types::{Dtb, PhysAddr, VirtAddr},
     },
     nt::{
-        guest::EvmcsState,
+        guest::{EvmcsState, ModuleInfo},
         layout::{StructRef, TypeInfo, Types},
+        symbols::{ImageFetch, SymbolStore},
     },
 };
 
@@ -38,6 +39,96 @@ pub enum SearchSpace {
 pub const MAX_SEARCH_MATCHES: usize = 4096;
 /// Bytes read per step of a search.
 const SEARCH_CHUNK: usize = 1 << 20;
+
+/// Read `buf` at `address` with `read`, filling each hole a user-mode
+/// minidump leaves ([`Error::NotCaptured`]) inside one of `modules`' images
+/// from the module's image file, relocated to where the module was loaded
+/// ([`PeImage::read_loaded`](crate::nt::pe::PeImage::read_loaded)). A
+/// MiniDumpNormal dump captures no module memory, and the file has the
+/// code and read-only data the process had. The file is the one the
+/// module's `TimeDateStamp` and `SizeOfImage` name, downloaded if need be,
+/// as the stack walk downloads it for the module's unwind data. A byte
+/// neither the dump nor a file has fails the read as the dump's hole did.
+pub fn read_filling_from_image_files(
+    symbols: &SymbolStore,
+    modules: &[ModuleInfo],
+    read: impl Fn(VirtAddr, &mut [u8]) -> Result<()>,
+    address: VirtAddr,
+    buf: &mut [u8],
+) -> Result<()> {
+    let mut done = 0;
+    loop {
+        let (missing, resumes) = match read(address + done as u64, &mut buf[done..]) {
+            Ok(()) => return Ok(()),
+            Err(Error::NotCaptured { address, resumes }) => (address, resumes),
+            Err(error) => return Err(error),
+        };
+        let hole = (missing.0 - address.0) as usize;
+        let hole_end = resumes.map_or(buf.len(), |resumes| {
+            (resumes.0.saturating_sub(address.0) as usize).min(buf.len())
+        });
+        let filled = match buf.get_mut(hole..hole_end) {
+            Some(hole) if !hole.is_empty() => {
+                fill_from_image_files(symbols, modules, missing, hole)
+            }
+            _ => 0,
+        };
+        if hole + filled < hole_end || hole_end <= hole {
+            return Err(Error::NotCaptured {
+                address: missing + filled as u64,
+                resumes,
+            });
+        }
+        if hole_end == buf.len() {
+            return Ok(());
+        }
+        done = hole_end;
+    }
+}
+
+/// Fill `buf`, memory at `address` that a dump did not capture, from the
+/// image files of the `modules` it lies in (see
+/// [`read_filling_from_image_files`]); returns how many leading bytes were
+/// filled.
+fn fill_from_image_files(
+    symbols: &SymbolStore,
+    modules: &[ModuleInfo],
+    address: VirtAddr,
+    buf: &mut [u8],
+) -> usize {
+    let mut filled = 0;
+    while filled < buf.len() {
+        let at = address + filled as u64;
+        let Some(module) = modules.iter().find(|module| module.contains_address(at)) else {
+            break;
+        };
+        let Some(file) = module.time_date_stamp.and_then(|time_date_stamp| {
+            symbols
+                .module_image_on_disk(
+                    &module.name,
+                    time_date_stamp,
+                    module.size,
+                    ImageFetch::Download,
+                )
+                .ok()
+        }) else {
+            break;
+        };
+        let end = buf
+            .len()
+            .min(filled + (module.end_address().0 - at.0) as usize);
+        let read = file.read_loaded(
+            module.base_address.0,
+            (at.0 - module.base_address.0) as usize,
+            &mut buf[filled..end],
+        );
+        filled += read;
+        if filled < end {
+            break;
+        }
+    }
+    filled
+}
 
 /// Which memory an operation addresses: the virtual address space of the
 /// session's context, or guest-physical memory. The REPL names it by the
@@ -82,7 +173,12 @@ pub enum ExpressionScope {
 /// The virtual memory expressions read: the inspection address space, or a
 /// hypercall caller's (see [`ExpressionScope`]).
 pub enum ExpressionMemory<'a> {
-    Context(AddressSpace<'a, PhysMem>),
+    /// The inspection address space, with the session's breakpoint
+    /// instructions masked as [`Target::read_masked`] masks them:
+    /// `by(nt!NtClose)` is the code under a breakpoint there, as `db` shows
+    /// it, so `eb nt!NtClose by(nt!NtClose)` writes back what the breakpoint
+    /// displaced rather than the breakpoint.
+    Context(&'a Target),
     HypercallCaller(&'a Target, Option<EvmcsState>),
 }
 
@@ -99,7 +195,7 @@ fn caller_state(state: Option<&EvmcsState>) -> Result<&EvmcsState> {
 impl MemoryOps<VirtAddr> for ExpressionMemory<'_> {
     fn read_bytes(&self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
         match self {
-            Self::Context(memory) => memory.read_bytes(addr, buf),
+            Self::Context(target) => target.read_masked_held(target.current_dtb(), addr, buf),
             Self::HypercallCaller(target, state) => {
                 target.read_guest_partition(caller_state(state.as_ref())?, true, addr.0, buf)
             }
@@ -108,7 +204,7 @@ impl MemoryOps<VirtAddr> for ExpressionMemory<'_> {
 
     fn write_bytes(&self, addr: VirtAddr, buf: &[u8]) -> Result<()> {
         match self {
-            Self::Context(memory) => memory.write_bytes(addr, buf),
+            Self::Context(target) => target.context_memory().write_bytes(addr, buf),
             Self::HypercallCaller(..) => Err(Error::Hypervisor(
                 "a hypercall caller's memory is read-only".to_string(),
             )),
@@ -247,6 +343,76 @@ impl Target {
         AddressSpace::for_arch(&self.phys, dtb, self.kernel_dtb(), self.arch())
     }
 
+    /// Read `buf` at `address` in `dtb`'s address space for display, as
+    /// WinDbg does: what a user-mode minidump did not capture of a loaded
+    /// module's image is read from the module's image file (see
+    /// [`read_filling_from_image_files`]). Captured bytes always win, so a
+    /// full dump reads as [`Self::address_space`] does. Not for comparing
+    /// memory with the file (`!chkimg`), which must see only what the dump
+    /// holds.
+    pub fn read_image_backed(&self, dtb: Dtb, address: VirtAddr, buf: &mut [u8]) -> Result<()> {
+        let memory = self.address_space(dtb);
+        read_filling_from_image_files(
+            &self.symbols,
+            self.user_modules().unwrap_or_default(),
+            |address, buf| memory.read_bytes(address, buf),
+            address,
+            buf,
+        )
+    }
+
+    /// Read guest virtual memory in the inspection address space
+    /// ([`Self::current_dtb`]) with the session's breakpoint instructions
+    /// masked back to the original code, so every host (REPL, MCP, SDK)
+    /// sees the same bytes the guest would run. What a user-mode minidump
+    /// did not capture of a module's image is read from its image file
+    /// ([`Self::read_image_backed`]).
+    pub fn read_masked(&self, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
+        self.read_masked_in(self.current_dtb(), addr, buf)
+    }
+
+    /// [`Self::read_masked`] in the address space `dtb` rather than the
+    /// inspection one, for values that belong to a particular stack frame.
+    pub fn read_masked_in(&self, dtb: Dtb, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
+        self.read_image_backed(dtb, addr, buf)?;
+        self.mask_breakpoints(dtb, addr, buf);
+        Ok(())
+    }
+
+    /// [`Self::read_masked_in`] of what the target holds alone, never a
+    /// minidump's image file: expressions, and `!chkimg`, which compares
+    /// memory with that file.
+    pub fn read_masked_held(&self, dtb: Dtb, addr: VirtAddr, buf: &mut [u8]) -> Result<()> {
+        self.address_space(dtb).read_bytes(addr, buf)?;
+        self.mask_breakpoints(dtb, addr, buf);
+        Ok(())
+    }
+
+    /// Put the code the session's breakpoints and traps displaced back into
+    /// `buf`, read at `start` in `dtb`'s address space
+    /// ([`CodeSites::mask`](crate::nt::breakpoints::CodeSites::mask)).
+    /// Without this a view shows the debugger's `int3` instead of the
+    /// guest's code.
+    pub fn mask_code(&self, start: VirtAddr, buf: &mut [u8], dtb: Dtb) {
+        self.code_sites.mask(self, start, buf, dtb);
+    }
+
+    /// [`Self::mask_code`], except in a VTL1 address space.
+    pub fn mask_breakpoints(&self, dtb: Dtb, addr: VirtAddr, buf: &mut [u8]) {
+        if !self.symbols.is_secure_root(dtb) {
+            self.mask_code(addr, buf, dtb);
+        }
+    }
+
+    /// Why the page at `address`, in the address space rooted at `dtb`, is
+    /// not in memory ([`AddressSpace::non_resident`]); `None` when it is, and
+    /// for a VTL1 address space, which the page walk does not describe.
+    pub fn non_resident(&self, dtb: Dtb, address: VirtAddr) -> Option<memory::NonResident> {
+        let secure = self.symbols.is_secure_root(dtb)
+            || (dtb == self.current_dtb() && self.in_secure_scope());
+        (!secure).then(|| self.address_space(dtb).non_resident(address))?
+    }
+
     /// Kernel-root address space (reads kernel VAs on both arches).
     pub fn kernel_address_space(&self) -> AddressSpace<'_, PhysMem> {
         self.address_space(self.kernel_dtb())
@@ -263,21 +429,11 @@ impl Target {
         self.address_space(self.current_dtb())
     }
 
-    /// Write `data` at `address` of `memory`: the inspection address space
-    /// ([`Self::context_memory`]) or guest-physical memory. Every host's
-    /// memory write (`eb`, `!eb`, `Memory.write`) goes through it.
-    pub fn write_memory(&self, memory: MemoryKind, address: u64, data: &[u8]) -> Result<()> {
-        match memory {
-            MemoryKind::Virtual => self.context_memory().write_bytes(VirtAddr(address), data),
-            MemoryKind::Physical => self.write_physical(address, data),
-        }
-    }
-
     /// The virtual memory expressions read in the [`ExpressionScope`]: the
     /// inspection address space, or a hypercall caller's.
     pub fn expression_memory(&self) -> ExpressionMemory<'_> {
         match self.expression_scope {
-            ExpressionScope::Context => ExpressionMemory::Context(self.context_memory()),
+            ExpressionScope::Context => ExpressionMemory::Context(self),
             ExpressionScope::HypercallCaller(state) => {
                 ExpressionMemory::HypercallCaller(self, state)
             }
@@ -303,9 +459,10 @@ impl Target {
         self.types_in(self.current_dtb())
     }
 
-    /// Kernel types read through `dtb`'s page tables.
+    /// Kernel types read through `dtb`'s page tables, with the session's
+    /// breakpoints and traps masked as [`Self::read_masked_held`] masks them.
     pub fn types_in(&self, dtb: Dtb) -> Types<'_> {
-        match &self.guest {
+        let types = match &self.guest {
             Some(guest) => guest.ntoskrnl.types_in(dtb),
             None => Types::new(
                 &self.symbols,
@@ -315,7 +472,8 @@ impl Target {
                 self.kernel_dtb(),
                 dtb,
             ),
-        }
+        };
+        types.masked_by(self)
     }
 
     /// Search `length` bytes from `start` for the byte `pattern`, reading
@@ -493,6 +651,7 @@ impl Target {
                         }
                         if result.hits.len() == MAX_SEARCH_MATCHES {
                             result.stopped = Some(SearchStop::MatchLimit);
+                            result.pages += index as u64 + 1;
                             break 'runs;
                         }
                         result.hits.push(PhysicalSearchHit {

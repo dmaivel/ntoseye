@@ -8,9 +8,9 @@ use std::fs::{remove_file, write};
 use std::mem::take;
 #[cfg(test)]
 use std::process::id;
-use std::sync::LazyLock;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 #[cfg(test)]
 use crate::TargetSpec;
@@ -23,9 +23,12 @@ use crate::backend::dbg_backend::{
 use crate::base::disasm::ControlFlow;
 use crate::base::error::{Error, Result};
 use crate::base::notice::Notice;
-use crate::base::ntstatus::exception_code_name;
+use crate::base::ntstatus::{STATUS_BREAKPOINT, STATUS_SINGLE_STEP, exception_code_name};
 use crate::base::types::VirtAddr;
-use crate::nt::breakpoints::{BreakpointInfo, BreakpointManager, StepFrame};
+use crate::nt::breakpoints::{
+    BreakpointInfo, BreakpointManager, CodeSites, Publish, Published, StepFrame, ThreadScope,
+    TrapKind,
+};
 #[cfg(test)]
 use crate::nt::dmp::triage::{TriageBlock, make_triage_dump};
 use crate::nt::expr::NumberRadix;
@@ -39,30 +42,25 @@ use crate::session::partition::{KeptPartition, PartitionView};
 use ntoseye_macros::record;
 
 /// Trace reload classification (lines prefixed `reload:`), gated on
-/// `NTOSEYE_KD_TRACE` like the KD packet trace so one capture correlates both.
+/// [`Trace::Kd`](crate::base::env::Trace::Kd) like the KD packet trace so one
+/// capture correlates both.
 /// Off by default; pure output.
 macro_rules! reload_trace {
     ($($arg:tt)*) => {
-        if trace_enabled() {
+        if $crate::base::env::Trace::Kd.enabled() {
             eprintln!("reload: {}", format_args!($($arg)*));
         }
     };
 }
 
-/// Whether `NTOSEYE_STEP_TRACE` is set: see [`step_trace`].
-pub fn step_trace_enabled() -> bool {
-    static ENABLED: LazyLock<bool> =
-        LazyLock::new(|| std::env::var_os("NTOSEYE_STEP_TRACE").is_some());
-    *ENABLED
-}
-
 /// Trace breakpoint and step mechanics (lines prefixed `step:`): how each
 /// hardware stop is classified and filtered, and how a run past a
 /// breakpoint site ends when its vCPU had to wait on the others. Gated on
-/// `NTOSEYE_STEP_TRACE`; pure output, for races that only show under load.
+/// [`Trace::Step`](crate::base::env::Trace::Step); pure output, for races
+/// that only show under load.
 macro_rules! step_trace {
     ($($arg:tt)*) => {
-        if $crate::session::step_trace_enabled() {
+        if $crate::base::env::Trace::Step.enabled() {
             eprintln!("step: {}", format_args!($($arg)*));
         }
     };
@@ -91,7 +89,7 @@ pub use driver::{
     ReloadStop, RunOutcome, Stop, StopKind, WalkUntil,
 };
 
-/// How [`Session::continue_until_break`] returned: a stop worth surfacing, or a
+/// How a wait ([`Session::wait_stop`]) returned: a stop worth surfacing, or a
 /// timeout with the VM still running (the caller polls again). Hosts render it.
 #[derive(Debug, Clone)]
 pub enum ContinueOutcome {
@@ -150,9 +148,9 @@ pub enum ContinueOutcome {
     Running,
     /// A non-resuming wait found the VM already halted with nothing pending: it
     /// is parked at `rip` and no new stop can arrive without a resume. Returned
-    /// only by [`Session::wait_for_stop_bounded`] (the run-and-wait helpers resume
-    /// first, so they never see it); lets a caller distinguish "still stopped
-    /// where you left it" from "running" instead of spinning the whole timeout.
+    /// by [`Session::wait_stop`] and [`Session::halted_outcome`]; lets a caller
+    /// distinguish "still stopped where you left it" from "running" instead of
+    /// spinning the whole timeout.
     Halted { rip: u64 },
 }
 
@@ -264,7 +262,6 @@ pub struct ExceptionRecord {
     #[record(hex, rename = "exception_address")]
     pub address: u64,
     /// The exception's `ExceptionInformation` parameters.
-    #[record(hex)]
     pub parameters: Vec<u64>,
 }
 
@@ -375,6 +372,14 @@ pub struct ControlState {
 /// `step(until=)`/`step_over(until=)`) that never finds its target.
 pub const STEP_UNTIL_LIMIT: usize = 100_000;
 
+/// The stack of a thread a host spawns to run commands on (the MCP and
+/// Python session actors). Expression parsing and evaluation recurse once
+/// per nesting level (see [`crate::nt::expr::MAX_EXPR_DEPTH`]), so these
+/// threads get more than the 2 MiB default, and at least the 8 MiB main
+/// thread the REPL, DAP and gdbserver run commands on. The reservation costs
+/// address space, not memory.
+pub const COMMAND_THREAD_STACK: usize = 16 << 20;
+
 /// The plan for a step-over of the current instruction: either a plain
 /// single-step, or run to an address (the instruction after a `call`).
 #[derive(Debug, Clone, Copy)]
@@ -407,13 +412,30 @@ pub struct PendingWalk {
     pub sites: Vec<(VirtAddr, Option<StepFrame>)>,
 }
 
+/// A run to an address that was handed back running (see
+/// [`Session::run_to_any`]): the stop a later wait collects ends it and
+/// takes its sites out, and while it runs on, the waits still check that
+/// the thread it follows can reach them, as the run itself did.
+#[derive(Debug, Clone)]
+pub struct HandedBackRun {
+    /// The thread it follows, if any.
+    pub thread: Option<ThreadScope>,
+    /// The temporary sites it armed, by id and serial: an id freed meanwhile
+    /// may name a later breakpoint, which is not the run's to remove.
+    pub sites: Vec<(u32, u64)>,
+    /// When the thread was last found alive.
+    pub checked: Instant,
+}
+
 /// Where a step's run-to must find the stepping thread's stack pointer (see
 /// [`Session::step_frame`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepStack {
     /// Anywhere: a run through straight-line code, which may push.
     Any,
-    /// At or above the current one: the return from the call at the PC.
+    /// At or above the current one: the return from the call at the PC. In
+    /// x86 code anywhere, as a callee there may leave its caller's frame
+    /// allocated.
     CallReturn,
     /// Above the current frame: the return from the current function.
     FunctionReturn,
@@ -422,17 +444,23 @@ pub enum StepStack {
 /// Architecture-neutral summary of the instruction at the program counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CurrentInstruction {
+    /// The program counter.
+    pub ip: u64,
     /// Whether the instruction is a call (`call` on AMD64, `bl`/`blr` on ARM64).
     pub is_call: bool,
+    /// A direct call's target.
+    pub call_target: Option<u64>,
     /// Address of the following instruction.
     pub next_ip: u64,
+    /// The page-table root the code was read through.
+    pub code_dtb: u64,
 }
 
 /// How a stop landed relative to our breakpoints, decided by
 /// [`Session::resolve_breakpoint_stop`]. Cases a host shouldn't surface (a
 /// wrong-process hit on a shared-page int3, or a false conditional breakpoint)
 /// are stepped over and resumed inside the resolver; the host only reacts to the
-/// verdict. Shared by the core loop and the REPL so the two can't drift.
+/// verdict.
 #[derive(Debug, Clone)]
 pub enum BreakpointStopAction {
     /// A breakpoint the caller should surface (its condition, if any, held).
@@ -446,6 +474,10 @@ pub enum BreakpointStopAction {
     /// conditional breakpoint. It has been stepped over and the VM resumed, so
     /// the caller should keep waiting.
     Resumed,
+    /// A hit absorbed as for `Resumed` but kept where it is, for a break-in
+    /// out of retries (see [`Session::interrupt_classified`]): the target
+    /// stays halted on the site, which the next resume steps over.
+    Held,
     /// `rip` is not one of our breakpoints (a genuine exception or manual pause).
     NotBreakpoint,
 }
@@ -638,9 +670,6 @@ impl VcpuInfo {
     }
 }
 
-/// `STATUS_BREAKPOINT`, the NTSTATUS an `int3` raises (e.g. `nt!DbgBreakPoint`).
-const STATUS_BREAKPOINT: u32 = 0x8000_0003;
-
 /// A breakpoint the session plants in the kernel for itself, outside the
 /// breakpoint manager, and the instruction bytes it displaced (empty when
 /// they could not be read). A read of `address` shows `original`, not the
@@ -651,13 +680,47 @@ pub struct TrapSite {
     pub original: Vec<u8>,
 }
 
-/// A trap on a kernel function that reports a module `event`, planted for
-/// a backend that reports no module events itself. The image base is the
-/// function's second argument.
+/// A trap on a kernel function that reports a module `event`: for a
+/// backend that reports no module events itself, one on the function that
+/// reports a kernel image, whose base is its second argument; on any
+/// backend, `user` on the one every user-mode image map runs
+/// (`nt!PsCallImageNotifyRoutines`), which Windows reports to no debugger.
 #[derive(Debug, Clone)]
 pub struct ModuleTrap {
     pub event: ModuleEvent,
     pub site: TrapSite,
+    pub user: bool,
+}
+
+/// Which of the session's own traps a thread was interrupted on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InterruptedTrap {
+    /// A module trap, by its event and whether it is the user-image trap:
+    /// that trap and the kernel load trap are both load traps, so the event
+    /// alone does not name the trap.
+    Module { event: ModuleEvent, user: bool },
+    /// The trap on `nt!KeBugCheckEx`.
+    Bugcheck,
+}
+
+impl Publish for Option<TrapSite> {
+    fn publish(&self, sites: &CodeSites) {
+        sites.publish_traps(
+            TrapKind::Bugcheck,
+            self.iter()
+                .map(|trap| (trap.address, trap.original.as_slice())),
+        );
+    }
+}
+
+impl Publish for Vec<ModuleTrap> {
+    fn publish(&self, sites: &CodeSites) {
+        sites.publish_traps(
+            TrapKind::Module,
+            self.iter()
+                .map(|trap| (trap.site.address, trap.site.original.as_slice())),
+        );
+    }
 }
 
 /// What [`Session::page_in`] observed once the target came back.
@@ -669,13 +732,6 @@ pub struct PageInReport {
     /// The requested address reads back in the current context.
     pub resident: bool,
 }
-
-/// `STATUS_SINGLE_STEP`, the NTSTATUS a trap-flag single-step raises. During a
-/// run-control loop (continue / run-to) nobody is intentionally single-stepping;
-/// `si` steps via [`stepping::step_one_and_clear_tf`] directly, not the loop,
-/// so a single-step that isn't at a user breakpoint is a debugger artifact
-/// (see [`stops::stop_is_stray_single_step`]).
-const STATUS_SINGLE_STEP: u32 = 0x8000_0004;
 
 /// A session's inspection selection, moved out by [`Session::take_selection`].
 pub struct Selection {
@@ -788,7 +844,9 @@ pub struct Session {
     id: usize,
     pub target: Target,
     pub backend: Box<dyn DebugBackend>,
-    pub breakpoints: BreakpointManager,
+    /// Published to the target's [`Target::code_sites`], which every read
+    /// masks, so it is changed through [`Published::edit`].
+    pub breakpoints: Published<BreakpointManager>,
     pub register_map: RegisterMap,
     pub current_thread: String,
     /// Per-exception-code stop policy (`sxe`/`sxd`/`sxn`/`sxi`). Session state
@@ -801,7 +859,7 @@ pub struct Session {
     /// `current_thread`. Its register file does not exist as a coherent snapshot.
     parked_windows_thread: Option<VirtAddr>,
     /// Whether a guest reload is mid-flight with the loaded-module list not yet
-    /// available (very early boot). Carried across `continue_until_break` calls
+    /// available (very early boot). Carried across waits ([`Self::wait_stop`])
     /// so the post-reboot KD-reconnect dance runs to completion; when the list
     /// appears, [`Self::try_complete_pending_reload`] finishes rediscovery and
     /// stops the backend's reconnect-assist poking. Seeded at attach, which
@@ -810,15 +868,32 @@ pub struct Session {
     /// The automatic `nt!KeBugCheckEx` breakpoint, once armed. Only backends
     /// that cannot report a bugcheck themselves get one; see
     /// [`Self::arm_bugcheck_trap`].
-    bugcheck_trap: Option<TrapSite>,
+    bugcheck_trap: Published<Option<TrapSite>>,
     /// The automatic breakpoints on the kernel functions that report module
     /// loads and unloads, while one is waited on. Only backends that report
     /// no module events themselves get them; see [`Self::sync_module_traps`].
-    module_traps: Vec<ModuleTrap>,
-    /// The event and stack pointer of a thread that took an interrupt on a
-    /// module trap while being run past it, before executing it: its next
-    /// hit on that event's trap is the same event, not a new one.
-    module_trap_interrupted: Option<(ModuleEvent, u64)>,
+    module_traps: Published<Vec<ModuleTrap>>,
+    /// The trap and stack pointer of a thread that took an interrupt on one
+    /// of the session's traps while being run past it, before executing it:
+    /// its next hit on that trap is the same event, not a new one.
+    trap_interrupted: Option<(InterruptedTrap, u64)>,
+    /// The vCPU whose single step another vCPU's stop came before, on a
+    /// backend that steps only the stopping processor (ARM64 KD), and the
+    /// NT thread the step was for: the step stays armed and fires when the
+    /// target next runs, so that vCPU's next step resumes the target and
+    /// waits for it rather than stepping again. Any other resume spends it
+    /// (the run loops absorb its stray stop).
+    step_in_flight: Option<(String, Option<u64>)>,
+    /// The user-mode image mapping last reported, by the address-space root
+    /// it was mapped into, its base, and whether the user-image trap (rather
+    /// than Windows) reported it. Under `!gflag +ksl` Windows reports an
+    /// image's first mapping itself, and where the trap fires too it reports
+    /// the same map call again: that second report is no new load.
+    last_user_image: Option<(u64, VirtAddr, bool)>,
+    /// A break-in's last try is classifying a stop: a hit a filter declines
+    /// is held as the pause rather than resumed (see
+    /// [`Session::interrupt_classified`]).
+    hold_declined_hits: bool,
     /// Whether a detected reload has not yet been surfaced to the host: the
     /// guest-state rebuild failed at the detection stop, so no
     /// [`ContinueOutcome::TargetReloaded`] went out. While set, the eventual
@@ -828,12 +903,14 @@ pub struct Session {
     reload_surface_pending: bool,
     /// A real execution stop the background `service_idle` caught and processed
     /// while the host was idle (a breakpoint/non-bp stop/bugcheck the host didn't
-    /// actively `wait_for_stop` for). The VM is halted at it; the next
-    /// `wait_for_stop` returns this as the proper event instead of a bare
+    /// actively wait for). The VM is halted at it; the next
+    /// [`Self::wait_stop`] returns this as the proper event instead of a bare
     /// "halted", and `resume` clears it. `None` whenever the host is up to date.
     parked_stop: Option<ContinueOutcome>,
     /// Where the step walk another stop ended goes on from.
     pending_walk: Option<PendingWalk>,
+    /// The run handed back running that a wait goes on with, until it stops.
+    handed_back_run: Option<HandedBackRun>,
     /// The stop the target is halted at, as it was surfaced: set by every
     /// visible classification and every host-facing run/step result, cleared
     /// when the target moves. Unlike `parked_stop` it is not consumed by
@@ -887,6 +964,11 @@ pub struct Session {
     /// With [`Self::compact_stops`], draw stops as their banner only: a
     /// stop in the middle of a line, whose detail the rest of it carries.
     pub brief_stops: bool,
+    /// The default radix of numbers in the expressions a host evaluates, set
+    /// with `n`. Session state so the breakpoint actions and filter commands
+    /// the [`ActionRunner`] runs, and a DAP client's watch expressions, read
+    /// the number the user typed the same way the prompt does.
+    pub radix: NumberRadix,
     /// The expressions the stop display shows at every stop.
     pub displays: Vec<Display>,
     /// Guest debug output read from the kernel's DbgPrint buffer, for a
@@ -932,9 +1014,7 @@ impl Session {
 
     /// Whether the backend delivers debug output itself, as KD does.
     pub fn backend_streams_debug_output(&self) -> bool {
-        self.backend.capabilities().iter().any(|capability| {
-            capability.capability == DebugCapability::DebugOutput && capability.supported
-        })
+        self.backend.supports(DebugCapability::DebugOutput)
     }
 
     /// Record what the kernel printed to its DbgPrint buffer since the last

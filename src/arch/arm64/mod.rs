@@ -1,6 +1,7 @@
 //! ARM64 (AArch64).
 
 mod context;
+pub mod continuation;
 pub mod debug_registers;
 pub mod disasm;
 pub mod paging;

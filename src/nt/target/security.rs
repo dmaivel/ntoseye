@@ -1,12 +1,13 @@
 //! security: structured inspector data (shared by the REPL, Python SDK, and MCP).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::types::VirtAddr;
 use crate::nt::guest::ProcessInfo;
-use crate::nt::layout::{StructRef, TypeInfo};
+use crate::nt::layout::{StructRef, TypeInfo, Types};
 use crate::nt::symbols::glob_matches;
 use crate::nt::target::{DiagnosticValue, Target, fast_ref_address};
 use ntoseye_macros::record;
@@ -117,7 +118,8 @@ pub struct ObjectSecurity {
 /// A session and its processes.
 #[record]
 pub struct Session {
-    /// `None` for processes whose session is unknown.
+    /// `None` for processes outside every session (System, Registry, smss)
+    /// and those whose session is unknown.
     pub id: Option<u64>,
     /// The processes in the session.
     pub processes: Vec<ProcessInfo>,
@@ -681,19 +683,23 @@ impl Target {
     }
 
     /// Resolve one process's session ID from its session space, falling back
-    /// to the primary token's `SessionId`.
+    /// to the primary token's `SessionId` when the session space can't be
+    /// read. A NULL `Session` is a process outside every session (System,
+    /// Registry, smss), whose token still says 0.
     pub fn process_session_id(&self, eprocess: VirtAddr) -> Option<u32> {
         let kernel_dtb = self.kernel_dtb();
         let types = self.guest().ok()?.ntoskrnl.types_in(kernel_dtb);
         let eprocess = types.struct_at("_EPROCESS", eprocess).ok()?;
-        if let Some(session) = eprocess
-            .read_pointer("Session")
-            .ok()
-            .filter(|address| !address.is_zero())
-            && let Ok(session) = types.struct_at("_MM_SESSION_SPACE", session)
-            && let Ok(id) = session.read_field::<u32>("SessionId")
-        {
-            return Some(id);
+        if let Ok(session) = eprocess.read_pointer("Session") {
+            if session.is_zero() {
+                return None;
+            }
+            if let Ok(id) = types
+                .struct_at("_MM_SESSION_SPACE", session)
+                .and_then(|session| session.read_field::<u32>("SessionId"))
+            {
+                return Some(id);
+            }
         }
 
         let token = eprocess
@@ -764,7 +770,8 @@ impl Target {
     /// select one session.  `Some(-1)`/`Some(-2)` selects the current session,
     /// `Some(-4)` selects all sessions, and non-negative values select an ID;
     /// unknown session IDs remain valid empty results.  Session IDs first use
-    /// `_EPROCESS.Session`/`_MM_SESSION_SPACE` and fall back to `_TOKEN.SessionId`.
+    /// `_EPROCESS.Session`/`_MM_SESSION_SPACE` and fall back to `_TOKEN.SessionId`;
+    /// processes with no session space group under `None`.
     pub fn sessions(&self, session: Option<i64>) -> Result<Sessions> {
         let (processes, truncated) = self.collect_sessions()?;
         let selected_session = match session {
@@ -1077,12 +1084,21 @@ impl Target {
         };
 
         let privileges = DiagnosticValue::from_result((|| -> Result<Vec<TokenPrivilege>> {
-            let privileges = token + token_layout.field_offset("Privileges")?;
-            let privileges_layout = types.layout("_SEP_TOKEN_PRIVILEGES")?;
-            let present: u64 = self.read_layout_field(&privileges_layout, privileges, "Present")?;
-            let enabled: u64 = self.read_layout_field(&privileges_layout, privileges, "Enabled")?;
-            let enabled_by_default: u64 =
-                self.read_layout_field(&privileges_layout, privileges, "EnabledByDefault")?;
+            let (present, enabled, enabled_by_default) =
+                if token_layout.fields.contains_key("PrivilegeCount") {
+                    self.privilege_array_bitmaps(&types, &token_layout, token)?
+                } else {
+                    let privileges = token + token_layout.field_offset("Privileges")?;
+                    let privileges_layout = types.layout("_SEP_TOKEN_PRIVILEGES")?;
+                    let field = |name| -> Result<u64> {
+                        self.read_layout_field(&privileges_layout, privileges, name)
+                    };
+                    (
+                        field("Present")?,
+                        field("Enabled")?,
+                        field("EnabledByDefault")?,
+                    )
+                };
             Ok(decode_token_privilege_bitmaps(
                 present,
                 enabled,
@@ -1102,6 +1118,47 @@ impl Target {
             groups,
             privileges,
         })
+    }
+
+    /// The present, enabled and enabled-by-default privilege bitmaps of a
+    /// token from before Vista: `PrivilegeCount` `LUID_AND_ATTRIBUTES`
+    /// behind `Privileges`, each LUID's low part the privilege's value.
+    fn privilege_array_bitmaps(
+        &self,
+        types: &Types<'_>,
+        token_layout: &Arc<TypeInfo>,
+        token: VirtAddr,
+    ) -> Result<(u64, u64, u64)> {
+        const SE_PRIVILEGE_ENABLED_BY_DEFAULT: u32 = 1;
+        const SE_PRIVILEGE_ENABLED: u32 = 2;
+        const MAX_PRIVILEGES: u32 = 64;
+        let count: u32 = self.read_layout_field(token_layout, token, "PrivilegeCount")?;
+        let array = types
+            .struct_with_layout(Arc::clone(token_layout), token)
+            .read_pointer("Privileges")?;
+        let entry = types.layout("_LUID_AND_ATTRIBUTES")?;
+        let (luid, attributes) = (
+            entry.field_offset("Luid")?,
+            entry.field_offset("Attributes")?,
+        );
+        let memory = self.kernel_address_space();
+        let (mut present, mut enabled, mut enabled_by_default) = (0u64, 0u64, 0u64);
+        for index in 0..count.min(MAX_PRIVILEGES) {
+            let at = array + u64::from(index) * entry.size as u64;
+            let value: u32 = memory.read(at + luid)?;
+            let flags: u32 = memory.read(at + attributes)?;
+            let Some(bit) = 1u64.checked_shl(value) else {
+                continue;
+            };
+            present |= bit;
+            if flags & SE_PRIVILEGE_ENABLED != 0 {
+                enabled |= bit;
+            }
+            if flags & SE_PRIVILEGE_ENABLED_BY_DEFAULT != 0 {
+                enabled_by_default |= bit;
+            }
+        }
+        Ok((present, enabled, enabled_by_default))
     }
 }
 

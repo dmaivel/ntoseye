@@ -18,21 +18,33 @@ fn bitfields_sort_by_position_and_fields_resolve_case_insensitively() {
 
     // PDB reports both bitfields at offset 0, so only the bit position
     // orders them; `dt` prints the low bit first even when its name sorts
-    // last.
+    // last. The whole word holding them comes first, though its name sorts
+    // after the low bit's.
     let info = TypeInfo {
         name: "_NODE".to_string(),
         pointer_size: 8,
         size: 1,
-        fields: [("Alpha".to_string(), bit(7)), ("Zeta".to_string(), bit(0))]
-            .into_iter()
-            .collect(),
+        fields: [
+            ("Alpha".to_string(), bit(7)),
+            ("Zeta".to_string(), bit(0)),
+            (
+                "Zz".to_string(),
+                FieldInfo {
+                    offset: 0,
+                    size: 1,
+                    type_data: ParsedType::Primitive("UCHAR".to_string()),
+                },
+            ),
+        ]
+        .into_iter()
+        .collect(),
     };
     let order: Vec<_> = info
         .fields_in_order()
         .into_iter()
         .map(|(name, _)| name.as_str())
         .collect();
-    assert_eq!(order, ["Zeta", "Alpha"]);
+    assert_eq!(order, ["Zz", "Zeta", "Alpha"]);
 
     assert_eq!(
         find_field(&info, "alpha").map(|(name, _)| name.as_str()),

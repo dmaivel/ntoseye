@@ -4,7 +4,6 @@
 //! [`BreakpointInfo`] record `bl` lists.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use tabled::builder::Builder;
@@ -105,7 +104,7 @@ fn code_breakpoint(
         .require_software_breakpoints()
         .map_err(invalid)?;
     let words = breakpoint_words(cursor);
-    parse_breakpoint_arguments(&words, cx.state.radix, cx.name, false).map_err(invalid)
+    parse_breakpoint_arguments(&words, cx.state.ctx.radix, cx.name, false).map_err(invalid)
 }
 
 /// `bm`'s line: [`code_breakpoint`]'s, whose target is a symbol pattern
@@ -132,7 +131,7 @@ fn hardware_breakpoint(
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<ParsedBreakpointArgs, ArgError> {
     let words = breakpoint_words(cursor);
-    parse_breakpoint_arguments(&words, cx.state.radix, cx.name, true).map_err(invalid)
+    parse_breakpoint_arguments(&words, cx.state.ctx.radix, cx.name, true).map_err(invalid)
 }
 
 /// `!hvbp`'s and `!hvexit`'s line.
@@ -145,7 +144,7 @@ fn hypervisor_breakpoint(
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<ParsedHypercallArgs, ArgError> {
     let words = breakpoint_words(cursor);
-    parse_hypercall_arguments(&words, cx.state.radix, cx.name).map_err(invalid)
+    parse_hypercall_arguments(&words, cx.state.ctx.radix, cx.name).map_err(invalid)
 }
 
 /// `bc`/`bd`/`be`'s IDs: `id`, `first-last`, or `*`.
@@ -183,7 +182,7 @@ fn pass_count(
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<u64, ArgError> {
     let text = cursor.word().ok_or(ArgError::Missing)?;
-    parse_radix_u64_text(&text, cx.state.radix, "pass count").map_err(invalid)
+    parse_radix_u64_text(&text, cx.state.ctx.radix, "pass count").map_err(invalid)
 }
 
 /// `bsc`'s condition and commands: a quoted last word is the commands, and
@@ -216,7 +215,10 @@ fn condition_and_commands(
 /// refuses an address inside an instruction. When nothing near the address
 /// says where instructions start, or that code cannot be read, bp sets the
 /// breakpoint and warns that it could not check. /a skips the check. A
-/// file:line sets a source breakpoint, as bu does.
+/// file:line sets a source breakpoint, as bu does. With /p, the address is
+/// evaluated in that process, as after .process /p, so bp /p 4140
+/// kernelbase!SleepEx+0x10 needs no .process first; the current process
+/// context stays as it was.
 #[command(
     names = ["bp"],
     category = "breakpoints and events",
@@ -231,17 +233,19 @@ fn set_breakpoint(
 ) -> Result<BreakpointsSet> {
     let spec = args.target.clone();
     let config = state.breakpoint_config(args)?;
-    let address = match Expr::eval_with_radix(&spec, &state.ctx.target, state.radix) {
+    let radix = state.ctx.radix;
+    let address = match state
+        .ctx
+        .resolve_in_breakpoint_scope(config.scope.as_ref(), |target| {
+            Expr::eval_with_radix(&spec, target, radix)
+        }) {
         Ok(address) => address,
-        Err(error) => match state.resolve_symbol_in_scope(&spec, config.scope.as_ref()) {
-            Some(address) => address,
-            // `bp queue.c:42` is a source line, which only fails as an
-            // expression.
-            None if BreakpointSpec::source(&spec, 0).is_some() => {
-                return set_source_breakpoint(state.ctx, spec, config);
-            }
-            None => return Err(error),
-        },
+        // `bp queue.c:42` is a source line, which only fails as an
+        // expression.
+        Err(_) if BreakpointSpec::source(&spec, 0).is_some() => {
+            return set_source_breakpoint(state.ctx, spec, config);
+        }
+        Err(error) => return Err(error),
     };
     let set = state.ctx.set_code_breakpoint(address, config)?;
     Ok(BreakpointsSet::Address {
@@ -286,7 +290,8 @@ fn set_symbolic_breakpoint(
 /// Set deferred symbolic breakpoints on the symbols that match a pattern.
 ///
 /// Only code symbols match, so bm skips the data symbols that the pattern
-/// also matches.
+/// also matches. With /p, the pattern matches the symbols of that process's
+/// modules, whose symbols ntoseye loads for it.
 #[command(
     names = ["bm"],
     category = "breakpoints and events",
@@ -314,9 +319,12 @@ fn set_pattern_breakpoints(
 /// Set a hardware (debug-register) breakpoint.
 ///
 /// The access is e=execute, r=read/write, or w=write, and the size is 1, 2,
-/// 4, or 8 bytes. An execute breakpoint has size 1. The command is not
-/// available on a dump or on the `memory` backend. Example: ba w4
-/// nt!MyGlobal. In VTL1 (the .vtl 1 view or a vCPU stopped in VTL1), ntoseye
+/// 4, or 8 bytes. An execute breakpoint has size 1. The options may also
+/// follow the access and size, as WinDbg writes them: ba e1 /p 4
+/// kernelbase!SleepEx. With /p, the address is evaluated in that process, as
+/// after .process /p, and the current process context stays as it was. The
+/// command is not available on a dump or on the `memory` backend. Example:
+/// ba w4 nt!MyGlobal. In VTL1 (the .vtl 1 view or a vCPU stopped in VTL1), ntoseye
 /// accepts only `ba e1`, and only on GDB backends. This breakpoint is global,
 /// so you cannot use /p or /t, which name NT processes and threads. Example:
 /// .vtl 1; ba e1 securekernel!SkeSelectProcessAddressSpace; g
@@ -339,13 +347,12 @@ fn set_hardware_breakpoint(
     let target = args.target.clone();
     let condition = args.condition.clone();
     let config = state.breakpoint_config(args)?;
-    // A user-mode symbol under `/p` is the process's, as for `bp`.
-    let address = match Expr::eval_with_radix(&target, &state.ctx.target, state.radix) {
-        Ok(address) => address,
-        Err(error) => state
-            .resolve_symbol_in_scope(&target, config.scope.as_ref())
-            .ok_or(error)?,
-    };
+    let radix = state.ctx.radix;
+    let address = state
+        .ctx
+        .resolve_in_breakpoint_scope(config.scope.as_ref(), |context| {
+            Expr::eval_with_radix(&target, context, radix)
+        })?;
     let id = state
         .ctx
         .set_hardware_breakpoint(address, access, len, config)?;
@@ -392,7 +399,7 @@ fn set_hypercall_breakpoint(
     state: &mut ReplState<'_>,
     #[arg(parse = hypervisor_breakpoint, name = "code|name")] args: ParsedHypercallArgs,
 ) -> Result<BreakpointsSet> {
-    let code = hypercall_code_text(&args.call, state.radix)?;
+    let code = hypercall_code_text(&args.call, state.ctx.radix)?;
     let (vp, config) = state.hypervisor_breakpoint_config(&args)?;
     let id = state.ctx.add_hypercall_breakpoint(
         HypercallFilter {
@@ -721,9 +728,18 @@ fn managed(session: &Session, selection: BreakpointIdSelection) -> Vec<u32> {
     let managed = session.breakpoints.managed_ids();
     match selection {
         BreakpointIdSelection::All => managed,
-        BreakpointIdSelection::Ids(ids) => {
-            let managed: HashSet<u32> = managed.into_iter().collect();
-            ids.into_iter().filter(|id| managed.contains(id)).collect()
+        // Ranges are tested against the breakpoints that exist, so a wide
+        // range such as `bc 0-4294967295` costs no more than a short one.
+        BreakpointIdSelection::Ranges(ranges) => {
+            let mut picked = Vec::new();
+            for (first, last) in ranges {
+                for &id in &managed {
+                    if (first..=last).contains(&id) && !picked.contains(&id) {
+                        picked.push(id);
+                    }
+                }
+            }
+            picked
         }
     }
 }
@@ -840,10 +856,14 @@ fn set_condition(
     let (condition, expr) = if condition.eq_ignore_ascii_case("clear") {
         (None, None)
     } else {
-        let expr = compile_repl_condition(Some(&condition), state.radix)?;
+        let expr = compile_repl_condition(Some(&condition), state.ctx.radix)?;
         (Some(condition), expr)
     };
-    state.ctx.breakpoints.set_condition(id, condition, expr)?;
+    state
+        .ctx
+        .breakpoints
+        .edit()
+        .set_condition(id, condition, expr)?;
     outln!("breakpoint {} condition updated", ui::bp_id(id));
     Ok(())
 }
@@ -868,8 +888,8 @@ fn set_condition_and_commands(
 ) -> Result<()> {
     let BreakpointId(id) = id;
     let (condition, action) = update;
-    let expr = compile_repl_condition(Some(&condition), state.radix)?;
-    let breakpoints = &mut state.ctx.breakpoints;
+    let expr = compile_repl_condition(Some(&condition), state.ctx.radix)?;
+    let mut breakpoints = state.ctx.breakpoints.edit();
     breakpoints.set_condition(id, Some(condition), expr)?;
     breakpoints.set_action(id, action)?;
     outln!(
@@ -894,7 +914,7 @@ fn set_commands(
 ) -> Result<()> {
     let BreakpointId(id) = id;
     let action = (!commands.eq_ignore_ascii_case("clear")).then_some(commands);
-    session.breakpoints.set_action(id, action)?;
+    session.breakpoints.edit().set_action(id, action)?;
     outln!("breakpoint {} action updated", ui::bp_id(id));
     Ok(())
 }
@@ -913,7 +933,7 @@ fn renumber_breakpoint(
     new_id: BreakpointId,
 ) -> Result<()> {
     let (BreakpointId(old_id), BreakpointId(new_id)) = (id, new_id);
-    state.ctx.breakpoints.renumber(old_id, new_id)?;
+    state.ctx.breakpoints.edit().renumber(old_id, new_id)?;
     state.caches.refresh_breakpoints(&state.ctx.breakpoints);
     outln!(
         "breakpoint {} renumbered to {}",
@@ -937,7 +957,7 @@ fn reset_pass_count(
     #[arg(parse = pass_count)] passes: u64,
 ) -> Result<()> {
     let BreakpointId(id) = id;
-    session.breakpoints.set_pass_count(id, passes)?;
+    session.breakpoints.edit().set_pass_count(id, passes)?;
     outln!("breakpoint {} pass count reset", ui::bp_id(id));
     Ok(())
 }
@@ -960,7 +980,8 @@ struct ParsedBreakpointArgs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BreakpointIdSelection {
     All,
-    Ids(Vec<u32>),
+    /// Inclusive `(first, last)` ID ranges; a lone ID is a range of one.
+    Ranges(Vec<(u32, u32)>),
 }
 
 /// An option argument that is a bare number, in the session radix. It takes
@@ -993,6 +1014,37 @@ struct BreakpointOptions {
     processor: Option<u16>,
     /// The `/w` condition.
     condition: Option<String>,
+}
+
+impl BreakpointOptions {
+    /// These options with `later`'s, which `ba` takes after its access and
+    /// size as WinDbg writes them. An option given in both places is refused.
+    fn merge(mut self, later: Self, command: &str) -> Result<Self> {
+        fn take<T>(
+            first: &mut Option<T>,
+            later: Option<T>,
+            flag: &str,
+            command: &str,
+        ) -> Result<()> {
+            match (first.is_some(), later) {
+                (true, Some(_)) => Err(Error::InvalidArgument(format!(
+                    "{command}: {flag} is given twice"
+                ))),
+                (_, Some(value)) => {
+                    *first = Some(value);
+                    Ok(())
+                }
+                (_, None) => Ok(()),
+            }
+        }
+        self.one_shot |= later.one_shot;
+        self.unchecked |= later.unchecked;
+        take(&mut self.pid, later.pid, "/p", command)?;
+        take(&mut self.thread, later.thread, "/t", command)?;
+        take(&mut self.processor, later.processor, "/c", command)?;
+        take(&mut self.condition, later.condition, "/w", command)?;
+        Ok(self)
+    }
 }
 
 /// Parse the options `argv` starts with, and the index of the first
@@ -1057,18 +1109,33 @@ fn parse_breakpoint_options(
     Ok((options, index))
 }
 
+/// How many more `<` than `>` `text` holds.
+fn angle_depth(text: &str) -> isize {
+    text.chars()
+        .map(|ch| match ch {
+            '<' => 1,
+            '>' => -1,
+            _ => 0,
+        })
+        .sum()
+}
+
 fn parse_breakpoint_arguments(
     argv: &[Cow<'_, str>],
     radix: NumberRadix,
     command: &str,
     wants_access_spec: bool,
 ) -> Result<ParsedBreakpointArgs> {
-    let (options, mut index) = parse_breakpoint_options(argv, radix, command)?;
+    let (mut options, mut index) = parse_breakpoint_options(argv, radix, command)?;
     let access_spec = if wants_access_spec {
         let access = argv
             .get(index)
             .ok_or_else(|| Error::InvalidArgument(format!("{command}: missing access/size")))?;
         index += 1;
+        // WinDbg writes `ba`'s options after the access and size.
+        let (later, used) = parse_breakpoint_options(&argv[index..], radix, command)?;
+        options = options.merge(later, command)?;
+        index += used;
         Some(access.as_ref().to_string())
     } else {
         None
@@ -1076,8 +1143,20 @@ fn parse_breakpoint_arguments(
     let target = argv
         .get(index)
         .ok_or_else(|| Error::InvalidArgument(format!("{command}: missing breakpoint target")))?;
-    let target = target.as_ref().to_string();
+    let mut target = target.as_ref().to_string();
     index += 1;
+    // A template argument list may hold a space after a comma, which splits
+    // the target into words: rejoin them while the list is open.
+    let mut depth = angle_depth(&target);
+    while depth > 0
+        && target.ends_with(',')
+        && let Some(word) = argv.get(index)
+    {
+        target.push(' ');
+        target.push_str(word);
+        depth += angle_depth(word);
+        index += 1;
+    }
 
     let mut pass_count = 0;
     if let Some(value) = argv.get(index)
@@ -1432,8 +1511,7 @@ fn parse_breakpoint_id_selectors(args: &[&str]) -> Result<BreakpointIdSelection>
         ));
     }
 
-    let mut ids = Vec::new();
-    let mut seen = HashSet::new();
+    let mut ranges = Vec::new();
     for selector in args {
         if let Some((first, last)) = selector.split_once('-') {
             let first = first.parse::<u32>().map_err(|_| {
@@ -1447,21 +1525,15 @@ fn parse_breakpoint_id_selectors(args: &[&str]) -> Result<BreakpointIdSelection>
                     "breakpoint ID range must be ascending: {selector}"
                 )));
             }
-            for id in first..=last {
-                if seen.insert(id) {
-                    ids.push(id);
-                }
-            }
+            ranges.push((first, last));
         } else {
             let id = selector.parse::<u32>().map_err(|_| {
                 Error::InvalidArgument(format!("invalid breakpoint ID: {selector}"))
             })?;
-            if seen.insert(id) {
-                ids.push(id);
-            }
+            ranges.push((id, id));
         }
     }
-    Ok(BreakpointIdSelection::Ids(ids))
+    Ok(BreakpointIdSelection::Ranges(ranges))
 }
 
 fn compile_repl_condition(
@@ -1505,23 +1577,6 @@ fn parse_hw_breakpoint_spec(spec: &str) -> Result<(HwBreakpointAccess, u8)> {
 }
 
 impl ReplState<'_> {
-    fn breakpoint_scope(&self, pid: Option<u64>) -> Result<Option<BreakpointScope>> {
-        let Some(pid) = pid else {
-            return Ok(None);
-        };
-        let process = self
-            .ctx
-            .target
-            .guest
-            .as_ref()
-            .ok_or(Error::NtoskrnlNotFound)?
-            .enumerate_processes()?
-            .into_iter()
-            .find(|process| process.pid == pid)
-            .ok_or_else(|| Error::InvalidArgument(format!("process {pid} not found")))?;
-        Ok(Some(BreakpointScope::process(&process)))
-    }
-
     /// The thread `/t` names, as a filter. Accepts what `.thread` accepts: a
     /// thread id, an ETHREAD, or a KTHREAD.
     fn breakpoint_thread_scope(&mut self, thread: Option<u64>) -> Result<Option<ThreadScope>> {
@@ -1557,8 +1612,11 @@ impl ReplState<'_> {
     }
 
     fn breakpoint_config(&mut self, parsed: ParsedBreakpointArgs) -> Result<BreakpointConfig> {
-        let condition_expr = compile_repl_condition(parsed.condition.as_deref(), self.radix)?;
-        let scope = self.breakpoint_scope(parsed.pid)?;
+        let condition_expr = compile_repl_condition(parsed.condition.as_deref(), self.ctx.radix)?;
+        let scope = parsed
+            .pid
+            .map(|pid| self.ctx.breakpoint_scope_for_pid(pid))
+            .transpose()?;
         let thread = self.breakpoint_thread_scope(parsed.thread)?;
         let processor = self.breakpoint_processor_scope(parsed.processor)?;
         Ok(BreakpointConfig {
@@ -1595,7 +1653,7 @@ impl ReplState<'_> {
             })
             .transpose()?;
         let config = BreakpointConfig {
-            condition_expr: compile_repl_condition(parsed.condition.as_deref(), self.radix)?,
+            condition_expr: compile_repl_condition(parsed.condition.as_deref(), self.ctx.radix)?,
             condition: parsed.condition.clone(),
             one_shot: parsed.one_shot,
             action: parsed.action.clone(),
@@ -1603,30 +1661,6 @@ impl ReplState<'_> {
             ..BreakpointConfig::default()
         };
         Ok((vp, config))
-    }
-
-    /// `bp /p <pid> mod!sym` names the address space the symbol lives in, but
-    /// the expression evaluator only knows the inspection scope. When the
-    /// evaluation fails and the spec is a plain `mod!sym`, resolve it under
-    /// the `/p` process instead, loading that module's symbols on demand.
-    fn resolve_symbol_in_scope(
-        &self,
-        spec: &str,
-        scope: Option<&BreakpointScope>,
-    ) -> Option<VirtAddr> {
-        let Some(BreakpointScope::Process { pid, dtb, .. }) = scope else {
-            return None;
-        };
-        let (module, _) = spec.split_once('!')?;
-        let symbols = &self.ctx.target.symbols;
-        if let Ok(Some(address)) = symbols.find_symbol_across_modules(*dtb, spec) {
-            return Some(address);
-        }
-        self.ctx
-            .target
-            .load_process_module_symbols(*pid, *dtb, Some(module.trim()))
-            .ok()?;
-        symbols.find_symbol_across_modules(*dtb, spec).ok()?
     }
 }
 
@@ -1660,19 +1694,58 @@ mod tests {
         assert!(pid("notanumber", NumberRadix::Hexadecimal).is_err());
     }
 
+    /// `ba` takes its options before the access and size or after them, as
+    /// WinDbg writes them, and refuses one given in both places.
+    #[test]
+    fn ba_options_may_follow_the_access_and_size() {
+        let parse = |words: &[&str]| {
+            let words: Vec<Cow<'_, str>> = words.iter().map(|&word| Cow::from(word)).collect();
+            parse_breakpoint_arguments(&words, NumberRadix::Hexadecimal, "ba", true)
+        };
+        for words in [
+            &["/p", "0n4", "/1", "e1", "kernelbase!SleepEx"][..],
+            &["e1", "/p", "0n4", "/1", "kernelbase!SleepEx"],
+            &["/1", "e1", "/p", "0n4", "kernelbase!SleepEx"],
+        ] {
+            let parsed = parse(words).unwrap();
+            assert_eq!(
+                (parsed.pid, parsed.one_shot, parsed.access_spec.as_deref()),
+                (Some(4), true, Some("e1")),
+                "{words:?}"
+            );
+            assert_eq!(parsed.target, "kernelbase!SleepEx");
+        }
+        assert!(parse(&["/p", "4", "e1", "/p", "8", "kernelbase!SleepEx"]).is_err());
+    }
+
+    /// A space after a comma in a template argument list stays in the
+    /// target; the words after the list are the pass count and condition.
+    #[test]
+    fn template_target_keeps_spaces_after_commas() {
+        let words: Vec<Cow<'_, str>> = ["nt!X<A,", "B<C,", "D>>::f", "3", "if", "@rcx"]
+            .iter()
+            .map(|&word| Cow::from(word))
+            .collect();
+        let parsed =
+            parse_breakpoint_arguments(&words, NumberRadix::Hexadecimal, "bp", false).unwrap();
+        assert_eq!(parsed.target, "nt!X<A, B<C, D>>::f");
+        assert_eq!(parsed.pass_count, 3);
+        assert_eq!(parsed.condition.as_deref(), Some("@rcx"));
+    }
+
     #[test]
     fn breakpoint_id_selectors_accept_lists_and_ranges() {
         assert_eq!(
             parse_breakpoint_id_selectors(&["0", "2", "5"]).unwrap(),
-            BreakpointIdSelection::Ids(vec![0, 2, 5])
+            BreakpointIdSelection::Ranges(vec![(0, 0), (2, 2), (5, 5)])
         );
         assert_eq!(
             parse_breakpoint_id_selectors(&["1-3"]).unwrap(),
-            BreakpointIdSelection::Ids(vec![1, 2, 3])
+            BreakpointIdSelection::Ranges(vec![(1, 3)])
         );
         assert_eq!(
             parse_breakpoint_id_selectors(&["1-3", "2", "5"]).unwrap(),
-            BreakpointIdSelection::Ids(vec![1, 2, 3, 5])
+            BreakpointIdSelection::Ranges(vec![(1, 3), (2, 2), (5, 5)])
         );
         assert_eq!(
             parse_breakpoint_id_selectors(&["*"]).unwrap(),

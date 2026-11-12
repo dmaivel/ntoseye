@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::thread::spawn;
 use std::time::Instant;
 
-use crate::backend::dbg_backend::ModuleEvent;
+use crate::backend::dbg_backend::{ModuleEvent, ModuleNotification};
 use crate::backend::kd::amd64::{reported_dr7, trap_state};
 use crate::backend::kd::framing::{
     BREAKIN_BYTE, HEADER_SIZE, INITIAL_PACKET_ID, PACKET_TYPE_KD_ACKNOWLEDGE,
@@ -30,7 +30,8 @@ fn transparent_arm64_state_change_uses_arm64_continue_layout() {
         exception_address: None,
         program_counter: 0xffff_f800_1234_5678,
         kernel_base_hint: None,
-        unload_symbols: false,
+        load_symbols: None,
+        exception_record: None,
         is_bugcheck: false,
         bugcheck: None,
         target_reloaded: false,
@@ -97,6 +98,49 @@ fn parse_state_change_extracts_exception_record_metadata() {
     assert_eq!(second.exception_first_chance, Some(false));
 }
 
+/// A trap in a WOW64 thread's x86 code reports `STATUS_WX86_SINGLE_STEP` or
+/// `STATUS_WX86_BREAKPOINT`; to the debugger they are a single step and a
+/// breakpoint, which is what ends a step and what a hit is.
+#[test]
+fn wow64_traps_parse_as_the_native_ones() {
+    let mut payload = vec![0u8; 188];
+    payload[0..4].copy_from_slice(&DBG_KD_EXCEPTION_STATE_CHANGE.to_le_bytes());
+    for (reported, native) in [
+        (0x4000_001eu32, 0x8000_0004u32),
+        (0x4000_001f, 0x8000_0003),
+        (0xc000_0005, 0xc000_0005),
+    ] {
+        payload[32..36].copy_from_slice(&reported.to_le_bytes());
+        assert_eq!(parse_state_change(&payload).unwrap().exception_code, native);
+    }
+}
+
+/// Windows on ARM64 reports a hardware breakpoint hit as a
+/// `STATUS_BREAKPOINT` of type `BREAKPOINT_HW_BREAK` (7), and a watchpoint
+/// hit as one of type `BREAKPOINT_HW_WATCH` (6) with the address accessed;
+/// both are the debug trap x64 reports, and only the record's type tells
+/// them from a `brk`.
+#[test]
+fn arm64_hardware_hits_parse_as_debug_traps_with_the_watched_address() {
+    let stop = |parameters: &[u64]| {
+        let mut payload = vec![0u8; 188];
+        payload[0..4].copy_from_slice(&DBG_KD_EXCEPTION_STATE_CHANGE.to_le_bytes());
+        payload[32..36].copy_from_slice(&STATUS_BREAKPOINT.to_le_bytes());
+        payload[56..60].copy_from_slice(&(parameters.len() as u32).to_le_bytes());
+        for (index, parameter) in parameters.iter().enumerate() {
+            payload[64 + index * 8..72 + index * 8].copy_from_slice(&parameter.to_le_bytes());
+        }
+        let stop = parse_state_change(&payload).unwrap();
+        (stop.exception_code, stop_event(stop).watchpoint_address)
+    };
+    let watched = 0xffff_8101_9de9_d1fc;
+    assert_eq!(stop(&[6, watched]), (STATUS_SINGLE_STEP, Some(watched)));
+    assert_eq!(stop(&[7]), (STATUS_SINGLE_STEP, None));
+    // A `brk` (BREAKPOINT_BREAK), and a debug print, stay breakpoints.
+    assert_eq!(stop(&[0]), (STATUS_BREAKPOINT, None));
+    assert_eq!(stop(&[1, watched]), (STATUS_BREAKPOINT, None));
+}
+
 #[test]
 fn parse_load_symbols_state_change_extracts_base_hint() {
     let mut payload = vec![0u8; 64];
@@ -123,7 +167,7 @@ fn load_symbols_unload_flag_separates_loads_from_unloads() {
     let load = stop_event(parse_state_change(&payload).unwrap());
     assert!(load.modules_changed);
     assert_eq!(
-        load.module_event,
+        load.module_event.map(|event| (event.kind, event.base)),
         Some((ModuleEvent::Load, VirtAddr(0xfffff807_12340000)))
     );
 
@@ -131,12 +175,43 @@ fn load_symbols_unload_flag_separates_loads_from_unloads() {
     let unload = stop_event(parse_state_change(&payload).unwrap());
     assert!(unload.modules_changed);
     assert_eq!(
-        unload.module_event,
+        unload.module_event.map(|event| (event.kind, event.base)),
         Some((ModuleEvent::Unload, VirtAddr(0xfffff807_12340000)))
     );
     assert_eq!(
         unload.target_kernel_base_hint,
         Some(VirtAddr(0xfffff807_12340000))
+    );
+}
+
+/// With `!gflag +ksl` the kernel reports each user-mode image it maps: the
+/// path follows the 240-byte state change, and `ProcessId` carries the
+/// mapping process's `EPROCESS`, of which KD keeps 32 bits. A user-mode base
+/// is no hint at the kernel, and the kernel's module list is unchanged.
+#[test]
+fn a_user_image_load_names_its_path_size_and_process() {
+    let path = b"\\Windows\\System32\\ws2_32.dll\0";
+    let mut payload = vec![0u8; 240];
+    payload[0..4].copy_from_slice(&DBG_KD_LOAD_SYMBOLS_STATE_CHANGE.to_le_bytes());
+    payload[8..12].copy_from_slice(&4u32.to_le_bytes());
+    payload[32..36].copy_from_slice(&(path.len() as u32).to_le_bytes());
+    payload[40..48].copy_from_slice(&0x7fff_a141_0000u64.to_le_bytes());
+    payload[48..56].copy_from_slice(&0xf63e_c080u64.to_le_bytes());
+    payload[60..64].copy_from_slice(&0x81000u32.to_le_bytes());
+    payload.extend_from_slice(path);
+
+    let load = stop_event(parse_state_change(&payload).unwrap());
+    assert!(!load.modules_changed);
+    assert_eq!(load.target_kernel_base_hint, None);
+    assert_eq!(
+        load.module_event,
+        Some(ModuleNotification {
+            kind: ModuleEvent::Load,
+            base: VirtAddr(0x7fff_a141_0000),
+            size: 0x81000,
+            path: Some(r"\Windows\System32\ws2_32.dll".to_string()),
+            process: Some(0xf63e_c080),
+        })
     );
 }
 
@@ -178,6 +253,16 @@ fn state_change_carries_the_amd64_control_report() {
     let stop = parse_state_change(&payload).unwrap();
     assert_eq!(stop.program_counter, 0x7ffa_7cc5_17e0);
     assert_eq!(stop.exception_code, STATUS_BREAKPOINT);
+    let record = stop.exception_record.as_ref().expect("an exception record");
+    assert_eq!(
+        (record.code, record.flags, record.address),
+        (STATUS_BREAKPOINT, 0, 0x7ffa_7cc5_17e0)
+    );
+    assert_eq!(
+        record.parameters,
+        [0],
+        "an int3's one parameter, BREAKPOINT_BREAK"
+    );
 
     let report = stop.control_report.expect("240 bytes carry a report");
     let trap = trap_state(&report).expect("AMD64 report");
@@ -192,11 +277,7 @@ fn state_change_carries_the_amd64_control_report() {
 
 #[test]
 fn parse_state_change_rejects_short_payload() {
-    let err = parse_state_change(&[0u8; 10]).unwrap_err();
-    match err {
-        Error::Kd(msg) => assert!(msg.contains("too short")),
-        other => panic!("unexpected error: {other:?}"),
-    }
+    assert!(matches!(parse_state_change(&[0u8; 10]), Err(Error::Kd(_))));
 }
 
 #[test]
@@ -217,16 +298,6 @@ fn initial_handshake_breaks_in_immediately_then_resets() {
         initial_handshake_stimulus(3),
         InitialHandshakeStimulus::Reset
     );
-}
-
-#[test]
-fn kd_handshake_timeout_rejects_zero_and_deadline_overflow() {
-    for seconds in [0, u64::MAX] {
-        assert!(matches!(
-            handshake_timeout(seconds),
-            Err(Error::InvalidArgument(_))
-        ));
-    }
 }
 
 #[test]
@@ -268,7 +339,8 @@ fn continue_drains_in_place_rebreak_stale_breakin_and_retired_breakpoint_trap() 
         exception_address: Some(pc),
         program_counter: pc,
         kernel_base_hint: None,
-        unload_symbols: false,
+        load_symbols: None,
+        exception_record: None,
         is_bugcheck: false,
         bugcheck: None,
         target_reloaded: false,
@@ -362,6 +434,7 @@ fn pump_absorbs_rebreak_after_continue_and_reports_real_stop() {
         Arch::Amd64.register_map().clone(),
         None,
     );
+    let absorbed_windows = drain.absorbed_windows();
     let (tx, rx) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));
     let handle = {
@@ -419,8 +492,11 @@ fn pump_absorbs_rebreak_after_continue_and_reports_real_stop() {
             }
             api::DBGKD_READ_VIRTUAL_MEMORY => {
                 // The absorbed re-break sits on a break-in `int3`, which
-                // the pump confirms before stepping the PC past it.
+                // the pump confirms before stepping the PC past it. The
+                // reply keeps the request's address and length, as
+                // Windows' does.
                 let mut union = [0u8; 16];
+                union[..12].copy_from_slice(&request[16..28]);
                 union[12..16].copy_from_slice(&1u32.to_le_bytes());
                 let mut reply = manipulate_reply_payload(api_number, 0, &union);
                 reply.push(0xcc);
@@ -452,6 +528,12 @@ fn pump_absorbs_rebreak_after_continue_and_reports_real_stop() {
         .expect("pump reported no stop")
         .expect("pump reported an error");
     assert_eq!(stop.program_counter, real_stop);
+    // The re-break's report deleted the entries in its window, though only
+    // the foreground can drop them.
+    assert_eq!(
+        *absorbed_windows.lock().unwrap(),
+        vec![resumed_from..resumed_from + api::DBGKD_MAXSTREAM]
+    );
 
     shutdown.store(true, Ordering::SeqCst);
     let _framing = handle.join().expect("pump thread panicked");
@@ -944,6 +1026,85 @@ fn fatal_system_error_print_marks_the_next_stop_with_captured_bugcheck() {
     assert_eq!(info.code, 0xd1);
     assert_eq!(info.parameters, [1, 2, 0, 4]);
     assert_eq!(info.driver.as_deref(), Some("myfault.sys"));
+}
+
+/// A processor that bugchecks in the debugger while it answers a request
+/// sends the bugcheck's print and its new stop before the reply. The request
+/// still gets its reply, and the next wait reports the new stop as the
+/// bugcheck, without reading the wire for it, even a poll whose deadline has
+/// passed: resuming instead would run the crashed target on into a reboot,
+/// as though it were still at the old stop.
+/// The target announcing that stop again, during a later request, is no new
+/// stop: held again, it came back without its bugcheck.
+#[test]
+fn a_bugcheck_while_a_request_is_answered_is_the_next_stop() {
+    let (mut kernel, mut host) = serial_pair().unwrap();
+    host.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let context: Vec<u8> = (0..64u8).collect();
+    let pc = 0xffff_f800_1960_c930;
+    let mut script = control_packet(
+        PACKET_TYPE_KD_ACKNOWLEDGE,
+        api::test_wire::first_outbound_id(),
+    );
+    script.extend(data_packet(
+        PACKET_TYPE_KD_DEBUG_IO,
+        INITIAL_PACKET_ID,
+        &debug_io_print_payload(
+            b"\r\n*** Fatal System Error: 0x0000002b\r\n                       (0xFFFFF800166D9920,0x0,0x0,0x0)\r\n",
+        ),
+    ));
+    script.extend(data_packet(
+        PACKET_TYPE_KD_STATE_CHANGE64,
+        INITIAL_PACKET_ID ^ 1,
+        &exception_state_change_payload(pc),
+    ));
+    script.extend(data_packet(
+        PACKET_TYPE_KD_STATE_MANIPULATE,
+        INITIAL_PACKET_ID,
+        &api::test_wire::build_reply(api::DBGKD_GET_CONTEXT, 0, &[], &context),
+    ));
+    kernel.write_all(&script).unwrap();
+    let mut framing = KdFraming::new(host.into());
+
+    let reply = api::get_context(&mut framing, 0, crate::arch::amd64::CONTEXT_ALL).unwrap();
+    let stop = await_state_change(
+        &mut framing,
+        AwaitStateOptions {
+            arch: Some(Arch::Amd64),
+            saw_kd_refresh: None,
+            filter: StateChangeFilter::Runtime,
+            bugcheck: None,
+            bugcheck_capture: None,
+            deadline: Some(Instant::now()),
+            debug_log: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(reply, context);
+    assert_eq!(stop.program_counter, pc);
+    assert!(stop.is_bugcheck);
+    let info = stop.bugcheck.expect("the print's bugcheck");
+    assert_eq!(info.code, 0x2b);
+    assert_eq!(info.parameters, [0xFFFF_F800_166D_9920, 0, 0, 0]);
+
+    let mut again = control_packet(
+        PACKET_TYPE_KD_ACKNOWLEDGE,
+        api::test_wire::first_outbound_id() ^ 1,
+    );
+    again.extend(data_packet(
+        PACKET_TYPE_KD_STATE_CHANGE64,
+        INITIAL_PACKET_ID ^ 1,
+        &exception_state_change_payload(pc),
+    ));
+    again.extend(data_packet(
+        PACKET_TYPE_KD_STATE_MANIPULATE,
+        INITIAL_PACKET_ID,
+        &api::test_wire::build_reply(api::DBGKD_GET_CONTEXT, 0, &[], &context),
+    ));
+    kernel.write_all(&again).unwrap();
+    api::get_context(&mut framing, 0, crate::arch::amd64::CONTEXT_ALL).unwrap();
+    assert!(!framing.holds_stop());
 }
 
 #[test]

@@ -1,10 +1,12 @@
 //! Building a PDB's searchable indexes: parsing its symbol, line, and type
 //! streams under the PDB lock, then publishing the derived indexes.
 
+use std::borrow::Cow;
+
 use super::{
-    AddressEntry, IndexedSymbol, LoadedModule, ProcedureSpan, SourceChecksum, SourceLineEntry,
-    SourceLocation, SymbolIndex, SymbolIndexDiagnostic, SymbolRvas, SymbolStore, SymbolVisibility,
-    source::recorded_checksum,
+    AddressEntry, DataTypes, IndexedSymbol, LoadedModule, ProcedureSpan, SourceChecksum,
+    SourceLineEntry, SourceLocation, SymbolIndex, SymbolIndexDiagnostic, SymbolRvas, SymbolStore,
+    SymbolVisibility, source::recorded_checksum,
 };
 use crate::base::error::{Error, Result};
 use crate::base::types::Dtb;
@@ -31,6 +33,8 @@ struct ParsedSymbols {
     rvas: SymbolRvas,
     source_lines: Vec<SourceLineEntry>,
     procedures: Vec<ProcedureSpan>,
+    sections: Vec<(u32, u32)>,
+    data_types: DataTypes,
     source_checksums: FxHashMap<String, SourceChecksum>,
     wpp_messages: HashMap<MessageKey, Arc<TmfMessage>>,
     diagnostics: Vec<SymbolIndexDiagnostic>,
@@ -47,7 +51,8 @@ struct ParsedTypes {
 
 /// The C name under an x86 public symbol's calling-convention decoration:
 /// `_name` (cdecl), `_name@N` (stdcall), `@name@N` (fastcall). C++ names
-/// (`?...`) are left as they are, as on x64, where C names are undecorated.
+/// (`?...`) are left to [`undecorate_cpp`], as on x64, where C names are
+/// undecorated.
 pub(super) fn undecorate_x86(name: &str) -> &str {
     let Some(bare) = name.strip_prefix('_').or_else(|| name.strip_prefix('@')) else {
         return name;
@@ -59,6 +64,37 @@ pub(super) fn undecorate_x86(name: &str) -> &str {
             stem
         }
         _ => bare,
+    }
+}
+
+/// The name WinDbg shows for an MSVC-decorated C++ name (`?...`): the
+/// qualified name without its signature (`wil::details::DebugBreak`), and
+/// `` `string' `` for a string literal. ARM64EC's `$$h` marker, which the
+/// demangler does not read, is dropped for a second try. Any other name, and
+/// one that does not demangle, stays as it is.
+pub fn undecorate_cpp(name: &str) -> Cow<'_, str> {
+    if !name.starts_with('?') {
+        return Cow::Borrowed(name);
+    }
+    if name.starts_with("??_C@") {
+        return Cow::Borrowed("`string'");
+    }
+    let demangle = |name: &str| undname::demangle(name, undname::Flags::NAME_ONLY).ok();
+    demangle(name)
+        .or_else(|| {
+            name.contains("$$h")
+                .then(|| demangle(&name.replacen("$$h", "", 1)))
+                .flatten()
+        })
+        .map_or(Cow::Borrowed(name), Cow::Owned)
+}
+
+/// [`undecorate_cpp`] for a name already owned, which most names keep.
+fn undecorate_cpp_owned(name: String) -> String {
+    if name.starts_with('?') {
+        undecorate_cpp(&name).into_owned()
+    } else {
+        name
     }
 }
 
@@ -197,6 +233,7 @@ impl SymbolStore {
         let mut rvas = FxHashMap::default();
         let mut source_lines = Vec::new();
         let mut procedures = Vec::new();
+        let mut data_types = DataTypes::default();
         let mut source_checksums = FxHashMap::default();
         let mut wpp_messages = HashMap::new();
 
@@ -211,6 +248,7 @@ impl SymbolStore {
             &mut rvas,
             &mut source_lines,
             &mut procedures,
+            &mut data_types,
             &mut source_checksums,
             &mut wpp_messages,
             &mut diagnostics,
@@ -225,6 +263,7 @@ impl SymbolStore {
             x86,
             &mut strings,
             &mut rvas,
+            &mut data_types,
             &mut diagnostics,
         )?;
 
@@ -233,6 +272,8 @@ impl SymbolStore {
             rvas,
             source_lines,
             procedures,
+            sections: section_ranges(&mut pdb_lock),
+            data_types,
             source_checksums,
             wpp_messages,
             diagnostics,
@@ -295,6 +336,8 @@ impl SymbolStore {
         self.publish_symbol_rvas(guid, parsed.rvas);
         self.source_lines.insert(guid, parsed.source_lines);
         self.procedures.insert(guid, parsed.procedures);
+        self.sections.insert(guid, parsed.sections);
+        self.data_types.insert(guid, parsed.data_types);
         self.source_checksums.insert(guid, parsed.source_checksums);
         self.index_types
             .insert(guid, SymbolIndex::from_names(types.type_strings));
@@ -382,8 +425,9 @@ impl SymbolStore {
         let mut rvas = SymbolRvas::default();
         let mut index_names = Vec::new();
         for (name, rva) in names {
-            index_names.push(name.to_string());
-            insert_symbol_rva(&mut rvas, name, rva, SymbolVisibility::Public, None);
+            let name = undecorate_cpp(name);
+            insert_symbol_rva(&mut rvas, &name, rva, SymbolVisibility::Public, None);
+            index_names.push(name.into_owned());
         }
         // The index's names are sorted and deduped, as a PDB load leaves them.
         index_names.sort_unstable();
@@ -407,6 +451,7 @@ fn parse_module_streams(
     rvas: &mut SymbolRvas,
     source_lines: &mut Vec<SourceLineEntry>,
     procedures: &mut Vec<ProcedureSpan>,
+    data_types: &mut DataTypes,
     source_checksums: &mut FxHashMap<String, SourceChecksum>,
     wpp_messages: &mut HashMap<MessageKey, Arc<TmfMessage>>,
     diagnostics: &mut Vec<SymbolIndexDiagnostic>,
@@ -510,6 +555,9 @@ fn parse_module_streams(
                                     Some((procedure.name.to_string().into(), procedure.offset))
                                 }
                                 pdb2::SymbolData::Data(data) => {
+                                    if let Some(rva) = data.offset.to_rva(address_map) {
+                                        data_types.insert(rva.0, data.type_index);
+                                    }
                                     Some((data.name.to_string().into(), data.offset))
                                 }
                                 _ => None,
@@ -517,6 +565,7 @@ fn parse_module_streams(
                         if let Some((name, offset)) = named_offset
                             && let Some(rva) = offset.to_rva(address_map)
                         {
+                            let name = undecorate_cpp_owned(name);
                             insert_symbol_rva(
                                 rvas,
                                 &name,
@@ -695,13 +744,15 @@ fn collect_tmf_annotation(
     }
 }
 
-/// Public symbols from the global symbol stream, undecorated when `x86`.
+/// Public symbols from the global symbol stream, their C++ names undecorated
+/// ([`undecorate_cpp`]), and their C names too when `x86`.
 fn parse_public_symbols(
     pdb: &mut pdb2::PDB<'static, Cursor<&'static [u8]>>,
     address_map: &AddressMap<'_>,
     x86: bool,
     strings: &mut Vec<String>,
     rvas: &mut SymbolRvas,
+    data_types: &mut DataTypes,
     diagnostics: &mut Vec<SymbolIndexDiagnostic>,
 ) -> Result<()> {
     let offset_limit = section_offset_limit(pdb);
@@ -710,10 +761,11 @@ fn parse_public_symbols(
     while let Some(symbol) = symbols.next()? {
         match symbol.parse() {
             Ok(pdb2::SymbolData::Public(data)) => {
-                let name: String = if x86 {
-                    undecorate_x86(&data.name.to_string()).to_string()
+                let name = data.name.to_string();
+                let name = if x86 {
+                    undecorate_cpp(undecorate_x86(&name)).into_owned()
                 } else {
-                    data.name.to_string().into()
+                    undecorate_cpp_owned(name.into_owned())
                 };
                 if data.offset.offset <= offset_limit
                     && let Some(rva) = data.offset.to_rva(address_map)
@@ -721,6 +773,15 @@ fn parse_public_symbols(
                     insert_symbol_rva(rvas, &name, rva.0, SymbolVisibility::Public, None);
                 }
                 strings.push(name);
+            }
+            // A global variable's record in the global stream: its name is
+            // a public symbol's too, but only this record has its type.
+            Ok(pdb2::SymbolData::Data(data)) => {
+                if data.offset.offset <= offset_limit
+                    && let Some(rva) = data.offset.to_rva(address_map)
+                {
+                    data_types.entry(rva.0).or_insert(data.type_index);
+                }
             }
             Ok(_) => {}
             Err(error) => record_index_diagnostic(
@@ -755,6 +816,30 @@ pub(super) fn section_offset_limit(pdb: &mut pdb2::PDB<'static, Cursor<&'static 
                 .max()
         })
         .unwrap_or(u32::MAX)
+}
+
+/// The image sections' RVA ranges, `[start, end)` sorted by start, from the
+/// PDB's copy of the section headers; empty when the PDB has none.
+fn section_ranges(pdb: &mut pdb2::PDB<'static, Cursor<&'static [u8]>>) -> Vec<(u32, u32)> {
+    let mut ranges: Vec<(u32, u32)> = pdb
+        .sections()
+        .ok()
+        .flatten()
+        .map(|sections| {
+            sections
+                .iter()
+                .map(|section| {
+                    let size = section.virtual_size.max(section.size_of_raw_data);
+                    (
+                        section.virtual_address,
+                        section.virtual_address.saturating_add(size),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    ranges.sort_unstable();
+    ranges
 }
 
 /// The type stream's index inputs, read through a `pdb2` handle of its own

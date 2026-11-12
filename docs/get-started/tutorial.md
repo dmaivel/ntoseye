@@ -136,7 +136,7 @@ stack
   03  00007ff852e36217  kernelbase!CreateFileInternal+0x373
   04  00007ff852e37887  kernelbase!CreateFileW+0x97
   05  00007ff84fbf0c85  psmserviceexthost!CrmStateMonitorSystemDiskUsageTimerCallback+0xa5
-  ... 4 more frames
+  ... more frames
 ```
 
 The disassembly shows the instructions around the stop in the function it is in, each with its offset from its symbol, as the stack counts it: `>` marks the instruction the processor is at, and `●` an instruction with a breakpoint. A jump or a call names its target, such as `je +0x33` or `call nt!ObpPushStackInfo`, the jumps between the instructions shown are drawn as arrows, and at a jump the stop says whether it will be taken. The stack marks where it crosses from the kernel into the user-mode code that called it, or through a trap or an interrupt.

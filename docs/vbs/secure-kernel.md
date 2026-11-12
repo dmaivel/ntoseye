@@ -11,7 +11,7 @@ ntoseye does not support VTL1 inspection for crash dumps, with `--memory-source 
 
 VBS needs a VM that gives nested virtualization to the guest, and the [KVM/QEMU setup](../setup/kvm-qemu.md#virtualization-based-security-vbs) gives a CPU model that works.
 
-When VBS runs, Windows does not allow KD writes to user-mode code pages, physical or virtual, although KD writes to data pages and to kernel code succeed. Because of this, `kd` and `kdnet` cannot set user-mode breakpoints, and `bp` shows the error that the target gives.
+When VBS runs, Windows does not allow KD writes to some user-mode code pages, such as ntdll's and kernelbase's, physical or virtual, although KD writes to data pages and to kernel code succeed. On an x86 guest whose memory `ntoseye` reads from the VM process, `kd` and `kdnet` write such a user-mode breakpoint into that memory instead. Otherwise they cannot set it, and `bp` says that Windows refused the write.
 
 ## Inspecting VTL1 memory
 

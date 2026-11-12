@@ -3,9 +3,10 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
-use pelite::pe64::{Pe, PeView, image::IMAGE_SCN_MEM_EXECUTE};
+use pelite::pe64::{Pe, PeView};
 
 use super::{
     CachedModule, FrameMemory, FrameRegisters, OwnedModule, StackPage, StackTracer,
@@ -15,18 +16,23 @@ use crate::nt::trapframe::decode_ktrap_frame_for_thread;
 use crate::{
     base::{
         error::{Error, Result},
-        memory::{MemoryOps, PAGE_SIZE, read_page_chunks},
+        memory::{MemoryOps, PAGE_SIZE, Residency, read_page_chunks},
         types::{CodeMachine, VirtAddr},
     },
     nt::{
+        cpu_state::{kprcb_for_processor, processor_count},
         guest::{Image, ModuleInfo},
-        pe::{CodeLayout, PeImage, pe_headers_end},
+        pe::{self, CodeLayout, PeImage},
         symbols::ImageFetch,
-        target::Target,
+        target::{Target, TargetKind},
     },
 };
 
 const STACK_SCAN_BYTES: usize = 0x1000;
+/// `_KPRCB` members that hold the top of one of the processor's own stacks,
+/// each `KeKernelStackSize` deep: interrupts and DPCs run on them, and an
+/// exception that would overflow a kernel stack is dispatched on the last.
+const PROCESSOR_STACK_TOPS: [&str; 3] = ["IsrStack", "DpcStack", "ExceptionStack"];
 
 impl<'a> StackTracer<'a> {
     pub(super) fn new(debugger: &'a Target, trace: &'a ThreadTraceContext) -> Self {
@@ -38,7 +44,25 @@ impl<'a> StackTracer<'a> {
             modules: HashMap::new(),
             stack_pages: RefCell::new(HashMap::new()),
             kernel: debugger.guest.as_ref().map(|guest| &guest.ntoskrnl),
+            processor_stacks: None,
         }
+    }
+
+    /// Whether an unwind from sp `from` to `to` moved between two stacks of
+    /// one processor: its current thread's kernel stack and the stacks of
+    /// its own that interrupts and DPCs run on. A function that switches to
+    /// one of those (ARM64's `KxSwitchStackAndPlayInterrupt`) restores the
+    /// sp it saved in a register, which can be anywhere below.
+    pub fn switched_stacks(&mut self, from: u64, to: u64) -> bool {
+        let target = self.target;
+        self.processor_stacks
+            .get_or_insert_with(|| processor_stacks(target))
+            .iter()
+            .any(|stacks| {
+                let from = stacks.iter().position(|stack| stack.contains(&from));
+                let to = stacks.iter().position(|stack| stack.contains(&to));
+                matches!((from, to), (Some(from), Some(to)) if from != to)
+            })
     }
 
     /// A stack slot, from the per-trace page cache.
@@ -148,6 +172,12 @@ impl<'a> StackTracer<'a> {
             {
                 continue;
             }
+            // A pointer into code is no return address unless a call
+            // precedes it: a function pointer, a code address in data, or a
+            // value that just lands in an image's code.
+            if !self.follows_call(potential_ip) {
+                continue;
+            }
 
             found.insert(potential_ip);
             frames.push((sp, potential_ip));
@@ -168,6 +198,55 @@ impl<'a> StackTracer<'a> {
             .executable_ranges
             .iter()
             .any(|(start, end)| rva >= *start && rva < *end)
+    }
+
+    /// Whether a return address the unwind found is code: by
+    /// [`Self::is_executable_address`], or, outside every module of a
+    /// kernel target, in a page the tables map executable and just after a
+    /// call. JIT-compiled code is there, and .NET Framework's has no tables
+    /// to read: an in-process callback gives its unwind data. The call is
+    /// what tells a return address from any other pointer into such a page.
+    /// The stack scan keeps to the strict test, which needs no page walk for
+    /// each slot it reads.
+    pub(super) fn is_return_address(&mut self, address: u64) -> bool {
+        if self.is_executable_address(address) {
+            return true;
+        }
+        if !(self.target.kind() == TargetKind::Kernel
+            && self.module_containing(address).is_none()
+            && matches!(
+                self.memory.virt_to_phys(VirtAddr(address)),
+                Ok(Some(page)) if page.residency == Residency::Mapped && !page.nx
+            ))
+        {
+            return false;
+        }
+        self.follows_call(address)
+    }
+
+    /// Whether the instruction before `address` is a call: what a return
+    /// address follows. A module's code is read through its cached image,
+    /// which fetches each block once for the walk, rather than off the
+    /// target for each of the stack scan's candidates.
+    pub(super) fn follows_call(&mut self, address: u64) -> bool {
+        // The longest call `ends_in_call` reads.
+        const LONGEST_CALL: u64 = 7;
+        let Some(start) = address.checked_sub(LONGEST_CALL) else {
+            return false;
+        };
+        let mut before = [0u8; LONGEST_CALL as usize];
+        let read = match self.module_containing(start) {
+            Some(module) => usize::try_from(start - module.info.base_address.0)
+                .ok()
+                .and_then(|rva| module.image.read(rva, before.len()))
+                .map(|bytes| before.copy_from_slice(&bytes))
+                .is_some(),
+            None => self.memory.read_bytes(VirtAddr(start), &mut before).is_ok(),
+        };
+        read && self
+            .code_machine_at(address)
+            .instruction_set()
+            .ends_in_call(&before)
     }
 
     pub(super) fn module_containing(&mut self, address: u64) -> Option<&CachedModule> {
@@ -263,10 +342,19 @@ impl<'a> StackTracer<'a> {
         let image = match kernel_image {
             Some(image) => image,
             None => {
+                // A session-space driver (win32k) is not mapped in the
+                // kernel's address space, its module's, but is in the
+                // traced thread's process's.
                 match self
                     .target
                     .mapped_pe_image(module.dtb, module.info.base_address)
-                {
+                    .or_else(|error| {
+                        if self.trace.active_dtb == module.dtb {
+                            return Err(error);
+                        }
+                        self.target
+                            .mapped_pe_image(self.trace.active_dtb, module.info.base_address)
+                    }) {
                     Ok(img) => Arc::new(img),
                     Err(_) => {
                         // Triage dumps don't contain PE headers; download the PE from
@@ -317,13 +405,8 @@ impl<'a> StackTracer<'a> {
     /// from the target. The file must open with the headers the guest
     /// mapped; a mismatch keeps the guest image. Nothing is downloaded here.
     fn cached_on_disk_image(&self, image: &PeImage, info: &ModuleInfo) -> Option<Arc<PeImage>> {
-        let disk = self.on_disk_image(image, info, ImageFetch::CacheOnly)?;
-        let headers_end = pe_headers_end(image.headers())?;
-        headers_match_relocated(
-            disk.headers().get(..headers_end)?,
-            image.headers().get(..headers_end)?,
-        )
-        .then_some(disk)
+        self.symbols
+            .module_image_matching(&info.name, image.headers(), ImageFetch::CacheOnly)
     }
 
     /// Whether `info` is the trace's foreign image (the Windows
@@ -368,52 +451,57 @@ impl CachedModule {
     }
 }
 
-/// The `[start, end)` RVA ranges of a module's executable sections (used to
-/// validate scan candidates).
-fn executable_ranges(image: &PeImage) -> Vec<(u32, u32)> {
-    let Ok(view) = PeView::from_bytes(image.headers()) else {
+/// Every processor's stacks, as the ranges an sp on each can hold: its
+/// current thread's kernel stack, `StackLimit` to `StackBase`, then those of
+/// [`PROCESSOR_STACK_TOPS`] its `_KPRCB` has. Empty but on a kernel target.
+fn processor_stacks(target: &Target) -> Vec<Vec<RangeInclusive<u64>>> {
+    if target.kind() != TargetKind::Kernel {
+        return Vec::new();
+    }
+    let Ok(guest) = target.guest() else {
         return Vec::new();
     };
-    view.section_headers()
-        .iter()
-        .filter_map(|section| {
-            if section.Characteristics & IMAGE_SCN_MEM_EXECUTE == 0 {
-                return None;
+    let nt = &guest.ntoskrnl;
+    let types = nt.types();
+    let stack_size = nt
+        .symbol("KeKernelStackSize")
+        .and_then(|symbol| symbol.read::<u32>())
+        .ok();
+    (0..processor_count(target).unwrap_or(0))
+        .filter_map(|index| {
+            let prcb = types
+                .struct_at("_KPRCB", kprcb_for_processor(target, index).ok()?)
+                .ok()?;
+            let mut stacks = Vec::new();
+            if let Ok(thread) = prcb.read_pointer("CurrentThread")
+                && let Ok(thread) = types.struct_at("_KTHREAD", thread)
+                && let (Ok(limit), Ok(base)) = (
+                    thread.read_pointer("StackLimit"),
+                    thread.read_pointer("StackBase"),
+                )
+                && limit < base
+            {
+                stacks.push(limit.0..=base.0);
             }
-            let size = section.VirtualSize.max(section.SizeOfRawData);
-            if size == 0 {
-                return None;
+            if let Some(size) = stack_size {
+                for name in PROCESSOR_STACK_TOPS {
+                    if let Ok(top) = prcb.read_pointer(name)
+                        && let Some(bottom) = top.0.checked_sub(u64::from(size))
+                    {
+                        stacks.push(bottom..=top.0);
+                    }
+                }
             }
-            Some((
-                section.VirtualAddress,
-                section.VirtualAddress.saturating_add(size),
-            ))
+            Some(stacks)
         })
         .collect()
 }
 
-/// Whether `disk` is the file `mapped` was loaded from: the headers agree
-/// except in `OptionalHeader.ImageBase`, which the loader rewrites to the
-/// address it relocated the image to.
-fn headers_match_relocated(disk: &[u8], mapped: &[u8]) -> bool {
-    if disk.len() != mapped.len() || disk.len() < 0x40 {
-        return false;
-    }
-    let e_lfanew = u32::from_le_bytes(disk[0x3c..0x40].try_into().unwrap()) as usize;
-    let optional = e_lfanew + 24;
-    let Some(magic) = disk.get(optional..optional + 2) else {
-        return false;
-    };
-    let image_base = match u16::from_le_bytes([magic[0], magic[1]]) {
-        0x20b => optional + 24..optional + 32,
-        0x10b => optional + 28..optional + 32,
-        _ => return false,
-    };
-    if image_base.end > disk.len() {
-        return false;
-    }
-    disk[..image_base.start] == mapped[..image_base.start]
-        && disk[image_base.end..] == mapped[image_base.end..]
+/// The `[start, end)` RVA ranges of a module's executable sections (used to
+/// validate scan candidates).
+fn executable_ranges(image: &PeImage) -> Vec<(u32, u32)> {
+    PeView::from_bytes(image.headers())
+        .map_or_else(|_| Vec::new(), |view| pe::executable_ranges(&view))
 }
 
 impl FrameMemory for StackTracer<'_> {

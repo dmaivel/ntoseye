@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::MemoryOps;
+use crate::arch::Arch;
 use crate::base::types::{Dtb, VirtAddr};
 
 /// Processes walked from `PsActiveProcessHead` before giving up on a cycle.
@@ -22,6 +23,8 @@ const MAX_VAD_DEPTH: usize = 64;
 /// The kernel structure offsets the lookup reads, from the kernel's PDB.
 #[derive(Clone, Debug)]
 pub struct SectionLayout {
+    /// The architecture whose pointers the kernel's structures hold.
+    pub arch: Arch,
     /// `PsActiveProcessHead`.
     pub process_list_head: VirtAddr,
     /// `_EPROCESS.ActiveProcessLinks`.
@@ -60,11 +63,14 @@ pub struct SectionViews {
 
 /// Each process's `EPROCESS` by the root of its address space, and roots no
 /// process has, so a root that is not a process's (VTL1, the hypervisor)
-/// does not cost a walk of the process list per page.
+/// does not cost a walk of the process list per page. `unknown` holds for
+/// one halt (`epoch`): a root may join the list, or be reused by a new
+/// process, once the target runs.
 #[derive(Default)]
 struct Processes {
     by_root: HashMap<u64, VirtAddr>,
     unknown: HashSet<u64>,
+    epoch: Option<u64>,
 }
 
 impl SectionViews {
@@ -85,23 +91,27 @@ impl SectionViews {
     /// process whose address space is rooted at `dtb`, read from the VAD that
     /// maps it; `None` when no view maps it (private memory has no prototype
     /// PTEs) or its PTE is outside the view's contiguous run of them.
-    /// `kernel` reads kernel addresses.
+    /// `kernel` reads kernel addresses; `epoch` is the halt it reads in
+    /// (`None` for a target that never runs).
     pub fn prototype_pte(
         &self,
         kernel: &impl MemoryOps<VirtAddr>,
+        epoch: Option<u64>,
         dtb: Dtb,
         va: VirtAddr,
     ) -> Option<VirtAddr> {
         let layout = &self.layout;
-        let eprocess = self.process(kernel, dtb & layout.root_mask)?;
+        let eprocess = self.process(kernel, epoch, dtb & layout.root_mask)?;
         let vpn = va.0 >> 12;
         let (vad, start) = self.find_vad(kernel, eprocess, vpn)?;
-        let flags: u32 = kernel.read(vad + layout.vad_flags).ok()?;
+        // 8 bytes of flags before Windows 8 (`PrivateMemory` is bit 63
+        // there), 4 after; the bits read are always below the field's end.
+        let flags: u64 = kernel.read(vad + layout.vad_flags).ok()?;
         if flags >> layout.private_memory_bit & 1 != 0 {
             return None;
         }
-        let first: u64 = kernel.read(vad + layout.first_prototype_pte).ok()?;
-        let last: u64 = kernel.read(vad + layout.last_contiguous_pte).ok()?;
+        let first = self.pointer(kernel, vad + layout.first_prototype_pte)?.0;
+        let last = self.pointer(kernel, vad + layout.last_contiguous_pte)?.0;
         let pte = first.checked_add((vpn - start).checked_mul(8)?)?;
         (first != 0 && pte <= last).then_some(VirtAddr(pte))
     }
@@ -109,8 +119,20 @@ impl SectionViews {
     /// The `EPROCESS` whose root is `root`, confirmed against the process's
     /// own field, since a root outlives nothing: an exited process's may be
     /// reused.
-    fn process(&self, kernel: &impl MemoryOps<VirtAddr>, root: u64) -> Option<VirtAddr> {
-        let known = self.processes().by_root.get(&root).copied();
+    fn process(
+        &self,
+        kernel: &impl MemoryOps<VirtAddr>,
+        epoch: Option<u64>,
+        root: u64,
+    ) -> Option<VirtAddr> {
+        let known = {
+            let mut processes = self.processes();
+            if processes.epoch != epoch {
+                processes.epoch = epoch;
+                processes.unknown.clear();
+            }
+            processes.by_root.get(&root).copied()
+        };
         if let Some(eprocess) = known
             && self.root_of(kernel, eprocess) == Some(root)
         {
@@ -122,6 +144,8 @@ impl SectionViews {
         let by_root = self.walk_processes(kernel);
         let mut processes = self.processes();
         processes.by_root = by_root;
+        // The fresh walk is the answer for every root it does not list.
+        processes.unknown.clear();
         let eprocess = processes.by_root.get(&root).copied();
         if eprocess.is_none() {
             processes.unknown.insert(root);
@@ -129,11 +153,19 @@ impl SectionViews {
         eprocess
     }
 
+    /// The pointer at `at`, as wide as the architecture's.
+    fn pointer(&self, kernel: &impl MemoryOps<VirtAddr>, at: VirtAddr) -> Option<VirtAddr> {
+        let mut bytes = [0u8; 8];
+        let size = self.layout.arch.pointer_size() as usize;
+        kernel.read_bytes(at, &mut bytes[..size]).ok()?;
+        Some(self.layout.arch.decode_pointer(&bytes))
+    }
+
     fn root_of(&self, kernel: &impl MemoryOps<VirtAddr>, eprocess: VirtAddr) -> Option<u64> {
-        let value: u64 = kernel
-            .read(eprocess + self.layout.directory_table_base)
-            .ok()?;
-        Some(value & self.layout.root_mask)
+        // `DirectoryTableBase` is pointer-wide: a `ULONG` on x86, a
+        // `ULONGLONG` (XP x64: the first of two) on 64-bit builds.
+        let value = self.pointer(kernel, eprocess + self.layout.directory_table_base)?;
+        Some(value.0 & self.layout.root_mask)
     }
 
     fn walk_processes(&self, kernel: &impl MemoryOps<VirtAddr>) -> HashMap<u64, VirtAddr> {
@@ -141,10 +173,16 @@ impl SectionViews {
         let mut by_root = HashMap::new();
         let mut link = head;
         for _ in 0..MAX_PROCESSES {
-            let Ok(next) = kernel.read::<VirtAddr>(link) else {
+            let Some(next) = self.pointer(kernel, link) else {
                 break;
             };
             if next == head || next.is_zero() {
+                break;
+            }
+            // A link outside the kernel half is a torn or corrupt list: its
+            // "process" would be read through a user mapping, whose section
+            // pages are resolved by this very walk.
+            if next.0 < self.layout.arch.paging().system_range_start() {
                 break;
             }
             let eprocess = VirtAddr(next.0.wrapping_sub(self.layout.active_process_links));
@@ -172,7 +210,7 @@ impl SectionViews {
             };
             Some(u64::from(low) | u64::from(high) << 32)
         };
-        let mut node: VirtAddr = kernel.read(eprocess + layout.vad_root).ok()?;
+        let mut node = self.pointer(kernel, eprocess + layout.vad_root)?;
         for _ in 0..MAX_VAD_DEPTH {
             if node.is_zero() {
                 return None;
@@ -187,7 +225,7 @@ impl SectionViews {
             } else {
                 return Some((vad, start));
             };
-            node = kernel.read(node + child).ok()?;
+            node = self.pointer(kernel, node + child)?;
         }
         None
     }

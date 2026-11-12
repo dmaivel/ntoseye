@@ -20,9 +20,11 @@ use std::sync::{
 };
 
 use super::Guest;
+use super::evmcs_fields::evmcs_offset;
 use crate::{
     backend::phys::PhysMem,
     base::{
+        bytes::{read_u16, read_u32, read_u64},
         error::{Error, Result},
         memory::{MemoryOps, PAGE_SIZE},
         types::{CodeMachine, PhysAddr},
@@ -39,33 +41,33 @@ const EVMCS_BYTES: usize = 0x400;
 /// hundreds of VPs; more means the check is matching something else.
 const MAX_PAGES: usize = 4096;
 
-const HOST_CR3: usize = 0x30;
-const HOST_RIP: usize = 0x50;
-const SECONDARY_CONTROLS: usize = 0x64;
-const HOST_GS_BASE: usize = 0x248;
-const HOST_RSP: usize = 0x268;
-const EPT_POINTER: usize = 0x270;
-const GUEST_ES_SELECTOR: usize = 0x80;
-const GUEST_CS_SELECTOR: usize = 0x82;
-const GUEST_SS_SELECTOR: usize = 0x84;
-const GUEST_DS_SELECTOR: usize = 0x86;
-const GUEST_FS_SELECTOR: usize = 0x88;
-const GUEST_GS_SELECTOR: usize = 0x8a;
-const GUEST_CS_AR_BYTES: usize = 0xbc;
-const GUEST_FS_BASE: usize = 0xf8;
-const GUEST_GS_BASE: usize = 0x100;
-const GUEST_CR0: usize = 0x220;
-const GUEST_CR3: usize = 0x228;
-const GUEST_CR4: usize = 0x230;
-const GUEST_DR7: usize = 0x238;
-const VM_ENTRY_CONTROLS: usize = 0x31c;
-const VM_EXIT_REASON: usize = 0x2b4;
-const VM_EXIT_INTR_INFO: usize = 0x2b8;
-const VM_EXIT_INSTRUCTION_LEN: usize = 0x2c8;
-const EXIT_QUALIFICATION: usize = 0x2d0;
-const GUEST_RSP: usize = 0x300;
-const GUEST_RFLAGS: usize = 0x308;
-const GUEST_RIP: usize = 0x330;
+const HOST_CR3: usize = evmcs_offset("host_cr3");
+const HOST_RIP: usize = evmcs_offset("host_rip");
+const SECONDARY_CONTROLS: usize = evmcs_offset("secondary_vm_exec_control");
+const HOST_GS_BASE: usize = evmcs_offset("host_gs_base");
+const HOST_RSP: usize = evmcs_offset("host_rsp");
+const EPT_POINTER: usize = evmcs_offset("ept_pointer");
+const GUEST_ES_SELECTOR: usize = evmcs_offset("guest_es_selector");
+const GUEST_CS_SELECTOR: usize = evmcs_offset("guest_cs_selector");
+const GUEST_SS_SELECTOR: usize = evmcs_offset("guest_ss_selector");
+const GUEST_DS_SELECTOR: usize = evmcs_offset("guest_ds_selector");
+const GUEST_FS_SELECTOR: usize = evmcs_offset("guest_fs_selector");
+const GUEST_GS_SELECTOR: usize = evmcs_offset("guest_gs_selector");
+const GUEST_CS_AR_BYTES: usize = evmcs_offset("guest_cs_ar_bytes");
+const GUEST_FS_BASE: usize = evmcs_offset("guest_fs_base");
+const GUEST_GS_BASE: usize = evmcs_offset("guest_gs_base");
+const GUEST_CR0: usize = evmcs_offset("guest_cr0");
+const GUEST_CR3: usize = evmcs_offset("guest_cr3");
+const GUEST_CR4: usize = evmcs_offset("guest_cr4");
+const GUEST_DR7: usize = evmcs_offset("guest_dr7");
+const VM_ENTRY_CONTROLS: usize = evmcs_offset("vm_entry_controls");
+const VM_EXIT_REASON: usize = evmcs_offset("vm_exit_reason");
+const VM_EXIT_INTR_INFO: usize = evmcs_offset("vm_exit_intr_info");
+const VM_EXIT_INSTRUCTION_LEN: usize = evmcs_offset("vm_exit_instruction_len");
+const EXIT_QUALIFICATION: usize = evmcs_offset("exit_qualification");
+const GUEST_RSP: usize = evmcs_offset("guest_rsp");
+const GUEST_RFLAGS: usize = evmcs_offset("guest_rflags");
+const GUEST_RIP: usize = evmcs_offset("guest_rip");
 
 /// `hv_vp_assist_page.enlighten_vmentry`: the hypervisor enters its guest
 /// through `current_nested_vmcs`.
@@ -100,7 +102,7 @@ impl EvmcsPages {
             .filter_map(|&assist| {
                 let mut page = [0u8; ASSIST_CURRENT_NESTED_VMCS + 8];
                 phys.read_bytes(assist, &mut page).ok()?;
-                let current = u64_at(&page, ASSIST_CURRENT_NESTED_VMCS);
+                let current = read_u64(&page, ASSIST_CURRENT_NESTED_VMCS);
                 (page[ASSIST_ENLIGHTEN_VMENTRY] == 1).then_some(current)
             })
             .filter(|current| self.pages.iter().any(|&(address, _)| address == *current))
@@ -253,18 +255,6 @@ pub struct EvmcsState {
     pub gs_base: u64,
 }
 
-fn u16_at(page: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes(page[offset..offset + 2].try_into().unwrap())
-}
-
-fn u32_at(page: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(page[offset..offset + 4].try_into().unwrap())
-}
-
-fn u64_at(page: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(page[offset..offset + 8].try_into().unwrap())
-}
-
 impl EvmcsState {
     /// A state at `address`, current or not, in 64-bit paging, with every
     /// other field zero but the few an eVMCS needs to parse.
@@ -350,46 +340,46 @@ impl EvmcsState {
     /// host entry point in the upper half, and guest paging on. Anything
     /// else in RAM that starts with a 1 fails one of these.
     fn parse(page: &[u8]) -> Option<Self> {
-        let host_rip = u64_at(page, HOST_RIP);
-        let cr0 = u64_at(page, GUEST_CR0);
-        if u32_at(page, 0) != EVMCS_VERSION
+        let host_rip = read_u64(page, HOST_RIP);
+        let cr0 = read_u64(page, GUEST_CR0);
+        if read_u32(page, 0) != EVMCS_VERSION
             || host_rip >> 47 != 0x1ffff
             || cr0 & (CR0_PE | CR0_PG) != CR0_PE | CR0_PG
-            || u64_at(page, HOST_CR3) == 0
-            || u64_at(page, GUEST_CR3) == 0
+            || read_u64(page, HOST_CR3) == 0
+            || read_u64(page, GUEST_CR3) == 0
         {
             return None;
         }
         Some(Self {
             address: 0,
             current: false,
-            host_cr3: u64_at(page, HOST_CR3),
+            host_cr3: read_u64(page, HOST_CR3),
             host_rip,
-            host_rsp: u64_at(page, HOST_RSP),
-            host_gs_base: u64_at(page, HOST_GS_BASE),
-            ept_pointer: u64_at(page, EPT_POINTER),
-            secondary_controls: u32_at(page, SECONDARY_CONTROLS),
-            exit_reason: u32_at(page, VM_EXIT_REASON),
-            exit_interruption_info: u32_at(page, VM_EXIT_INTR_INFO),
-            exit_instruction_length: u32_at(page, VM_EXIT_INSTRUCTION_LEN),
-            exit_qualification: u64_at(page, EXIT_QUALIFICATION),
-            rip: u64_at(page, GUEST_RIP),
-            rsp: u64_at(page, GUEST_RSP),
-            rflags: u64_at(page, GUEST_RFLAGS),
+            host_rsp: read_u64(page, HOST_RSP),
+            host_gs_base: read_u64(page, HOST_GS_BASE),
+            ept_pointer: read_u64(page, EPT_POINTER),
+            secondary_controls: read_u32(page, SECONDARY_CONTROLS),
+            exit_reason: read_u32(page, VM_EXIT_REASON),
+            exit_interruption_info: read_u32(page, VM_EXIT_INTR_INFO),
+            exit_instruction_length: read_u32(page, VM_EXIT_INSTRUCTION_LEN),
+            exit_qualification: read_u64(page, EXIT_QUALIFICATION),
+            rip: read_u64(page, GUEST_RIP),
+            rsp: read_u64(page, GUEST_RSP),
+            rflags: read_u64(page, GUEST_RFLAGS),
             cr0,
-            cr3: u64_at(page, GUEST_CR3),
-            cr4: u64_at(page, GUEST_CR4),
-            entry_controls: u32_at(page, VM_ENTRY_CONTROLS),
-            dr7: u64_at(page, GUEST_DR7),
-            cs: u16_at(page, GUEST_CS_SELECTOR),
-            ss: u16_at(page, GUEST_SS_SELECTOR),
-            ds: u16_at(page, GUEST_DS_SELECTOR),
-            es: u16_at(page, GUEST_ES_SELECTOR),
-            fs: u16_at(page, GUEST_FS_SELECTOR),
-            gs: u16_at(page, GUEST_GS_SELECTOR),
-            cs_access_rights: u32_at(page, GUEST_CS_AR_BYTES),
-            fs_base: u64_at(page, GUEST_FS_BASE),
-            gs_base: u64_at(page, GUEST_GS_BASE),
+            cr3: read_u64(page, GUEST_CR3),
+            cr4: read_u64(page, GUEST_CR4),
+            entry_controls: read_u32(page, VM_ENTRY_CONTROLS),
+            dr7: read_u64(page, GUEST_DR7),
+            cs: read_u16(page, GUEST_CS_SELECTOR),
+            ss: read_u16(page, GUEST_SS_SELECTOR),
+            ds: read_u16(page, GUEST_DS_SELECTOR),
+            es: read_u16(page, GUEST_ES_SELECTOR),
+            fs: read_u16(page, GUEST_FS_SELECTOR),
+            gs: read_u16(page, GUEST_GS_SELECTOR),
+            cs_access_rights: read_u32(page, GUEST_CS_AR_BYTES),
+            fs_base: read_u64(page, GUEST_FS_BASE),
+            gs_base: read_u64(page, GUEST_GS_BASE),
         })
     }
 
@@ -472,7 +462,7 @@ fn scan(
                         )));
                     }
                 }
-                let current = u64_at(page, ASSIST_CURRENT_NESTED_VMCS);
+                let current = read_u64(page, ASSIST_CURRENT_NESTED_VMCS);
                 if page[ASSIST_ENLIGHTEN_VMENTRY] == 1
                     && current != 0
                     && current.is_multiple_of(PAGE_SIZE as u64)

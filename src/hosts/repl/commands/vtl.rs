@@ -483,11 +483,7 @@ impl ReplState<'_> {
                     )
                 );
             }
-        } else if let Some(rip) = target.register_value(target.arch().pc_register())
-            && halted_in_windows_hypervisor(target, target.current_dtb(), rip)
-        {
-            // Not VTL0: the vCPU halted in the Windows hypervisor, whose root
-            // maps no NT memory.
+        } else if target.in_hypervisor_address_space() {
             outln!(
                 "hypervisor stop on vCPU {}: DTB {} is the Windows hypervisor's and maps no NT memory",
                 self.ctx.current_thread,
@@ -1504,7 +1500,14 @@ fn hvvmcs(
     else {
         return Ok(());
     };
-    let level = values.get(2).map_or(vp.vtl, |&level| level as u8);
+    let level = match values.get(2).map(|&level| u8::try_from(level)) {
+        None => vp.vtl,
+        Some(Ok(level)) => level,
+        Some(Err(_)) => {
+            error!("VTL {:#x} is out of range", values[2]);
+            return Ok(());
+        }
+    };
     let Some(page) = vp
         .vtls
         .iter()
@@ -1605,7 +1608,7 @@ fn hvd(
     };
     let start = VirtAddr(address.0);
     let range = match arguments.get(1) {
-        Some(text) => eval_range(text, &repl.ctx.target, repl.radix, start, item),
+        Some(text) => eval_range(text, &repl.ctx.target, repl.ctx.radix, start, item),
         None => eval_range("L80", &repl.ctx.target, NumberRadix::Hexadecimal, start, 1),
     };
     let range = match range {
@@ -1701,7 +1704,7 @@ fn hvu(
     let extent = match arguments.get(1) {
         None => CodeExtent::Count(DEFAULT_INSTRUCTIONS),
         Some(text) => match windbg_count_expression(text) {
-            Some(count) => match repl.eval_or_report(count) {
+            Some(count) => match repl.eval_or_report(count.strip_prefix('?').unwrap_or(count)) {
                 Some(count) if (1..=MAX_DISASSEMBLY_INSTRUCTIONS as u64).contains(&count.0) => {
                     CodeExtent::Count(count.0 as usize)
                 }
@@ -1711,7 +1714,7 @@ fn hvu(
                 }
                 None => return Ok(()),
             },
-            None => match eval_range(text, &repl.ctx.target, repl.radix, address, 1) {
+            None => match eval_range(text, &repl.ctx.target, repl.ctx.radix, address, 1) {
                 Ok(range) if range.len() <= MAX_DISPLAY_BYTES => CodeExtent::Before(range.end.0),
                 Ok(_) => {
                     error!("range exceeds the maximum of {MAX_DISPLAY_BYTES:#x} bytes");

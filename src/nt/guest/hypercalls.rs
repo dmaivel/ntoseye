@@ -89,7 +89,10 @@ pub fn tlfs_hypercall(code: u16) -> Option<(&'static str, bool)> {
 /// or without `hv!`, in any case. `HvCallUnimplemented` names no single
 /// code, so it gives none.
 pub fn hypercall_code(name: &str) -> Option<u16> {
-    let name = name.strip_prefix("hv!").unwrap_or(name);
+    let name = name
+        .get(..3)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("hv!"))
+        .map_or(name, |_| &name[3..]);
     if let Some(&(code, _, _)) = TLFS_HYPERCALLS
         .iter()
         .find(|(_, known, _)| known.eq_ignore_ascii_case(name))
@@ -519,6 +522,7 @@ mod tests {
             Some(0x000b)
         );
         assert_eq!(hypercall_code("hv!hvcallpostmessage"), Some(0x005c));
+        assert_eq!(hypercall_code("HV!HvCallPostMessage"), Some(0x005c));
         assert_eq!(hypercall_code("HvCall0004"), Some(0x0004));
         assert_eq!(hypercall_code("hv!HvCall000b"), Some(0x000b));
         assert_eq!(hypercall_code("HvCallUnimplemented"), None);

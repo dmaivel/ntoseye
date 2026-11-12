@@ -58,7 +58,9 @@ PyO3 introspection generates `ntoseye/_ntoseye.pyi` from the extension, taking
 the signatures from the Rust types and the docstrings from the doc comments.
 
 CI fails when the stub in the repository differs from a newly generated one, so
-after you change the Rust surface, regenerate the stub and commit the result:
+after you change the Rust surface, regenerate the stub and commit the result.
+CI uses the latest maturin, and the stub needs 1.16 or later, which escapes
+docstrings itself:
 
 ```sh
 maturin develop --release --generate-stubs
@@ -74,11 +76,14 @@ NTOSEYE_TEST_BACKEND=kd NTOSEYE_TEST_CONNECT=/tmp/ntoseye-kd.sock pytest tests
 NTOSEYE_TEST_BACKEND=gdb NTOSEYE_TEST_CONNECT=127.0.0.1:1234 pytest tests
 ```
 
-The last two commands also run `tests/test_live.py` and
+The last two commands also run the `tests/test_live*.py` files and
 `tests/test_stub_types.py` on a guest, over KD or QEMU's GDB stub. They break
 in, step, set breakpoints on hot kernel functions, and resume the guest. The
 tests of breakpoints in the Windows hypervisor, the secure kernel, and guest
-partitions need the `gdb` backend, and skip on `kd`.
+partitions need the `gdb` backend, and skip on `kd`. Each file attaches once;
+`tests/test_live_breakpoints.py` and `tests/test_live_detach.py` check what
+breakpoints and a closed session leave in the guest, and write only to
+`nt!NtShutdownSystem`, which the guest does not run while it is up.
 
 By default (`auto`), the tests read guest memory from the VM process when they
 can. Add `NTOSEYE_TEST_MEMORY_SOURCE=kd` to read it over KD instead, which

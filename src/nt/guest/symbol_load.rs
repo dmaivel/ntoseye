@@ -172,7 +172,11 @@ impl Guest {
 
     fn is_session_space(addr: VirtAddr) -> bool {
         let prefix = addr.0 >> 44;
-        prefix == 0xFFFF8 || prefix == 0xFFFF9 || prefix == 0xFFFFA
+        prefix == 0xFFFF8
+            || prefix == 0xFFFF9
+            || prefix == 0xFFFFA
+            // Windows 7 and 8.1's fixed session space.
+            || (0xFFFF_F900_0000_0000..0xFFFF_F980_0000_0000).contains(&addr.0)
     }
 
     /// Load symbols for `modules` under `dtb`: discover each module's PDB
@@ -195,7 +199,7 @@ impl Guest {
             symbols,
             modules,
             dtb,
-            session_space,
+            &session_space,
             arch,
             recovery,
             &mut report,
@@ -248,7 +252,7 @@ impl Guest {
             symbols,
             modules,
             dtb,
-            SessionSpace::Load,
+            &SessionSpace::Load,
             arch,
             PdbRecovery::Automatic,
             &mut report,
@@ -264,7 +268,7 @@ impl Guest {
                 symbols,
                 stale,
                 dtb,
-                SessionSpace::Load,
+                &SessionSpace::Load,
                 arch,
                 PdbRecovery::Automatic,
                 &mut report,
@@ -362,7 +366,7 @@ impl Guest {
         symbols: &SymbolStore,
         modules: Vec<ModuleInfo>,
         dtb: Dtb,
-        session_space: SessionSpace,
+        session_space: &SessionSpace,
         arch: Arch,
         recovery: PdbRecovery,
         report: &mut ModuleSymbolLoadReport,
@@ -373,7 +377,8 @@ impl Guest {
         let mut from_memory = Vec::new();
 
         for module in modules {
-            if session_space == SessionSpace::Skip && Self::is_session_space(module.base_address) {
+            let session = Self::is_session_space(module.base_address);
+            if *session_space == SessionSpace::Skip && session {
                 Self::apply_module_symbol_status(
                     symbols,
                     report,
@@ -383,6 +388,26 @@ impl Guest {
                 );
                 continue;
             }
+            // The roots the image may be read through, and the one it is:
+            // the first whose view names its PDB, else the first.
+            let roots = match session_space {
+                SessionSpace::Through(roots) if session => roots.as_slice(),
+                _ => std::slice::from_ref(&dtb),
+            };
+            let mut discovered = None;
+            for &root in roots {
+                let discovery = symbols.extract_download_job(phys, root, &module, arch);
+                let ready = matches!(discovery, Ok(ModuleSymbolDiscovery::Ready { .. }));
+                if discovered.is_none() || ready {
+                    discovered = Some((root, discovery));
+                }
+                if ready {
+                    break;
+                }
+            }
+            let Some((image_dtb, discovery)) = discovered else {
+                continue;
+            };
 
             // A file no source had earlier this session is not asked for
             // again: the same image in the next process would fail the same way.
@@ -393,7 +418,7 @@ impl Guest {
                     ))
                 })
             };
-            match symbols.extract_download_job(phys, dtb, &module, arch) {
+            match discovery {
                 Ok(ModuleSymbolDiscovery::Ready { job, guid, source }) => {
                     let mut load = ModuleSymbolLoad::new(job, guid, source, module, dtb);
                     let ready = plan.is_ready(symbols, &load);
@@ -402,7 +427,8 @@ impl Guest {
                         // exist anywhere: read the export table now, while
                         // guest memory is reachable from this thread, as the
                         // fallback symbols for that case.
-                        load.exports = Self::read_export_fallback(phys, dtb, arch, &load.module);
+                        load.exports =
+                            Self::read_export_fallback(phys, image_dtb, arch, &load.module);
                     }
                     match unavailable(&load.job).filter(|_| !ready) {
                         Some(status) => {
@@ -430,7 +456,7 @@ impl Guest {
                 Ok(ModuleSymbolDiscovery::NeedsImage { image_job }) => {
                     // Memory names no PDB: if the image does not either, or
                     // cannot be fetched, its export table is all there is.
-                    let exports = Self::read_export_fallback(phys, dtb, arch, &module);
+                    let exports = Self::read_export_fallback(phys, image_dtb, arch, &module);
                     match unavailable(&image_job) {
                         Some(status) => {
                             Self::publish_image_export_fallback(
@@ -450,7 +476,7 @@ impl Guest {
                 }
                 Err(_e) if module.time_date_stamp.is_some() => {
                     let tds = module.time_date_stamp.unwrap();
-                    match SymbolStore::build_image_download_job(&module.name, tds, module.size) {
+                    match symbols.build_image_download_job(&module.name, tds, module.size) {
                         Ok(image_job) => match unavailable(&image_job) {
                             Some(status) => Self::apply_module_symbol_status(
                                 symbols, report, dtb, &module, status,
@@ -592,6 +618,15 @@ impl Guest {
         }
     }
 
+    /// Whether a background fetch for `module` lost its `Fetching` status,
+    /// which every cleanup path removes when the module goes away.
+    fn fetch_abandoned(symbols: &SymbolStore, dtb: Dtb, module: &ModuleInfo) -> bool {
+        !matches!(
+            symbols.module_symbol_status(dtb, module.base_address),
+            Some(ModuleSymbolStatus::Fetching)
+        )
+    }
+
     /// Acquisition half of a symbol load: download images and PDBs the plan
     /// asked for, then index everything that is on disk. Files and network
     /// only, so it may run off the session thread. Returns the modules whose
@@ -602,7 +637,7 @@ impl Guest {
         plan: ModuleSymbolPlan,
         dtb: Dtb,
         report: &mut ModuleSymbolLoadReport,
-        quiet: bool,
+        background: bool,
     ) -> Vec<ModuleInfo> {
         let ModuleSymbolPlan {
             mut ready,
@@ -612,7 +647,7 @@ impl Guest {
 
         let image_results = download_jobs_parallel(
             image_jobs.iter().map(|image| image.job.clone()).collect(),
-            quiet,
+            background,
         );
         for (image, result) in image_jobs.into_iter().zip(image_results) {
             let ImageLoad {
@@ -620,6 +655,9 @@ impl Guest {
                 module,
                 exports,
             } = image;
+            if background && Self::fetch_abandoned(symbols, dtb, &module) {
+                continue;
+            }
             match result {
                 Ok(_) => match symbols.extract_download_job_from_image_file(&image_job.path) {
                     Ok(Some((job, guid))) => {
@@ -684,10 +722,13 @@ impl Guest {
 
         let download_results = download_jobs_parallel(
             downloads.iter().map(|load| load.job.clone()).collect(),
-            quiet,
+            background,
         );
         let mut stale_identities: Vec<ModuleInfo> = Vec::new();
         for (load, result) in downloads.into_iter().zip(download_results) {
+            if background && Self::fetch_abandoned(symbols, dtb, &load.module) {
+                continue;
+            }
             match result {
                 Ok(_) => ready.push(load),
                 Err(_) if matches!(load.source, ModuleSymbolSource::Identity) => {
@@ -712,7 +753,7 @@ impl Guest {
         }
 
         if !ready.is_empty() {
-            let pb = if quiet {
+            let pb = if background {
                 ProgressBar::hidden()
             } else {
                 output::progress_bar(ready.len() as u64, "indexing symbols")
@@ -737,13 +778,13 @@ impl Guest {
             let mut results = first_per_guid
                 .into_par_iter()
                 .map(|load| {
-                    let result = symbols.load_downloaded_pdb(&load);
+                    let result = symbols.load_downloaded_pdb(&load, background);
                     pb.inc(1);
                     (load, result)
                 })
                 .collect::<Vec<_>>();
             results.extend(duplicate_guids.into_iter().map(|load| {
-                let result = symbols.load_downloaded_pdb(&load);
+                let result = symbols.load_downloaded_pdb(&load, background);
                 pb.inc(1);
                 (load, result)
             }));
@@ -762,6 +803,9 @@ impl Guest {
                             symbols.remember_module_identity(&load.module, &load.job);
                         }
                     }
+                    // The module was unloaded while its PDB was fetched: it
+                    // has no status left to report a failure in.
+                    Err(_) if background && Self::fetch_abandoned(symbols, dtb, &load.module) => {}
                     Err(_) if matches!(load.source, ModuleSymbolSource::Identity) => {
                         stale_identities.push(load.module);
                     }
@@ -801,15 +845,68 @@ impl Guest {
             }
         }
         let dtb = self.ntoskrnl.dtb();
+        let session_space = self.kernel_session_space(dtb, &modules, SessionSpace::Skip);
         Self::load_module_symbols(
             phys,
             symbols,
             modules,
             dtb,
-            SessionSpace::Skip,
+            session_space,
             self.ntoskrnl.arch(),
             PdbRecovery::Automatic,
         )
+    }
+
+    /// How a load of `modules` under `dtb` treats session space: through a
+    /// session process's root when `dtb` is the kernel's, a module lies in
+    /// session space and a process is attached to a session; `otherwise`
+    /// if not.
+    fn kernel_session_space(
+        &self,
+        dtb: Dtb,
+        modules: &[ModuleInfo],
+        otherwise: SessionSpace,
+    ) -> SessionSpace {
+        if dtb != self.ntoskrnl.dtb()
+            || !modules
+                .iter()
+                .any(|module| Self::is_session_space(module.base_address))
+        {
+            return otherwise;
+        }
+        let roots = self.session_process_dtbs();
+        if roots.is_empty() {
+            otherwise
+        } else {
+            SessionSpace::Through(roots)
+        }
+    }
+
+    /// The page-table root of a process attached to each session, which
+    /// maps that session's space where the kernel's root does not (win32k on
+    /// Windows 7 and 8.1).
+    fn session_process_dtbs(&self) -> Vec<Dtb> {
+        let Some(session) = self
+            .ntoskrnl
+            .types()
+            .layout("_EPROCESS")
+            .ok()
+            .and_then(|layout| layout.field_offset("Session").ok())
+        else {
+            return Vec::new();
+        };
+        let memory = self.ntoskrnl.memory();
+        let mut sessions = HashSet::new();
+        self.enumerate_processes()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|process| {
+                memory
+                    .read_pointer(process.eprocess + session)
+                    .is_ok_and(|pointer| !pointer.is_zero() && sessions.insert(pointer))
+            })
+            .map(|process| process.dtb)
+            .collect()
     }
 
     pub fn load_missing_kernel_module_symbols(
@@ -833,12 +930,13 @@ impl Guest {
             })
             .collect::<Vec<_>>();
 
+        let session_space = self.kernel_session_space(dtb, &missing, SessionSpace::Skip);
         let mut report = Self::load_module_symbols(
             phys,
             symbols,
             missing,
             dtb,
-            SessionSpace::Skip,
+            session_space,
             self.ntoskrnl.arch(),
             PdbRecovery::Automatic,
         )?;
@@ -877,12 +975,13 @@ impl Guest {
         dtb: Dtb,
         recovery: PdbRecovery,
     ) -> Result<ModuleSymbolLoadReport> {
+        let session_space = self.kernel_session_space(dtb, &modules, SessionSpace::Load);
         Self::load_module_symbols(
             phys,
             symbols,
             modules,
             dtb,
-            SessionSpace::Load,
+            session_space,
             self.ntoskrnl.arch(),
             recovery,
         )

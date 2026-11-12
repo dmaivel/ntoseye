@@ -10,7 +10,7 @@ use crate::base::error::{Error, Result};
 use crate::base::memory::{AddressSpace, MemoryOps};
 use crate::base::types::{Dtb, VirtAddr};
 use crate::nt::symbols::SymbolStore;
-use crate::nt::target::ListCursor;
+use crate::nt::target::{ListCursor, Target};
 
 /// A module's struct/type namespace bound to a read address space: the entry
 /// point for layout lookups and fluent cursors. Cheap to copy. The namespace
@@ -26,6 +26,11 @@ pub struct Types<'a> {
     arch: Arch,
     kernel_dtb: Dtb,
     dtb: Dtb,
+    /// The target whose breakpoints and traps reads mask
+    /// ([`Target::mask_breakpoints`]), so a struct over a planted site shows
+    /// the code the guest runs. `None` for an image's own walkers, which
+    /// have no target to ask and read only data.
+    code: Option<&'a Target>,
 }
 
 impl<'a> Types<'a> {
@@ -48,11 +53,25 @@ impl<'a> Types<'a> {
             arch,
             kernel_dtb,
             dtb,
+            code: None,
         }
     }
 
-    fn memory(self) -> AddressSpace<'a, Arc<PhysMem>> {
+    /// This namespace reading with `target`'s breakpoints and traps masked.
+    pub fn masked_by(self, target: &'a Target) -> Self {
+        Self {
+            code: Some(target),
+            ..self
+        }
+    }
+
+    fn read_bytes(self, address: VirtAddr, buf: &mut [u8]) -> Result<()> {
         AddressSpace::for_arch(self.phys, self.dtb, self.kernel_dtb, self.arch)
+            .read_bytes(address, buf)?;
+        if let Some(target) = self.code {
+            target.mask_breakpoints(self.dtb, address, buf);
+        }
+        Ok(())
     }
 
     /// The parsed layout of struct `name` from the object's PDB (cached). A
@@ -117,7 +136,7 @@ impl<'a> Types<'a> {
             memory(&mut bytes[..pointer_size])?;
             Ok(VirtAddr(le_uint(&bytes[..pointer_size])))
         };
-        let initial = read_link(&|buf| self.memory().read_bytes(head, buf))?;
+        let initial = read_link(&|buf| self.read_bytes(head, buf))?;
         let mut cursor = ListCursor::new(head, MAX);
         cursor.advance(Ok(initial));
 
@@ -165,10 +184,6 @@ pub struct StructRef<'a> {
 const STRUCT_PREFETCH_MAX: usize = 0x1000;
 
 impl<'a> StructRef<'a> {
-    fn memory(&self) -> AddressSpace<'a, Arc<PhysMem>> {
-        self.types.memory()
-    }
-
     /// Read the struct's bytes once so later field reads are served from the
     /// copy: one request per page instead of one per field on a remote
     /// target. Best-effort; an unreadable or oversized struct keeps per-field
@@ -176,7 +191,7 @@ impl<'a> StructRef<'a> {
     pub fn prefetch(mut self) -> Self {
         if self.image.is_none() && self.ti.size != 0 && self.ti.size <= STRUCT_PREFETCH_MAX {
             let mut image = vec![0u8; self.ti.size];
-            if self.memory().read_bytes(self.base, &mut image).is_ok() {
+            if self.types.read_bytes(self.base, &mut image).is_ok() {
                 self.image = Some(image.into());
             }
         }
@@ -192,7 +207,7 @@ impl<'a> StructRef<'a> {
             out.copy_from_slice(bytes);
             return Ok(());
         }
-        self.memory().read_bytes(self.base + offset, out)
+        self.types.read_bytes(self.base + offset, out)
     }
 
     /// Read an integer field at its PDB-declared width (1..=8 bytes).
@@ -364,7 +379,7 @@ impl<'a> StructRef<'a> {
             return Ok(Vec::new());
         }
         let mut buf = vec![0u8; length as usize];
-        self.memory().read_bytes(buffer, &mut buf)?;
+        self.types.read_bytes(buffer, &mut buf)?;
         Ok(buf)
     }
 

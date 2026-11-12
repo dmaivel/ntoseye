@@ -12,7 +12,7 @@ use std::collections::HashSet;
 
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
-use crate::nt::expr::{Expr, ExprValue, NumberRadix};
+use crate::nt::expr::{Expr, ExprValue, MAX_EXPR_DEPTH, NumberRadix, too_deep_message};
 use crate::nt::layout::{ParsedType, is_signed_primitive};
 use crate::nt::target::Target;
 
@@ -203,6 +203,7 @@ pub fn is_query(text: &str) -> bool {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 enum Node {
     Int(Integer),
     Str(String),
@@ -226,9 +227,29 @@ struct Parser {
     /// The lambda parameters in scope, which a parenthesized name never
     /// casts to.
     params: Vec<String>,
+    /// How many levels deep the parse is: parsing, evaluating and dropping
+    /// the tree recurse once per level, so it is bounded by
+    /// [`MAX_EXPR_DEPTH`].
+    depth: usize,
 }
 
 impl Parser {
+    /// Go one level deeper, failing past [`MAX_EXPR_DEPTH`].
+    fn enter_level(&mut self) -> Result<()> {
+        if self.depth >= MAX_EXPR_DEPTH {
+            return Err(invalid(too_deep_message()));
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    fn nested<T>(&mut self, parse: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        self.enter_level()?;
+        let result = parse(self);
+        self.depth -= 1;
+        result
+    }
+
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.at)
     }
@@ -275,6 +296,11 @@ impl Parser {
     }
 
     fn expression(&mut self) -> Result<Node> {
+        // Every recursion but a prefix operator's passes through here.
+        self.nested(Self::expression_at_level)
+    }
+
+    fn expression_at_level(&mut self) -> Result<Node> {
         // `p => ...` and `(p) => ...`.
         let lambda = match (
             self.peek(),
@@ -317,21 +343,25 @@ impl Parser {
             return self.unary();
         }
         let mut left = self.binary(level + 1)?;
+        // Each link of a chain nests the tree built so far one level deeper.
+        let outer = self.depth;
         while let Some(Token::Punct(op)) = self.peek() {
             let Some(op) = BINARY_LEVELS[level].iter().find(|known| *known == op) else {
                 break;
             };
             self.at += 1;
+            self.enter_level()?;
             let right = self.binary(level + 1)?;
             left = Node::Binary(op, Box::new(left), Box::new(right));
         }
+        self.depth = outer;
         Ok(left)
     }
 
     fn unary(&mut self) -> Result<Node> {
         for op in ["-", "~", "!", "*", "&"] {
             if self.eat(op) {
-                let operand = self.unary()?;
+                let operand = self.nested(Self::unary)?;
                 return Ok(match (op, operand) {
                     // `-2147483648` is an `__int64` before it is negated.
                     ("-", Node::Int(integer)) => {
@@ -343,7 +373,7 @@ impl Parser {
         }
         if let Some((type_name, length)) = self.cast_type() {
             self.at += length;
-            let operand = self.unary()?;
+            let operand = self.nested(Self::unary)?;
             return Ok(Node::Cast(type_name, Box::new(operand)));
         }
         self.postfix()
@@ -499,6 +529,7 @@ fn parse(text: &str) -> Result<Node> {
         tokens: tokenize(text)?,
         at: 0,
         params: Vec::new(),
+        depth: 0,
     };
     let node = parser.expression()?;
     match parser.peek() {
@@ -694,6 +725,20 @@ impl Evaluator<'_> {
         result
     }
 
+    /// Whether `lambda` holds for the element under `key`.
+    fn matches(
+        &self,
+        lambda: &Node,
+        key: u64,
+        element: &ModelValue,
+        scope: &mut Scope,
+    ) -> Result<bool> {
+        let result = self
+            .apply(lambda, element.clone(), scope)
+            .map_err(|error| invalid(format!("[{key:#x}]: {}", message(&error))))?;
+        self.truth(&result)
+    }
+
     fn query(
         &self,
         elements: Vec<(u64, ModelValue)>,
@@ -771,43 +816,58 @@ impl Evaluator<'_> {
             }
             "First" | "Last" => {
                 arity(&[0, 1])?;
-                let candidates = if lambda.is_some() {
-                    let mut kept = Vec::new();
-                    for (key, element, result) in mapped(elements)? {
-                        if self.truth(&result)? {
-                            kept.push((key, element));
-                        }
+                // The search stops at the first element that matches, so a
+                // later element the lambda fails on does not fail it.
+                let mut elements = elements;
+                let len = elements.len();
+                let mut found = None;
+                for step in 0..len {
+                    let index = if method == "First" {
+                        step
+                    } else {
+                        len - 1 - step
+                    };
+                    let (key, element) = &elements[index];
+                    let matches = match lambda {
+                        Some(lambda) => self.matches(lambda, *key, element, scope)?,
+                        None => true,
+                    };
+                    if matches {
+                        found = Some(index);
+                        break;
                     }
-                    kept
-                } else {
-                    elements
-                };
-                let found = if method == "First" {
-                    candidates.into_iter().next()
-                } else {
-                    candidates.into_iter().last()
-                };
-                found
-                    .map(|(_, element)| element)
-                    .ok_or_else(|| invalid(format!(".{method}() found no element")))?
+                }
+                let index =
+                    found.ok_or_else(|| invalid(format!(".{method}() found no element")))?;
+                elements.swap_remove(index).1
             }
             "Any" | "All" | "Count" => {
                 arity(&[0, 1])?;
-                let matches = if lambda.is_some() {
-                    let mut matches = 0;
-                    for (_, _, result) in mapped(elements.clone())? {
-                        matches += usize::from(self.truth(&result)?);
-                    }
-                    matches
-                } else if method == "All" {
-                    return Err(invalid(".All() takes a lambda"));
-                } else {
-                    elements.len()
+                let Some(lambda) = lambda else {
+                    return match method {
+                        "All" => Err(invalid(".All() takes a lambda")),
+                        "Any" => Ok(ModelValue::Bool(!elements.is_empty())),
+                        _ => Ok(ModelValue::unsigned(elements.len() as u64)),
+                    };
                 };
+                // Any and All stop at the first element that decides them.
+                let mut count = 0u64;
+                let mut decided = None;
+                for (key, element) in elements {
+                    let matches = self.matches(lambda, key, &element, scope)?;
+                    match method {
+                        "Any" if matches => decided = Some(true),
+                        "All" if !matches => decided = Some(false),
+                        _ => count += u64::from(matches),
+                    }
+                    if decided.is_some() {
+                        break;
+                    }
+                }
                 match method {
-                    "Any" => ModelValue::Bool(matches > 0),
-                    "All" => ModelValue::Bool(matches == elements.len()),
-                    _ => ModelValue::unsigned(matches as u64),
+                    "Any" => ModelValue::Bool(decided.unwrap_or(false)),
+                    "All" => ModelValue::Bool(decided.unwrap_or(true)),
+                    _ => ModelValue::unsigned(count),
                 }
             }
             "OrderBy" | "OrderByDescending" => {
@@ -1132,19 +1192,44 @@ mod tests {
         assert!(!is_query("DebuggerData"));
     }
 
-    fn parsed(text: &str) -> String {
-        format!("{:?}", parse(text).unwrap())
+    fn parsed(text: &str) -> Node {
+        parse(text).unwrap()
+    }
+
+    fn name(text: &str) -> Box<Node> {
+        Box::new(Node::Name(text.into()))
+    }
+
+    fn int(value: i128) -> Box<Node> {
+        Box::new(Node::Int(Integer::new(value, false, false)))
+    }
+
+    fn member(object: Box<Node>, field: &str) -> Box<Node> {
+        Box::new(Node::Member(object, field.into()))
+    }
+
+    fn binary(op: &'static str, left: Box<Node>, right: Box<Node>) -> Box<Node> {
+        Box::new(Node::Binary(op, left, right))
     }
 
     /// `(p)` inside a lambda over `p` is a parenthesized name, while
     /// `(nt!_TOKEN *)` and `(unsigned char)` are casts.
     #[test]
     fn casts_are_told_from_parentheses() {
-        assert!(parsed("(nt!_TOKEN *)x").starts_with("Cast(\"nt!_TOKEN *\""));
-        assert!(parsed("(unsigned char)x").starts_with("Cast(\"unsigned char\""));
-        assert!(parsed("p => (p) * 2").contains("Binary(\"*\", Name(\"p\")"));
+        assert_eq!(
+            parsed("(nt!_TOKEN *)x"),
+            Node::Cast("nt!_TOKEN *".into(), name("x"))
+        );
+        assert_eq!(
+            parsed("(unsigned char)x"),
+            Node::Cast("unsigned char".into(), name("x"))
+        );
+        assert_eq!(
+            parsed("p => (p) * 2"),
+            Node::Lambda("p".into(), binary("*", name("p"), int(2)))
+        );
         // A plain name in parentheses is not a type.
-        assert!(parsed("(x) - 1").starts_with("Binary(\"-\""));
+        assert_eq!(parsed("(x) - 1"), *binary("-", name("x"), int(1)));
     }
 
     /// Precedence follows C# and C++: `==` binds tighter than `&`, which
@@ -1153,11 +1238,25 @@ mod tests {
     fn operators_bind_as_in_csharp() {
         assert_eq!(parsed("a & 0xF == 3 && b"), parsed("(a & (0xF == 3)) && b"));
         assert_eq!(parsed("a + 2 * 3 << 1"), parsed("(a + (2 * 3)) << 1"));
-        assert!(
-            parsed("p.Name.ToLower().Contains(\"svc\")")
-                .starts_with("Call(Call(Member(Name(\"p\"), \"Name\"), \"ToLower\", [])")
+        assert_eq!(
+            parsed("p.Name.ToLower().Contains(\"svc\")"),
+            Node::Call(
+                Box::new(Node::Call(
+                    member(name("p"), "Name"),
+                    "ToLower".into(),
+                    vec![]
+                )),
+                "Contains".into(),
+                vec![Node::Str("svc".into())]
+            )
         );
-        assert!(parsed("new { Name = p.Name, Pid = p.Id }").starts_with("New([(\"Name\""));
+        assert_eq!(
+            parsed("new { Name = p.Name, Pid = p.Id }"),
+            Node::New(vec![
+                ("Name".into(), *member(name("p"), "Name")),
+                ("Pid".into(), *member(name("p"), "Id")),
+            ])
+        );
         // WinDbg names no field after its path, as C# does.
         assert!(parse("new { p.Name }").is_err());
     }
@@ -1166,9 +1265,17 @@ mod tests {
     /// a whole argument, its body running to the closing parenthesis.
     #[test]
     fn lambdas_take_their_whole_argument() {
-        assert!(
-            parsed("x.Where((p) => p.Id > 4 && p.Id < 8)")
-                .starts_with("Call(Name(\"x\"), \"Where\", [Lambda(\"p\", Binary(\"&&\"")
+        let id = || member(name("p"), "Id");
+        assert_eq!(
+            parsed("x.Where((p) => p.Id > 4 && p.Id < 8)"),
+            Node::Call(
+                name("x"),
+                "Where".into(),
+                vec![Node::Lambda(
+                    "p".into(),
+                    binary("&&", binary(">", id(), int(4)), binary("<", id(), int(8)))
+                )]
+            )
         );
         assert!(parse("x.Where(p => )").is_err());
         assert!(parse("new { 1 }").is_err());
@@ -1240,5 +1347,41 @@ mod tests {
         let session = crate::session::session_over_memory(0x1000, &[0; 0x10]);
         assert!(evaluate(&session.target, "new { A = 1 / 0 }").is_err());
         assert!(evaluate(&session.target, "new { A = \"x\" < 1 }").is_err());
+    }
+
+    /// Nesting past the bound is a parse error rather than a stack overflow
+    /// that aborts the process, and expressions just inside it parse and
+    /// evaluate, on the smallest stack a host runs commands on: the 8 MiB
+    /// main thread.
+    #[test]
+    fn deep_nesting_is_an_error_not_a_stack_overflow() {
+        // The object around each expression takes one level of its own.
+        let inner = MAX_EXPR_DEPTH - 2;
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(move || {
+                for deep in [
+                    "(".repeat(10_000),
+                    format!("{}1", "-".repeat(3000)),
+                    format!("1{}", " + 1".repeat(100_000)),
+                    format!("x{}", "[0".repeat(5000)),
+                    "new { A = ".repeat(5000),
+                ] {
+                    assert_eq!(message(&parse(&deep).unwrap_err()), too_deep_message());
+                }
+                for (text, value) in [
+                    (format!("{}1{}", "(".repeat(inner), ")".repeat(inner)), 1),
+                    (format!("{}1", "~~".repeat(inner / 2)), 1),
+                    (format!("1{}", " + 1".repeat(inner)), inner + 1),
+                ] {
+                    assert_eq!(
+                        fields(&format!("new {{ A = {text} }}")),
+                        [("A".to_string(), value.to_string())]
+                    );
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

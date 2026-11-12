@@ -2,7 +2,7 @@
 //! rediscovery that follow it.
 
 use crate::backend::dbg_backend::StopEvent;
-use crate::backend::kd::{kd_files, trace_enabled};
+use crate::backend::kd::kd_files;
 use crate::base::error::Result;
 use crate::base::notice::Notice;
 use crate::base::types::VirtAddr;
@@ -52,15 +52,25 @@ impl Session {
         !self.reload_module_list_pending && self.target.current_kernel_mapping_is_valid()
     }
 
-    /// Rebuild guest state, auto-discovering the kernel base.
+    /// Rebuild guest state, auto-discovering the kernel base. A guest that
+    /// has not rebooted (its kernel image is still mapped) still holds the
+    /// breakpoint sites planted in it, so they are lifted first; a reboot
+    /// took them with the old memory.
     pub fn reload(&mut self) -> Result<()> {
         self.target.last_exception_code = None;
         self.module_refresh_report = None;
+        let lifted = if self.target.current_kernel_mapping_is_valid() {
+            self.breakpoints
+                .lift_sites_for_reload(self.backend.as_mut(), &self.target)
+        } else {
+            Ok(())
+        };
         let outcome = self.perform_target_reload(None);
         if let Some(error) = outcome.breakpoint_error {
             return Err(error);
         }
-        outcome.report.map(|_| ())
+        outcome.report?;
+        lifted
     }
 
     /// If a module-list reload is pending and the loaded-module list has now
@@ -84,6 +94,7 @@ impl Session {
         }
         self.target.refresh_kernel_module_symbols()?;
         self.breakpoints
+            .edit()
             .resolve_symbolic(self.backend.as_mut(), &self.target)?;
         self.backend.note_target_rediscovery_complete();
         self.reload_module_list_pending = false;
@@ -139,9 +150,11 @@ impl Session {
             event.target_reloaded = true;
             // The reboot invalidates the sites: the kernel is re-based and
             // the target's breakpoints are gone. The next resume re-arms them.
-            self.bugcheck_trap = None;
-            self.module_traps.clear();
-            self.module_trap_interrupted = None;
+            *self.bugcheck_trap.edit() = None;
+            self.module_traps.edit().clear();
+            self.trap_interrupted = None;
+            self.step_in_flight = None;
+            self.last_user_image = None;
             let TargetReloadOutcome {
                 report,
                 hint,
@@ -224,10 +237,11 @@ impl Session {
     fn perform_target_reload(&mut self, event_hint: Option<VirtAddr>) -> TargetReloadOutcome {
         let backend = self.backend.as_mut();
         let target = &mut self.target;
-        let breakpoints = &mut self.breakpoints;
+        let mut breakpoints = self.breakpoints.edit();
         // Target-specific numeric breakpoints and hardware slots cannot survive a
         // rebuild. Symbolic code breakpoints retain identity and become deferred.
         breakpoints.prepare_target_reload(backend);
+        backend.forget_target_breakpoints();
         // Release file handles owned by the previous target.
         kd_files().reset_handles();
         // A load-symbols stop's hint is the loading image's base, which is the
@@ -259,7 +273,10 @@ impl Session {
             // Before re-resolving breakpoints: a stub may plant them through
             // this root, and the old boot's is gone.
             backend.set_kernel_dtb(target.kernel_dtb());
-            backend.set_teb_path(crate::nt::cpu_state::teb_path(target));
+            backend.set_thread_layout(crate::nt::cpu_state::thread_layout(target));
+            if let Ok(count) = crate::nt::cpu_state::processor_count(target) {
+                backend.set_processor_count(count);
+            }
             // A reboot may have turned the Windows hypervisor on or off.
             backend.set_windows_hypervisor(target.windows_hypervisor_running());
             let debugger_data_hint = backend.target_debugger_data_hint().ok().flatten();

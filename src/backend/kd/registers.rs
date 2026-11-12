@@ -3,16 +3,20 @@
 
 use super::machine::machine;
 use crate::arch::{Arch, arm64};
-use crate::backend::dbg_backend::TebPath;
+use crate::backend::dbg_backend::ThreadLayout;
 use crate::base::bytes;
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
 
-use super::{KD_REQUEST_TIMEOUT, KdBackend, api, trace_enabled, with_framing_read_timeout};
+use super::{KD_REQUEST_TIMEOUT, KdBackend, api, with_framing_read_timeout};
+use crate::base::env::Trace;
 
 /// The control-space selector for `KSPECIAL_REGISTERS`, on both
-/// architectures (0 returns a KPCR pointer).
+/// architectures.
 pub const CONTROL_SPACE_KSPECIAL: u64 = 2;
+/// The control-space selector for a processor's KPCR pointer, which the
+/// target reads from its processor block for the processor a request names.
+const CONTROL_SPACE_KPCR: u64 = 0;
 pub const MSR_EFER: u32 = 0xC000_0080;
 
 /// Windows KD encoding of `TTBR1_EL1`: op0=3, op1=0, CRn=2, CRm=0, op2=1.
@@ -21,6 +25,9 @@ pub const ARM64_WINDBG_TTBR1_EL1: u32 = 0x0003_0201;
 pub const ARM64_WINDBG_TTBR0_EL1: u32 = 0x0003_0200;
 pub const ARM64_WINDBG_ESR_EL1: u32 = 0x0003_0520;
 pub const ARM64_WINDBG_FAR_EL1: u32 = 0x0003_0600;
+/// `ID_AA64DFR0_EL1`: op0=3, op1=0, CRn=0, CRm=5, op2=0. It counts the
+/// breakpoint and watchpoint register pairs.
+pub const ARM64_WINDBG_ID_AA64DFR0_EL1: u32 = 0x0003_0050;
 /// `TPIDR_EL1`: op0=3, op1=0, CRn=13, CRm=0, op2=4. Windows keeps the
 /// processor's KPCR there, with flags in the low bits.
 const ARM64_WINDBG_TPIDR_EL1: u32 = 0x0003_0d04;
@@ -44,17 +51,17 @@ pub(super) trait Arm64X18Source {
 /// answer.
 pub(super) fn arm64_x18(
     context: &[u8],
-    teb_path: Option<TebPath>,
+    thread_layout: Option<ThreadLayout>,
     source: &mut impl Arm64X18Source,
 ) -> Option<u64> {
     let cpsr = bytes::read_u32(context, arm64::OFFSET_CPSR);
     let x18_at = arm64::OFFSET_X0 + 18 * 8;
-    let x18 = u64::from_le_bytes(context.get(x18_at..x18_at + 8)?.try_into().ok()?);
+    let x18 = bytes::get_u64(context, x18_at)?;
     // CPSR.M[3:2] is the exception level the context was taken at.
     match (cpsr >> 2) & 3 {
         1 => source.kpcr().filter(|kpcr| *kpcr != 0),
         0 if x18 == 0 => {
-            let path = teb_path?;
+            let path = thread_layout?;
             let kpcr = source.kpcr().filter(|kpcr| *kpcr != 0)?;
             let thread = source.read_pointer(kpcr.wrapping_add(path.current_thread))?;
             source
@@ -114,10 +121,7 @@ pub fn context_payload(arch: Arch, data: &[u8]) -> Result<&[u8]> {
 
 impl Arm64X18Source for KdBackend {
     fn kpcr(&mut self) -> Option<u64> {
-        self.read_msr_value(self.current_processor, ARM64_WINDBG_TPIDR_EL1)
-            .inspect_err(|error| kd_trace!("kd: ARM64 TPIDR_EL1 read unavailable: {error}"))
-            .ok()
-            .map(|value| value & !0xfff)
+        self.processor_kpcr(self.current_processor)
     }
 
     fn read_pointer(&mut self, address: u64) -> Option<u64> {
@@ -130,6 +134,42 @@ impl Arm64X18Source for KdBackend {
 }
 
 impl KdBackend {
+    /// `processor`'s KPCR. On the processor that stopped the target it is
+    /// `TPIDR_EL1` with its flag bits (the low 12) cleared; the target reads
+    /// system registers only there, so any other processor's comes from
+    /// control space. Read once a boot (see [`Self::kpcr_cache`]).
+    pub(super) fn processor_kpcr(&mut self, processor: u16) -> Option<u64> {
+        if let Some(&kpcr) = self.kpcr_cache.get(&processor) {
+            return Some(kpcr);
+        }
+        let kpcr = if processor == self.last_stop_processor {
+            self.read_msr_value(processor, ARM64_WINDBG_TPIDR_EL1)
+                .inspect_err(|error| kd_trace!("kd: ARM64 TPIDR_EL1 read unavailable: {error}"))
+                .ok()
+                .map(|value| value & !0xfff)
+        } else {
+            with_framing_read_timeout(self.framing().ok()?, KD_REQUEST_TIMEOUT, |framing| {
+                api::read_control_space(framing, processor, CONTROL_SPACE_KPCR, 8)
+            })
+            .inspect_err(|error| kd_trace!("kd: p{} KPCR read unavailable: {error}", processor + 1))
+            .ok()
+            .and_then(|bytes| Some(u64::from_le_bytes(bytes.get(..8)?.try_into().ok()?)))
+        }
+        .filter(|kpcr| *kpcr != 0)?;
+        self.kpcr_cache.insert(processor, kpcr);
+        Some(kpcr)
+    }
+
+    /// The page-table root of the address space `processor`'s current
+    /// thread runs in, read from its process (see [`ThreadLayout`]).
+    pub(super) fn processor_process_root(&mut self, processor: u16) -> Option<u64> {
+        let layout = self.thread_layout?;
+        let kpcr = self.processor_kpcr(processor)?;
+        let thread = self.read_pointer(kpcr.wrapping_add(layout.current_thread))?;
+        let process = self.read_pointer(thread.wrapping_add(layout.process))?;
+        self.read_pointer(process.wrapping_add(layout.directory_table_base))
+    }
+
     pub(super) fn read_special_registers_uncached(&mut self, processor: u16) -> Result<Vec<u8>> {
         let size = self.arch.special_register_map().extent() as u32;
         with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
@@ -228,7 +268,7 @@ impl KdBackend {
         context_payload(self.arch, &ctx)?;
         self.append_control_registers(&mut ctx)?;
         kd_trace!("kd: read_registers: extended to {} bytes", ctx.len());
-        if trace_enabled() {
+        if Trace::Kd.enabled() {
             let cr3 = self.register_map.read_u64("cr3", &ctx).unwrap_or(0);
             let pc = self
                 .register_map
@@ -250,8 +290,9 @@ impl KdBackend {
         // before the write, the stop's report of TF and DR6 included.
         self.registers.invalidate(processor);
         let context = context_payload(self.arch, data)?;
+        let flags = self.arch.context_flags().all;
         with_framing_read_timeout(self.framing()?, KD_REQUEST_TIMEOUT, |framing| {
-            api::set_context_chunked(framing, processor, context)
+            api::set_context(framing, processor, flags, context)
         })?;
 
         // KD restores the hardware-breakpoint state from KSPECIAL_REGISTERS,

@@ -16,6 +16,7 @@ use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError, Current, FromArg};
 use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::bugchecks::looks_like_kernel_pointer;
+use crate::nt::expr::Expr;
 use crate::nt::target::sched::ThreadDetail;
 use crate::nt::target::{ThreadInfo, kthread_state_name, wait_reason_name};
 use crate::nt::unwind::ThreadStackSource;
@@ -46,7 +47,10 @@ fn wait_reason_label(thread: &ThreadInfo) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-fn thread_matches_filter(thread: &ThreadInfo, filter: &str) -> bool {
+/// Whether `thread` matches a `threads` filter: its process's name, or its
+/// PID, TID or ETHREAD written out, or `number`, the filter read as a number
+/// literal (`0n6996`, `0x1b54`, or a bare number in the session radix).
+fn thread_matches_filter(thread: &ThreadInfo, filter: &str, number: Option<u64>) -> bool {
     let filter_lower = filter.to_ascii_lowercase();
     thread
         .process_name
@@ -60,6 +64,9 @@ fn thread_matches_filter(thread: &ThreadInfo, filter: &str) -> bool {
             .is_some_and(|tid| tid.to_string() == filter || format!("{:#x}", tid) == filter_lower)
         || format!("{:#x}", thread.ethread.0) == filter_lower
         || format!("{:x}", thread.ethread.0) == filter_lower.trim_start_matches("0x")
+        || number.is_some_and(|number| {
+            thread.pid == Some(number) || thread.tid == Some(number) || thread.ethread.0 == number
+        })
 }
 
 /// `!thread`'s text for one thread, as `!process` lists threads too.
@@ -402,6 +409,12 @@ impl Current for ThreadInfo {
 }
 
 /// List the Windows threads, with an optional filter by process, PID, TID, or ETHREAD.
+///
+/// With no filter while attached to a process (attach, .process), the
+/// command lists that process's threads, and * lists every thread. The start
+/// address is the thread's own entry (its Win32 start address), else where
+/// the kernel started it, named from the symbols loaded: the kernel's, and
+/// the attached process's.
 #[command(
     names = ["threads"],
     category = "processes and modules",
@@ -429,15 +442,33 @@ impl Render<Option<String>> for WindowsThreads {
     fn render(&self, repl: &mut ReplState<'_>, filter: Option<String>) {
         // Completion wants every thread, not just the ones this listing shows.
         *repl.caches.threads.write().unwrap() = self.threads.clone();
+        // Unfiltered, the attached process's; `*`, every thread.
+        let attached = repl.ctx.target.attached_process().cloned();
+        let scope = attached.as_ref().filter(|_| filter.is_none());
+        let number = filter.as_deref().and_then(|filter| {
+            match Expr::parse_with_radix(filter, repl.ctx.radix) {
+                Ok(Expr::Literal(number)) => Some(number.0),
+                _ => None,
+            }
+        });
         let threads: Vec<&ThreadInfo> = self
             .threads
             .iter()
-            .filter(|thread| {
-                filter
-                    .as_deref()
-                    .is_none_or(|filter| thread_matches_filter(thread, filter))
+            .filter(|thread| match (filter.as_deref(), scope) {
+                (Some("*"), _) | (None, None) => true,
+                (Some(filter), _) => thread_matches_filter(thread, filter, number),
+                (None, Some(process)) => thread.eprocess == Some(process.eprocess),
             })
             .collect();
+        if let Some(process) = scope {
+            outln!(
+                "{}",
+                ui::muted(&format!(
+                    "threads of {} (PID {}); `threads *` lists every thread",
+                    process.name, process.pid
+                ))
+            );
+        }
         if threads.is_empty() {
             let note = match filter.as_deref() {
                 Some(filter) => format!("no threads matching '{filter}'"),
@@ -463,7 +494,10 @@ impl Render<Option<String>> for WindowsThreads {
                 .active
                 .get(&thread.ethread.0)
                 .map_or_else(|| "-".to_string(), |vcpu| thread_label(vcpu));
-            let start = thread.start_address.or(thread.win32_start_address);
+            let start = thread
+                .win32_start_address
+                .filter(|address| address.0 != 0)
+                .or(thread.start_address);
             builder.push_record(vec![
                 active_vcpu,
                 ui::addr(thread.ethread.0).to_string(),
@@ -481,12 +515,32 @@ impl Render<Option<String>> for WindowsThreads {
                 thread_state_label(thread).to_string(),
                 wait_reason_label(thread).to_string(),
                 start
-                    .map(|addr| ui::addr(addr.0))
+                    .map(|address| start_label(repl, thread, address))
                     .unwrap_or_else(|| "-".to_string()),
             ]);
         }
         print_padded_table(builder);
     }
+}
+
+/// A thread's start `address`, named where its symbols are loaded: kernel
+/// code, and the code of the attached process, whose modules are. Naming
+/// another process's would load every process's symbols.
+fn start_label(repl: &ReplState<'_>, thread: &ThreadInfo, address: VirtAddr) -> String {
+    let target = &repl.ctx.target;
+    let symbol = if target.arch().paging().is_kernel_address(address) {
+        target
+            .symbols
+            .format_closest_symbol_for_address(target.kernel_dtb(), address)
+    } else if target
+        .attached_process()
+        .is_some_and(|process| thread.eprocess == Some(process.eprocess))
+    {
+        target.closest_symbol_current_context(address)
+    } else {
+        None
+    };
+    symbol.unwrap_or_else(|| ui::addr(address.0).to_string())
 }
 
 /// Show a Windows thread and, optionally, its kernel stack.

@@ -24,6 +24,7 @@ use super::{ErrorKind, error, raise};
 use crate::base::error::{Error, Result as CoreResult};
 use crate::hosts::repl::ReplStore;
 use crate::nt::target::InterruptRequester;
+use crate::session::COMMAND_THREAD_STACK;
 use crate::session::Session;
 use crate::session::effects::Effects;
 
@@ -56,14 +57,16 @@ const SIGNAL_POLL: Duration = Duration::from_millis(100);
 #[pyclass(frozen, module = "ntoseye")]
 pub struct Debugger {
     inner: SessionHandle,
-    /// REPL-side state (aliases, radix, `ls` cursor, completion caches) that
+    /// REPL-side state (aliases, `ls` cursor, completion caches) that
     /// `command()` keeps between calls, like the MCP `command` tool does.
     pub repl_store: Shared<Option<ReplStore>>,
-    /// Python `when=` breakpoint conditions by breakpoint id. These can
+    /// Python `when=` breakpoint conditions by breakpoint id, with the serial
+    /// of the breakpoint they were given to: a later breakpoint that reuses
+    /// the id (set through `command()`) must not inherit one. These can
     /// capture the debugger itself, so they are exposed to the GC through
     /// `__traverse__`/`__clear__`; otherwise the cycle would leak the session
     /// and its single-instance lock.
-    pub conditions: Shared<HashMap<u32, Py<PyAny>>>,
+    pub conditions: Shared<HashMap<u32, (u64, Py<PyAny>)>>,
     /// The target's rebuild count ([`crate::nt::target::Target::generation`]),
     /// shared with the session so staleness checks need no trip to it.
     generation: Arc<AtomicU64>,
@@ -148,6 +151,7 @@ impl Actor {
         let (opened, open_result) = mpsc::sync_channel(1);
         let thread = std::thread::Builder::new()
             .name("ntoseye-session".to_string())
+            .stack_size(COMMAND_THREAD_STACK)
             .spawn(move || {
                 let mut session = match open() {
                     Ok(session) => {

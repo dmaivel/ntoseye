@@ -17,7 +17,8 @@ use crate::nt::target::sched::{
 };
 use crate::nt::target::workqueue::{WorkItem, WorkQueueTypes, WorkQueues};
 use crate::nt::target::{
-    DiagnosticValue, ListTermination, ThreadInfo, kthread_state_name, wait_reason_name,
+    DiagnosticValue, ListTermination, ThreadInfo, kthread_state_name, process_by_name,
+    wait_reason_name,
 };
 use crate::nt::unwind::StackFrame;
 use crate::session::Session;
@@ -408,7 +409,7 @@ fn timer_address(
         return Ok(None);
     }
     let expression = cursor.rest();
-    Expr::eval_with_radix(&expression, &cx.state.ctx.target, cx.state.radix)
+    Expr::eval_with_radix(&expression, &cx.state.ctx.target, cx.state.ctx.radix)
         .map(Some)
         .map_err(|error| {
             ArgError::Message(format!("invalid timer address '{expression}': {error}"))
@@ -494,17 +495,11 @@ fn apc_selector(
             return Ok(ApcSelector::All);
         }
         let target = &cx.state.ctx.target;
-        if let Ok(value) = Expr::eval_with_radix(argument, target, cx.state.radix) {
+        if let Ok(value) = Expr::eval_with_radix(argument, target, cx.state.ctx.radix) {
             return Ok(ApcSelector::Number(value.0));
         }
-        let needle = argument.to_ascii_lowercase();
         let processes = target.guest()?.enumerate_processes()?;
-        let process = processes
-            .iter()
-            .find(|process| process.name.to_ascii_lowercase().contains(&needle))
-            .ok_or_else(|| {
-                Error::DebugInfo(format!("no process or thread matches '{argument}'"))
-            })?;
+        let process = process_by_name(&processes, argument)?;
         Ok(ApcSelector::Process(process.pid))
     };
     select().map_err(|error| ArgError::Message(format!("failed to select APC threads: {error}")))
@@ -949,7 +944,9 @@ fn print_timer_list(detail: &TimerTable) {
     for entry in &detail.entries {
         let [due_time, period, dpc] = timer_cells(&entry.timer, now, &mut unread);
         builder.push_record([
-            entry.processor.to_string(),
+            entry
+                .processor
+                .map_or_else(|| "-".to_string(), |processor| processor.to_string()),
             entry.bucket.to_string(),
             ui::addr(entry.timer.address.0).to_string(),
             due_time,
@@ -965,9 +962,13 @@ fn print_timer_list(detail: &TimerTable) {
     unread.print();
     for bucket in &detail.terminations {
         if let Some(stop) = termination_message(&bucket.termination) {
+            let table = bucket.processor.map_or_else(
+                || "shared table".to_string(),
+                |processor| format!("CPU {processor}"),
+            );
             print_warning(format!(
-                "CPU {} bucket {}: list walk stopped: {stop}",
-                bucket.processor, bucket.bucket
+                "{table} bucket {}: list walk stopped: {stop}",
+                bucket.bucket
             ));
         }
     }
@@ -1217,7 +1218,7 @@ fn print_stacks(detail: &ThreadStacks) {
                 );
             }
             if thread.truncated != 0 {
-                outln!("    {}", more_frames(thread.truncated));
+                outln!("    {}", more_frames(Some(thread.truncated)));
             }
             if let Some(error) = stack_error(thread) {
                 outln!("    {}", ui::muted(error));
@@ -1311,7 +1312,7 @@ fn print_findstack(detail: &FindStack) {
                     );
                 }
                 if thread.stack.truncated != 0 {
-                    outln!("      {}", more_frames(thread.stack.truncated));
+                    outln!("      {}", more_frames(Some(thread.stack.truncated)));
                 }
             }
         }
@@ -1376,7 +1377,7 @@ fn print_uniqstack(detail: &UniqStacks, options: UniqStackOptions) {
             );
         }
         if group.stack.truncated != 0 {
-            outln!("    {}", more_frames(group.stack.truncated));
+            outln!("    {}", more_frames(Some(group.stack.truncated)));
         }
         if group.threads.len() > 1 {
             outln!("    threads: {}", thread_ids_by_process(&group.threads));

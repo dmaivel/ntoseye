@@ -11,6 +11,7 @@ use crate::arch::arm64::unwind::{
     FP, LR, RUNTIME_FUNCTION_SIZE, Resume, UnwindData, call_return_address, describe_arm64_unwind,
     function_length, runtime_function_at, strip_pac,
 };
+use crate::arch::unwind::UnwindBytes;
 use crate::{
     arch::{Arch, arm64::VOLATILE_REGISTERS},
     base::{
@@ -101,7 +102,18 @@ pub fn describe_arm64_function_entry(
         Arm64Lookup::Missing => return EntryLookup::Leaf,
         Arm64Lookup::Unreadable => return EntryLookup::Holed,
     };
-    let Some(unwind) = describe_arm64_unwind(image, function.unwind_data, base, &symbol) else {
+    describe_arm64_entry(image, base, function, symbol)
+}
+
+/// `function` and its unwind data, read from `code`: the image or the
+/// memory above a dynamic function table's `base`.
+pub fn describe_arm64_entry(
+    code: &impl UnwindBytes,
+    base: u64,
+    function: Arm64Function,
+    symbol: impl Fn(u64) -> String,
+) -> EntryLookup {
+    let Some(unwind) = describe_arm64_unwind(code, function.unwind_data, base, &symbol) else {
         return EntryLookup::Holed;
     };
     EntryLookup::Found {
@@ -307,8 +319,11 @@ impl StackTracer<'_> {
                 unwind_trace!("unwind: no unwind data -> leaf");
                 Resume::Return
             }
+            Resolve::Leaf | Resolve::Holed if context.after_call => {
+                return self.unwind_frame_record_arm64(context);
+            }
             Resolve::Leaf | Resolve::Holed => {
-                unwind_trace!("unwind: caller without resident unwind data -> stop");
+                unwind_trace!("unwind: no resident unwind data -> stop");
                 return Unwound::Stop;
             }
         };
@@ -334,7 +349,7 @@ impl StackTracer<'_> {
                     unwind_trace!("unwind: returns to its own pc without moving -> stop");
                     return Unwound::Stop;
                 }
-                if !self.is_executable_address(return_address) {
+                if !self.is_return_address(return_address) {
                     unwind_trace!("unwind: lr {return_address:#x} is no code -> stop");
                     return Unwound::Stop;
                 }
@@ -357,6 +372,50 @@ impl StackTracer<'_> {
                 }
                 Unwound::Frame { stack_switch: true }
             }
+        }
+    }
+
+    /// A caller whose unwind data is not there to read, by the frame record
+    /// (the caller's x29 and lr) its x29 points at: the Windows ARM64 ABI
+    /// has every function that makes a frame keep x29 at its record, for
+    /// walks without unwind data. .NET's JIT code has none an unwinder can
+    /// read (an in-process callback gives it), and an NGEN image's may be
+    /// paged out with no file to fetch. The caller's sp is not known past the
+    /// record's end, where its frame starts at least; a caller with unwind
+    /// data that addresses its frame from sp unwinds from there.
+    fn unwind_frame_record_arm64(&mut self, context: &mut FrameRegisters) -> Unwound {
+        // The record is in the frame: at or above its sp.
+        let Some(fp) = context.regs[FP].filter(|&fp| fp >= context.sp && fp % 8 == 0) else {
+            unwind_trace!("unwind: caller without unwind data or a frame record -> stop");
+            return Unwound::Stop;
+        };
+        let (Ok(caller_fp), Ok(lr)) = (self.stack_u64(fp), self.stack_u64(fp + 8)) else {
+            unwind_trace!("unwind: frame record at {fp:#x} unreadable -> stop");
+            return Unwound::Stop;
+        };
+        let return_address = strip_pac(lr);
+        // The caller's record is further up the stack, or there is none.
+        if caller_fp != 0 && caller_fp <= fp
+            || !self.is_return_address(return_address)
+            || !self.follows_call(return_address)
+        {
+            unwind_trace!(
+                "unwind: frame record at {fp:#x} (fp {caller_fp:#x}, lr {lr:#x}) holds no caller -> stop"
+            );
+            return Unwound::Stop;
+        }
+        unwind_trace!("unwind: frame record at {fp:#x} -> lr {return_address:#x}");
+        context.pc = return_address;
+        context.sp = fp + 16;
+        context.after_call = true;
+        for index in VOLATILE_REGISTERS {
+            context.regs[index] = None;
+        }
+        context.regs[FP] = Some(caller_fp);
+        // The caller's own lr is in the next record down, not known here.
+        context.regs[LR] = None;
+        Unwound::Frame {
+            stack_switch: false,
         }
     }
 

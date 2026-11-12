@@ -124,13 +124,16 @@ struct CompletionInput<'a> {
 }
 
 impl<'a> CompletionInput<'a> {
-    fn new(text_before_cursor: &'a str, pos: usize) -> Self {
-        let arg_start = text_before_cursor
-            .char_indices()
-            .rfind(|(_, ch)| ch.is_whitespace())
-            .map(|(i, ch)| i + ch.len_utf8())
-            .unwrap_or(0);
-        let raw_prefix = &text_before_cursor[arg_start..];
+    /// The word `text` ends with, where `text` starts at byte `offset` of
+    /// the line.
+    fn new(text: &'a str, offset: usize, pos: usize) -> Self {
+        let arg_start = offset
+            + text
+                .char_indices()
+                .rfind(|(_, ch)| ch.is_whitespace())
+                .map(|(i, ch)| i + ch.len_utf8())
+                .unwrap_or(0);
+        let raw_prefix = &text[arg_start - offset..];
 
         // Find the start of the identifier being typed by scanning backward for
         // expression boundary characters (operators, parens, dereference).
@@ -173,6 +176,64 @@ fn completion_arg_index(text_before_cursor: &str) -> usize {
     count.saturating_sub(2)
 }
 
+/// What a caret at the end of a line is in: the command word of the last
+/// command of the line, or one of its arguments.
+pub enum CaretContext<'a> {
+    /// The command word, `name` typed so far from byte `start`.
+    Command { name: &'a str, start: usize },
+    /// An argument that completes as `strategy`, of the command that starts
+    /// at byte `start`.
+    Argument {
+        strategy: CompletionStrategy,
+        start: usize,
+    },
+}
+
+/// Where `text_before_cursor` leaves the caret, judged in the last command
+/// of a `;` list: a built-in's, a script command's or an alias's argument
+/// strategy. `None` when the line does not parse.
+pub fn caret_context<'a>(
+    caches: &ReplCaches,
+    text_before_cursor: &'a str,
+) -> Option<CaretContext<'a>> {
+    let start = last_command_start(text_before_cursor);
+    let command = &text_before_cursor[start..];
+    let parsed = parse_command(command).ok()?;
+    let name = parsed.as_ref().map(|parsed| parsed.name).unwrap_or("");
+    if parsed
+        .as_ref()
+        .is_none_or(|parsed| parsed.raw_tail.is_empty() && !command.ends_with(char::is_whitespace))
+    {
+        return Some(CaretContext::Command {
+            name,
+            start: text_before_cursor.len() - name.len(),
+        });
+    }
+
+    let arg_index = completion_arg_index(command);
+    let strategy = if let Some(spec) = command_registry().get(name) {
+        spec.completion.strategy_for_arg(arg_index)
+    } else {
+        let user_cmds = caches.user_commands.read().unwrap();
+        if let Some((_, _, strategies)) = user_cmds.iter().find(|(n, _, _)| n == name) {
+            strategies
+                .get(arg_index)
+                .copied()
+                .unwrap_or(CompletionStrategy::None)
+        } else {
+            let aliases = caches.aliases.read().unwrap();
+            aliases
+                .iter()
+                .find(|(alias, _)| alias == name)
+                .map(|(_, expansion)| {
+                    infer_alias_completion_strategy(expansion, arg_index, &user_cmds)
+                })
+                .unwrap_or(CompletionStrategy::None)
+        }
+    };
+    Some(CaretContext::Argument { strategy, start })
+}
+
 impl Completer for MyCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
         // PDBs that loaded since the indexes were built (a module whose
@@ -183,119 +244,79 @@ impl Completer for MyCompleter {
             }
         });
         let text_before_cursor = &line[..pos];
-        let parsed = match parse_command(text_before_cursor) {
-            Ok(parsed) => parsed,
-            Err(_) => return vec![],
-        };
-        let command_str = parsed.as_ref().map(|parsed| parsed.name).unwrap_or("");
-        let is_command_context = parsed.as_ref().is_none_or(|parsed| {
-            parsed.raw_tail.is_empty() && !text_before_cursor.ends_with(char::is_whitespace)
-        });
-
-        if is_command_context {
-            let mut suggestions: Vec<Suggestion> = command_registry()
-                .command_names()
-                .into_iter()
-                .filter_map(|(name, spec)| {
-                    if name.starts_with(command_str) {
-                        Some(Suggestion {
-                            value: name.to_string(),
-                            description: Some(spec.summary.to_string()),
-                            style: None,
-                            extra: None,
-                            match_indices: None,
-                            span: Span::new(0, pos),
-                            append_whitespace: true,
-                            display_override: None,
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            {
-                let user_cmds = self.caches.user_commands.read().unwrap();
-                for (name, help, _) in user_cmds.iter() {
-                    if name.starts_with(command_str) {
-                        suggestions.push(Suggestion {
-                            value: name.clone(),
-                            description: Some(help.clone()),
-                            style: None,
-                            extra: None,
-                            match_indices: None,
-                            span: Span::new(0, pos),
-                            append_whitespace: true,
-                            display_override: None,
-                        });
-                    }
-                }
-            }
-            {
-                let aliases = self.caches.aliases.read().unwrap();
-                for (name, _) in aliases.iter() {
-                    if name.starts_with(command_str) {
-                        suggestions.push(Suggestion {
-                            value: name.clone(),
-                            description: Some("Alias".to_string()),
-                            style: None,
-                            extra: None,
-                            match_indices: None,
-                            span: Span::new(0, pos),
-                            append_whitespace: true,
-                            display_override: None,
-                        });
-                    }
-                }
-            }
-            return suggestions;
-        }
-
-        if let Some(spec) = command_registry().get(command_str) {
-            let input = CompletionInput::new(text_before_cursor, pos);
-            let strategy = spec
-                .completion
-                .strategy_for_arg(completion_arg_index(text_before_cursor));
-            return self.apply_strategy(strategy, input);
-        }
-
-        {
-            // Fallback: script-registered command with per-arg completion hints
-            let user_cmds = self.caches.user_commands.read().unwrap();
-            if let Some((_, _, strategies)) = user_cmds.iter().find(|(n, _, _)| n == command_str) {
-                let arg_index = completion_arg_index(text_before_cursor);
-                let strat = strategies
-                    .get(arg_index)
-                    .copied()
-                    .unwrap_or(CompletionStrategy::None);
-
-                let input = CompletionInput::new(text_before_cursor, pos);
-                return self.apply_strategy(strat, input);
+        match caret_context(&self.caches, text_before_cursor) {
+            None => vec![],
+            Some(CaretContext::Command { name, start }) => self.complete_command(name, start, pos),
+            Some(CaretContext::Argument { strategy, start }) => {
+                let input = CompletionInput::new(&text_before_cursor[start..], start, pos);
+                self.apply_strategy(strategy, input)
             }
         }
-
-        let alias_expansion = {
-            let aliases = self.caches.aliases.read().unwrap();
-            aliases
-                .iter()
-                .find(|(name, _)| name == command_str)
-                .map(|(_, expansion)| expansion.clone())
-        };
-        if let Some(expansion) = alias_expansion {
-            let arg_index = completion_arg_index(text_before_cursor);
-            let strategy = {
-                let user_cmds = self.caches.user_commands.read().unwrap();
-                infer_alias_completion_strategy(&expansion, arg_index, &user_cmds)
-            };
-            let input = CompletionInput::new(text_before_cursor, pos);
-            return self.apply_strategy(strategy, input);
-        }
-
-        vec![]
     }
 }
 
 impl MyCompleter {
+    /// The built-ins, script commands and aliases whose names start with
+    /// `typed`, replacing it from byte `start`.
+    fn complete_command(&self, typed: &str, start: usize, pos: usize) -> Vec<Suggestion> {
+        let mut suggestions: Vec<Suggestion> = command_registry()
+            .command_names()
+            .into_iter()
+            .filter_map(|(name, spec)| {
+                if name.starts_with(typed) {
+                    Some(Suggestion {
+                        value: name.to_string(),
+                        description: Some(spec.summary.to_string()),
+                        style: None,
+                        extra: None,
+                        match_indices: None,
+                        span: Span::new(start, pos),
+                        append_whitespace: true,
+                        display_override: None,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        {
+            let user_cmds = self.caches.user_commands.read().unwrap();
+            for (name, help, _) in user_cmds.iter() {
+                if name.starts_with(typed) {
+                    suggestions.push(Suggestion {
+                        value: name.clone(),
+                        description: Some(help.clone()),
+                        style: None,
+                        extra: None,
+                        match_indices: None,
+                        span: Span::new(start, pos),
+                        append_whitespace: true,
+                        display_override: None,
+                    });
+                }
+            }
+        }
+        {
+            let aliases = self.caches.aliases.read().unwrap();
+            for (name, _) in aliases.iter() {
+                if name.starts_with(typed) {
+                    suggestions.push(Suggestion {
+                        value: name.clone(),
+                        description: Some("Alias".to_string()),
+                        style: None,
+                        extra: None,
+                        match_indices: None,
+                        span: Span::new(start, pos),
+                        append_whitespace: true,
+                        display_override: None,
+                    });
+                }
+            }
+        }
+        suggestions
+    }
+
     fn apply_strategy(
         &self,
         strategy: CompletionStrategy,
@@ -1084,6 +1105,24 @@ mod tests {
             infer_alias_completion_strategy("bp ${1}; bc ${1}", 0, &user_cmds),
             CompletionStrategy::None
         );
+    }
+
+    /// After a `;` the next command completes on its own: its command word
+    /// replaces only itself, and its arguments complete as that command's.
+    #[test]
+    fn completion_works_in_the_last_command_of_a_list() {
+        let mut completer = completer();
+
+        let line = "g; ev @r";
+        assert_eq!(
+            values(completer.complete(line, line.len())),
+            vec!["rax", "rip"]
+        );
+
+        let line = "g; unal";
+        let suggestions = completer.complete(line, line.len());
+        assert_eq!(values(suggestions.clone()), vec!["unalias"]);
+        assert_eq!(suggestions[0].span, Span::new(3, line.len()));
     }
 
     #[test]

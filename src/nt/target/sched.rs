@@ -11,6 +11,7 @@ use crate::base::memory::{AddressSpace, MemoryOps};
 use crate::base::types::{MAX_PROCESSORS, PhysAddr, VirtAddr};
 use crate::nt::cpu_state::{kpcr_for_processor, kprcb_for_processor, processor_count};
 use crate::nt::guest::ProcessInfo;
+use crate::nt::guest::vad::{vad_root_offset, vad_tree_link};
 use crate::nt::kuser_shared::KuserSharedData;
 use crate::nt::layout::{ParsedType, StructRef, TypeInfo, Types};
 use crate::nt::symbols::glob_matches;
@@ -158,7 +159,8 @@ pub struct KernelTimer {
 /// A timer in the timer table of a processor.
 #[record]
 pub struct TimerTableEntry {
-    pub processor: u16,
+    /// `None` in the one table all processors share before Windows 7.
+    pub processor: Option<u16>,
     /// The index of the timer-table bucket.
     pub bucket: u16,
     pub timer: KernelTimer,
@@ -167,7 +169,7 @@ pub struct TimerTableEntry {
 /// A timer-table bucket whose list walk did not end at its head.
 #[record]
 pub struct TimerBucketEnd {
-    pub processor: u16,
+    pub processor: Option<u16>,
     pub bucket: u16,
     pub termination: ListTermination,
 }
@@ -187,6 +189,17 @@ pub struct TimerTable {
     /// Whether the walk stopped at its entry limit.
     pub truncated: bool,
     pub errors: Vec<SchedulerError>,
+}
+
+/// The timer tables [`Target::timer_list`] walks, by processor (`None` for
+/// a table they share), and their bucket layout.
+struct TimerBuckets {
+    tables: Vec<(Option<u16>, VirtAddr)>,
+    count: usize,
+    stride: u64,
+    /// The list head's offset in a table, past its bucket's.
+    head_offset: u64,
+    errors: Vec<SchedulerError>,
 }
 
 /// The threads `!apc` inspects; `kind` says which.
@@ -646,7 +659,10 @@ pub struct ProcessDetail {
     pub directory_table_base: Option<u64>,
     pub object_table: Option<VirtAddr>,
     pub handle_count: Option<u64>,
+    /// The root VAD.
     pub vad_root: Option<VirtAddr>,
+    /// The number of VADs, where the build counts them.
+    pub vad_count: Option<u64>,
     pub token: Option<VirtAddr>,
     /// `CreateTime` as a FILETIME.
     pub create_time: Option<u64>,
@@ -690,8 +706,9 @@ impl ThreadDetail {
     }
 }
 
-/// The integer at the first readable path below `root`. Every segment but
-/// the last names an embedded struct, or a pointer to one, to step into.
+/// The integer at the first readable path below `root`, a bitfield's own
+/// bits. Every segment but the last names an embedded struct, or a pointer
+/// to one, to step into.
 fn read_first_uint(root: &StructRef<'_>, paths: &[&[&str]]) -> Option<u64> {
     fn enter<'a>(parent: &StructRef<'a>, name: &str) -> Option<StructRef<'a>> {
         parent.embedded(name).or_else(|_| parent.follow(name)).ok()
@@ -699,19 +716,30 @@ fn read_first_uint(root: &StructRef<'_>, paths: &[&[&str]]) -> Option<u64> {
     paths.iter().find_map(|path| {
         let (field, parents) = path.split_last()?;
         let Some((first, rest)) = parents.split_first() else {
-            return root.read_uint(field).ok();
+            return root.read_bits(field).ok();
         };
         let mut current = enter(root, first)?;
         for parent in rest {
             current = enter(&current, parent)?;
         }
-        current.read_uint(field).ok()
+        current.read_bits(field).ok()
     })
 }
 
 /// A handle table's open handles: its `HandleCount`, or on builds that
 /// count them per free list (`FreeLists[n].HandleCount`, 24H2), the sum.
-fn handle_table_count(table: &StructRef<'_>, types: Types<'_>) -> Option<u64> {
+/// The PDB declares `FreeLists[1]`, but the kernel allocates
+/// `nt!ExpFreeListCount` lists, so `free_lists` overrides the declared
+/// length: `Some(None)` where the build has no such symbol, `None` where it
+/// did not read, which leaves the sum unknown. Each list's count
+/// is a signed `LONG`: a handle opened on one list and closed on another
+/// leaves one negative and the other high, and only the wrapping sum is the
+/// table's count.
+fn handle_table_count(
+    table: &StructRef<'_>,
+    types: Types<'_>,
+    free_lists: Option<Option<u32>>,
+) -> Option<u64> {
     if let Ok(count) = table.read_uint("HandleCount") {
         return Some(count);
     }
@@ -724,14 +752,19 @@ fn handle_table_count(table: &StructRef<'_>, types: Types<'_>) -> Option<u64> {
     };
     let layout = types.layout(name.as_str()).ok()?;
     let first = table.addr() + u64::from(field.offset);
-    (0..u64::from(*lists))
-        .map(|index| {
-            types
-                .struct_with_layout(layout.clone(), first + index * layout.size as u64)
-                .read_uint("HandleCount")
-                .ok()
-        })
-        .sum()
+    let lists = free_lists?.unwrap_or(*lists);
+    // More lists than processors is a corrupt count, not a table to walk.
+    if lists > u32::from(MAX_PROCESSORS) {
+        return None;
+    }
+    let total = (0..u64::from(lists)).try_fold(0i32, |total, index| {
+        let count = types
+            .struct_with_layout(layout.clone(), first + index * layout.size as u64)
+            .read_field::<i32>("HandleCount")
+            .ok()?;
+        Some(total.wrapping_add(count))
+    })?;
+    u64::try_from(total).ok()
 }
 
 /// Element `index` of the integer array field `name`.
@@ -1103,13 +1136,16 @@ impl Target {
                 Error::DebugInfo("_KPRCB.DpcData element type unavailable".to_string())
             })?;
         let data_layout = layout_for(self, data_type_name)?;
+        // `DpcList`, or Windows 7's `DpcListHead`.
         let dpc_list = data_layout
             .fields
             .get("DpcList")
+            .or_else(|| data_layout.fields.get("DpcListHead"))
             .ok_or_else(|| Error::FieldNotFound(format!("{data_type_name}.DpcList")))?;
         // Newer builds queue DPCs on a `_KDPC_LIST`, a singly linked list
-        // that ends at a null link; only a `_LIST_ENTRY` queue returns to its
-        // head, and a null link there is damage.
+        // that ends at a null link; only a `_LIST_ENTRY` queue (Windows 7's
+        // `DpcListHead`) returns to its head, and a null link there is
+        // damage.
         let singly_linked =
             !matches!(&dpc_list.type_data, ParsedType::Struct(name) if name == "_LIST_ENTRY");
         let dpc_link_offset = link_offset(self, "_KDPC", &["DpcListEntry", "ListEntry", "SLink"]);
@@ -1163,8 +1199,20 @@ impl Target {
                 let remaining = MAX_LIST_ENTRIES - total;
                 let (dpcs, termination) =
                     walk_list_records(self, head, dpc_link_offset.unwrap_or(0), remaining);
+                // A head the kernel never initialized, both links zero, is an
+                // empty queue: XP x64's threaded-DPC queue.
+                let never_initialized = || {
+                    let memory = self.kernel_address_space();
+                    let pointer_size = memory.arch().pointer_size();
+                    [head, head + pointer_size]
+                        .into_iter()
+                        .all(|link| memory.read_pointer(link).is_ok_and(|link| link.is_zero()))
+                };
                 let termination = match termination {
                     ListTermination::Null if singly_linked => ListTermination::Head,
+                    ListTermination::Null if dpcs.is_empty() && never_initialized() => {
+                        ListTermination::Head
+                    }
                     other => other,
                 };
                 let mut entries = Vec::with_capacity(dpcs.len());
@@ -1354,109 +1402,27 @@ impl Target {
         let interrupt_time = self.interrupt_time();
         let keys = self.timer_dpc_keys();
         let trace = resolve_thread_trace_context(self, self.kernel_dtb());
-        let prcb_layout = layout_for(self, "_KPRCB")?;
-        let timer_table_field = prcb_layout
-            .fields
-            .get("TimerTable")
-            .ok_or_else(|| Error::FieldNotFound("_KPRCB.TimerTable".to_string()))?;
-        let table_type = aggregate_type_name(&timer_table_field.type_data)
-            .ok_or_else(|| Error::DebugInfo("_KPRCB.TimerTable type unavailable".to_string()))?;
-        let table_layout = layout_for(self, table_type)?;
-        let entries = table_layout
-            .fields
-            .get("TimerEntries")
-            .ok_or_else(|| Error::FieldNotFound("_KTIMER_TABLE.TimerEntries".to_string()))?;
-        let resolved_entry_count = array_count(&entries.type_data, TIMER_BUCKET_COUNT);
-        let entry_type_name = array_element_type_name(&entries.type_data)
-            .or_else(|| aggregate_type_name(&entries.type_data))
-            .ok_or_else(|| Error::DebugInfo("_KTIMER_TABLE entry type unavailable".to_string()))?;
-        let entry_layout = layout_for(self, entry_type_name)?;
-        let entry_stride = entry_layout.size as u64;
-        if entry_stride == 0 {
-            return Err(Error::DebugInfo(format!(
-                "_KTIMER_TABLE.TimerEntries leaf type {entry_type_name} has no size"
-            )));
-        }
-        if entries.size != 0
-            && u64::try_from(resolved_entry_count)
-                .ok()
-                .and_then(|count| count.checked_mul(entry_stride))
-                != Some(entries.size)
-        {
-            return Err(Error::DebugInfo(format!(
-                "_KTIMER_TABLE.TimerEntries dimensions/size mismatch ({} entries * {:#x} != field size {:#x})",
-                resolved_entry_count, entry_stride, entries.size
-            )));
-        }
-        let entry_count = resolved_entry_count.min(MAX_LIST_ENTRIES);
-        let entry_name = if entry_layout.fields.contains_key("Entry") {
-            "Entry"
-        } else if entry_layout.fields.contains_key("TimerListEntry") {
-            "TimerListEntry"
-        } else {
-            return Err(Error::FieldNotFound(format!("{entry_type_name}.Entry")));
-        };
-        let entry = entry_layout
-            .fields
-            .get(entry_name)
-            .ok_or_else(|| Error::FieldNotFound(format!("{entry_type_name}.{entry_name}")))?;
+        let TimerBuckets {
+            tables,
+            count: entry_count,
+            stride: entry_stride,
+            head_offset,
+            errors,
+        } = self.timer_buckets()?;
         let timer_link_offset = link_offset(
             self,
             "_KTIMER",
             &["TimerListEntry", "TimerList", "ListEntry"],
         );
-        let processors = processor_indices(self)?;
         let mut list_entries = Vec::new();
         let mut terminations = Vec::new();
-        let mut errors = Vec::new();
         let mut total = 0usize;
-        for processor in processors {
-            let prcb = match kprcb_for_processor(self, processor) {
-                Ok(prcb) => prcb,
-                Err(error) => {
-                    errors.push(SchedulerError {
-                        processor: Some(processor),
-                        queue: None,
-                        message: error.to_string(),
-                    });
-                    continue;
-                }
-            };
-            let table = if matches!(timer_table_field.type_data, ParsedType::Pointer(_)) {
-                match self
-                    .guest()
-                    .and_then(|guest| guest.ntoskrnl.types().struct_at("_KPRCB", prcb))
-                    .and_then(|cursor| cursor.read_pointer("TimerTable"))
-                {
-                    Ok(address) if !address.is_zero() => address,
-                    Ok(_) => {
-                        errors.push(SchedulerError {
-                            processor: Some(processor),
-                            queue: None,
-                            message: "TimerTable is null".to_string(),
-                        });
-                        continue;
-                    }
-                    Err(error) => {
-                        errors.push(SchedulerError {
-                            processor: Some(processor),
-                            queue: None,
-                            message: error.to_string(),
-                        });
-                        continue;
-                    }
-                }
-            } else {
-                prcb + u64::from(timer_table_field.offset)
-            };
+        for (processor, table) in tables {
             for bucket in 0..entry_count {
                 if total >= MAX_LIST_ENTRIES {
                     break;
                 }
-                let head = table
-                    + u64::from(entries.offset)
-                    + bucket as u64 * entry_stride
-                    + u64::from(entry.offset);
+                let head = table + bucket as u64 * entry_stride + head_offset;
                 let remaining = MAX_LIST_ENTRIES - total;
                 let (timers, termination) =
                     walk_list_records(self, head, timer_link_offset.unwrap_or(0), remaining);
@@ -1509,6 +1475,119 @@ impl Target {
         })
     }
 
+    /// The timer tables to walk and how their buckets are laid out: each
+    /// processor's `_KPRCB.TimerTable`, or before Windows 7 the one table
+    /// they share, `KiTimerTableListHead` (`KiTimerTableSize` entries).
+    fn timer_buckets(&self) -> Result<TimerBuckets> {
+        let prcb_layout = layout_for(self, "_KPRCB")?;
+        let Some(timer_table_field) = prcb_layout.fields.get("TimerTable") else {
+            let nt = &self.guest()?.ntoskrnl;
+            let shared = nt
+                .symbol("KiTimerTableListHead")
+                .map_err(|_| Error::FieldNotFound("_KPRCB.TimerTable".to_string()))?
+                .address();
+            let size: u32 = nt.symbol("KiTimerTableSize")?.read()?;
+            let entry_layout = layout_for(self, "_KTIMER_TABLE_ENTRY")?;
+            return Ok(TimerBuckets {
+                tables: vec![(None, shared)],
+                count: (size as usize).min(MAX_LIST_ENTRIES),
+                stride: entry_layout.size as u64,
+                head_offset: entry_layout.field_offset("Entry")?,
+                errors: Vec::new(),
+            });
+        };
+        let table_type = aggregate_type_name(&timer_table_field.type_data)
+            .ok_or_else(|| Error::DebugInfo("_KPRCB.TimerTable type unavailable".to_string()))?;
+        let table_layout = layout_for(self, table_type)?;
+        let entries = table_layout
+            .fields
+            .get("TimerEntries")
+            .ok_or_else(|| Error::FieldNotFound("_KTIMER_TABLE.TimerEntries".to_string()))?;
+        let resolved_entry_count = array_count(&entries.type_data, TIMER_BUCKET_COUNT);
+        let entry_type_name = array_element_type_name(&entries.type_data)
+            .or_else(|| aggregate_type_name(&entries.type_data))
+            .ok_or_else(|| Error::DebugInfo("_KTIMER_TABLE entry type unavailable".to_string()))?;
+        let entry_layout = layout_for(self, entry_type_name)?;
+        let entry_stride = entry_layout.size as u64;
+        if entry_stride == 0 {
+            return Err(Error::DebugInfo(format!(
+                "_KTIMER_TABLE.TimerEntries leaf type {entry_type_name} has no size"
+            )));
+        }
+        if entries.size != 0
+            && u64::try_from(resolved_entry_count)
+                .ok()
+                .and_then(|count| count.checked_mul(entry_stride))
+                != Some(entries.size)
+        {
+            return Err(Error::DebugInfo(format!(
+                "_KTIMER_TABLE.TimerEntries dimensions/size mismatch ({} entries * {:#x} != field size {:#x})",
+                resolved_entry_count, entry_stride, entries.size
+            )));
+        }
+        let entry_name = if entry_layout.fields.contains_key("Entry") {
+            "Entry"
+        } else if entry_layout.fields.contains_key("TimerListEntry") {
+            "TimerListEntry"
+        } else {
+            return Err(Error::FieldNotFound(format!("{entry_type_name}.Entry")));
+        };
+        let entry = entry_layout
+            .fields
+            .get(entry_name)
+            .ok_or_else(|| Error::FieldNotFound(format!("{entry_type_name}.{entry_name}")))?;
+        let mut tables = Vec::new();
+        let mut errors = Vec::new();
+        for processor in processor_indices(self)? {
+            let prcb = match kprcb_for_processor(self, processor) {
+                Ok(prcb) => prcb,
+                Err(error) => {
+                    errors.push(SchedulerError {
+                        processor: Some(processor),
+                        queue: None,
+                        message: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+            let table = if matches!(timer_table_field.type_data, ParsedType::Pointer(_)) {
+                match self
+                    .guest()
+                    .and_then(|guest| guest.ntoskrnl.types().struct_at("_KPRCB", prcb))
+                    .and_then(|cursor| cursor.read_pointer("TimerTable"))
+                {
+                    Ok(address) if !address.is_zero() => address,
+                    Ok(_) => {
+                        errors.push(SchedulerError {
+                            processor: Some(processor),
+                            queue: None,
+                            message: "TimerTable is null".to_string(),
+                        });
+                        continue;
+                    }
+                    Err(error) => {
+                        errors.push(SchedulerError {
+                            processor: Some(processor),
+                            queue: None,
+                            message: error.to_string(),
+                        });
+                        continue;
+                    }
+                }
+            } else {
+                prcb + u64::from(timer_table_field.offset)
+            };
+            tables.push((Some(processor), table));
+        }
+        Ok(TimerBuckets {
+            tables,
+            count: resolved_entry_count.min(MAX_LIST_ENTRIES),
+            stride: entry_stride,
+            head_offset: u64::from(entries.offset) + u64::from(entry.offset),
+            errors,
+        })
+    }
+
     pub fn apc_layout(&self) -> Result<ApcLayout> {
         let kthread = layout_for(self, "_KTHREAD")?;
         let state = kthread.field("ApcState")?;
@@ -1551,6 +1630,86 @@ pub struct ApcLayout {
     pub normal_routine: Option<&'static str>,
 }
 
+/// The `_ETHREAD` fields after `Tcb` that a thread's summary reads.
+const THREAD_SUMMARY_FIELDS: [&str; 7] = [
+    "Cid",
+    "ThreadsProcess",
+    "ProcessFastRef",
+    "StartAddress",
+    "Win32StartAddress",
+    "Teb",
+    "IrpList",
+];
+
+/// The bytes of an `_ETHREAD` a thread's summary decodes, read at once from
+/// its start through its `Tcb` and the last summary field, as
+/// `EprocessSpan` reads a process's: the fields lie over a few lines, and
+/// over KD each line a field read misses costs a request. A field outside
+/// the span, or a span that did not read whole, is read on its own.
+struct ThreadBytes {
+    start: VirtAddr,
+    bytes: Option<Vec<u8>>,
+}
+
+impl ThreadBytes {
+    fn fetch(
+        memory: &AddressSpace<'_, impl MemoryOps<PhysAddr>>,
+        ethread: VirtAddr,
+        ethread_layout: &TypeInfo,
+        kthread_layout: &TypeInfo,
+        tcb_offset: u64,
+    ) -> Self {
+        // Every summary field is pointer-sized at most, `Cid` two pointers.
+        let pointer = memory.arch().pointer_size();
+        let end = THREAD_SUMMARY_FIELDS
+            .iter()
+            .filter_map(|name| ethread_layout.field_offset(name).ok())
+            .map(|offset| offset + 2 * pointer)
+            .fold(tcb_offset + kthread_layout.size as u64, u64::max)
+            .min(ethread_layout.size as u64);
+        let mut bytes = vec![0u8; end as usize];
+        let bytes = memory
+            .read_bytes(ethread, &mut bytes)
+            .is_ok()
+            .then_some(bytes);
+        Self {
+            start: ethread,
+            bytes,
+        }
+    }
+
+    fn slice(&self, address: VirtAddr, len: usize) -> Option<&[u8]> {
+        let offset = usize::try_from(address.0.checked_sub(self.start.0)?).ok()?;
+        self.bytes.as_ref()?.get(offset..offset.checked_add(len)?)
+    }
+
+    fn read<T>(
+        &self,
+        memory: &AddressSpace<'_, impl MemoryOps<PhysAddr>>,
+        address: VirtAddr,
+    ) -> Option<T>
+    where
+        T: Copy + zerocopy::FromZeros + zerocopy::FromBytes + zerocopy::IntoBytes,
+    {
+        match self.slice(address, size_of::<T>()) {
+            Some(bytes) => T::read_from_bytes(bytes).ok(),
+            None => memory.read(address).ok(),
+        }
+    }
+
+    fn pointer(
+        &self,
+        memory: &AddressSpace<'_, impl MemoryOps<PhysAddr>>,
+        address: VirtAddr,
+    ) -> Option<VirtAddr> {
+        let arch = memory.arch();
+        match self.slice(address, arch.pointer_size() as usize) {
+            Some(bytes) => Some(arch.decode_pointer(bytes)),
+            None => memory.read_pointer(address).ok(),
+        }
+    }
+}
+
 impl Target {
     /// The process's parent PID; see `parent_pid` for the field fallback.
     pub fn process_parent_pid(&self, process: &ProcessInfo) -> Result<u64> {
@@ -1581,6 +1740,7 @@ impl Target {
                 object_table: None,
                 handle_count: None,
                 vad_root: None,
+                vad_count: None,
                 token: None,
                 create_time: None,
                 user_time: None,
@@ -1599,40 +1759,67 @@ impl Target {
         let pointer = |name: &str| field(&[&[name]]).map(VirtAddr);
         // Newer builds keep the counters in `Vm.Instance`.
         let vm = |name: &str| field(&[&["Vm", name], &["Vm", "Instance", name], &[name]]);
+        // Windows 7 counts quota in `ProcessQuotaUsage`, earlier builds in
+        // `QuotaUsage`, both arrays indexed by PS_QUOTA_TYPE: nonpaged pool,
+        // then paged pool.
+        let quota_usage = |index: usize| {
+            read_uint_element(&eprocess, "ProcessQuotaUsage", index)
+                .or_else(|| read_uint_element(&eprocess, "QuotaUsage", index))
+        };
 
         let object_table = pointer("ObjectTable");
+        let free_lists = match self
+            .guest()
+            .ok()
+            .and_then(|guest| guest.ntoskrnl.symbol("ExpFreeListCount").ok())
+        {
+            Some(symbol) => symbol.read::<u32>().ok().map(Some),
+            None => Some(None),
+        };
         let handle_count = object_table
             .and_then(|table| {
                 let table = types
                     .struct_at("_HANDLE_TABLE", VirtAddr(table.0 & !0xf))
                     .ok()?;
-                handle_table_count(&table, types)
+                handle_table_count(&table, types, free_lists)
             })
             .or_else(|| field(&[&["HandleCount"]]));
         ProcessDetail {
             session_id,
             peb: pointer("Peb"),
             parent_pid: parent_pid(&eprocess).ok(),
-            directory_table_base: field(&[&["Pcb", "DirectoryTableBase"], &["DirectoryTableBase"]]),
+            // `ULONGLONG[2]` on XP x64, the root first.
+            directory_table_base: field(&[&["Pcb", "DirectoryTableBase"], &["DirectoryTableBase"]])
+                .or_else(|| {
+                    let pcb = eprocess.embedded("Pcb").ok()?;
+                    read_uint_element(&pcb, "DirectoryTableBase", 0)
+                }),
             object_table,
             handle_count,
-            vad_root: field(&[&["VadRoot", "Root"], &["VadRoot"]]).map(VirtAddr),
+            vad_root: vad_root_offset(types, eprocess.layout())
+                .and_then(|offset| {
+                    self.kernel_address_space()
+                        .read_pointer(process.eprocess + offset)
+                })
+                .ok()
+                .map(|link| vad_tree_link(link.0)),
+            // Windows 8.1's `_RTL_AVL_TREE` keeps no count, the
+            // `_MM_AVL_TABLE` before it does.
+            vad_count: field(&[&["VadRoot", "NumberGenericTableElements"], &["VadCount"]]),
             token: field(&[&["Token"]]).map(fast_ref_address),
             create_time: field(&[&["CreateTime"]]),
             user_time: field(&[&["Pcb", "UserTime"], &["UserTime"]]),
             kernel_time: field(&[&["Pcb", "KernelTime"], &["KernelTime"]]),
-            // `ProcessQuotaUsage` is indexed by PS_QUOTA_TYPE: nonpaged
-            // pool, then paged pool.
             quota_paged_pool: field(&[
                 &["QuotaUsage", "PagedPool"],
                 &["QuotaUsage", "PagedPoolUsage"],
             ])
-            .or_else(|| read_uint_element(&eprocess, "ProcessQuotaUsage", 1)),
+            .or_else(|| quota_usage(1)),
             quota_nonpaged_pool: field(&[
                 &["QuotaUsage", "NonPagedPool"],
                 &["QuotaUsage", "NonPagedPoolUsage"],
             ])
-            .or_else(|| read_uint_element(&eprocess, "ProcessQuotaUsage", 0)),
+            .or_else(|| quota_usage(0)),
             working_set_size: vm("WorkingSetSize"),
             commit_charge: vm("PagefileUsage").or_else(|| vm("CommitCharge")),
             peak_virtual_size: vm("PeakVirtualSize"),
@@ -1667,7 +1854,7 @@ impl Target {
         ThreadDetail {
             thread,
             vcpu,
-            win32_thread: read(&ethread, "Win32Thread").map(VirtAddr),
+            win32_thread: read(&kthread, "Win32Thread").map(VirtAddr),
             user_time: read(&kthread, "UserTime").or_else(|| read(&ethread, "UserTime")),
             kernel_time: read(&kthread, "KernelTime").or_else(|| read(&ethread, "KernelTime")),
             wait_time: read(&kthread, "WaitTime"),
@@ -1752,6 +1939,13 @@ impl Target {
         let kthread_layout = types.layout("_KTHREAD")?;
         let tcb_offset = ethread_layout.field_offset("Tcb").unwrap_or(0);
         let kthread = ethread + tcb_offset;
+        let bytes = ThreadBytes::fetch(
+            &memory,
+            ethread,
+            &ethread_layout,
+            &kthread_layout,
+            tcb_offset,
+        );
 
         let cid_base = ethread_layout
             .field_offset("Cid")
@@ -1762,14 +1956,14 @@ impl Target {
             client_id_layout
                 .as_ref()
                 .and_then(|layout| layout.field_offset("UniqueThread").ok())
-                .and_then(|offset| memory.read_pointer(base + offset).ok())
+                .and_then(|offset| bytes.pointer(&memory, base + offset))
                 .map(|id| id.0)
         });
         let pid = cid_base.and_then(|base| {
             client_id_layout
                 .as_ref()
                 .and_then(|layout| layout.field_offset("UniqueProcess").ok())
-                .and_then(|offset| memory.read_pointer(base + offset).ok())
+                .and_then(|offset| bytes.pointer(&memory, base + offset))
                 .map(|id| id.0)
         });
 
@@ -1777,21 +1971,21 @@ impl Target {
             ethread_layout
                 .field_offset(field)
                 .ok()
-                .and_then(|offset| memory.read_pointer(ethread + offset).ok())
+                .and_then(|offset| bytes.pointer(&memory, ethread + offset))
                 .filter(|addr| !addr.is_zero())
         };
         let read_kthread_ptr = |field: &str| -> Option<VirtAddr> {
             kthread_layout
                 .field_offset(field)
                 .ok()
-                .and_then(|offset| memory.read_pointer(kthread + offset).ok())
+                .and_then(|offset| bytes.pointer(&memory, kthread + offset))
                 .filter(|addr| !addr.is_zero())
         };
         let read_kthread_u8 = |field: &str| -> Option<u8> {
             kthread_layout
                 .field_offset(field)
                 .ok()
-                .and_then(|offset| memory.read::<u8>(kthread + offset).ok())
+                .and_then(|offset| bytes.read::<u8>(&memory, kthread + offset))
         };
 
         // KTHREAD.Process (KPROCESS* == EPROCESS base) first; ThreadsProcess
@@ -1803,7 +1997,7 @@ impl Target {
                 ethread_layout
                     .field_offset("ProcessFastRef")
                     .ok()
-                    .and_then(|offset| memory.read_pointer(ethread + offset).ok())
+                    .and_then(|offset| bytes.pointer(&memory, ethread + offset))
                     .map(|fast_ref| fast_ref_address(fast_ref.0))
                     .filter(|addr| !addr.is_zero())
             });
@@ -1840,10 +2034,13 @@ impl Target {
             base_priority: read_kthread_u8("BasePriority"),
             wait_irql: read_kthread_u8("WaitIrql"),
             // A one-bit field inside `MiscFlags`: the whole byte is never zero.
-            kernel_stack_resident: self
-                .extract_kernel_layout_bits(&kthread_layout, kthread, "KernelStackResident")
-                .ok()
-                .map(|value| value != 0),
+            kernel_stack_resident: kthread_layout.field("KernelStackResident").ok().and_then(
+                |field| {
+                    bytes
+                        .read::<u64>(&memory, kthread + field.offset as u64)
+                        .map(|raw| field.decode(raw) != 0)
+                },
+            ),
             start_address: read_ethread_ptr("StartAddress"),
             win32_start_address: read_ethread_ptr("Win32StartAddress"),
             teb: read_kthread_ptr("Teb").or_else(|| read_ethread_ptr("Teb")),

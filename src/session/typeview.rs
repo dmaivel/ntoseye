@@ -6,6 +6,8 @@ use std::result;
 use std::sync::Arc;
 
 use crate::base::bytes::{before_nul, utf16le_lossy};
+use crate::base::error::Result as BaseResult;
+use crate::base::memory::{ScanFault, TerminatedRead, read_terminated};
 use crate::base::types::{Dtb, VirtAddr};
 use crate::nt::layout::{
     FieldInfo, ParsedType, TypeInfo, abi_layout, bitfield_value, find_field, le_uint, named_type,
@@ -370,6 +372,7 @@ impl<'a> TypeView<'a> {
         }
         let mut bytes = [0u8; 8];
         self.session
+            .target
             .read_masked_in(self.dtb, address, &mut bytes[..size])
             .map_err(|error| error.to_string())?;
         Ok(le_uint(&bytes[..size]))
@@ -385,9 +388,26 @@ impl<'a> TypeView<'a> {
         }
         let mut bytes = vec![0u8; size];
         self.session
+            .target
             .read_masked_in(self.dtb, address, &mut bytes)
             .map_err(|error| error.to_string())?;
         Ok(bytes)
+    }
+
+    /// The NUL-terminated string of `unit`-byte characters at `address`, at
+    /// most `max_bytes` long, read as [`Self::read_display_bytes`] reads.
+    pub fn read_display_terminated(
+        &self,
+        address: VirtAddr,
+        max_bytes: usize,
+        unit: usize,
+    ) -> BaseResult<TerminatedRead> {
+        read_terminated(address, max_bytes, unit, |at, buf| {
+            self.session
+                .target
+                .read_masked_in(self.dtb, at, buf)
+                .map_err(ScanFault::Unreadable)
+        })
     }
 
     fn format_enum_value(&self, type_name: &str, raw: u64, size: usize) -> String {
@@ -435,13 +455,18 @@ impl<'a> TypeView<'a> {
         }
     }
 
+    /// A `CHAR`/`UCHAR` array: its text when it holds text, else its
+    /// bytes (a GUID's `Data4`, a hash), which as text would be noise.
     fn format_c_string(&self, address: VirtAddr, count: u32) -> String {
         let size = (count as usize).min(MAX_UNICODE_BYTES);
         let bytes = match self.read_display_bytes(address, size) {
             Ok(bytes) => bytes,
             Err(error) => return format!("<unavailable: {error}>"),
         };
-        quote_bounded(&String::from_utf8_lossy(before_nul(&bytes)))
+        match std::str::from_utf8(before_nul(&bytes)) {
+            Ok(text) if !text.chars().any(char::is_control) => quote_bounded(text),
+            _ => byte_list(&bytes),
+        }
     }
 
     /// `type_data` is the field's own type: its (possibly `module!`-qualified)
@@ -501,15 +526,33 @@ impl<'a> TypeView<'a> {
 /// Quote and escape a decoded guest string, stopping after
 /// [`MAX_STRING_CHARS`]. A truncated string carries the trailing `...` that
 /// `da`/`du` use, so a clamped value is never mistaken for the whole string.
+/// Printable characters of any script stay as they are; control
+/// characters, quotes and backslashes are escaped.
 fn quote_bounded(text: &str) -> String {
     let mut escaped = String::new();
     for (index, ch) in text.chars().enumerate() {
         if index == MAX_STRING_CHARS {
             return format!("\"{escaped}\"...");
         }
-        escaped.extend(ch.escape_default());
+        escaped.extend(ch.escape_debug());
     }
     format!("\"{escaped}\"")
+}
+
+/// Bytes in hex, `[8f 01 ec]`, stopping after [`MAX_STRING_CHARS`] of
+/// them with the trailing `...` [`quote_bounded`] uses.
+fn byte_list(bytes: &[u8]) -> String {
+    let shown: Vec<String> = bytes
+        .iter()
+        .take(MAX_STRING_CHARS)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let more = if bytes.len() > MAX_STRING_CHARS {
+        "..."
+    } else {
+        ""
+    };
+    format!("[{}]{more}", shown.join(" "))
 }
 
 #[cfg(test)]
@@ -541,7 +584,7 @@ mod tests {
         );
 
         assert!(value.ends_with("\"..."), "{value}");
-        assert_eq!(value.matches("\\u{").count(), MAX_STRING_CHARS);
+        assert_eq!(value.matches('\u{101}').count(), MAX_STRING_CHARS);
     }
 
     #[test]

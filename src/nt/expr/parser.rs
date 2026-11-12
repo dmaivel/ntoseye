@@ -2,10 +2,9 @@
 //! down to literals, symbols, and casts, and their positioned parse errors.
 
 use super::{
-    Expr, ExprBinaryOp, ExprParseError, ExprType, ExprUnaryOp, NumberRadix, StringOp,
-    parse_number_literal_text,
+    Expr, ExprBinaryOp, ExprParseError, ExprType, ExprUnaryOp, MAX_EXPR_DEPTH, NumberRadix,
+    StringOp, parse_number_literal_text, too_deep_message,
 };
-use crate::base::error::Result;
 use crate::base::types::VirtAddr;
 use std::result;
 use winnow::Parser;
@@ -37,26 +36,33 @@ impl Expr {
         }
     }
 
-    fn parse_type(type_str: &str) -> Result<ExprType> {
-        let type_str = type_str.trim();
-
-        if let Some(stripped) = type_str.strip_suffix('*') {
-            let inner_type = Self::parse_type(stripped.trim_end())?;
-            return Ok(ExprType::Pointer(Box::new(inner_type)));
+    /// The type a cast names, or `None` when it has more pointer levels than
+    /// [`MAX_EXPR_DEPTH`]: the type is walked recursively later, so its
+    /// nesting is bounded like any other.
+    fn parse_type(type_str: &str) -> Option<ExprType> {
+        let mut type_str = type_str.trim();
+        let mut pointers = 0;
+        while let Some(stripped) = type_str.strip_suffix('*') {
+            type_str = stripped.trim_end();
+            pointers += 1;
+        }
+        if pointers > MAX_EXPR_DEPTH {
+            return None;
         }
 
-        match type_str.to_lowercase().as_str() {
-            "byte" | "u8" | "uint8_t" | "int8_t" => Ok(ExprType::Byte),
-            "word" | "u16" | "uint16_t" | "int16_t" => Ok(ExprType::Word),
-            "dword" | "u32" | "uint32_t" | "int32_t" => Ok(ExprType::Dword),
+        let base = match type_str.to_lowercase().as_str() {
+            "byte" | "u8" | "uint8_t" | "int8_t" => ExprType::Byte,
+            "word" | "u16" | "uint16_t" | "int16_t" => ExprType::Word,
+            "dword" | "u32" | "uint32_t" | "int32_t" => ExprType::Dword,
             "qword" | "u64" | "dword64" | "pvoid" | "size_t" | "uint64_t" | "int64_t" | "usize" => {
-                Ok(ExprType::Qword)
+                ExprType::Qword
             }
-            _ => Ok(match c_primitive(type_str) {
+            _ => match c_primitive(type_str) {
                 Some(name) => ExprType::Primitive(name.to_string()),
                 None => ExprType::Struct(type_str.to_string()),
-            }),
-        }
+            },
+        };
+        Some((0..pointers).fold(base, |inner, _| ExprType::Pointer(Box::new(inner))))
     }
 }
 
@@ -84,7 +90,15 @@ fn c_primitive(type_str: &str) -> Option<&'static str> {
     Some(name)
 }
 
-type ExprInput<'a> = Stateful<LocatingSlice<&'a str>, NumberRadix>;
+/// What the grammar carries alongside the text: the radix bare numbers read
+/// in, and how many levels deep the parse is (see [`MAX_EXPR_DEPTH`]).
+#[derive(Debug, Clone, Copy)]
+pub struct ParseState {
+    pub radix: NumberRadix,
+    pub depth: usize,
+}
+
+type ExprInput<'a> = Stateful<LocatingSlice<&'a str>, ParseState>;
 
 type ParseResult<T> = ModalResult<T, ExprParseError>;
 
@@ -121,17 +135,25 @@ fn parse_left_associative<'a, Op>(
     combine: fn(Expr, Op, Expr) -> Expr,
 ) -> ParseResult<Expr> {
     let mut expr = operand(input)?;
-    loop {
+    // Each link of a chain nests the tree built so far one level deeper,
+    // and evaluating it recurses that deep, so a link counts as a level.
+    let outer = input.state.depth;
+    let result = loop {
         let checkpoint = input.checkpoint();
         match tail(input) {
             Ok((op, rhs)) => expr = combine(expr, op, rhs),
             Err(ErrMode::Backtrack(_)) => {
                 input.reset(&checkpoint);
-                return Ok(expr);
+                break Ok(expr);
             }
-            Err(error) => return Err(error),
+            Err(error) => break Err(error),
         }
-    }
+        if let Err(error) = enter_level(input) {
+            break Err(error);
+        }
+    };
+    input.state.depth = outer;
+    result
 }
 
 fn parse_non_chained_binary<'a>(
@@ -441,8 +463,10 @@ fn parse_index_suffix(input: &mut ExprInput<'_>) -> ParseResult<Suffix> {
 
 fn parse_prefix(input: &mut ExprInput<'_>) -> ParseResult<Expr> {
     ws0.parse_next(input)?;
-
-    alt((
+    // Every recursive production (groups, prefix operators, casts, memory
+    // reads) passes through here, so this one guard bounds them all.
+    enter_level(input)?;
+    let result = alt((
         parse_address_prefix,
         parse_unary_prefix,
         parse_unary_plus,
@@ -450,7 +474,18 @@ fn parse_prefix(input: &mut ExprInput<'_>) -> ParseResult<Expr> {
         parse_cast,
         parse_postfix,
     ))
-    .parse_next(input)
+    .parse_next(input);
+    input.state.depth -= 1;
+    result
+}
+
+/// Go one level deeper, failing outright past [`MAX_EXPR_DEPTH`].
+fn enter_level(input: &mut ExprInput<'_>) -> ParseResult<()> {
+    if input.state.depth >= MAX_EXPR_DEPTH {
+        return Err(ErrMode::Cut(error_at(input, too_deep_message())));
+    }
+    input.state.depth += 1;
+    Ok(())
 }
 
 fn parse_address_prefix(input: &mut ExprInput<'_>) -> ParseResult<Expr> {
@@ -603,7 +638,7 @@ fn parse_cast_type(input: &mut ExprInput<'_>) -> ParseResult<ExprType> {
         return Err(ErrMode::Backtrack(error_at(input, "expected expression")));
     }
     let expr_type = Expr::parse_type(type_str)
-        .map_err(|_| ErrMode::Cut(error_at(input, "invalid cast type")))?;
+        .ok_or_else(|| ErrMode::Cut(error_at(input, too_deep_message())))?;
     expect_char(input, ')', "expected ')'")?;
     Ok(expr_type)
 }
@@ -699,7 +734,7 @@ fn parse_number_literal(input: &mut ExprInput<'_>, label: &'static str) -> Parse
         .parse_next(input)
         .map_err(|_| ErrMode::Backtrack(error_at(input, label)))?;
 
-    parse_number_literal_text(token, input.state)
+    parse_number_literal_text(token, input.state.radix)
         .map_err(|label| ErrMode::Cut(ExprParseError::new(span, label)))
 }
 

@@ -105,7 +105,7 @@ g
 - The loaded image range.
 - The symbol status.
 - Where ntoseye read the image from, for example guest memory.
-- The GUID and age of the accepted PDB.
+- The GUID and age of the accepted PDB, as the image names it and symbol stores file it. The PDB file itself can record a higher age.
 
 `.reload mydriver` does the same as `ld mydriver`, and {command}`.reload` without a module reloads all modules in the current inspection scope.
 
@@ -138,6 +138,10 @@ ntoseye shows a call that the compiler inlined as a separate frame, as WinDbg do
 Frame numbers include inline frames, so `.frame N` selects an inline frame like any other frame. After that, {command}`dv`, {command}`ls`, and local names in expressions use the variables and source of the inlined function, and the frame that the call was inlined into lists only its own variables.
 
 An inline frame has no registers of its own and uses the registers of its physical frame. Stop headers and {command}`ln` show the name of the physical procedure.
+
+## C++ names
+
+Microsoft's public PDBs record C++ functions and variables by their decorated names only, such as `?ScDispatcherLoop@@YAXPEAPEAX@Z`. ntoseye shows these as WinDbg does, as the qualified name without the signature: `sechost!ScDispatcherLoop`, `kernelbase!wil::details::DebugBreak`, `nt!ST_STORE<SM_TRAITS>::StDmpSinglePageInsert`, and `` `string' `` for a string literal. Commands take the same names, for example `bp nt!ST_STORE<SM_TRAITS>::StDmpSinglePageInsert` or `x kernelbase!wil::*`. Overloads of a function share one name: {command}`x` lists each of them, and a command that needs one address reports the name as ambiguous and lists the candidates with their addresses. A name that the demangler cannot read keeps its decorated form.
 
 ## Code split off from its function
 

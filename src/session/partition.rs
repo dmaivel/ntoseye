@@ -14,8 +14,8 @@ use crate::base::error::{Error, Result};
 use crate::base::notice::Notice;
 use crate::base::types::VirtAddr;
 use crate::nt::breakpoints::{
-    BreakpointConfig, BreakpointHitDisposition, BreakpointInfo, BreakpointManager, PartitionFilter,
-    StepFrame,
+    BreakpointConfig, BreakpointHitDisposition, BreakpointInfo, BreakpointManager, Edit,
+    PartitionFilter, StepFrame,
 };
 use crate::nt::guest::HvPartition;
 use crate::nt::target::Target;
@@ -276,10 +276,12 @@ impl Session {
     /// shown. Every breakpoint is the target's, a partition's included, as
     /// the target's processors trap it; a view's backend and target are only
     /// the partition's VPs and memory, which no site is written to.
-    pub fn breakpoint_sites(&mut self) -> (&mut BreakpointManager, &mut dyn DebugBackend, &Target) {
+    pub fn breakpoint_sites(
+        &mut self,
+    ) -> (Edit<'_, BreakpointManager>, &mut dyn DebugBackend, &Target) {
         match &mut self.partition_view {
-            Some(view) => (&mut self.breakpoints, view.backend.as_mut(), &view.target),
-            None => (&mut self.breakpoints, self.backend.as_mut(), &self.target),
+            Some(view) => (self.breakpoints.edit(), view.backend.as_mut(), &view.target),
+            None => (self.breakpoints.edit(), self.backend.as_mut(), &self.target),
         }
     }
 
@@ -309,11 +311,7 @@ impl Session {
             ))
         })?;
         let host = view.backend.as_mut();
-        if !host
-            .capabilities()
-            .iter()
-            .any(|entry| entry.capability == DebugCapability::WriteRegisters && entry.supported)
-        {
+        if !host.supports(DebugCapability::WriteRegisters) {
             return Err(Error::RegisterWriteUnsupported);
         }
         let register_map = &self.register_map;
@@ -404,8 +402,19 @@ impl Session {
         if partition.is_some() {
             self.require_partition_traps()?;
         }
-        let (breakpoints, backend, target) = self.breakpoint_sites();
-        breakpoints.add_temporary_code(backend, target, address, frame, partition)
+        // The stepping thread's own root, its processor's, whichever process
+        // inspection is attached to.
+        let root = self
+            .read_registers()
+            .ok()
+            .and_then(|registers| {
+                self.register_map
+                    .read_u64(self.target.arch().dtb_register(), &registers)
+                    .ok()
+            })
+            .unwrap_or_else(|| self.target.current_dtb());
+        let (mut breakpoints, backend, target) = self.breakpoint_sites();
+        breakpoints.add_temporary_code(backend, target, address, frame, partition, root)
     }
 
     /// Surface the hit of `breakpoint`, partition `partition`'s, by its VP
@@ -450,7 +459,7 @@ impl Session {
             }
         }
         let verdict = judge_partition_hit(
-            &mut self.breakpoints,
+            &mut self.breakpoints.edit(),
             checked_on.as_mut().map(|(target, _)| target),
             &breakpoint,
             partition,
@@ -471,7 +480,7 @@ impl Session {
         };
         if breakpoint.one_shot {
             // Kept, hidden, until the next resume removes it.
-            self.breakpoints.mark_one_shot_hit(breakpoint.id)?;
+            self.breakpoints.edit().mark_one_shot_hit(breakpoint.id)?;
         }
         let shown = self.enter_partition(partition).and_then(|()| match vp {
             Some(vp) => self.set_current_thread(&vp_thread_id(partition, vp)),

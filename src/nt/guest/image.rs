@@ -94,6 +94,18 @@ impl Image {
         self.arch
     }
 
+    /// Where the PTE self-map starts: `MmPteBase`, or on AMD64 kernels
+    /// without it (before Windows 10 1607 randomized the self-map) the
+    /// fixed base, `0xfffff68000000000`.
+    pub fn pte_base(&self) -> Result<VirtAddr> {
+        const AMD64_FIXED_PTE_BASE: VirtAddr = VirtAddr(0xffff_f680_0000_0000);
+        match self.symbol("MmPteBase") {
+            Ok(symbol) => symbol.read_pointer(),
+            Err(_) if self.arch == Arch::Amd64 => Ok(AMD64_FIXED_PTE_BASE),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn load_symbols(mut self) -> Result<Self> {
         let symbols = Arc::clone(&self.symbols);
         self.guid = symbols.load_from_binary(&mut self, "ntoskrnl.exe")?;
@@ -225,6 +237,11 @@ impl Image {
     /// Resolve this object's struct/type namespace, read in its own address
     /// space. Use [`types_in`](Self::types_in) to read the same types from a
     /// different `dtb` (e.g. ntoskrnl's kernel types against a process's space).
+    /// The symbol store the image's symbols load into.
+    pub fn symbols(&self) -> &Arc<SymbolStore> {
+        &self.symbols
+    }
+
     pub fn types(&self) -> Types<'_> {
         self.types_in(self.dtb)
     }

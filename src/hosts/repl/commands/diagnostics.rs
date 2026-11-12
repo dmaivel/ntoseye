@@ -3,13 +3,15 @@ use std::fmt::Display;
 use tabled::builder::Builder;
 
 use crate::base::error::{Error, Result};
+use crate::base::ntstatus::ntstatus_name;
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::target::mm::SystemMemorySummary;
 use crate::nt::target::object::{
-    ExecutiveResource, FileObject, HandleEntry, HandleTable, ResourceList,
+    ExecutiveResource, FileObject, HandleEntry, HandleTable, MAX_RESOURCES,
+    RESOURCE_OWNED_EXCLUSIVE, ResourceList, ResourceOwner,
 };
 use crate::nt::target::security::Token;
 use crate::nt::target::usermode::address::human_size;
@@ -17,7 +19,7 @@ use crate::nt::target::usermode::handles::{
     handle_attribute_names, handle_type_counts, handle_type_label,
 };
 use crate::nt::target::{DiagnosticValue, ListTermination, TargetKind};
-use crate::nt::userdump::UserHandle;
+use crate::nt::userdump::{HandleObjectInfo, UserHandle};
 use crate::session::Session;
 use ntoseye_macros::{command, grammar};
 
@@ -182,7 +184,8 @@ pub fn print_process_memory(summary: &SystemMemorySummary) {
 
 /// `!handle`'s flags on a user-mode minidump, as WinDbg's user-mode flags:
 /// the handle's type; its access, attributes, and counts; its object's
-/// name; and object-specific information, which a minidump does not record.
+/// name; and object-specific information, which a minidump records for
+/// some types when it was written with it.
 const SHOW_TYPE: u64 = 0x1;
 const SHOW_BASIC: u64 = 0x2;
 const SHOW_NAME: u64 = 0x4;
@@ -216,9 +219,136 @@ fn print_user_handle(entry: &UserHandle, show: u64) {
             entry.object_name.as_deref().unwrap_or("-")
         );
     }
+    if show & SHOW_OBJECT != 0 {
+        match &entry.object_info {
+            Some(info) => {
+                for (label, value) in object_info_fields(info) {
+                    outln!("  {label:<14} {value}");
+                }
+            }
+            None => outln!("  object         {}", ui::muted("not recorded")),
+        }
+    }
 }
 
-fn print_resource(detail: &ExecutiveResource) {
+/// The fields of a handle's object information, labeled as `!handle`
+/// shows them.
+fn object_info_fields(info: &HandleObjectInfo) -> Vec<(&'static str, String)> {
+    let client = |process: u64, thread: u64| format!("{process:x}.{thread:x}");
+    match info {
+        HandleObjectInfo::Thread(thread) => vec![
+            ("thread", client(thread.process_id, thread.thread_id)),
+            ("TEB", ui::addr(thread.teb)),
+            ("priority", thread.priority.to_string()),
+            ("base priority", thread.base_priority.to_string()),
+            ("affinity", format!("{:#x}", thread.affinity)),
+            ("exit status", ntstatus_text(thread.exit_status)),
+        ],
+        HandleObjectInfo::Process(process) => vec![
+            ("process", format!("{:x}", process.process_id)),
+            ("parent", format!("{:x}", process.parent_process_id)),
+            ("PEB", ui::addr(process.peb)),
+            ("base priority", process.base_priority.to_string()),
+            ("affinity", format!("{:#x}", process.affinity)),
+            ("exit status", ntstatus_text(process.exit_status)),
+        ],
+        HandleObjectInfo::Event(event) => vec![
+            (
+                "event type",
+                if event.manual_reset {
+                    "manual reset"
+                } else {
+                    "auto reset"
+                }
+                .to_string(),
+            ),
+            (
+                "event state",
+                if event.signaled { "set" } else { "waiting" }.to_string(),
+            ),
+        ],
+        HandleObjectInfo::Mutant(mutant) => {
+            let state = if mutant.current_count > 0 {
+                "free"
+            } else {
+                "owned"
+            };
+            let mut fields = vec![
+                ("mutex", state.to_string()),
+                ("count", mutant.current_count.to_string()),
+                (
+                    "abandoned",
+                    if mutant.abandoned { "yes" } else { "no" }.to_string(),
+                ),
+            ];
+            if let (Some(process), Some(thread)) = (mutant.owner_process_id, mutant.owner_thread_id)
+                && (process, thread) != (0, 0)
+            {
+                fields.push(("owner", client(process, thread)));
+            }
+            fields
+        }
+        HandleObjectInfo::Semaphore(semaphore) => vec![
+            ("count", semaphore.current_count.to_string()),
+            ("limit", semaphore.maximum_count.to_string()),
+        ],
+        HandleObjectInfo::Section(section) => vec![
+            ("section base", format!("{:#x}", section.base_address)),
+            ("section flags", format!("{:#x}", section.attributes)),
+            ("maximum size", format!("{:#x}", section.maximum_size)),
+        ],
+        HandleObjectInfo::Other(other) => vec![(
+            "object",
+            format!(
+                "information of kind {} ({} bytes), not decoded",
+                other.kind, other.size
+            ),
+        )],
+    }
+}
+
+/// An NTSTATUS, with its name when it has one.
+fn ntstatus_text(status: u32) -> String {
+    match ntstatus_name(status) {
+        Some(name) => format!("{status:#x} ({name})"),
+        None => format!("{status:#x}"),
+    }
+}
+
+/// `thread`, an owner of a resource, with its TID and process.
+fn owner_label(repl: &ReplState<'_>, owner: &ResourceOwner) -> String {
+    let thread = repl.ctx.target.thread_info_from_ethread(owner.thread).ok();
+    let who = thread.and_then(|thread| {
+        let tid = thread.tid?;
+        Some(match thread.process_name {
+            Some(process) => format!(" TID {tid} {process}"),
+            None => format!(" TID {tid}"),
+        })
+    });
+    format!(
+        "{}({}){}",
+        ui::addr(owner.thread.0),
+        owner.count,
+        who.unwrap_or_default()
+    )
+}
+
+/// How `resource` is owned: exclusively, or shared.
+fn ownership(resource: &ExecutiveResource) -> &'static str {
+    match (&resource.flags, resource_held(resource)) {
+        (_, Some(false)) => "-",
+        (_, None) => "?",
+        (DiagnosticValue::Available(flags), Some(true))
+            if flags & RESOURCE_OWNED_EXCLUSIVE != 0 =>
+        {
+            "exclusive"
+        }
+        (DiagnosticValue::Available(_), Some(true)) => "shared",
+        (DiagnosticValue::Unavailable(_), Some(true)) => "?",
+    }
+}
+
+fn print_resource(repl: &ReplState<'_>, detail: &ExecutiveResource) {
     let mut notes = UnavailableNotes::default();
     let field = |name: &str, value: String| outln!("  {name:<24} : {value}");
     outln!("ERESOURCE {}", ui::addr(detail.address.0));
@@ -242,13 +372,9 @@ fn print_resource(detail: &ExecutiveResource) {
     match &detail.owners {
         DiagnosticValue::Available(owners) if owners.is_empty() => field("Owners", "-".into()),
         DiagnosticValue::Available(owners) => {
-            outln!("  Owners");
+            outln!("  Owners ({})", ownership(detail));
             for owner in owners {
-                outln!(
-                    "    THREAD {}  count {}",
-                    ui::addr(owner.thread.0),
-                    owner.count
-                );
+                outln!("    {}", owner_label(repl, owner));
             }
         }
         DiagnosticValue::Unavailable(error) => field("Owners", notes.missing("Owners", error)),
@@ -258,11 +384,12 @@ fn print_resource(detail: &ExecutiveResource) {
 
 /// `!locks`'s list: one row for each resource, its owners as
 /// `thread(count)`.
-fn print_resource_table(resources: &[ExecutiveResource]) {
+fn print_resource_table(repl: &ReplState<'_>, resources: &[&ExecutiveResource]) {
     let mut notes = UnavailableNotes::default();
     let mut builder = Builder::default();
     builder.push_record([
         "Resource",
+        "Owned",
         "Active",
         "Flags",
         "Contention",
@@ -276,13 +403,14 @@ fn print_resource_table(resources: &[ExecutiveResource]) {
             DiagnosticValue::Available(owners) if owners.is_empty() => "-".to_string(),
             DiagnosticValue::Available(owners) => owners
                 .iter()
-                .map(|owner| format!("{}({})", ui::addr(owner.thread.0), owner.count))
+                .map(|owner| owner_label(repl, owner))
                 .collect::<Vec<_>>()
-                .join(" "),
+                .join(", "),
             DiagnosticValue::Unavailable(error) => notes.missing(&at("owners"), error),
         };
         builder.push_record([
             ui::addr(resource.address.0).to_string(),
+            ownership(resource).to_string(),
             notes.value(&at("active"), &resource.active_count),
             notes.hex(&at("flags"), &resource.flags),
             notes.value(&at("contention"), &resource.contention_count),
@@ -301,10 +429,12 @@ fn print_resource_table(resources: &[ExecutiveResource]) {
 /// a handle, it shows the object, type, name, access mask, and attributes, if
 /// it can decode them. On a user-mode minidump it lists the handles the
 /// dump's handle data records, as Windows reported them when the dump was
-/// written, with a count of each type; it has no objects to show. There, a
-/// handle of 0 selects every handle, flags choose what to show (1 type, 2
-/// access, attributes, and counts, 4 name; the default shows all), and a
-/// type, such as File, keeps only handles of that type.
+/// written, with a count of each type. There, a handle of 0 selects every
+/// handle, flags choose what to show (1 type, 2 access, attributes, and
+/// counts, 4 name, 8 the object-specific information, such as an event's
+/// state or a thread's ID, that a dump written with it records for some
+/// types; the default shows all but 8), and a type, such as File, keeps
+/// only handles of that type.
 #[command(
     names = ["!handle"],
     category = "objects and I/O",
@@ -515,12 +645,6 @@ fn print_user_handles(listing: &UserHandles) {
             type_filter.is_none_or(|filter| handle_type_label(entry).eq_ignore_ascii_case(filter))
         })
         .collect();
-    if show & SHOW_OBJECT != 0 {
-        outln!(
-            "{}",
-            ui::muted("object-specific information is not recorded in a user-mode minidump")
-        );
-    }
     if handle != 0 {
         let Some(entry) = shown.first() else {
             match type_filter {
@@ -556,6 +680,9 @@ fn print_user_handles(listing: &UserHandles) {
     if show & SHOW_NAME != 0 {
         header.push("Name");
     }
+    if show & SHOW_OBJECT != 0 {
+        header.push("Object");
+    }
     let mut builder = Builder::default();
     builder.push_record(header);
     for entry in &shown {
@@ -573,6 +700,16 @@ fn print_user_handles(listing: &UserHandles) {
         }
         if show & SHOW_NAME != 0 {
             row.push(entry.object_name.clone().unwrap_or_else(|| "-".to_string()));
+        }
+        if show & SHOW_OBJECT != 0 {
+            row.push(match &entry.object_info {
+                Some(info) => object_info_fields(info)
+                    .into_iter()
+                    .map(|(label, value)| format!("{label} {value}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                None => "-".to_string(),
+            });
         }
         builder.push_record(row);
     }
@@ -689,11 +826,13 @@ impl Render for FileObject {
     }
 }
 
-/// Show one ERESOURCE, or list the resources in the system resource list.
+/// Show one ERESOURCE, or the resources of the system resource list that are held.
 ///
-/// Without an argument, the command uses ExpSystemResourcesList and shows up
-/// to 256 entries without scanning memory. If the symbol or the list metadata
-/// is not available, it cannot list the resources.
+/// Without an argument, the command walks ExpSystemResourcesList, without
+/// scanning memory, and shows the resources a thread owns, as WinDbg's does,
+/// each owner with its TID and process; -v shows every resource. If the
+/// symbol or the list metadata is not available, it cannot list the
+/// resources.
 #[command(
     names = ["!locks"],
     category = "objects and I/O",
@@ -701,12 +840,18 @@ impl Render for FileObject {
     target = Kernel,
     forms = [resource, resources],
 )]
-fn locks(session: &Session, #[arg(name = "resource")] address: Option<VirtAddr>) -> Result<Locks> {
+fn locks(
+    session: &Session,
+    #[arg(switch = "-v")] all: bool,
+    #[arg(name = "resource")] address: Option<VirtAddr>,
+) -> Result<Locks> {
     match address {
         Some(address) => resource(session, address).map(Locks::One),
-        None => resources(session, 256).map(Locks::List).map_err(|error| {
-            Error::DebugInfo(format!("global resource enumeration unavailable: {error}"))
-        }),
+        None => resources(session, MAX_RESOURCES)
+            .map(|list| Locks::List { list, all })
+            .map_err(|error| {
+                Error::DebugInfo(format!("global resource enumeration unavailable: {error}"))
+            }),
     }
 }
 
@@ -723,17 +868,27 @@ fn resources(session: &Session, #[arg(sdk, default = 256)] limit: usize) -> Resu
     session.target.enumerate_resources(limit)
 }
 
-/// What `!locks` read.
+/// What `!locks` read: one resource, or the list, to show whole (`-v`) or
+/// only the resources that are held.
 enum Locks {
     One(ExecutiveResource),
-    List(ResourceList),
+    List { list: ResourceList, all: bool },
+}
+
+/// Whether a thread owns `resource`, or `None` when its active count does
+/// not read.
+fn resource_held(resource: &ExecutiveResource) -> Option<bool> {
+    match &resource.active_count {
+        DiagnosticValue::Available(count) => Some(*count != 0),
+        DiagnosticValue::Unavailable(_) => None,
+    }
 }
 
 impl Render for Locks {
-    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+    fn render(&self, repl: &mut ReplState<'_>, (): ()) {
         match self {
-            Self::One(resource) => print_resource(resource),
-            Self::List(list) => {
+            Self::One(resource) => print_resource(repl, resource),
+            Self::List { list, all } => {
                 let count = list.resources.len();
                 let plural = if count == 1 { "" } else { "s" };
                 let walk = match &list.termination {
@@ -752,11 +907,30 @@ impl Render for Locks {
                         format!("{count} resource{plural}, then a read error: {error}")
                     }
                 };
+                let shown: Vec<&ExecutiveResource> = list
+                    .resources
+                    .iter()
+                    // A resource whose state does not read is shown, as it
+                    // may be held, but not counted as held.
+                    .filter(|resource| *all || resource_held(resource) != Some(false))
+                    .collect();
+                let held = list
+                    .resources
+                    .iter()
+                    .filter(|r| resource_held(r) == Some(true))
+                    .count();
                 outln!(
-                    "executive resources: list head {}, {walk}",
+                    "executive resources: list head {}, {walk}, {held} held",
                     ui::addr(list.head.0)
                 );
-                print_resource_table(&list.resources);
+                if shown.is_empty() {
+                    outln!(
+                        "{}",
+                        ui::muted("no resource is held; -v lists every resource")
+                    );
+                    return;
+                }
+                print_resource_table(repl, &shown);
             }
         }
     }

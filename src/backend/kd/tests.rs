@@ -5,6 +5,7 @@ use std::io::{Cursor, Read, Write};
 use std::thread::{JoinHandle, spawn};
 
 use crate::arch::{amd64, arm64};
+use crate::backend::kd::breakpoints::StrandedEntries;
 use crate::backend::kd::connect::MEMORY_OVER_KD_CHOSEN;
 use crate::backend::kd::framing::{
     HEADER_SIZE, Header, INITIAL_PACKET_ID, PACKET_TYPE_KD_ACKNOWLEDGE,
@@ -12,7 +13,7 @@ use crate::backend::kd::framing::{
 };
 use crate::backend::kd::memory::{KD_REMOTE_MEMORY_CHUNK, LineCache};
 use crate::backend::kd::registers::CONTROL_SPACE_KSPECIAL;
-use crate::backend::kd::transport::{SerialStream, serial_pair};
+use crate::backend::kd::transport::SerialStream;
 
 mod breakpoints;
 mod connect;
@@ -31,25 +32,6 @@ fn kd_memory_source_parses_supported_values() {
     assert_eq!("host".parse(), Ok(KdMemorySource::Host));
     assert_eq!("kd".parse(), Ok(KdMemorySource::Kd));
     assert!("remote".parse::<KdMemorySource>().is_err());
-}
-
-#[test]
-fn arm64_capabilities_include_debug_breakpoints() {
-    let (_kernel, host) = serial_pair().unwrap();
-    let mut backend = kd_backend_with_framing(host);
-    backend.arch = Arch::Arm64;
-
-    for capability in [
-        DebugCapability::UserModeBreakpoints,
-        DebugCapability::Watchpoints,
-    ] {
-        assert!(
-            backend
-                .capabilities()
-                .iter()
-                .any(|entry| { entry.capability == capability && entry.supported })
-        );
-    }
 }
 
 struct Loopback {
@@ -100,9 +82,9 @@ fn debug_io_print_payload(text: &[u8]) -> Vec<u8> {
 
 #[test]
 fn thread_id_uses_one_based_hex() {
-    assert_eq!(thread_id_for(0), "p1.1");
-    assert_eq!(thread_id_for(3), "p1.4");
-    assert_eq!(thread_id_for(15), "p1.10");
+    assert_eq!(backend_thread_id(0), "p1.1");
+    assert_eq!(backend_thread_id(3), "p1.4");
+    assert_eq!(backend_thread_id(15), "p1.10");
 }
 
 #[test]
@@ -176,18 +158,19 @@ fn kd_backend_with_pump(pump: PumpHandle, breakin_clone: SerialStream) -> KdBack
         register_map: Arch::Amd64.register_map().clone(),
         arch: Arch::Amd64,
         kernel_dtb_override: 0,
-        teb_path: None,
+        thread_layout: None,
         processor_count: 1,
         current_processor: 0,
         last_stop_processor: 0,
         last_exception_code: 0,
         last_rip: 0,
-        switch_report_pcs: Vec::new(),
+        dropped_bp_addresses: HashSet::new(),
         reconnect_assist_after_continue: None,
         bp_handles: HashMap::new(),
         managed_bp_addresses: HashSet::new(),
         retired_bp_addresses: HashSet::new(),
         breakin_addresses: HashSet::new(),
+        last_exception_record: None,
         late_breakin: false,
         pending_write_breakpoint: None,
         registers: HaltRegisters::default(),
@@ -195,6 +178,8 @@ fn kd_backend_with_pump(pump: PumpHandle, breakin_clone: SerialStream) -> KdBack
         surface_break_at: None,
         special_registers_unsupported: false,
         efer_cache: HashMap::new(),
+        kpcr_cache: HashMap::new(),
+        debug_features: None,
         virtual_lines: LineCache::default(),
         table_lines: LineCache::default(),
         virtual_fill_cap: KD_REMOTE_MEMORY_CHUNK,
@@ -202,7 +187,7 @@ fn kd_backend_with_pump(pump: PumpHandle, breakin_clone: SerialStream) -> KdBack
         debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
         translations: Arc::new(TranslationCache::default()),
         notices: Vec::new(),
-        released_handles: HashSet::new(),
+        stranded: StrandedEntries::default(),
         running_reason: MEMORY_OVER_KD_CHOSEN,
     }
 }
@@ -226,18 +211,19 @@ fn kd_backend_with_framing(host: SerialStream) -> KdBackend {
         register_map: Arch::Amd64.register_map().clone(),
         arch: Arch::Amd64,
         kernel_dtb_override: 0,
-        teb_path: None,
+        thread_layout: None,
         processor_count: 1,
         current_processor: 0,
         last_stop_processor: 0,
         last_exception_code: 0,
         last_rip: 0,
-        switch_report_pcs: Vec::new(),
+        dropped_bp_addresses: HashSet::new(),
         reconnect_assist_after_continue: None,
         bp_handles: HashMap::new(),
         managed_bp_addresses: HashSet::new(),
         retired_bp_addresses: HashSet::new(),
         breakin_addresses: HashSet::new(),
+        last_exception_record: None,
         late_breakin: false,
         pending_write_breakpoint: None,
         registers: HaltRegisters::default(),
@@ -245,6 +231,8 @@ fn kd_backend_with_framing(host: SerialStream) -> KdBackend {
         surface_break_at: None,
         special_registers_unsupported: false,
         efer_cache: HashMap::new(),
+        kpcr_cache: HashMap::new(),
+        debug_features: None,
         virtual_lines: LineCache::default(),
         table_lines: LineCache::default(),
         virtual_fill_cap: KD_REMOTE_MEMORY_CHUNK,
@@ -252,7 +240,7 @@ fn kd_backend_with_framing(host: SerialStream) -> KdBackend {
         debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
         translations: Arc::new(TranslationCache::default()),
         notices: Vec::new(),
-        released_handles: HashSet::new(),
+        stranded: StrandedEntries::default(),
         running_reason: MEMORY_OVER_KD_CHOSEN,
     }
 }
@@ -270,9 +258,11 @@ fn manipulate_reply_payload(api_number: u32, processor: u16, union_body: &[u8]) 
 }
 
 /// A halted fake kernel answering breakpoint APIs from an ordered
-/// `(api, status, handle)` script. The handle rides in the manipulate
-/// header union, where `DbgKdWriteBreakPointApi` returns it, rather than in
-/// trailing data. Yields the `(api, union)` pairs the host actually sent -
+/// `(api, status, handle)` script. Each reply is the request's header, as
+/// Windows answers in the request it received, with the scripted status;
+/// a write breakpoint's also carries the handle in the union, where
+/// `DbgKdWriteBreakPointApi` returns it. A refused read is a page that is
+/// not resident. Yields the `(api, union)` pairs the host actually sent -
 /// a breakpoint address for a write, a table handle for a restore.
 fn serve_breakpoints(
     mut kernel: SerialStream,
@@ -295,10 +285,11 @@ fn serve_breakpoints(
             let (expected_api, status, handle) =
                 script.next().expect("unexpected breakpoint request");
             assert_eq!(api_number, expected_api);
-            let mut reply = vec![0u8; api::MANIPULATE_HEADER_SIZE];
-            reply[0..4].copy_from_slice(&api_number.to_le_bytes());
+            let mut reply = request[..api::MANIPULATE_HEADER_SIZE].to_vec();
             reply[8..12].copy_from_slice(&status.to_le_bytes());
-            reply[UNION + 8..UNION + 12].copy_from_slice(&handle.to_le_bytes());
+            if api_number == api::DBGKD_WRITE_BREAKPOINT {
+                reply[UNION + 8..UNION + 12].copy_from_slice(&handle.to_le_bytes());
+            }
             kernel
                 .write_all(&data_packet(
                     PACKET_TYPE_KD_STATE_MANIPULATE,

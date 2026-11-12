@@ -216,6 +216,14 @@ impl ReplCaches {
         self.build_symbol_indexes(debugger);
     }
 
+    /// Leave the symbol and type indexes for the next reader to rebuild: a
+    /// module unloaded, which advances neither the address space nor the
+    /// symbol store's load generation. Merging every module's names is too
+    /// slow to do at each stop that changed the module set.
+    pub fn invalidate_symbol_indexes(&self) {
+        self.indexed_at.store(NOT_INDEXED, Ordering::Release);
+    }
+
     fn build_symbol_indexes(&self, debugger: &Target) {
         // Read first: a load during the rebuild then shows as a newer
         // generation, and the next refresh picks it up.

@@ -7,6 +7,8 @@ use parking_lot::Mutex;
 
 pub mod alpc;
 pub mod apic;
+mod blocklist;
+pub mod breaks;
 pub mod classpnp;
 mod context;
 pub mod cpu;
@@ -40,7 +42,6 @@ pub mod smbios;
 pub mod srb;
 pub mod storport;
 mod symbols;
-mod trap_sites;
 pub mod userdump;
 pub mod usermode;
 mod variables;
@@ -77,7 +78,7 @@ use crate::{
         types::{CodeMachine, Dtb, VirtAddr},
     },
     nt::{
-        breakpoints::SiteJournal,
+        breakpoints::{CodeSites, SiteJournal},
         dmp::DmpInfo,
         guest::{Guest, ModuleInfo, ModuleSymbolLoadReport, ProcessInfo},
         symbols::{CodeFrame, SymbolStore},
@@ -115,6 +116,9 @@ pub struct Target {
     /// scope. Its `dtb` roots the process address space; see
     /// [`Self::process_dtb`].
     process: Option<ProcessInfo>,
+    /// The attached process is a `.process` context, which WinDbg keeps
+    /// only until the target executes again; `attach` keeps its own.
+    process_until_run: bool,
     /// Secure-kernel or trustlet root selected for read-only inspection.
     secure_root: Option<Dtb>,
     /// `.effmach`: the instruction set code is disassembled as, whatever the
@@ -155,7 +159,8 @@ pub struct Target {
     pub breakpoint_stop: Option<BreakpointStop>,
     /// Host interrupt flag. Long scans (pool, heap, list walks) stop early
     /// once it is raised; the host sets it (Ctrl-C in the REPL) and clears it
-    /// before the next command.
+    /// before the next command. Replace it with [`Self::set_interrupt`],
+    /// which hands it to the target's memory too.
     pub interrupt: Arc<AtomicBool>,
     /// How many times a host raised `interrupt` through an
     /// [`InterruptRequester`]. Work that takes the flag (a stack walk, a
@@ -170,10 +175,17 @@ pub struct Target {
     /// the handles they hand out with it, so an address from before a reboot
     /// is refused instead of read through the new kernel's layout.
     generation: Arc<AtomicU64>,
+    /// Whether every guest keeps its kernel module list across halts, the
+    /// backend reporting each load and unload; see
+    /// [`Self::keep_kernel_modules`].
+    keep_kernel_modules: bool,
     /// The on-disk record of breakpoint instructions this session patched
     /// into guest memory itself, so a session that dies with them in place is
     /// repaired by the next; `None` for targets nothing is patched into.
     pub site_journal: Option<SiteJournal>,
+    /// Where the session's breakpoints and traps are planted and the code
+    /// they displaced, which reads mask back ([`Self::mask_code`]).
+    pub code_sites: Arc<CodeSites>,
     /// The `_ETHREAD` each processor runs, standing in for the KPRCB walk
     /// in tests over bare memory; shared so a mock backend can switch it.
     #[cfg(test)]
@@ -190,6 +202,7 @@ pub struct Target {
 /// one operation in a scope of its own and put the user's selection back.
 pub struct TargetSelection {
     process: Option<ProcessInfo>,
+    process_until_run: bool,
     secure_root: Option<Dtb>,
     context_dtb_override: Option<Dtb>,
     selected_frame: Option<SelectedFrame>,
@@ -198,7 +211,7 @@ pub struct TargetSelection {
 }
 
 impl TargetSelection {
-    pub(crate) fn holds_live_registers(&self) -> bool {
+    pub fn holds_live_registers(&self) -> bool {
         self.selected_frame
             .as_ref()
             .is_none_or(SelectedFrame::is_live)
@@ -517,7 +530,7 @@ impl ThreadInfo {
 }
 
 #[cfg(test)]
-pub(crate) fn sample_thread() -> ThreadInfo {
+pub fn sample_thread() -> ThreadInfo {
     ThreadInfo {
         ethread: VirtAddr(0xffff_8000_0000_1000),
         kthread: VirtAddr(0xffff_8000_0000_1100),
@@ -690,6 +703,9 @@ pub const KTHREAD_STATE_STANDBY: u8 = 3;
 /// `KTHREAD.State` of a thread whose kernel stack has been freed.
 pub const KTHREAD_STATE_TERMINATED: u8 = 4;
 
+/// `KTHREAD.State` of a thread blocked on a dispatcher object.
+pub const KTHREAD_STATE_WAITING: u8 = 5;
+
 pub fn kthread_state_name(state: u8) -> &'static str {
     match state {
         0 => "Initialized",
@@ -697,10 +713,11 @@ pub fn kthread_state_name(state: u8) -> &'static str {
         KTHREAD_STATE_RUNNING => "Running",
         KTHREAD_STATE_STANDBY => "Standby",
         KTHREAD_STATE_TERMINATED => "Terminated",
-        5 => "Waiting",
+        KTHREAD_STATE_WAITING => "Waiting",
         6 => "Transition",
         7 => "DeferredReady",
-        8 => "GateWaitObsolete",
+        // Windows 10 names it GateWaitObsolete, no longer setting it.
+        8 => "GateWait",
         9 => "WaitingForProcessInSwap",
         _ => "?",
     }

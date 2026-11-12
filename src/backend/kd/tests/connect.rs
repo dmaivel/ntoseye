@@ -10,7 +10,7 @@ use crate::backend::kd::framing::{
     INITIAL_PACKET_ID, PACKET_TYPE_KD_ACKNOWLEDGE, PACKET_TYPE_KD_STATE_MANIPULATE, control_packet,
     data_packet,
 };
-use crate::backend::kd::registers::ARM64_WINDBG_TTBR1_EL1;
+use crate::backend::kd::registers::{ARM64_WINDBG_ID_AA64DFR0_EL1, ARM64_WINDBG_TTBR1_EL1};
 use crate::backend::kd::transport::serial_pair;
 
 #[test]
@@ -43,8 +43,10 @@ fn kd_connections_reject_invalid_handshake_timeouts_before_opening_a_transport()
 fn kd_detects_amd64_and_arm64_machine_types() {
     assert_eq!(detect_arch(0x8664).unwrap(), Arch::Amd64);
     assert_eq!(detect_arch(0xaa64).unwrap(), Arch::Arm64);
-    let error = detect_arch(0x014c).unwrap_err();
-    assert!(error.to_string().contains("I386 KD target"));
+    assert!(matches!(
+        detect_arch(0x014c),
+        Err(Error::UnsupportedArchitecture(_))
+    ));
 }
 
 #[test]
@@ -120,6 +122,32 @@ fn arm64_target_hints_read_ttbr1_through_kd() {
             ))
             .unwrap();
         let _ttbr_ack = read_wire_packet(&mut kernel);
+
+        let features_request = read_wire_packet(&mut kernel);
+        let features_id = wire_header(&features_request).packet_id;
+        assert_eq!(
+            u32::from_le_bytes(features_request[32..36].try_into().unwrap()),
+            ARM64_WINDBG_ID_AA64DFR0_EL1
+        );
+        kernel
+            .write_all(&control_packet(PACKET_TYPE_KD_ACKNOWLEDGE, features_id))
+            .unwrap();
+        let mut features_union = [0u8; 12];
+        features_union[0..4].copy_from_slice(&ARM64_WINDBG_ID_AA64DFR0_EL1.to_le_bytes());
+        features_union[4..8].copy_from_slice(&0x1030_5106u32.to_le_bytes());
+        let features_reply = manipulate_reply_payload(
+            api::DBGKD_READ_MACHINE_SPECIFIC_REGISTER,
+            0,
+            &features_union,
+        );
+        kernel
+            .write_all(&data_packet(
+                PACKET_TYPE_KD_STATE_MANIPULATE,
+                INITIAL_PACKET_ID,
+                &features_reply,
+            ))
+            .unwrap();
+        let _features_ack = read_wire_packet(&mut kernel);
     });
 
     let hints = backend.target_hints().unwrap();
@@ -129,4 +157,55 @@ fn arm64_target_hints_read_ttbr1_through_kd() {
     assert_eq!(hints.kernel_dtb, 0x80d4_5000);
     assert_eq!(hints.kernel_base, VirtAddr(kernel_base));
     assert_eq!(hints.ps_loaded_module_list, VirtAddr(module_list));
+    // The target's six breakpoint pairs, not the CONTEXT's eight.
+    assert_eq!(
+        backend.hardware_slot_range(HwBreakpointAccess::Execute),
+        2..8
+    );
+}
+
+/// A reply the target sent a debugger that went away (here to a
+/// RestoreBreakPoint) and sends again to the next is passed over: the
+/// request's own reply follows it.
+#[test]
+fn a_stale_reply_before_the_requested_one_is_passed_over() {
+    let (mut kernel, host) = serial_pair().unwrap();
+    let mut backend = kd_backend_with_framing(host);
+    backend.link.halt();
+    backend.exit_prepared = true;
+    let kernel_base = 0xffff_f802_4e80_0000u64;
+
+    let worker = spawn(move || {
+        let request = read_wire_packet(&mut kernel);
+        kernel
+            .write_all(&control_packet(
+                PACKET_TYPE_KD_ACKNOWLEDGE,
+                wire_header(&request).packet_id,
+            ))
+            .unwrap();
+        let stale = manipulate_reply_payload(api::DBGKD_RESTORE_BREAKPOINT, 0, &[0u8; 40]);
+        kernel
+            .write_all(&data_packet(
+                PACKET_TYPE_KD_STATE_MANIPULATE,
+                INITIAL_PACKET_ID,
+                &stale,
+            ))
+            .unwrap();
+        let _stale_ack = read_wire_packet(&mut kernel);
+        let mut version_union = [0u8; 40];
+        version_union[16..24].copy_from_slice(&kernel_base.to_le_bytes());
+        let reply = manipulate_reply_payload(api::DBGKD_GET_VERSION, 0, &version_union);
+        kernel
+            .write_all(&data_packet(
+                PACKET_TYPE_KD_STATE_MANIPULATE,
+                INITIAL_PACKET_ID ^ 1,
+                &reply,
+            ))
+            .unwrap();
+        let _ack = read_wire_packet(&mut kernel);
+    });
+
+    let version = api::get_version(backend.framing().unwrap(), 0).unwrap();
+    worker.join().unwrap();
+    assert_eq!(version.kern_base, kernel_base);
 }

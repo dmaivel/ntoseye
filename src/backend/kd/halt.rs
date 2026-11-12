@@ -86,7 +86,7 @@ mod tests {
     }
 
     #[test]
-    fn a_write_that_drops_a_context_drops_the_report_with_it() {
+    fn invalidating_a_processor_drops_its_report_with_its_context() {
         let mut registers = HaltRegisters::default();
         registers.stopped(0, Some(report()));
         registers.set_context(0, vec![1, 2, 3]);

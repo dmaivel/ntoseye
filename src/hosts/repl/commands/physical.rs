@@ -119,7 +119,7 @@ impl Render for PhysicalWritten {
 
 /// Write `values` as `unit`s at the physical `address`.
 fn write_physical(
-    session: &Session,
+    session: &mut Session,
     address: VirtAddr,
     values: &[u64],
     unit: WriteUnit,
@@ -142,7 +142,7 @@ fn write_physical(
     python = none,
 )]
 fn physical_eb(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(parse = write_values)] values: Vec<u64>,
 ) -> Result<PhysicalWritten> {
@@ -159,7 +159,7 @@ fn physical_eb(
     python = none,
 )]
 fn physical_ed(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(parse = write_values)] values: Vec<u64>,
 ) -> Result<PhysicalWritten> {
@@ -176,7 +176,7 @@ fn physical_ed(
     python = none,
 )]
 fn physical_eq(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(parse = write_values)] values: Vec<u64>,
 ) -> Result<PhysicalWritten> {

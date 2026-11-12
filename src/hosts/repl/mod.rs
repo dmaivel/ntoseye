@@ -40,7 +40,7 @@ use crate::base::output::{
     self, drop_leading_blank_lines, log_input_line, prompting, separate_prompt,
 };
 #[cfg(feature = "cli")]
-use crate::base::time::filetime_to_iso;
+use crate::base::time::unix_time_to_iso;
 #[cfg(feature = "cli")]
 use crate::base::types::VirtAddr;
 #[cfg(feature = "python")]
@@ -48,7 +48,7 @@ use crate::hosts::python::embed;
 use crate::hosts::ui;
 use crate::nt::expr::NumberRadix;
 use crate::nt::guest::ModuleSymbolLoadReport;
-use crate::nt::symbols::ntoseye_home;
+use crate::nt::symbols::{ntoseye_home, split_query_module};
 #[cfg(all(any(unix, windows), feature = "cli"))]
 use crate::nt::target::InterruptRequester;
 #[cfg(feature = "cli")]
@@ -70,12 +70,53 @@ static INTERRUPT_REQUESTED: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "cli")]
 pub static NATIVE_PROMPT: AtomicBool = AtomicBool::new(false);
 pub const BREAK_STACKTRACE_DISPLAY_LIMIT: usize = 6;
-pub const BREAK_STACKTRACE_PROBE_LIMIT: usize = 64;
+/// Frames a stop walks: one past those it shows, which tells whether there
+/// are more without walking them all, each frame a few memory reads (slow
+/// ones over KD).
+pub const BREAK_STACKTRACE_WALK_LIMIT: usize = BREAK_STACKTRACE_DISPLAY_LIMIT + 1;
+/// Frames a bugcheck stop walks to find the one that faulted, under the
+/// bugcheck's own.
+pub const BUGCHECK_FAULT_SEARCH_LIMIT: usize = 64;
 #[cfg(feature = "cli")]
 const REPL_HISTORY_SIZE: usize = 5000;
 
 pub fn error(msg: &str) {
     diagnostics::print_error(msg);
+}
+
+/// Print a command's error. A read that failed at an address also says why
+/// the page there is not in memory, as the current address space's page
+/// tables tell it: the error does not say which space the read was in, and
+/// it is that one but for a command that reads another process's.
+pub fn report_error(state: &ReplState<'_>, error: &crate::base::error::Error) {
+    self::error(&error.to_string());
+    if let crate::base::error::Error::BadVirtualAddress(address) = error
+        && let Some(why) = unreadable_reason(&state.ctx.target, *address)
+    {
+        diagnostics::print_note(format!("{}: {why}", ui::addr(address.0)));
+    }
+}
+
+/// Why `address` does not read in the inspection address space, as its page
+/// tables tell it. At a stop whose context is the Windows hypervisor's own,
+/// a VM-exit entry's or one `.cxr` selected, that space maps no NT memory,
+/// which the page walk alone would only call unmapped.
+pub fn unreadable_reason(
+    target: &crate::nt::target::Target,
+    address: crate::base::types::VirtAddr,
+) -> Option<String> {
+    let why = target.non_resident(target.current_dtb(), address);
+    let unmapped = why
+        .as_ref()
+        .is_none_or(|why| why.place == crate::base::memory::Place::Unmapped);
+    if unmapped && target.in_hypervisor_address_space() {
+        return Some(
+            "not mapped in the Windows hypervisor's address space, which this stop's context is; \
+             .vtlcxr selects where VTL0 left off"
+                .to_string(),
+        );
+    }
+    why.map(|why| why.to_string())
 }
 
 macro_rules! error {
@@ -115,7 +156,7 @@ pub use commands::{ReplActions, command_reference_json, json_string, open_sessio
 pub use completion::*;
 pub use disasm::*;
 #[cfg(feature = "cli")]
-use line_editor::{CustomPrompt, MyCompleter, TrackingHighlighter};
+use line_editor::{CaretContext, CustomPrompt, MyCompleter, TrackingHighlighter, caret_context};
 pub use memory_view::*;
 pub use remote::*;
 pub use stop::*;
@@ -211,15 +252,6 @@ pub fn print_backend_capabilities(capabilities: &[BackendCapability], note: Opti
     outln!();
 }
 
-pub fn supports_capability(
-    capabilities: &[BackendCapability],
-    capability: DebugCapability,
-) -> bool {
-    capabilities
-        .iter()
-        .any(|entry| entry.capability == capability && entry.supported)
-}
-
 pub fn print_backend_capability_warning(capabilities: &[BackendCapability]) {
     if capabilities.iter().all(|capability| capability.supported) {
         return;
@@ -277,8 +309,9 @@ pub struct ReplState<'a> {
     pub ctx: &'a mut Session,
     pub caches: ReplCaches,
     pub aliases: UserAliases,
-    /// Nested automatic exception-command executions. Bounded so an event
-    /// command that resumes into the same exception cannot recurse forever.
+    /// Breakpoint actions and exception commands being dispatched, one
+    /// inside another: a command loop inside one leaves Ctrl+C to the stop
+    /// loop that ran it.
     pub event_command_depth: usize,
     /// Nested command loops (`.foreach`, `!for_each_*`). Bounded so an alias
     /// that loops over itself ends with an error instead of the stack.
@@ -290,7 +323,6 @@ pub struct ReplState<'a> {
     /// Whether the innermost command loop is a `.for`/`.while`/`.do`, the
     /// loops `.break` and `.continue` steer.
     pub breakable_loop: bool,
-    pub radix: NumberRadix,
     pub line: String,
     /// Who is dispatching; decides which [`RunEffect`]s a command may have.
     pub context: DispatchContext,
@@ -398,14 +430,12 @@ pub enum RemoteClient {
 
 /// Everything a [`ReplState`] owns besides its session borrow. A host that
 /// runs commands one at a time against a session it owns (MCP or the Python
-/// SDK) keeps one of these between calls, so completion caches, aliases,
-/// exception policies, and the radix persist exactly as in the interactive
-/// REPL, and rebuilds the borrowing `ReplState` per call with
-/// [`ReplState::attach`].
+/// SDK) keeps one of these between calls, so completion caches, aliases, and
+/// the `ls` and `u` cursors persist exactly as in the interactive REPL, and
+/// rebuilds the borrowing `ReplState` per call with [`ReplState::attach`].
 pub struct ReplStore {
     caches: ReplCaches,
     aliases: UserAliases,
-    radix: NumberRadix,
     context: DispatchContext,
     source_cursor: Option<(PathBuf, u32)>,
     disasm_search: DisasmSearch,
@@ -415,7 +445,7 @@ pub struct ReplStore {
 
 impl ReplStore {
     /// Fresh REPL state for `ctx`: caches seeded from the current symbol
-    /// context, persisted aliases loaded, default exception policies and radix.
+    /// context, persisted aliases loaded.
     /// The symbol and type indexes are built when a search first reads them.
     pub fn new(ctx: &Session, context: DispatchContext) -> Self {
         let caches = ReplCaches {
@@ -441,20 +471,12 @@ impl ReplStore {
         Self {
             caches,
             aliases,
-            radix: NumberRadix::Hexadecimal,
             context,
             source_cursor: None,
             disasm_search: DisasmSearch::default(),
             disasm_cursor: None,
             virtio_seen: Default::default(),
         }
-    }
-
-    /// The session's current default radix. A host that evaluates expressions
-    /// outside `dispatch_line` (DAP watch/hover requests) shares it so `n 10`
-    /// typed in the console applies there too.
-    pub fn radix(&self) -> NumberRadix {
-        self.radix
     }
 
     /// Type names matching `query`, best first, from the index `dt`
@@ -465,16 +487,16 @@ impl ReplStore {
     }
 
     /// Module-qualified symbol names matching `query`, best first, from the
-    /// index symbol completion uses; `module!query` searches that module.
+    /// index symbol completion uses; `module!query` searches the modules
+    /// `module` names.
     pub fn search_symbols(&self, session: &Session, query: &str, limit: usize) -> Vec<String> {
-        if let Some((module, query)) = query.split_once('!') {
-            return self
-                .caches
-                .symbol_store
-                .search_symbols_in_module(session.target.current_dtb(), module, query, limit)
-                .into_iter()
-                .map(|name| format!("{module}!{name}"))
-                .collect();
+        if let Some((module, query)) = split_query_module(query) {
+            return self.caches.symbol_store.search_symbols_in_modules(
+                session.target.current_dtb(),
+                module,
+                query,
+                limit,
+            );
         }
         self.caches.refresh_loaded_symbols(&session.target);
         self.caches.symbols.read().unwrap().search(query, limit)
@@ -533,7 +555,6 @@ impl<'a> ReplState<'a> {
             event_command_depth: 0,
             command_loop_depth: 0,
             command_loop_interrupts: 0,
-            radix: store.radix,
             breakable_loop: false,
             line: String::new(),
             context: store.context,
@@ -555,7 +576,6 @@ impl<'a> ReplState<'a> {
         ReplStore {
             caches: self.caches,
             aliases: self.aliases,
-            radix: self.radix,
             context: self.context,
             source_cursor: self.source_cursor,
             disasm_search: self.disasm_search,
@@ -635,9 +655,18 @@ impl<'a> ReplState<'a> {
     }
 }
 
+/// What the command line asks of the REPL besides its prompt: command
+/// lists to run first (`-c`), and with `batch`, to quit after them instead
+/// of prompting, leaving out the startup summary and the stop.
+#[derive(Debug)]
+pub struct Startup {
+    pub commands: Vec<String>,
+    pub batch: bool,
+}
+
 #[cfg(feature = "cli")]
-pub fn start_repl(ctx: &mut Session) -> Result<()> {
-    start_repl_with_mode(ctx, false)
+pub fn start_repl(ctx: &mut Session, startup: &Startup) -> Result<()> {
+    start_repl_with_mode(ctx, false, startup)
 }
 
 /// Signal-handler safe: one atomic store through an already-initialized static.
@@ -843,8 +872,37 @@ fn read_line_interruptible<R: BufRead>(
 }
 
 #[cfg(feature = "cli")]
-pub fn start_plain_repl(ctx: &mut Session) -> Result<()> {
-    start_repl_with_mode(ctx, true)
+pub fn start_plain_repl(ctx: &mut Session, startup: &Startup) -> Result<()> {
+    start_repl_with_mode(ctx, true, startup)
+}
+
+/// Run `line` as if typed at the prompt.
+#[cfg(feature = "cli")]
+fn run_typed_line(state: &mut ReplState<'_>, line: &str) -> Result<Flow> {
+    log_input_line(line);
+    drop_leading_blank_lines();
+    state.line = line.to_string();
+    // A Ctrl+C that ended the last command's step is spent.
+    state.ctx.target.interrupt.store(false, Ordering::SeqCst);
+    state.dispatch_line(line)
+}
+
+/// Run the command line's `-c` lists in order, each echoed after the prompt
+/// and run as if typed there: an error ends its own list, not the next one.
+/// `true` when one quits (`q`).
+#[cfg(feature = "cli")]
+fn run_startup_commands(state: &mut ReplState<'_>, commands: &[String]) -> Result<bool> {
+    for command in commands.iter().map(|command| command.trim()) {
+        if command.is_empty() {
+            continue;
+        }
+        separate_prompt();
+        outln!("{} {command}", state.plain_prompt());
+        if run_typed_line(state, command)? == Flow::Quit {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// What the session found of the target's kernel.
@@ -919,7 +977,7 @@ fn user_dump_summary(target: &Target) -> Option<UserDumpSummary> {
     Some(UserDumpSummary {
         process: info.process_label(),
         system: version,
-        written: filetime_to_iso((u64::from(info.time_date_stamp) + 11_644_473_600) * 10_000_000),
+        written: unix_time_to_iso(u64::from(info.time_date_stamp)),
         threads: info.threads.len(),
         modules: info.modules.len(),
         memory: format!(
@@ -954,7 +1012,12 @@ fn print_user_dump_target(dump: &UserDumpSummary) {
 }
 
 #[cfg(feature = "cli")]
-fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
+fn start_repl_with_mode(ctx: &mut Session, plain: bool, startup: &Startup) -> Result<()> {
+    if startup.batch {
+        // Nothing comes before the first command's output to set it apart
+        // from.
+        drop_leading_blank_lines();
+    }
     // Warnings the attach raised (unreadable PRCB contexts, a corrupt triage
     // signature, kernel discovery falling back) precede the banner.
     for notice in ctx.take_notices() {
@@ -991,7 +1054,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         }
         loaded_parts.push(part);
     }
-    if !loaded_parts.is_empty() {
+    if !loaded_parts.is_empty() && !startup.batch {
         outln!(
             "{}",
             ui::muted(&format!("loaded: {}", loaded_parts.join(", ")))
@@ -1003,7 +1066,9 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     print_python_commands_notice();
     print_alias_load_failures(&alias_report);
 
-    if let Some(dump) = user_dump_summary(debugger) {
+    if startup.batch {
+        // A batch run's output is its commands'.
+    } else if let Some(dump) = user_dump_summary(debugger) {
         print_user_dump_target(&dump);
     } else {
         // Triage dumps may lack the ntoskrnl PE header needed for full kernel
@@ -1024,12 +1089,13 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         };
         print_target(&target);
     }
-    let capabilities = client.capabilities();
-    print_backend_capability_warning(&capabilities);
+    if !startup.batch {
+        print_backend_capability_warning(&client.capabilities());
+    }
 
-    let has_register_context = supports_capability(&capabilities, DebugCapability::ReadRegisters);
+    let has_register_context = client.supports(DebugCapability::ReadRegisters);
 
-    if has_register_context {
+    if has_register_context && !startup.batch {
         // A user dump written for an exception stops on the thread that
         // raised it; `.ecxr` selects the exception's own context.
         let cause = ctx.target.user_exception().map(|exception| {
@@ -1097,7 +1163,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     }
     let edit_mode = Box::new(Emacs::new(keybindings));
 
-    let initial_vcpus = if supports_capability(&capabilities, DebugCapability::ThreadList) {
+    let initial_vcpus = if client.supports(DebugCapability::ThreadList) {
         client.thread_list().unwrap_or_default()
     } else {
         Vec::new()
@@ -1191,7 +1257,6 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
         event_command_depth: 0,
         command_loop_depth: 0,
         command_loop_interrupts: 0,
-        radix: NumberRadix::Hexadecimal,
         breakable_loop: false,
         line: String::new(),
         context: DispatchContext::Interactive,
@@ -1211,6 +1276,9 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     // An error ends the prompt, not the cleanup below: breakpoints left
     // planted in a guest that resumes without a debugger crash it.
     let prompt: Result<()> = (|| {
+        if run_startup_commands(&mut state, &startup.commands)? || startup.batch {
+            return Ok(());
+        }
         if plain {
             let stdin = io::stdin();
             let mut input = stdin.lock();
@@ -1237,13 +1305,7 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
                     drop_leading_blank_lines();
                     continue;
                 }
-
-                log_input_line(command);
-                drop_leading_blank_lines();
-                state.line = command.to_string();
-                // A Ctrl+C that ended the last command's step is spent.
-                state.ctx.target.interrupt.store(false, Ordering::SeqCst);
-                if state.dispatch_line(command)? == Flow::Quit {
+                if run_typed_line(&mut state, command)? == Flow::Quit {
                     break;
                 }
             }
@@ -1334,44 +1396,8 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool) -> Result<()> {
     })();
 
     terminal::end();
-    // The breakpoints, traps and backend to clean up are the target's, which
-    // a partition view keeps aside while it is shown.
-    state.ctx.leave_partition();
-    let was_running_on_exit = state.ctx.backend.is_running();
-    let mut resume_on_exit = !was_running_on_exit;
-    if was_running_on_exit && state.ctx.has_installed_sites() {
-        match state.ctx.halt_for_exit() {
-            Ok(()) => resume_on_exit = true,
-            Err(error) => {
-                error!("failed to halt cleanly during exit: {error}");
-                resume_on_exit = false;
-            }
-        }
-    }
-
-    // Restore every debugger-owned site before allowing the guest to resume.
-    // A failed removal remains managed and forces an explicitly halted exit;
-    // resuming with an orphaned int3 would turn cleanup failure into a guest
-    // crash after the debugger disconnects.
-    let breakpoint_cleanup_succeeded = match state
-        .ctx
-        .breakpoints
-        .remove_all(&mut *state.ctx.backend, &state.ctx.target)
-        .and_then(|()| state.ctx.disarm_traps())
-    {
-        Ok(()) => true,
-        Err(error) => {
-            error!("failed to uninstall breakpoints on exit: {error}");
-            false
-        }
-    };
-
-    let leave_running_on_exit =
-        breakpoint_cleanup_succeeded && (resume_on_exit || state.ctx.backend.is_running());
-    match state.ctx.backend.prepare_for_exit(leave_running_on_exit) {
-        Ok(()) if leave_running_on_exit => state.ctx.mark_kd_debugger_absent(),
-        Ok(()) => {}
-        Err(e) => error!("failed to prepare backend for exit: {e}"),
+    if let Err(error) = state.ctx.cleanup_for_exit() {
+        error!("debugger cleanup failed; target was not resumed: {error}");
     }
 
     prompt
@@ -1540,6 +1566,29 @@ mod tests {
         }
     }
 
+    /// The command line's lists run in order, each echoed after the prompt:
+    /// an error ends its own list and not the next one, and `q` ends them
+    /// all.
+    #[cfg(feature = "cli")]
+    #[test]
+    fn startup_commands_run_as_typed_lines() {
+        let mut session = session_over_memory(0x1000, &[0u8; 8]);
+        let mut state = ReplState::for_oneshot(&mut session);
+        let prompt = state.plain_prompt();
+        let lists = ["? 11; ? no_such_symbol; ? 12", "? 13", "q", "? 14"].map(String::from);
+        let (quit, text) = capture(|| super::run_startup_commands(&mut state, &lists));
+        assert!(quit.unwrap(), "q quits");
+        assert!(text.contains(&format!("{prompt} ? 13")), "{text}");
+        for (value, shown) in [(0x11, true), (0x12, false), (0x13, true), (0x14, false)] {
+            assert_eq!(
+                text.contains(&format!("{value:016x}")),
+                shown,
+                "{value:#x}: {text}"
+            );
+        }
+        let (quit, _) = capture(|| super::run_startup_commands(&mut state, &lists[..2]));
+        assert!(!quit.unwrap(), "no q, no quit");
+    }
     #[test]
     fn session_radix_switch_applies_to_later_expressions() {
         let mut session = session_over_memory(0x1000, &[0u8; 8]);
@@ -1608,6 +1657,7 @@ mod tests {
         let mut session = session_with_mock(backend);
         session
             .breakpoints
+            .edit()
             .insert_for_test(0, VirtAddr(0x1000), true, None);
         let mut state = remote_state(&mut session, 5_000);
         let (result, text) = capture(|| state.dispatch_line(HALTED_PROBE));
@@ -1622,6 +1672,7 @@ mod tests {
         let mut session = session_with_mock(MockBackend::default().running());
         session
             .breakpoints
+            .edit()
             .insert_for_test(0, VirtAddr(0x1000), true, None);
         let mut state = remote_state(&mut session, 150);
         let (result, text) = capture(|| state.dispatch_line(HALTED_PROBE));
@@ -1676,6 +1727,7 @@ mod tests {
         let mut session = session_with_mock(backend);
         session
             .breakpoints
+            .edit()
             .insert_for_test(0, VirtAddr(0x1000), true, None);
         let mut state = remote_state(&mut session, 5_000);
         let (result, text) = capture(|| state.dispatch_line("g"));
@@ -1695,18 +1747,45 @@ mod tests {
         session.service_idle();
         assert!(!session.backend.is_running(), "the stop was not parked");
         let mut state = remote_state(&mut session, 5_000);
-        let (begin, _) = capture(|| state.begin_remote_line("bd; g"));
+        let (begin, _) = capture(|| state.begin_remote_line(".echo earlier; g"));
         assert!(begin.is_none());
-        let (result, text) = capture(|| state.dispatch_line("bd; g"));
-        assert_eq!(result.unwrap(), Flow::Denied);
+        let (result, text) = capture(|| state.dispatch_line(".echo earlier; g"));
+        assert_eq!(result.unwrap(), Flow::Denied, "{text:?}");
         assert!(
-            text.contains(HALTED_PROBE_RAN),
-            "bd before the refused g did not run: {text:?}"
+            text.contains("earlier"),
+            "the command before the refused g did not run: {text:?}"
         );
         assert!(text.contains("not run"), "{text:?}");
         assert!(
             !state.ctx.backend.is_running(),
             "the parked stop was continued past"
+        );
+    }
+
+    /// A command missing its argument prints its help and counts as an
+    /// error, so the `;` list stops there instead of resuming the target.
+    #[test]
+    fn missing_argument_stops_a_command_list() {
+        let mut session = session_with_mock(MockBackend::default());
+        let mut state = remote_state(&mut session, 5_000);
+        let (result, text) = capture(|| state.dispatch_line("bd; g"));
+        result.unwrap();
+        assert!(text.contains(HALTED_PROBE_RAN), "{text:?}");
+        assert!(!state.ctx.backend.is_running(), "g ran after bd failed");
+    }
+
+    /// A handler that checks its own operands counts the missing argument
+    /// as an error too, so the list stops before `g`.
+    #[test]
+    fn handler_missing_argument_stops_a_command_list() {
+        let mut session = session_with_mock(MockBackend::default());
+        let mut state = remote_state(&mut session, 5_000);
+        let (result, text) = capture(|| state.dispatch_line("undisplay; g"));
+        result.unwrap();
+        assert!(text.contains("undisplay <number>"), "{text:?}");
+        assert!(
+            !state.ctx.backend.is_running(),
+            "g ran after undisplay failed"
         );
     }
 
@@ -1903,7 +1982,7 @@ mod tests {
             vcpu_at(0x1020).runs_stopping_at(&[(0x1000, STACK, THREAD), (0x1010, STACK, THREAD)]);
         let continues = backend.continue_count();
         let mut session = session_running_code(&[0x90; 0x40], backend);
-        session.set_action_runner(Box::new(ReplActions));
+        session.set_action_runner(Box::new(ReplActions::default()));
         let mut state = remote_state(&mut session, 5_000);
 
         let (result, text) =
@@ -1914,6 +1993,24 @@ mod tests {
         assert!(text.contains("├─ breakpoint #1"), "{text:?}");
         assert_eq!(rip(&mut state), 0x1010);
         assert_eq!(continues.load(Ordering::Relaxed), 2);
+    }
+
+    /// A `do` action reads its numbers in the radix `n` set at the prompt,
+    /// as the same text typed there would, at every hit.
+    #[test]
+    fn a_do_action_reads_numbers_in_the_radix_n_set() {
+        let backend =
+            vcpu_at(0x1020).runs_stopping_at(&[(0x1000, STACK, THREAD), (0x1010, STACK, THREAD)]);
+        let mut session = session_running_code(&[0x90; 0x40], backend);
+        session.set_action_runner(Box::new(ReplActions::default()));
+        let mut state = remote_state(&mut session, 5_000);
+
+        let (result, text) = capture(|| {
+            state.dispatch_line(r#"n 10; bp 0x1000 do "? 42; gc"; bp 0x1010 do "? 42"; g"#)
+        });
+        assert_eq!(result.unwrap(), Flow::Continue, "{text:?}");
+        assert_eq!(text.matches("000000000000002a").count(), 2, "{text:?}");
+        assert!(!text.contains("0000000000000042"), "{text:?}");
     }
 
     /// `bl` lists each breakpoint with its state, site, condition and
@@ -1976,7 +2073,7 @@ mod tests {
             ..breakpoint_event(0x1020)
         });
         let mut session = session_running_code(&[0x90; 0x40], backend);
-        session.set_action_runner(Box::new(ReplActions));
+        session.set_action_runner(Box::new(ReplActions::default()));
         let mut state = remote_state(&mut session, 5_000);
 
         let (result, text) = capture(|| state.dispatch_line(r#"sxe -c ".echo seen" -f break av"#));

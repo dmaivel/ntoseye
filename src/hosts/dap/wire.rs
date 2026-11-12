@@ -242,7 +242,10 @@ mod tests {
         let mut input = Cursor::new(buffer);
         let message = read_message(&mut input).unwrap().unwrap();
 
-        assert_eq!(message["event"], "stopped");
+        assert_eq!(
+            message,
+            json!({"seq": 3, "type": "event", "event": "stopped"})
+        );
     }
 
     #[test]

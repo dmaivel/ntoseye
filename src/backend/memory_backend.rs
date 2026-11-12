@@ -1,19 +1,24 @@
 use std::time::Duration;
 
 use crate::arch::RegisterMap;
-use crate::backend::dbg_backend::{BackendCapability, DebugBackend, DebugCapability, StopEvent};
+use crate::backend::dbg_backend::{
+    BackendCapability, DebugBackend, DebugCapability, StopEvent, backend_thread_id,
+    processor_index_from_backend_thread_id,
+};
 use crate::base::error::{Error, Result};
 
+/// Reads guest memory from the host while the guest runs. It has no
+/// registers, but lists the kernel's processors so the session can select
+/// one; the backend itself reads nothing per processor.
 #[derive(Default)]
 pub struct MemoryBackend {
     register_map: RegisterMap,
+    processors: u16,
 }
 
 impl MemoryBackend {
     pub fn new() -> Self {
-        Self {
-            register_map: RegisterMap::default(),
-        }
+        Self::default()
     }
 
     fn unsupported(operation: &str) -> Error {
@@ -39,8 +44,8 @@ impl DebugBackend for MemoryBackend {
             BackendCapability::unsupported(DebugCapability::SingleStep),
             BackendCapability::unsupported(DebugCapability::ReadRegisters),
             BackendCapability::unsupported(DebugCapability::WriteRegisters),
-            BackendCapability::unsupported(DebugCapability::ThreadList),
-            BackendCapability::unsupported(DebugCapability::ThreadSelection),
+            BackendCapability::supported(DebugCapability::ThreadList),
+            BackendCapability::supported(DebugCapability::ThreadSelection),
             BackendCapability::unsupported(DebugCapability::KernelBreakpoints),
             BackendCapability::unsupported(DebugCapability::UserModeBreakpoints),
             BackendCapability::unsupported(DebugCapability::Watchpoints),
@@ -94,12 +99,22 @@ impl DebugBackend for MemoryBackend {
         Ok(None)
     }
 
-    fn thread_list(&mut self) -> Result<Vec<String>> {
-        Err(Self::unsupported("context enumeration"))
+    fn set_processor_count(&mut self, count: u16) {
+        self.processors = count;
     }
 
-    fn set_current_thread(&mut self, _thread_id: &str) -> Result<()> {
-        Err(Self::unsupported("context selection"))
+    fn thread_list(&mut self) -> Result<Vec<String>> {
+        if self.processors == 0 {
+            return Err(Self::unsupported("context enumeration"));
+        }
+        Ok((0..self.processors).map(backend_thread_id).collect())
+    }
+
+    fn set_current_thread(&mut self, thread_id: &str) -> Result<()> {
+        match processor_index_from_backend_thread_id(thread_id) {
+            Some(index) if index < self.processors => Ok(()),
+            _ => Err(Error::DebugInfo(format!("no processor {thread_id}"))),
+        }
     }
 
     fn stopped_thread_id(&mut self) -> Result<String> {

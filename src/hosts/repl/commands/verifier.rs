@@ -296,20 +296,27 @@ fn print_driver_details(driver: &VerifierDriver) {
         "Peak contiguous memory bytes",
         &DiagnosticValue::Available(driver.peak_contiguous_memory_bytes),
     );
-    if let Some(suspect) = &driver.suspect {
-        print_value("SuspectDriver FullName", &suspect.full_name);
-        print_hex_stat(
-            "SuspectDriver Loads",
-            &DiagnosticValue::Available(suspect.loads),
-        );
-        print_hex_stat(
-            "SuspectDriver Unloads",
-            &DiagnosticValue::Available(suspect.unloads),
-        );
-    } else {
-        print_value("SuspectDriver FullName", "-");
-        print_value("SuspectDriver Loads", "-");
-        print_value("SuspectDriver Unloads", "-");
+    match &driver.suspect {
+        Some(DiagnosticValue::Available(suspect)) => {
+            print_value("SuspectDriver FullName", &suspect.full_name);
+            print_hex_stat(
+                "SuspectDriver Loads",
+                &DiagnosticValue::Available(suspect.loads),
+            );
+            print_hex_stat(
+                "SuspectDriver Unloads",
+                &DiagnosticValue::Available(suspect.unloads),
+            );
+        }
+        Some(DiagnosticValue::Unavailable(error)) => {
+            print_value("SuspectDriver FullName", "-");
+            outln!("    {}", ui::muted(&format!("unavailable: {error}")));
+        }
+        None => {
+            print_value("SuspectDriver FullName", "-");
+            print_value("SuspectDriver Loads", "-");
+            print_value("SuspectDriver Unloads", "-");
+        }
     }
 }
 

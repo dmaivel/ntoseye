@@ -1,7 +1,10 @@
 #[cfg(test)]
 use crate::base::error::Result;
 use crate::{
-    base::types::{Dtb, VirtAddr},
+    base::{
+        env,
+        types::{Dtb, VirtAddr},
+    },
     nt::{
         guest::ModuleInfo,
         layout::{EnumDef, ParsedType, TypeInfo},
@@ -48,8 +51,7 @@ pub static NO_PDB_FROM_MEMORY: OnceLock<bool> = OnceLock::new();
 /// turned it off.
 pub fn pdb_from_memory_enabled() -> bool {
     static ENABLED: LazyLock<bool> = LazyLock::new(|| {
-        !*NO_PDB_FROM_MEMORY.get_or_init(|| false)
-            && std::env::var_os("NTOSEYE_NO_PDB_FROM_MEMORY").is_none_or(|value| value.is_empty())
+        !*NO_PDB_FROM_MEMORY.get_or_init(|| false) && !env::switch_on("NTOSEYE_NO_PDB_FROM_MEMORY")
     });
     *ENABLED
 }
@@ -85,19 +87,6 @@ static DEFAULT_SYMBOL_SOURCES: LazyLock<Vec<SymbolSource>> = LazyLock::new(|| {
     sources
 });
 
-/// `index_path` under every symbol server in the default symbol path.
-fn server_urls(index_path: &str) -> Vec<String> {
-    DEFAULT_SYMBOL_SOURCES
-        .iter()
-        .filter_map(|source| match source {
-            SymbolSource::Http(base) => {
-                Some(format!("{}/{index_path}", base.trim_end_matches('/')))
-            }
-            _ => None,
-        })
-        .collect()
-}
-
 /// Whether a symbol is a public (exported or PDB public) or a private one.
 #[record]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +110,9 @@ type SymbolRecords = SmallVec<[IndexedSymbol; 1]>;
 /// Symbol name -> its records, for one PDB. The name is shared with the
 /// PDB's [`AddressEntry`] list rather than copied into it.
 type SymbolRvas = FxHashMap<Arc<str>, SymbolRecords>;
+/// RVA -> the type of the global or static variable there, from its
+/// `S_GDATA32`/`S_LDATA32` record; public symbols carry none.
+type DataTypes = FxHashMap<u32, TypeIndex>;
 
 /// One address-bearing record of the RVA-sorted index behind
 /// [`SymbolStore::closest_symbol`]. Records sharing an RVA are ordered by
@@ -192,6 +184,10 @@ pub struct SymbolStore {
 
     mmaps: DashMap<u128, Arc<Mmap>>,
     pdb_ages: DashMap<u128, u32>,
+    /// GUID -> the age the image's CodeView record names its PDB by, which
+    /// a symbol store files the PDB under. The PDB's own (`pdb_ages`) can be
+    /// higher: a later link may update a PDB the image still matches.
+    image_ages: DashMap<u128, u32>,
     /// GUID -> the local PDB file it was loaded from.
     pdb_paths: DashMap<u128, PathBuf>,
     /// GUID -> pointer width of the PDB's target machine (see
@@ -223,6 +219,11 @@ pub struct SymbolStore {
     /// where [`Self::frame_locals`] and [`Self::inline_frames`] find the
     /// procedure an address is in without scanning every module stream.
     procedures: DashMap<u128, Vec<ProcedureSpan>>,
+    /// GUID -> the image sections' RVA ranges, sorted: a symbol names no
+    /// address in another section.
+    sections: DashMap<u128, Vec<(u32, u32)>>,
+    /// GUID -> the types of its PDB's global and static variables.
+    data_types: DashMap<u128, DataTypes>,
     /// GUID -> recorded source file -> the checksum the compiler recorded for
     /// its contents. Files without one have no entry.
     source_checksums: DashMap<u128, FxHashMap<String, SourceChecksum>>,
@@ -981,6 +982,7 @@ impl SymbolStore {
             pdbs: DashMap::new(),
             mmaps: DashMap::new(),
             pdb_ages: DashMap::new(),
+            image_ages: DashMap::new(),
             pdb_paths: DashMap::new(),
             pdb_pointer_sizes: DashMap::new(),
             index_build_results: DashMap::new(),
@@ -993,6 +995,8 @@ impl SymbolStore {
             symbol_extents: DashMap::new(),
             source_lines: DashMap::new(),
             procedures: DashMap::new(),
+            sections: DashMap::new(),
+            data_types: DashMap::new(),
             source_checksums: DashMap::new(),
             local_source_digests: Mutex::new(HashMap::new()),
             index_diagnostics: DashMap::new(),
@@ -1125,10 +1129,6 @@ impl SymbolStore {
 
     pub fn append_source_path(&self, path: SourcePathMapping) {
         self.source_paths.write().push(path);
-    }
-
-    pub fn reset_source_paths(&self) {
-        self.source_paths.write().clear();
     }
 
     /// Record the kernel module's guid so type/enum layout lookups can prefer it
@@ -1453,6 +1453,7 @@ impl SymbolStore {
             }
             self.mmaps.remove(&guid);
             self.pdb_ages.remove(&guid);
+            self.image_ages.remove(&guid);
             self.pdb_paths.remove(&guid);
             self.index_build_results.remove(&guid);
             self.index.remove(&guid);
@@ -1462,6 +1463,8 @@ impl SymbolStore {
             self.symbol_addresses.remove(&guid);
             self.source_lines.remove(&guid);
             self.procedures.remove(&guid);
+            self.sections.remove(&guid);
+            self.data_types.remove(&guid);
             self.source_checksums.remove(&guid);
             self.index_diagnostics.remove(&guid);
             self.wpp_messages.remove(&guid);
@@ -1561,9 +1564,14 @@ impl SymbolStore {
         }
     }
 
+    /// The identity the module's image names its PDB by: the GUID and the
+    /// image's age, as a symbol store files it.
     pub fn module_pdb_identity(&self, dtb: Dtb, base_address: VirtAddr) -> Option<PdbIdentity> {
         let module = self.modules.get(&Self::module_key(dtb, base_address))?;
-        let age = *self.pdb_ages.get(&module.guid)?;
+        let age = match self.image_ages.get(&module.guid) {
+            Some(age) => *age,
+            None => *self.pdb_ages.get(&module.guid)?,
+        };
         Some(PdbIdentity {
             guid: module.guid,
             age,
@@ -1595,10 +1603,6 @@ impl SymbolStore {
         self.module_source
             .get(&Self::module_key(dtb, base_address))
             .map(|source| source.clone())
-    }
-
-    pub fn has_guid(&self, guid: u128) -> bool {
-        self.pdbs.contains_key(&guid)
     }
 
     pub fn has_matching_pdb(&self, job: &DownloadJob) -> bool {
@@ -1657,7 +1661,7 @@ mod types;
 
 use cache::{ModuleIdentities, symbols_directory};
 use download::forget_nested_pdbs;
-pub use index::SymbolIndex;
+pub use index::{SymbolIndex, split_query_module};
 pub use inline::ProcedureInlines;
 
 #[cfg(test)]

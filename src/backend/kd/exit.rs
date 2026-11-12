@@ -100,9 +100,10 @@ impl KdBackend {
             return Ok(());
         }
 
-        // A booting target stops on every image it loads, one after another,
-        // so module-load notifications are progress and only other stops
-        // count toward giving up. The notification cap only bounds the loop.
+        // A booting target stops on every image it loads, one after another
+        // (and with `!gflag +ksl` on every user-mode image too), so module
+        // notifications are progress and only other stops count toward
+        // giving up. The notification cap only bounds the loop.
         let mut stops = 0;
         for _ in 0..KD_EXIT_MAX_NOTIFICATIONS {
             if !self.link.is_running() {
@@ -111,7 +112,7 @@ impl KdBackend {
             let Some(stop) = self.try_wait_for_stop(KD_EXIT_STOP_POLL)? else {
                 return Ok(());
             };
-            if stop.modules_changed {
+            if stop.modules_changed || stop.module_event.is_some() {
                 continue;
             }
             self.absorb_stray_single_step_for_exit(&stop);

@@ -11,7 +11,7 @@ use crate::base::output;
 use crate::hosts::repl::{
     DispatchContext, Flow, RemoteClient, ReplState, ReplStore, StopWaitBudget,
 };
-use crate::nt::expr::{Expr, ExprValue, NumberRadix};
+use crate::nt::expr::{Expr, ExprValue};
 use crate::nt::layout::{FieldInfo, ParsedType};
 use crate::nt::target::Target;
 use crate::session::typeview::{Expand, TypeView};
@@ -159,9 +159,9 @@ impl Server {
         &mut self,
         expression: &str,
     ) -> result::Result<(Expr, ExprValue), String> {
-        let radix = self.repl_radix();
-        let expr = Expr::parse_with_radix(expression, radix).map_err(|error| error.to_string())?;
         let session = self.session()?;
+        let expr =
+            Expr::parse_with_radix(expression, session.radix).map_err(|error| error.to_string())?;
         let value = expr
             .evaluate(&session.target)
             .map_err(|error| error.to_string())?;
@@ -169,18 +169,10 @@ impl Server {
     }
 
     pub(super) fn evaluate_expression(&mut self, expression: &str) -> result::Result<u64, String> {
-        let radix = self.repl_radix();
         let session = self.session()?;
-        Expr::eval_with_radix(expression, &session.target, radix)
+        Expr::eval_with_radix(expression, &session.target, session.radix)
             .map(|address| address.0)
             .map_err(|error| error.to_string())
-    }
-
-    fn repl_radix(&mut self) -> NumberRadix {
-        self.repl
-            .as_ref()
-            .map(ReplStore::radix)
-            .unwrap_or(NumberRadix::Hexadecimal)
     }
 
     /// What the console can repoint underneath the client: the selected

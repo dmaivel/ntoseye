@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::BreakpointScope;
-use super::install::{BreakpointBackend, forget_site};
+use super::install::{BreakpointBackend, forget_site, write_user_code};
 use super::spec::CodeSite;
 use super::{BreakpointConfig, BreakpointInfo, BreakpointManager, PartitionFilter, StepFrame};
 #[cfg(test)]
@@ -14,7 +14,6 @@ use super::{HardwareBreakpoint, install::BreakpointPatch};
 use crate::arch::HwBreakpointAccess;
 use crate::backend::dbg_backend::DebugBackend;
 use crate::base::error::{Error, Result};
-use crate::base::memory::MemoryOps;
 use crate::base::types::{Dtb, VirtAddr};
 use crate::nt::target::Target;
 
@@ -105,7 +104,9 @@ impl BreakpointManager {
 
     /// A one-shot breakpoint for a run to `address`; `frame` restricts it to
     /// a step's execution, and `partition` makes it a guest partition's (see
-    /// [`PartitionFilter`]), whose code only a debug register traps.
+    /// [`PartitionFilter`]), whose code only a debug register traps. `root` is
+    /// the address space the stepping thread runs in, which a user-space
+    /// `address` is in.
     pub fn add_temporary_code(
         &mut self,
         client: &mut dyn DebugBackend,
@@ -113,18 +114,17 @@ impl BreakpointManager {
         address: VirtAddr,
         frame: Option<StepFrame>,
         partition: Option<PartitionFilter>,
+        root: Dtb,
     ) -> Result<u32> {
         let config = BreakpointConfig {
             scope: match partition {
                 // `debugger` is the target, whose processes are not the
                 // partition's: the step's thread alone says whose hit it is.
                 Some(_) => Some(BreakpointScope::Kernel),
-                // A user-space target is in the process the stop is in,
-                // whichever process inspection is attached to.
+                // A user-space target is in the process the stepping thread
+                // runs, whichever process inspection is attached to.
                 None => (!debugger.arch().paging().is_kernel_address(address))
-                    .then(|| {
-                        debugger.process_for_cr3(debugger.normalize_dtb(debugger.current_dtb()))
-                    })
+                    .then(|| debugger.process_for_cr3(debugger.normalize_dtb(root)))
                     .flatten()
                     .map(|process| BreakpointScope::process(&process)),
             },
@@ -132,10 +132,18 @@ impl BreakpointManager {
             partition,
             ..BreakpointConfig::default()
         };
-        // Secure-kernel code is never patched, and a partition's cannot be:
-        // a run-to there (`p` over a call, `gu`) takes a debug-register slot
-        // for the run instead.
-        let (id, hardware) = if partition.is_some() || debugger.is_secure_address(address) {
+        // Secure-kernel code is never patched, and a partition's cannot be,
+        // nor user-space code on a backend that plants no user-mode software
+        // breakpoint (a GDB stub: see `validate_scope_capability`): a run-to
+        // there (`p` over a call, `gu`) takes a debug-register slot for the
+        // run instead.
+        let user_space_unpatchable = !debugger.arch().paging().is_kernel_address(address)
+            && !client.supports_user_mode_breakpoints()
+            && client.supports_watchpoints();
+        let (id, hardware) = if partition.is_some()
+            || debugger.is_secure_address(address)
+            || user_space_unpatchable
+        {
             let id = self.add_hardware_configured(
                 client,
                 debugger,
@@ -474,6 +482,73 @@ impl BreakpointManager {
         Ok(())
     }
 
+    /// Run `write` with the breakpoints `ids` lifted (see
+    /// [`Self::sites_under_write`]), then plant them again over whatever
+    /// code it left there. A write that lands on a site changes the
+    /// instruction the breakpoint displaced, not the breakpoint: written
+    /// over the planted instruction instead, it would be undone by the
+    /// breakpoint's removal, which puts the displaced copy back, and a KD
+    /// target, which restores only where it still finds its breakpoint,
+    /// would keep the entry until it reboots. A breakpoint that cannot be
+    /// planted again is left disabled and named in the error.
+    pub fn write_under(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+        ids: &[u32],
+        write: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let mut lifted = Vec::with_capacity(ids.len());
+        for &id in ids {
+            let bp = self.breakpoints.get(&id).ok_or(Error::BPNotFound(id))?;
+            if let Err(error) = Self::uninstall_breakpoint(client, debugger, bp) {
+                let replanted = self.replant(client, debugger, &lifted);
+                return written_and_replanted(Err(error), replanted);
+            }
+            lifted.push(id);
+        }
+        let written = write();
+        let replanted = self.replant(client, debugger, &lifted);
+        written_and_replanted(written, replanted)
+    }
+
+    /// Plant the breakpoints [`Self::write_under`] lifted, each displacing
+    /// the code now at its site.
+    fn replant(
+        &mut self,
+        client: &mut dyn DebugBackend,
+        debugger: &Target,
+        ids: &[u32],
+    ) -> Result<()> {
+        let mut failed = Vec::new();
+        for &id in ids {
+            let Some(bp) = self.breakpoints.get_mut(&id) else {
+                continue;
+            };
+            match Self::install_breakpoint(client, debugger, bp.address, &bp.scope) {
+                Ok(backend) => bp.backend = backend,
+                Err(error) => {
+                    bp.enabled = false;
+                    failed.push((id, error));
+                }
+            }
+        }
+        if failed.is_empty() {
+            return Ok(());
+        }
+        for (id, _) in &failed {
+            self.forget_interrupted_hits(*id);
+        }
+        let failed: Vec<String> = failed
+            .iter()
+            .map(|(id, error)| format!("#{id} ({error})"))
+            .collect();
+        Err(Error::Breakpoint(format!(
+            "breakpoint {} could not be planted again around the write and is disabled",
+            failed.join(", ")
+        )))
+    }
+
     pub fn disable_guest_memory_patch_in_address_space(
         &mut self,
         client: &mut dyn DebugBackend,
@@ -489,9 +564,8 @@ impl BreakpointManager {
 
         match &bp.backend {
             BreakpointBackend::GuestMemoryPatch { original } => {
-                let memory = debugger.address_space(dtb);
-                memory.write_bytes(bp.address, original.as_slice())?;
-                forget_site(debugger, &memory, bp.address);
+                write_user_code(debugger, dtb, bp.address, original.as_slice())?;
+                forget_site(debugger, Self::site_dtb(debugger, bp), bp.address);
                 client.note_breakpoint_uninstalled(bp.address.0);
                 bp.enabled = false;
                 Ok(())
@@ -653,12 +727,39 @@ impl BreakpointManager {
     }
 }
 
+/// The outcome of a write made with sites lifted, given `written`, the
+/// write's, and `replanted`, planting the sites again. When both fail the
+/// error names both, so a site dropped around a failed write is reported
+/// rather than hidden behind the write's error (which a host may even take
+/// for success, as a DAP partial write).
+pub fn written_and_replanted(written: Result<()>, replanted: Result<()>) -> Result<()> {
+    match (written, replanted) {
+        (Err(written), Err(replanted)) => Err(Error::Breakpoint(format!("{written}; {replanted}"))),
+        (written, replanted) => written.and(replanted),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::arch::HwBreakpointAccess;
     use crate::base::error::Error;
     use crate::base::types::VirtAddr;
     use crate::nt::breakpoints::{BreakpointManager, HardwareBreakpoint};
+
+    #[test]
+    fn failed_write_keeps_the_replant_failure() {
+        let written = Err(Error::PartialWrite(2));
+        let replanted = Err(Error::Breakpoint("breakpoint #3 is disabled".into()));
+        let error = super::written_and_replanted(written, replanted).unwrap_err();
+        assert!(!matches!(error, Error::PartialWrite(_)));
+        let message = error.to_string();
+        assert!(message.contains("partial write"), "{message}");
+        assert!(message.contains("#3 is disabled"), "{message}");
+        assert!(matches!(
+            super::written_and_replanted(Err(Error::PartialWrite(2)), Ok(())),
+            Err(Error::PartialWrite(2))
+        ));
+    }
 
     #[test]
     fn failed_uninstall_keeps_breakpoint_managed_for_retry() {

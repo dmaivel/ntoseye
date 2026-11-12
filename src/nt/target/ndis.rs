@@ -2206,8 +2206,14 @@ impl Target {
                     let in_page = offset % PAGE_SIZE;
                     let chunk = ((PAGE_SIZE - in_page) as usize).min(end - data.len());
                     let start = data.len();
+                    let physical = pfn
+                        .checked_mul(PAGE_SIZE)
+                        .and_then(|base| base.checked_add(in_page))
+                        .ok_or_else(|| {
+                            Error::DebugInfo(format!("MDL {:#x} has PFN {pfn:#x}", mdl.0))
+                        })?;
                     data.resize(start + chunk, 0);
-                    self.read_physical(pfn * PAGE_SIZE + in_page, &mut data[start..])?;
+                    self.read_physical(physical, &mut data[start..])?;
                     offset += chunk as u64;
                 }
                 skip = 0;

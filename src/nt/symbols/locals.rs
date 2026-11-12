@@ -2,7 +2,10 @@
 //! sorting them into the frames there (the procedure's and each inlined
 //! call's), and describing where each lives by register and live range.
 
-use super::{CodeFrame, FrameLocals, LocalVariableLocation, ProcedureLocal, SymbolStore};
+use super::{
+    CodeFrame, FrameLocals, LocalVariableLocation, ProcedureLocal, SymbolStore,
+    inline::CrossModuleRefs,
+};
 use crate::{
     base::{error::Result, types::Dtb},
     nt::layout::ParsedType,
@@ -11,20 +14,21 @@ use pdb2::{FallibleIterator, TypeFinder, TypeIndex};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-#[cfg(test)]
-pub(super) fn live_range_contains(
+/// Whether `target_rva` is live in the definition range of `length` bytes
+/// at `start_rva`: inside it and in none of its `gaps`, each
+/// `(start, length)` from the range's start.
+pub fn live_range_contains(
     start_rva: u32,
     length: u16,
-    gaps: &[(u16, u16)],
+    gaps: impl IntoIterator<Item = (u16, u16)>,
     target_rva: u32,
 ) -> bool {
     let Some(relative) = target_rva.checked_sub(start_rva) else {
         return false;
     };
     relative < u32::from(length)
-        && !gaps.iter().any(|(start, length)| {
-            relative >= u32::from(*start)
-                && relative < u32::from(*start).saturating_add(u32::from(*length))
+        && !gaps.into_iter().any(|(start, length)| {
+            relative >= u32::from(start) && relative < u32::from(start) + u32::from(length)
         })
 }
 
@@ -52,15 +56,12 @@ fn pdb_live_range_contains(
     let Some(start) = range.offset.to_rva(address_map) else {
         return false;
     };
-    let Some(relative) = target_rva.checked_sub(start.0) else {
-        return false;
-    };
-    relative < u32::from(range.cb_range)
-        && !gaps.iter().any(|gap| {
-            relative >= u32::from(gap.gap_start_offset)
-                && relative
-                    < u32::from(gap.gap_start_offset).saturating_add(u32::from(gap.cb_range))
-        })
+    live_range_contains(
+        start.0,
+        range.cb_range,
+        gaps.iter().map(|gap| (gap.gap_start_offset, gap.cb_range)),
+        target_rva,
+    )
 }
 
 // pdb2 0.10.1 debug-asserts on valid Windows S_CALLEES/S_CALLERS records whose
@@ -219,6 +220,13 @@ impl SymbolStore {
         let Some(module_info) = pdb_lock.module_info(&dbi_module)? else {
             return Ok(None);
         };
+        // The variables of a call inlined from another object file have the
+        // types that file defines; one that does not resolve stays as
+        // written and shows as its index.
+        let mut refs = CrossModuleRefs::new(&module_info)?;
+        let mut global_type = |index: TypeIndex| -> Result<TypeIndex> {
+            Ok(refs.resolve(&mut pdb_lock, index)?.unwrap_or(index))
+        };
 
         // The compile flags open the module's stream, ahead of its procedures.
         let mut cpu_type = None;
@@ -332,7 +340,7 @@ impl SymbolStore {
                         guid,
                         &finder,
                         local.name.to_string().into(),
-                        local.type_index,
+                        global_type(local.type_index)?,
                         local.flags.isparam,
                         LocalVariableLocation::Unavailable {
                             reason: reason.to_string(),
@@ -417,7 +425,7 @@ impl SymbolStore {
                         guid,
                         &finder,
                         variable.name.to_string().into(),
-                        variable.type_index,
+                        global_type(variable.type_index)?,
                         variable.slot.is_some(),
                         LocalVariableLocation::Register {
                             register: pdb_register_name(variable.register, cpu_type),
@@ -437,7 +445,7 @@ impl SymbolStore {
                         guid,
                         &finder,
                         variable.name.to_string().into(),
-                        variable.type_index,
+                        global_type(variable.type_index)?,
                         variable.slot.is_some(),
                         LocalVariableLocation::RegisterRelative {
                             register: pdb_register_name(variable.register, cpu_type),
@@ -458,7 +466,7 @@ impl SymbolStore {
                         guid,
                         &finder,
                         variable.name.to_string().into(),
-                        variable.type_index,
+                        global_type(variable.type_index)?,
                         variable.slot.is_some(),
                         LocalVariableLocation::FrameRelative {
                             offset: variable.offset,
@@ -472,7 +480,7 @@ impl SymbolStore {
                             guid,
                             &finder,
                             name.to_string().into(),
-                            variable.type_index,
+                            global_type(variable.type_index)?,
                             false,
                             LocalVariableLocation::Unavailable {
                                 reason: "value spans multiple registers".to_string(),

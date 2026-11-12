@@ -4,6 +4,7 @@ use tabled::builder::Builder;
 
 use ntoseye_macros::{command, grammar};
 
+use crate::base::diagnostics;
 use crate::base::error::{Error, Result};
 use crate::base::time::filetime_to_iso;
 use crate::base::types::VirtAddr;
@@ -15,7 +16,7 @@ use crate::nt::guest::ProcessInfo;
 use crate::nt::symbols::glob_matches;
 use crate::nt::target::sched::ProcessDetail;
 use crate::nt::target::{AttachReport, decimal_pid_literal, process_by_name, process_matches};
-use crate::session::Session;
+use crate::session::{Session, ThreadContext};
 
 use super::thread::{THREAD_STACK_LIMIT, print_thread_detail};
 
@@ -189,7 +190,7 @@ enum ProcessContext {
     Process(ProcessInfo),
 }
 
-#[grammar(usage = "[eprocess|pid|0]", complete = [Process])]
+#[grammar(usage = "[eprocess|pid|name|0]", complete = [Process])]
 fn process_context_selector(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
@@ -210,19 +211,22 @@ fn process_context_selector(
         state.ctx.target.matching_processes(None).map_err(|error| {
             ArgError::Message(format!("failed to enumerate processes: {error}"))
         })?;
-    match state.process_for_selector(&selector, &processes) {
-        Some(process) => Ok(Some(ProcessContext::Process(process))),
-        None => Err(ArgError::Message(format!(
-            "no process matches '{selector}'"
-        ))),
-    }
+    state
+        .process_for_selector_or_name(&selector, &processes)
+        .map(|process| Some(ProcessContext::Process(process)))
+        .map_err(|error| ArgError::Message(error.to_string()))
 }
 
 /// Select a process address space to inspect.
 ///
-/// In this debugger, `/i` is the same as attach. `/p` and `/r` select the
-/// same non-invasive context. With no argument, the command prints the
-/// current process context.
+/// The process is named by its EPROCESS address, its PID, or its image
+/// name, as for `!process`; a name several processes share is refused.
+/// In this debugger, `/i` is the same as attach: it also selects a thread
+/// of the process, one a processor runs if there is one, else its first, so
+/// `!teb`, `!gle`, and `k` show that thread. `/p` and `/r` select the same
+/// non-invasive context, keeping the current thread, which lasts until the
+/// target executes again, as in WinDbg. With no argument, the command prints
+/// the current process context.
 #[command(
     names = [".process"],
     category = "processes and modules",
@@ -232,7 +236,7 @@ fn process_context_selector(
 )]
 fn process_context(
     state: &mut ReplState<'_>,
-    #[arg(switch = "/i")] _invasive: bool,
+    #[arg(switch = "/i")] invasive: bool,
     #[arg(switch = "/p")] _translate: bool,
     #[arg(switch = "/r")] _reload: bool,
     #[arg(parse = process_context_selector)] selection: Option<ProcessContext>,
@@ -246,11 +250,14 @@ fn process_context(
         }
     };
     state.leave_vtl1();
-    let report = state
-        .ctx
-        .target
-        .attach_process_info(process.clone())
-        .map_err(|error| Error::DebugInfo(format!("failed to select process context: {error}")))?;
+    // Only `/i` keeps the process past the next execution, as `attach` does.
+    let target = &mut state.ctx.target;
+    let report = if invasive {
+        target.attach_process_info(process.clone())
+    } else {
+        target.set_process_context(process.clone())
+    }
+    .map_err(|error| Error::DebugInfo(format!("failed to select process context: {error}")))?;
     state.caches.refresh_symbol_context(&state.ctx.target);
     state.clear_selected_frame();
     outln!(
@@ -262,10 +269,52 @@ fn process_context(
         if process.is_wow64() { ", WOW64" } else { "" },
     );
     print_user_modules(&report);
+    if invasive {
+        select_process_thread(state, &process);
+    }
     Ok(())
 }
 
+/// Select a thread of `process`, which a host just switched to, and say
+/// which: the one a processor runs, else its first (see
+/// [`Session::select_process_thread`]).
+fn select_process_thread(state: &mut ReplState<'_>, process: &ProcessInfo) {
+    match state.ctx.select_process_thread(process) {
+        Ok(Some((thread, context))) => {
+            let tid = thread
+                .tid
+                .map_or_else(|| "-".to_string(), |tid| tid.to_string());
+            match context {
+                ThreadContext::Live(vcpu) | ThreadContext::SavedVtl0(vcpu) => outln!(
+                    "thread {} (TID {tid}), running on {}",
+                    ui::addr(thread.ethread.0),
+                    ui::thread(&vcpu)
+                ),
+                // A running target has no live registers to match a
+                // processor against, so nothing was checked there.
+                ThreadContext::Parked if state.ctx.backend.is_running() => outln!(
+                    "thread {} (TID {tid}), by its stack: the target is running",
+                    ui::addr(thread.ethread.0)
+                ),
+                ThreadContext::Parked => outln!(
+                    "thread {} (TID {tid}), by its stack: no processor runs a thread of the process",
+                    ui::addr(thread.ethread.0)
+                ),
+            }
+            state.caches.refresh_symbol_context(&state.ctx.target);
+        }
+        Ok(None) => outln!("{}", ui::muted("the process has no thread to select")),
+        Err(error) => {
+            diagnostics::print_warning(format!("did not select a thread of the process: {error}"))
+        }
+    }
+}
+
 /// Attach to a process by PID.
+///
+/// The command also selects a thread of the process, as .process /i does:
+/// one a processor runs, whose registers are live, else its first, by its
+/// stack.
 #[command(
     names = ["attach"],
     category = "processes and modules",
@@ -294,6 +343,7 @@ fn attach(state: &mut ReplState<'_>, #[arg(complete = Process)] pid: String) -> 
             state.clear_selected_frame();
             outln!("attached to {} (PID {})", report.name, process.pid);
             print_user_modules(&report);
+            select_process_thread(state, &process);
         }
         Err(e) => error!("failed to attach: {}", e),
     }
@@ -333,7 +383,7 @@ fn detach(state: &mut ReplState<'_>) -> Result<()> {
 )]
 fn context(state: &mut ReplState<'_>, #[arg(complete = Expression)] dtb: String) -> Result<()> {
     let text = dtb.as_str();
-    let dtb = match Expr::eval_with_radix(text, &state.ctx.target, state.radix) {
+    let dtb = match Expr::eval_with_radix(text, &state.ctx.target, state.ctx.radix) {
         Ok(value) => value,
         Err(error) => {
             error!("invalid translation base '{}': {}", text, error);
@@ -353,6 +403,8 @@ fn context(state: &mut ReplState<'_>, #[arg(complete = Expression)] dtb: String)
     state.leave_vtl1();
     if state.ctx.target.attached_process().is_some() {
         state.ctx.target.detach();
+        // The root named is the context now, not the selected thread's.
+        state.ctx.target.clear_current_windows_thread_context();
     }
     state.clear_selected_frame();
     state.ctx.target.set_context_dtb_override(dtb.0);
@@ -459,8 +511,12 @@ fn print_ps(processes: &[ProcessInfo]) {
 fn print_process_detail(detail: &ProcessDetail) {
     let size =
         |value: Option<u64>| value.map_or_else(|| "-".to_string(), |value| format!("{value:#x}"));
+    let vad_root = match detail.vad_count {
+        Some(count) => format!("{} Vads {count}", display_pointer(detail.vad_root)),
+        None => display_pointer(detail.vad_root),
+    };
     let rows = [
-        ("VadRoot", display_pointer(detail.vad_root)),
+        ("VadRoot", vad_root),
         ("Token", display_pointer(detail.token)),
         ("Wow64Peb", display_pointer(detail.process.wow64_peb)),
         (
@@ -507,7 +563,7 @@ impl ReplState<'_> {
         {
             return Some(process.clone());
         }
-        let address = Expr::eval_with_radix(selector, &self.ctx.target, self.radix).ok();
+        let address = Expr::eval_with_radix(selector, &self.ctx.target, self.ctx.radix).ok();
         if let Some(address) = address
             && let Some(process) = processes.iter().find(|process| process.eprocess == address)
         {

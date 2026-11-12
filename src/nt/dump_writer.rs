@@ -1,6 +1,7 @@
 //! `.dump`: write a WinDbg-loadable kernel memory dump (`PAGEDU64` full dump)
 //! from a live target's physical memory.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -11,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use ntoseye_macros::record;
 
 use crate::arch::{Arch, RegisterMap};
+use crate::backend::dbg_backend::processor_index_from_backend_thread_id;
 use crate::base::bytes::{write_u32, write_u64};
 use crate::base::error::{Error, Result};
 use crate::base::memory::{MemoryOps, PAGE_SIZE};
@@ -54,6 +56,50 @@ pub fn context_from_registers(arch: Arch, source: &RegisterMap, registers: &[u8]
     context
 }
 
+/// A `CONTEXT` from registers known by name (a stack walk's, or the state
+/// the Windows hypervisor saved), claiming the control and integer state.
+/// Registers the map lacks stay zero. AMD64's segments are a 64-bit user
+/// thread's when `registers` does not hold them.
+pub fn context_from_named_registers(arch: Arch, registers: &HashMap<String, u64>) -> Vec<u8> {
+    let map = arch.register_map();
+    let mut context = vec![0u8; arch.context_size()];
+    for (name, value) in registers {
+        if map.contains(name) {
+            let _ = map.write_u64(name, &mut context, *value);
+        }
+    }
+    let flags = arch.context_flags();
+    let mut claimed = flags.control | flags.integer;
+    if arch == Arch::Amd64 {
+        for (segment, selector) in [("cs", 0x33), ("ss", 0x2b)] {
+            if !registers.contains_key(segment) {
+                let _ = map.write_u64(segment, &mut context, selector);
+            }
+        }
+        claimed |= flags.segments;
+    }
+    write_u32(&mut context, flags.offset, claimed);
+    context
+}
+
+/// A processor's `CONTEXT` as NT sees it. When its live registers are not
+/// NT's (it is halted in the Windows hypervisor, or runs VTL1), that is
+/// `vtl0`, the VTL0 state the hypervisor saved; otherwise its live
+/// `registers`, in the `source` layout, or a KD register buffer (a
+/// `CONTEXT` first) when `source` is `None`.
+pub fn nt_context(
+    arch: Arch,
+    source: Option<&RegisterMap>,
+    registers: &[u8],
+    vtl0: Option<&HashMap<String, u64>>,
+) -> Vec<u8> {
+    match (vtl0, source) {
+        (Some(vtl0), _) => context_from_named_registers(arch, vtl0),
+        (None, Some(source)) => context_from_registers(arch, source, registers),
+        (None, None) => registers.to_vec(),
+    }
+}
+
 #[repr(C)]
 struct PhysicalMemoryDescriptor64 {
     number_of_runs: u32,
@@ -79,6 +125,39 @@ pub struct DumpException {
     pub parameter_count: u32,
 }
 
+/// A processor's NT `CONTEXT`, and where its `_KPRCB` keeps the context the
+/// kernel saves when it stops the processor, which a dump's reader takes
+/// the processor's registers from. A live target's processors were stopped
+/// from outside, so RAM there holds whatever the kernel last saved.
+#[derive(Debug, Clone)]
+pub struct ProcessorContext {
+    /// A `CONTEXT` first, as [`DumpMetadata::context`] is.
+    pub context: Vec<u8>,
+    /// The guest-physical pieces of the saved context, in order, each its
+    /// address and length; together they are a `CONTEXT` long.
+    pub saved_at: Vec<(PhysAddr, u64)>,
+}
+
+/// The backend threads that run the kernel's processors, and the processor
+/// count a dump records. A VM's stub lists every vCPU it has, and the
+/// kernel may use fewer (Windows 7 on 2 of 8), so the count is the
+/// kernel's own (`KeNumberProcessors`) and only its processors' threads are
+/// kept; without it, every thread the backend lists.
+pub fn kernel_processors(vcpus: Vec<String>, kernel_count: Option<u16>) -> (Vec<String>, u32) {
+    let Some(count) = kernel_count else {
+        let count = vcpus.len().clamp(1, usize::from(MAX_PROCESSORS)) as u32;
+        return (vcpus, count);
+    };
+    let count = count.clamp(1, MAX_PROCESSORS);
+    let vcpus = vcpus
+        .into_iter()
+        .filter(|vcpu| {
+            processor_index_from_backend_thread_id(vcpu).is_some_and(|index| index < count)
+        })
+        .collect();
+    (vcpus, u32::from(count))
+}
+
 /// Metadata needed to build the fixed `_DUMP_HEADER64` prefix. The writer
 /// deliberately accepts this separately from `Target`: it keeps byte layout
 /// and physical-page streaming testable with a synthetic memory source and
@@ -94,23 +173,36 @@ pub struct DumpMetadata {
     pub pfn_database: u64,
     pub ps_loaded_module_list: u64,
     pub ps_active_process_head: u64,
+    /// `VER_NT_*` (`KUSER_SHARED_DATA.NtProductType`): 1 workstation,
+    /// 2 domain controller, 3 server; 0 when unknown.
+    pub product_type: u32,
     pub number_processors: u32,
     pub bug_check_code: u32,
     pub bug_check_parameters: [u64; 4],
     pub kd_debugger_data_block: u64,
-    /// A KD register buffer. The writer takes the leading `CONTEXT` record for
-    /// `arch` -- the buffer's synthetic control/system-register slots sit past
-    /// it -- and leaves the rest of the header's context bytes zero.
+    /// The current processor's NT `CONTEXT`, as in [`Self::processors`]: a
+    /// KD register buffer, of which the writer takes the leading `CONTEXT`
+    /// record for `arch` -- the buffer's synthetic control/system-register
+    /// slots sit past it -- and leaves the rest of the header's context
+    /// bytes zero.
     pub context: Vec<u8>,
+    /// Each processor's NT context, written where its `_KPRCB` keeps it in
+    /// place of what RAM holds there.
+    pub processors: Vec<ProcessorContext>,
     pub exception: Option<DumpException>,
     /// Physical RAM runs as `(base_page, page_count)`, in the order in which
     /// their page contents are streamed after the header.
     pub runs: Vec<(u64, u64)>,
+    /// The debugger's own breakpoints in guest RAM: each site's
+    /// guest-physical address and the bytes it displaced, which the dump
+    /// holds in its place.
+    pub displaced: Vec<(PhysAddr, Vec<u8>)>,
 }
 
-struct PartialDumpCleanup<'a> {
-    path: &'a Path,
-    keep: bool,
+/// Removes a dump's temporary file unless the dump completed.
+pub struct PartialDumpCleanup<'a> {
+    pub path: &'a Path,
+    pub keep: bool,
 }
 
 impl Drop for PartialDumpCleanup<'_> {
@@ -138,6 +230,20 @@ impl DumpMetadata {
                 "KD CONTEXT is too short: {} bytes, expected at least {context_size}",
                 self.context.len(),
             )));
+        }
+        for (index, processor) in self.processors.iter().enumerate() {
+            if processor.context.len() < context_size {
+                return Err(Error::DebugInfo(format!(
+                    "processor {index}'s CONTEXT is too short: {} bytes, expected at least {context_size}",
+                    processor.context.len(),
+                )));
+            }
+            let saved: u64 = processor.saved_at.iter().map(|&(_, length)| length).sum();
+            if saved != context_size as u64 {
+                return Err(Error::DebugInfo(format!(
+                    "processor {index}'s saved context spans {saved:#x} bytes, not a CONTEXT's {context_size:#x}"
+                )));
+            }
         }
         let mut pages = 0u64;
         for (run_index, &(base_page, page_count)) in self.runs.iter().enumerate() {
@@ -180,7 +286,9 @@ impl DumpMetadata {
     }
 }
 
-fn create_temporary_file(destination: &Path) -> Result<(PathBuf, File)> {
+/// A new file, private to the user, beside `destination`, for a dump to be
+/// written to and then renamed into place.
+pub fn create_temporary_file(destination: &Path) -> Result<(PathBuf, File)> {
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     let name = destination.file_name().ok_or_else(|| {
         Error::DebugInfo(format!(
@@ -273,6 +381,11 @@ fn build_header(metadata: &DumpMetadata, pages: u64) -> Result<Vec<u8>> {
         &mut header,
         offset_of!(Header64, machine_image_type),
         u32::from(metadata.arch.machine_type()),
+    );
+    write_u32(
+        &mut header,
+        offset_of!(Header64, product_type),
+        metadata.product_type,
     );
     write_u32(
         &mut header,
@@ -408,6 +521,32 @@ where
     let mut writer = BufWriter::new(file);
     writer.write_all(&header)?;
 
+    // The bytes the dump holds in place of RAM's -- the debugger's
+    // breakpoints' displaced bytes, and each processor's NT context where
+    // its `_KPRCB` keeps it -- one by one, in address order, so each page
+    // finds its own with a search rather than a pass over every site.
+    let mut replaced: Vec<(PhysAddr, u8)> = metadata
+        .displaced
+        .iter()
+        .flat_map(|(address, bytes)| {
+            (0..)
+                .map(move |index| address + index)
+                .zip(bytes.iter().copied())
+        })
+        .collect();
+    let context_size = metadata.arch.context_size();
+    for processor in &metadata.processors {
+        let mut context = processor.context[..context_size].iter().copied();
+        for &(address, length) in &processor.saved_at {
+            replaced.extend(
+                (0..length)
+                    .map(|offset| address + offset)
+                    .zip(context.by_ref()),
+            );
+        }
+    }
+    replaced.sort_unstable_by_key(|&(address, _)| address);
+
     let mut page = [0u8; PAGE_SIZE];
     let mut unreadable_pages = 0u64;
     for &(base_page, page_count) in &metadata.runs {
@@ -424,6 +563,13 @@ where
             if memory.read_bytes(address, &mut page).is_err() {
                 page.fill(0);
                 unreadable_pages += 1;
+            }
+            let first = replaced.partition_point(|&(site, _)| site < address);
+            for &(site, byte) in replaced[first..]
+                .iter()
+                .take_while(|&&(site, _)| site - address < PAGE_SIZE as u64)
+            {
+                page[(site - address) as usize] = byte;
             }
             writer.write_all(&page)?;
             on_page();
@@ -628,11 +774,26 @@ pub fn physical_runs(target: &Target) -> Result<Vec<(u64, u64)>> {
 mod tests {
     use super::*;
     use crate::arch::{RegisterInfo, amd64, arm64};
+    use crate::backend::dbg_backend::DebugBackend;
     use crate::base::bytes::write_u64;
-    use crate::nt::dmp::DmpMem;
+    use crate::nt::dmp::{DmpBackend, DmpMem};
     use std::cell::Cell;
     use std::fs;
     use std::path::{Path, PathBuf};
+
+    /// A gdb stub lists all 8 of a VM's vCPUs where Windows 7 runs on 2: the
+    /// dump records the kernel's 2 processors and writes contexts for those
+    /// alone, where a reader would list 6 more with no context.
+    #[test]
+    fn a_dump_records_the_kernels_processors_not_the_vms() {
+        let vcpus: Vec<String> = (1..=8).map(|tid| format!("p1.{tid:x}")).collect();
+        assert_eq!(
+            kernel_processors(vcpus.clone(), Some(2)),
+            (vec!["p1.1".to_string(), "p1.2".to_string()], 2)
+        );
+        // Without the kernel's count, every vCPU the backend lists.
+        assert_eq!(kernel_processors(vcpus.clone(), None), (vcpus, 8));
+    }
 
     #[test]
     fn a_stub_register_file_becomes_a_context_by_register_name() {
@@ -728,8 +889,11 @@ mod tests {
             bug_check_parameters: [0; 4],
             kd_debugger_data_block: 0,
             context: vec![0u8; amd64::CONTEXT_SIZE],
+            processors: Vec::new(),
             exception: None,
             runs,
+            product_type: 1,
+            displaced: Vec::new(),
         }
     }
 
@@ -765,6 +929,18 @@ mod tests {
         let memory = SyntheticMemory { bytes };
         let mut context = vec![0u8; amd64::CONTEXT_SIZE];
         write_u64(&mut context, amd64::OFFSET_RIP, 0xffff_f800_1234_5678);
+        // Breakpoints in the first page, across the first two, and in the
+        // last, which the dump must hold the displaced bytes of instead.
+        let displaced = vec![
+            (0x4000 + 0x123, vec![0x48]),
+            (0x10, vec![0x4c]),
+            (0xffe, vec![0x11, 0x22, 0x33, 0x44]),
+        ];
+        let mut expected = memory.bytes.clone();
+        for (address, bytes) in &displaced {
+            let start = *address as usize;
+            expected[start..start + bytes.len()].copy_from_slice(bytes);
+        }
         let metadata = DumpMetadata {
             arch: Arch::Amd64,
             major_version: 0xf,
@@ -773,13 +949,16 @@ mod tests {
             pfn_database: 0xffff_f800_1111_0000,
             ps_loaded_module_list: 0xffff_f800_2222_0000,
             ps_active_process_head: 0xffff_f800_3333_0000,
+            product_type: 1,
             number_processors: 1,
             bug_check_code: 0,
             bug_check_parameters: [0; 4],
             kd_debugger_data_block: 0,
             context,
+            processors: Vec::new(),
             exception: None,
             runs: runs.clone(),
+            displaced,
         };
         let path = std::env::temp_dir().join(format!(
             "ntoseye-dump-writer-{}-{}.dmp",
@@ -797,6 +976,7 @@ mod tests {
         let system_info = info.system_info.as_ref().unwrap();
         assert_eq!(system_info.major_version, metadata.major_version);
         assert_eq!(system_info.minor_version, metadata.minor_version);
+        assert_eq!(system_info.product_type, 1);
         let physical = offset_of!(Header64, physical_memory_block_buffer);
         let raw = fs::read(&path).unwrap();
         assert_eq!(
@@ -824,7 +1004,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 &actual,
-                &memory.bytes[page as usize * PAGE_SIZE..(page as usize + 1) * PAGE_SIZE]
+                &expected[page as usize * PAGE_SIZE..(page as usize + 1) * PAGE_SIZE]
             );
         }
 
@@ -897,6 +1077,167 @@ mod tests {
         let mut actual = [0u8; PAGE_SIZE];
         dump.read_bytes(PAGE_SIZE as u64, &mut actual).unwrap();
         assert_eq!(&actual, &memory.bytes[PAGE_SIZE..2 * PAGE_SIZE]);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    /// A GDB-style register file of a vCPU at `rip` and `rsp` on root `cr3`.
+    fn stub_registers(rip: u64, rsp: u64, cr3: u64) -> (RegisterMap, Vec<u8>) {
+        let register = |name: &str, offset, size| RegisterInfo {
+            name: name.to_string(),
+            offset,
+            size,
+            regnum: offset,
+        };
+        let stub = RegisterMap::from_registers(vec![
+            register("rip", 0, 8),
+            register("rsp", 8, 8),
+            register("cs", 16, 4),
+            register("cr3", 20, 8),
+        ]);
+        let mut registers = vec![0u8; 28];
+        stub.write_u64("rip", &mut registers, rip).unwrap();
+        stub.write_u64("rsp", &mut registers, rsp).unwrap();
+        stub.write_u64("cs", &mut registers, 0x10).unwrap();
+        stub.write_u64("cr3", &mut registers, cr3).unwrap();
+        (stub, registers)
+    }
+
+    /// A vCPU halted in the Windows hypervisor (win11.dmp's processor 0 at
+    /// `fffff83e453a6c0e`) is written with where NT left off, not with the
+    /// hypervisor's registers, which no NT stack walk can place.
+    #[test]
+    fn a_processor_outside_nt_gets_the_saved_vtl0_context() {
+        let (stub, hypervisor) =
+            stub_registers(0xffff_f83e_453a_6c0e, 0xffff_e700_0000_59e8, 0x1ae000);
+        let vtl0 = HashMap::from([
+            ("rip".to_string(), 0xffff_f805_a2a2_c7cf),
+            ("rsp".to_string(), 0xffff_f805_34b6_39a8),
+            ("eflags".to_string(), 0x40246),
+            ("cs".to_string(), 0x10),
+            ("ss".to_string(), 0x18),
+            ("cr3".to_string(), 0x1ad000),
+        ]);
+        let layout = Arch::Amd64.register_map();
+
+        let saved = nt_context(Arch::Amd64, Some(&stub), &hypervisor, Some(&vtl0));
+        assert_eq!(saved.len(), amd64::CONTEXT_SIZE);
+        assert_eq!(
+            layout.read_u64("rip", &saved).unwrap(),
+            0xffff_f805_a2a2_c7cf
+        );
+        assert_eq!(
+            layout.read_u64("rsp", &saved).unwrap(),
+            0xffff_f805_34b6_39a8
+        );
+        assert_eq!(layout.read_u64("ss", &saved).unwrap(), 0x18);
+        assert_eq!(layout.read_u64("eflags", &saved).unwrap(), 0x40246);
+
+        let live = nt_context(Arch::Amd64, Some(&stub), &hypervisor, None);
+        assert_eq!(
+            layout.read_u64("rip", &live).unwrap(),
+            0xffff_f83e_453a_6c0e
+        );
+    }
+
+    /// Every processor's NT context lands where its `_KPRCB` keeps it, over
+    /// the stale or zero context RAM held there, including one split across
+    /// two physical pages; the header holds the current processor's, so a
+    /// reader taking the contexts from the PRCBs selects that processor and
+    /// gives each one NT's registers.
+    #[test]
+    fn every_processor_gets_its_nt_context_where_its_prcb_keeps_it() {
+        let layout = Arch::Amd64.register_map();
+        let context = |rip: u64, rsp: u64| {
+            let mut context = vec![0u8; amd64::CONTEXT_SIZE];
+            layout.write_u64("rip", &mut context, rip).unwrap();
+            layout.write_u64("rsp", &mut context, rsp).unwrap();
+            context
+        };
+        // RAM holds a stale context for processor 0, and none (zeros) for
+        // processor 2, as the kernel saved them when it last stopped them.
+        let mut bytes = vec![0u8; 4 * PAGE_SIZE];
+        let stale = context(0xffff_f805_a287_e535, 0xffff_f805_34b6_3de8);
+        bytes[0x340..0x340 + amd64::CONTEXT_SIZE].copy_from_slice(&stale);
+        let memory = SyntheticMemory { bytes };
+
+        let (stub, hypervisor) =
+            stub_registers(0xffff_f83e_453a_6c0e, 0xffff_e700_0000_59e8, 0x1ae000);
+        let vtl0 = HashMap::from([
+            ("rip".to_string(), 0xffff_f805_a2a2_c7cf),
+            ("rsp".to_string(), 0xffff_f28e_9684_5b68),
+            ("cs".to_string(), 0x10),
+        ]);
+        let (_, nt_live) = stub_registers(0xffff_f805_a2a2_c7cf, 0xffff_f805_34b6_39a8, 0x1ad000);
+        let (_, nt_live_2) = stub_registers(0xffff_f805_a2a2_d000, 0xffff_f28e_9687_d9a8, 0x1ad000);
+        // Processor 1, halted in the hypervisor, is the current one.
+        let contexts = [
+            nt_context(Arch::Amd64, Some(&stub), &nt_live, None),
+            nt_context(Arch::Amd64, Some(&stub), &hypervisor, Some(&vtl0)),
+            nt_context(Arch::Amd64, Some(&stub), &nt_live_2, None),
+        ];
+        let split = 0x100u64;
+        let sites = [
+            vec![(0x340, amd64::CONTEXT_SIZE as u64)],
+            vec![(PAGE_SIZE as u64 + 0x340, amd64::CONTEXT_SIZE as u64)],
+            vec![
+                (2 * PAGE_SIZE as u64 - split, split),
+                (3 * PAGE_SIZE as u64, amd64::CONTEXT_SIZE as u64 - split),
+            ],
+        ];
+        let metadata = DumpMetadata {
+            number_processors: 3,
+            context: contexts[1].clone(),
+            processors: contexts
+                .iter()
+                .zip(&sites)
+                .map(|(context, saved_at)| ProcessorContext {
+                    context: context.clone(),
+                    saved_at: saved_at.clone(),
+                })
+                .collect(),
+            ..test_metadata(vec![(0, 4)])
+        };
+        let path = std::env::temp_dir().join(format!(
+            "ntoseye-dump-writer-{}-processor-contexts.dmp",
+            std::process::id()
+        ));
+
+        write_kernel_dump(&path, &memory, &metadata, || false, || {}).unwrap();
+        let dump = DmpMem::open(&path).unwrap();
+        let saved: Vec<Option<Vec<u8>>> = sites
+            .iter()
+            .map(|site| {
+                let mut context = Vec::new();
+                for &(address, length) in site {
+                    let mut piece = vec![0u8; length as usize];
+                    dump.read_bytes(address, &mut piece).unwrap();
+                    context.extend(piece);
+                }
+                Some(context)
+            })
+            .collect();
+        for (saved, expected) in saved.iter().zip(&contexts) {
+            assert_eq!(saved.as_deref(), Some(&expected[..]));
+        }
+        let mut backend = DmpBackend::new(dump.info());
+        backend.set_processor_contexts(saved, vec![Vec::new(); 3], Vec::new());
+
+        assert_eq!(backend.stopped_thread_id().unwrap(), "p1.2");
+        for (processor, rip) in [
+            (1, 0xffff_f805_a2a2_c7cf),
+            (2, 0xffff_f805_a2a2_c7cf),
+            (3, 0xffff_f805_a2a2_d000),
+        ] {
+            backend
+                .set_current_thread(&format!("p1.{processor}"))
+                .unwrap();
+            let registers = backend.read_registers().unwrap();
+            assert_eq!(
+                backend.register_map().read_u64("rip", &registers).unwrap(),
+                rip
+            );
+        }
 
         fs::remove_file(path).unwrap();
     }

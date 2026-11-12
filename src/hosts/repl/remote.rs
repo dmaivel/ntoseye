@@ -49,11 +49,16 @@ pub fn run_remote_command(
         }
     };
 
-    let status = state.ctx.run_status();
+    let mut status = state.ctx.run_status();
     // run_status can ingest a stop that arrived at the end of dispatch. Surface
-    // it in this result rather than deferring it to the next remote call.
+    // it in this result rather than deferring it to the next remote call, and
+    // re-read the status after: the stop's action may have resumed the target.
+    let pending = state.ctx.stop_pending();
     let (_, late) = output::capture(|| state.surface_parked_stop());
     text.push_str(&late);
+    if pending {
+        status = state.ctx.run_status();
+    }
     let reported_error = diagnostics::errors_reported() != errors;
 
     let result = RemoteCommandResult {

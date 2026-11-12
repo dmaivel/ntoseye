@@ -65,11 +65,11 @@ To download the symbols again when the cache has a copy, use `--force-download-s
 
 ## Breakpoints and stepping
 
-**A user-mode breakpoint over KD fails with `NTSTATUS 0xc0000001 for api 0x313e`.** When VBS is on, Windows does not allow the debugger to write to user-mode code, and `ntoseye` always writes breakpoints through KD. The `--memory-source` option does not change this because it controls only reads. Use a hardware execution breakpoint instead ({command}`ba` `e1`, or `hardware=True` in the SDK), which hits without writing to memory. There are four hardware breakpoint slots.
+**A user-mode breakpoint over KD fails with `Windows refused to write the breakpoint`.** When VBS is on, Windows does not allow the debugger to write some user-mode code, such as ntdll's and kernelbase's. On an x86 guest whose memory `ntoseye` reads from the VM process (`--memory-source auto` or `host`, see [where reads come from](../using/memory.md#where-reads-come-from)), `ntoseye` then writes the breakpoint into that memory itself, so the error appears only when reads go through KD, or on ARM64. There, use a hardware execution breakpoint instead ({command}`ba` `e1`, or `hardware=True` in the SDK), which hits without writing to memory. An AMD64 processor has four hardware breakpoint slots, and an ARM64 processor the number it implements, often six for execution.
 
 **A breakpoint scoped to one process slows the whole guest.** A user-mode breakpoint in a shared DLL stops each process that runs the code, and `ntoseye` resumes each hit outside the scope of the breakpoint, one at a time. [Breakpoints in shared pages](../using/breakpoints.md#user-mode-breakpoints-in-shared-pages) shows the cost and lists workarounds.
 
-**Breakpoints fail at some addresses after a session was killed.** KD has a breakpoint table with 32 entries. If a session is killed with `SIGKILL`, its entries stay installed until the next attach, which frees the entries that no live session owns. See [Breakpoints](../using/breakpoints.md).
+**Breakpoints fail at some addresses after a session was killed.** KD has a breakpoint table with 32 entries. If a session is killed with `SIGKILL`, its entries stay installed until the next attach, which frees the entries that no live session owns and warns about any that Windows keeps. See [the KD breakpoint table](../using/breakpoints.md#the-kd-breakpoint-table).
 
 ## Memory
 
@@ -79,15 +79,15 @@ To download the symbols again when the cache has a copy, use `--force-download-s
 
 ## Diagnostic output
 
-These environment variables make `ntoseye` show what it does on standard error.
+The `NTOSEYE_TRACE` environment variable makes `ntoseye` show what it does on standard error. Set it to a comma-separated list of traces, such as `NTOSEYE_TRACE=kd,step`.
 
-| Variable | Prints |
+| Trace | Prints |
 | --- | --- |
-| `NTOSEYE_KD_TRACE=1` | Each KD request and reply, with the time since the first line |
-| `NTOSEYE_KD_TRACE_BYTES=1` | The raw bytes on the KD transport |
-| `NTOSEYE_GDB_TRACE=1` | Each GDB remote protocol packet to the stub of the hypervisor and, for `ntoseye gdbserver`, each packet to its client |
-| `NTOSEYE_UNWIND_TRACE=1` | Each step of each stack unwind, to diagnose a wrong or short stack |
-| `NTOSEYE_STEP_TRACE=1` | How each hardware breakpoint stop is classified and why a filter declines it (with the armed hardware breakpoints, for a stop that matches none), each break-in after a run's timeout, each step off a breakpoint site with every stop of it and every run of the other vCPUs it waits on, and the state of a thread a walk follows, to diagnose a stop that does not come, a stop that is not taken for its breakpoint, a step that gives up, or a walk that never ends |
+| `kd` | Each KD request and reply, with the time since the first line |
+| `kd-bytes` | The raw bytes on the KD transport |
+| `gdb` | Each GDB remote protocol packet to the stub of the hypervisor and, for `ntoseye gdbserver`, each packet to its client |
+| `unwind` | Each step of each stack unwind, to diagnose a wrong or short stack |
+| `step` | How each hardware breakpoint stop is classified and why a filter declines it (with the armed hardware breakpoints, for a stop that matches none), each break-in after a run's timeout, each step off a breakpoint site with every stop of it and every run of the other vCPUs it waits on, and the state of a thread a walk follows, to diagnose a stop that does not come, a stop that is not taken for its breakpoint, a step that gives up, or a walk that never ends |
 
 ## Reporting a bug
 
@@ -96,4 +96,4 @@ Open an issue on [GitHub](https://github.com/dmaivel/ntoseye/issues) and include
 - The output of `ntoseye --version`.
 - The output of {command}`vertarget` and {command}`capabilities`.
 - The backend and the hypervisor that you use.
-- If it helps, a trace from one of the variables above.
+- If it helps, a trace from `NTOSEYE_TRACE`.

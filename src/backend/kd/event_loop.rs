@@ -2,21 +2,23 @@ use super::machine::machine;
 use std::collections::HashSet;
 use std::env::VarError;
 use std::io::ErrorKind;
-use std::sync::Arc;
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::transport::KdTransport;
 use crate::arch::{Arch, RegisterMap};
-use crate::backend::dbg_backend::DebugLog;
+use crate::backend::dbg_backend::{DebugLog, ExceptionRecord};
 use crate::backend::kd::api;
 use crate::backend::kd::framing::{
-    KdFraming, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO, PACKET_TYPE_KD_STATE_CHANGE64,
+    DataPacket, KdFraming, PACKET_TYPE_KD_DEBUG_IO, PACKET_TYPE_KD_FILE_IO,
+    PACKET_TYPE_KD_STATE_CHANGE64, is_temporary_io_error,
 };
-use crate::backend::kd::trace_enabled;
 use crate::base::bytes::{read_u16, read_u32, read_u64};
+use crate::base::env::Trace;
 use crate::base::error::{Error, Result};
 use crate::base::types::VirtAddr;
 
@@ -25,8 +27,9 @@ use super::{
     BugcheckCapture, CONTROL_REPORT_OFFSET, ControlReport, DBG_KD_COMMAND_STRING_STATE_CHANGE,
     DBG_KD_EXCEPTION_STATE_CHANGE, DBG_KD_LOAD_SYMBOLS_STATE_CHANGE, KD_INITIAL_PROBE_TIMEOUT,
     KD_INITIAL_PROGRESS_INTERVAL, KD_INITIAL_TIMEOUT_DEFAULT, KD_INITIAL_TIMEOUT_ENV,
-    KD_RECONNECT_BREAKIN_INTERVAL, KD_RECONNECT_BREAKIN_TRACE_EVERY, KD_REQUEST_TIMEOUT, PUMP_POLL,
-    STATUS_BREAKPOINT, StateChange, handle_debug_io_with_output, handle_file_io,
+    KD_RECONNECT_BREAKIN_INTERVAL, KD_RECONNECT_BREAKIN_TRACE_EVERY, KD_REQUEST_TIMEOUT,
+    LoadSymbols, PUMP_POLL, STATUS_BREAKPOINT, StateChange, handle_debug_io_with_output,
+    handle_file_io, native_trap_code,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,15 +77,34 @@ pub fn parse_state_change(payload: &[u8]) -> Result<StateChange> {
         )));
     }
     let new_state = read_u32(payload, 0);
-    let exception_code = if new_state == DBG_KD_EXCEPTION_STATE_CHANGE && payload.len() >= 36 {
-        read_u32(payload, 32)
-    } else {
-        0
-    };
     let exception_address = if new_state == DBG_KD_EXCEPTION_STATE_CHANGE && payload.len() >= 56 {
         Some(read_u64(payload, 48))
     } else {
         None
+    };
+    // DBGKM_EXCEPTION64 at 32: ExceptionCode u32 @32, ExceptionFlags u32
+    // @36, ExceptionRecord u64 @40, ExceptionAddress u64 @48,
+    // NumberParameters u32 @56, ExceptionInformation[15] u64 @64.
+    let exception_record = (new_state == DBG_KD_EXCEPTION_STATE_CHANGE && payload.len() >= 184)
+        .then(|| {
+            let count = (read_u32(payload, 56) as usize).min(EXCEPTION_MAXIMUM_PARAMETERS);
+            ExceptionRecord {
+                code: read_u32(payload, 32),
+                flags: read_u32(payload, 36),
+                record: read_u64(payload, 40),
+                address: read_u64(payload, 48),
+                parameters: (0..count)
+                    .map(|index| read_u64(payload, 64 + index * 8))
+                    .collect(),
+            }
+        });
+    let exception_code = if new_state == DBG_KD_EXCEPTION_STATE_CHANGE && payload.len() >= 36 {
+        let parameters = exception_record
+            .as_ref()
+            .map_or(&[][..], |record| &record.parameters[..]);
+        native_trap_code(read_u32(payload, 32), parameters)
+    } else {
+        0
     };
     let exception_first_chance =
         if new_state == DBG_KD_EXCEPTION_STATE_CHANGE && payload.len() >= 188 {
@@ -90,17 +112,15 @@ pub fn parse_state_change(payload: &[u8]) -> Result<StateChange> {
         } else {
             None
         };
-    let kernel_base_hint = if new_state == DBG_KD_LOAD_SYMBOLS_STATE_CHANGE && payload.len() >= 48 {
-        let base = read_u64(payload, 40);
-        (base != 0).then_some(VirtAddr(base))
-    } else {
-        None
-    };
-    // DBGKD_LOAD_SYMBOLS64 at 32: PathNameLength u32 @32, BaseOfDll u64 @40,
-    // ProcessId u64 @48, CheckSum u32 @56, SizeOfImage u32 @60,
-    // UnloadSymbols BOOLEAN @64.
-    let unload_symbols = new_state == DBG_KD_LOAD_SYMBOLS_STATE_CHANGE
-        && payload.get(64).is_some_and(|&flag| flag != 0);
+    let load_symbols = (new_state == DBG_KD_LOAD_SYMBOLS_STATE_CHANGE)
+        .then(|| load_symbols(payload))
+        .flatten();
+    // A user-mode image (`!gflag +ksl` reports them) lies in the lower half
+    // on both architectures, and is no hint at where the kernel is.
+    let kernel_base_hint = load_symbols
+        .as_ref()
+        .map(|image| image.base)
+        .filter(|base| base.0 >> 63 == 1);
     let processor = read_u16(payload, 6);
     let number_processors = read_u32(payload, 8);
     // Both drive thread ids and per-processor requests; a malformed count
@@ -125,12 +145,75 @@ pub fn parse_state_change(payload: &[u8]) -> Result<StateChange> {
         exception_address,
         program_counter: read_u64(payload, 24),
         kernel_base_hint,
-        unload_symbols,
+        load_symbols,
+        exception_record,
         is_bugcheck: false,
         bugcheck: None,
         target_reloaded: false,
         assisted_breakin: false,
         control_report: control_report(payload),
+    })
+}
+
+/// `EXCEPTION_MAXIMUM_PARAMETERS`: the room `ExceptionInformation` has.
+const EXCEPTION_MAXIMUM_PARAMETERS: usize = 15;
+
+/// The `DBGKD_LOAD_SYMBOLS64` of a load-symbols state change, at 32:
+/// PathNameLength u32 @32, BaseOfDll u64 @40, ProcessId u64 @48, CheckSum
+/// u32 @56, SizeOfImage u32 @60, UnloadSymbols BOOLEAN @64. The path, ANSI
+/// and NUL-terminated, is the payload's last PathNameLength bytes. `None`
+/// for a payload too short to hold the base or with no image base; a field
+/// past a short payload's end reads as 0.
+fn load_symbols(payload: &[u8]) -> Option<LoadSymbols> {
+    if payload.len() < 48 {
+        return None;
+    }
+    let base = read_u64(payload, 40);
+    if base == 0 {
+        return None;
+    }
+    let path_len = read_u32(payload, 32) as usize;
+    let path = payload
+        .len()
+        .checked_sub(path_len)
+        .filter(|&start| path_len != 0 && start >= 65)
+        .map(|start| {
+            let bytes = &payload[start..];
+            let end = bytes
+                .iter()
+                .position(|&byte| byte == 0)
+                .unwrap_or(bytes.len());
+            String::from_utf8_lossy(&bytes[..end]).into_owned()
+        })
+        .filter(|path| !path.is_empty());
+    kd_trace!(
+        "kd: load-symbols {} {} at {base:#x}, process {:#x}",
+        if payload.get(64).is_some_and(|&flag| flag != 0) {
+            "unload"
+        } else {
+            "load"
+        },
+        path.as_deref().unwrap_or("<no path>"),
+        if payload.len() >= 56 {
+            read_u64(payload, 48)
+        } else {
+            0
+        }
+    );
+    Some(LoadSymbols {
+        base: VirtAddr(base),
+        size: if payload.len() >= 64 {
+            read_u32(payload, 60)
+        } else {
+            0
+        },
+        process: if payload.len() >= 56 {
+            read_u64(payload, 48)
+        } else {
+            0
+        },
+        unload: payload.get(64).is_some_and(|&flag| flag != 0),
+        path,
     })
 }
 
@@ -286,9 +369,7 @@ pub fn poll_for_initial_break(
             },
         ) {
             Ok(stop) => break Ok(stop),
-            Err(Error::Io(e))
-                if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
-            {
+            Err(Error::Io(e)) if is_temporary_io_error(e.kind()) => {
                 let elapsed =
                     budget.saturating_sub(deadline.saturating_duration_since(Instant::now()));
                 let now = Instant::now();
@@ -355,18 +436,12 @@ pub fn breakin_and_wait(
         },
     ) {
         Ok(stop) => Ok(stop),
-        Err(Error::Io(e)) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-            Err(Error::Kd(format!(
-                "no break-in response within {}s",
-                budget.as_secs()
-            )))
-        }
+        Err(Error::Io(e)) if is_temporary_io_error(e.kind()) => Err(Error::Kd(format!(
+            "no break-in response within {}s",
+            budget.as_secs()
+        ))),
         Err(e) => Err(e),
     }
-}
-
-pub fn is_temporary_io_error(kind: ErrorKind) -> bool {
-    matches!(kind, ErrorKind::WouldBlock | ErrorKind::TimedOut)
 }
 
 /// Run a KD request under `timeout`, then leave the socket with that timeout
@@ -498,15 +573,35 @@ pub fn await_state_change(
     } = options;
     let mut target_reloaded = false;
     loop {
-        if let Some(deadline) = deadline
+        // A stop the target reached while answering a request comes first:
+        // it has been the target's state since. It takes no wait, so a
+        // deadline already reached (a poll) still reports it.
+        let held = framing.take_held_stop();
+        if held.is_none()
+            && let Some(deadline) = deadline
             && Instant::now() >= deadline
         {
             return Err(Error::Io(std::io::Error::from(ErrorKind::TimedOut)));
         }
-        let pkt = framing.recv_data()?;
+        let held_bugcheck = held.as_ref().and_then(|held| held.bugcheck.clone());
+        if let Some(held) = &held {
+            kd_trace!(
+                "kd: await: reporting the stop held since a request: p{} at {:#x}, bugcheck {:?}",
+                held.key.0 + 1,
+                held.key.1,
+                held_bugcheck.as_ref().map(|info| info.code)
+            );
+        }
+        let pkt = match held {
+            Some(held) => DataPacket {
+                packet_type: PACKET_TYPE_KD_STATE_CHANGE64,
+                payload: held.payload,
+            },
+            None => framing.recv_data()?,
+        };
         match pkt.packet_type {
             PACKET_TYPE_KD_STATE_CHANGE64 => {
-                if trace_enabled() {
+                if Trace::Kd.enabled() {
                     eprintln!("kd: state-change payload ({} bytes):", pkt.payload.len());
                     for chunk in pkt.payload.chunks(16) {
                         eprintln!(
@@ -522,7 +617,8 @@ pub fn await_state_change(
                 let mut stop = parse_state_change(&pkt.payload)?;
                 target_reloaded |= framing.take_peer_reset_seen();
                 stop.target_reloaded = target_reloaded;
-                let in_bugcheck = bugcheck.as_deref().copied().unwrap_or(false);
+                let in_bugcheck =
+                    held_bugcheck.is_some() || bugcheck.as_deref().copied().unwrap_or(false);
                 // Surface exception breaks (and anything unrecognised); during a
                 // bugcheck, surface even the notification kinds. Otherwise the
                 // load-symbols notification is surfaced for reconciliation while
@@ -534,16 +630,20 @@ pub fn await_state_change(
                 {
                     if in_bugcheck {
                         stop.is_bugcheck = true;
-                        stop.bugcheck = bugcheck_capture
-                            .as_ref()
-                            .and_then(|capture| capture.finish());
+                        stop.bugcheck = held_bugcheck.or_else(|| {
+                            bugcheck_capture
+                                .as_ref()
+                                .and_then(|capture| capture.finish())
+                        });
                     }
+                    framing.note_current_stop(stop.key());
                     return Ok(stop);
                 }
                 // Load/unload notifications are surfaced to the foreground as
                 // an internal stop. Command-string notifications remain fully
                 // transparent and are acknowledged here as before.
                 if stop.new_state == DBG_KD_LOAD_SYMBOLS_STATE_CHANGE {
+                    framing.note_current_stop(stop.key());
                     return Ok(stop);
                 }
                 kd_trace!(
@@ -664,15 +764,15 @@ pub fn advance_pc_past_breakpoint(
     let next_pc = pc.wrapping_add(u64::from(arch.breakpoint_size()));
     register_map.write_u64(arch.pc_register(), &mut context, next_pc)?;
     kd_trace!(
-        "kd: advance_pc: p{} read pc={:#x}, writing {}-byte CONTEXT in chunks",
+        "kd: advance_pc: p{} read pc={:#x}, writing {}-byte CONTEXT",
         processor + 1,
         pc,
         context.len()
     );
     with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
-        api::set_context_chunked(framing, processor, &context)
+        api::set_context(framing, processor, context_flags, &context)
     })?;
-    if trace_enabled()
+    if Trace::Kd.enabled()
         && let Ok(verify_context) =
             with_framing_read_timeout(framing, KD_REQUEST_TIMEOUT, |framing| {
                 api::get_context(framing, processor, context_flags)
@@ -708,6 +808,10 @@ pub struct ContinueDrain {
     /// A break here was asked for and must be reported. See
     /// [`crate::backend::dbg_backend::DebugBackend::surface_next_break_at`].
     surface_address: Option<u64>,
+    /// The report window of each stop absorbed (see
+    /// [`StateChange::report_window`]): the target deleted the breakpoint
+    /// table entries there as it reported a stop the foreground never sees.
+    absorbed_windows: Arc<Mutex<Vec<Range<u64>>>>,
 }
 
 impl ContinueDrain {
@@ -734,6 +838,7 @@ impl ContinueDrain {
             remaining: Self::MAX_ABSORBED,
             interrupt_requested: Arc::new(AtomicBool::new(false)),
             surface_address,
+            absorbed_windows: Arc::default(),
         }
     }
 
@@ -741,6 +846,12 @@ impl ContinueDrain {
     /// stop is reported rather than absorbed.
     pub fn interrupt_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.interrupt_requested)
+    }
+
+    /// Where the windows of the stops absorbed are kept, for the foreground
+    /// to drop the entries they deleted once it takes the framing back.
+    pub fn absorbed_windows(&self) -> Arc<Mutex<Vec<Range<u64>>>> {
+        Arc::clone(&self.absorbed_windows)
     }
 
     pub fn is_spurious(&self, stop: &StateChange) -> bool {
@@ -772,6 +883,10 @@ impl ContinueDrain {
     ) -> Result<()> {
         self.remaining -= 1;
         self.resumed_from_rip = stop.program_counter;
+        self.absorbed_windows
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(stop.report_window(arch));
         kd_trace!(
             "kd: pump: absorbing re-break at {:#x} on p{} ({} left)",
             stop.program_counter,
@@ -809,6 +924,8 @@ pub struct PumpHandle {
     /// Raised by the foreground before it writes a break-in byte, so the
     /// pump reports the stop instead of absorbing it as post-continue noise.
     pub breakin_requested: Arc<AtomicBool>,
+    /// See [`ContinueDrain::absorbed_windows`].
+    pub absorbed_windows: Arc<Mutex<Vec<Range<u64>>>>,
 }
 
 /// The pump's side of its link to the foreground: where it reports the stop
@@ -876,7 +993,11 @@ pub fn run_pump(
                     && drain.is_spurious(&stop)
                 {
                     if let Err(e) = drain.absorb(&mut framing, arch, &stop) {
-                        report(Err(e.to_string()));
+                        // The target is still halted at this stop, so hand it to
+                        // the foreground as a real one; reporting the error
+                        // instead would leave the backend believing it runs.
+                        kd_trace!("kd: pump: absorbing re-break failed: {e}");
+                        report(Ok(stop));
                         break;
                     }
                     continue;
@@ -884,9 +1005,7 @@ pub fn run_pump(
                 report(Ok(stop));
                 break;
             }
-            Err(Error::Io(e))
-                if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
-            {
+            Err(Error::Io(e)) if is_temporary_io_error(e.kind()) => {
                 // The re-break a stale break-in causes lands within a clock
                 // tick of the resume; an idle gap means there is none.
                 drain = None;

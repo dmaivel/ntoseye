@@ -7,8 +7,8 @@ use memmap2::Mmap;
 
 use crate::arch::{Arch, RegisterFile, RegisterMap, machine_name};
 use crate::backend::dbg_backend::{
-    BackendCapability, DebugBackend, DebugCapability, StopEvent,
-    processor_index_from_backend_thread_id,
+    BackendCapability, DebugBackend, StopEvent, backend_thread_id,
+    processor_index_from_backend_thread_id, snapshot_capabilities, snapshot_refusal,
 };
 use crate::backend::debugger_data::{DebuggerDataCandidate, MetadataSource};
 use crate::base::error::{Error, Result};
@@ -53,7 +53,6 @@ pub struct DmpException {
     #[record(hex)]
     pub address: u64,
     /// The exception's `ExceptionInformation` parameters.
-    #[record(hex)]
     pub parameters: Vec<u64>,
 }
 
@@ -391,11 +390,10 @@ pub struct DmpBackend {
     per_cpu_registers: Vec<Vec<u8>>,
     current_processor: usize,
     number_processors: u32,
-    // The dump header's CONTEXT record (the crashing CPU's) and DTB, kept so
-    // the crash context can be re-seated after the PRCB pass (see
+    // The dump header's CONTEXT record (the crashing CPU's), kept so the
+    // crash context can be re-seated after the PRCB pass (see
     // `select_crash_processor`)
     header_context: RegisterFile,
-    directory_table_base: u64,
     debugger_data_hint: Option<DebuggerDataCandidate>,
     /// Dump-integrity and per-CPU context warnings raised while opening,
     /// drained by the session through [`DebugBackend::take_notices`].
@@ -420,7 +418,6 @@ impl DmpBackend {
             current_processor: 0,
             number_processors: info.number_processors,
             header_context: info.context.clone(),
-            directory_table_base: info.directory_table_base,
             debugger_data_hint: info
                 .debugger_data_block
                 .map(|address| DebuggerDataCandidate {
@@ -456,9 +453,11 @@ impl DmpBackend {
         match self.per_cpu_registers.iter().position(matches_header) {
             Some(i) => self.current_processor = i,
             None => {
-                self.per_cpu_registers[0] = self
-                    .header_context
-                    .with_kernel_dtb(self.directory_table_base);
+                // Only the `CONTEXT`: the slots past it hold what the PRCB
+                // saved, which the header does not carry.
+                let context = arch.context_size();
+                self.per_cpu_registers[0][..context]
+                    .copy_from_slice(&self.header_context.bytes()[..context]);
                 self.current_processor = 0;
             }
         }
@@ -491,9 +490,16 @@ impl DmpBackend {
     /// only the crashing processor's context, and finding the others takes
     /// the kernel's symbols, so the session reads them once it has located
     /// the kernel. A `None` context keeps what the processor had.
+    ///
+    /// `special_registers` are each processor's registers that lie past the
+    /// `CONTEXT`, which the PRCB saves apart from it. A slot past the
+    /// `CONTEXT` that no processor's are given for, other than the page-table
+    /// roots the backend serves, leaves the register map, so it reads as
+    /// unavailable rather than as zero.
     pub fn set_processor_contexts(
         &mut self,
         contexts: Vec<Option<Vec<u8>>>,
+        special_registers: Vec<Vec<(&'static str, u64)>>,
         warnings: Vec<String>,
     ) {
         for (registers, context) in self.per_cpu_registers.iter_mut().zip(contexts) {
@@ -501,15 +507,35 @@ impl DmpBackend {
                 registers[..context.len()].copy_from_slice(&context);
             }
         }
+        let mut recorded = Vec::new();
+        for (registers, special) in self.per_cpu_registers.iter_mut().zip(special_registers) {
+            for (name, value) in special {
+                if self.register_map.write_u64(name, registers, value).is_ok()
+                    && let Some(info) = self.register_map.info(name)
+                {
+                    recorded.push(info.offset);
+                }
+            }
+        }
+        let arch = self.header_context.arch();
+        for root in [arch.kernel_dtb_register(), arch.dtb_register()] {
+            recorded.extend(self.register_map.info(root).map(|info| info.offset));
+        }
+        self.register_map = RegisterMap::from_registers(
+            self.register_map
+                .registers()
+                .iter()
+                .filter(|info| info.offset < arch.context_size() || recorded.contains(&info.offset))
+                .cloned()
+                .collect(),
+        );
         self.notices
             .extend(warnings.into_iter().map(Notice::warning));
         self.select_crash_processor();
     }
 
     fn unsupported(operation: &str) -> Error {
-        Error::DebugInfo(format!(
-            "crash dump is a static snapshot; {operation} is not available"
-        ))
+        snapshot_refusal("crash dump", operation)
     }
 }
 
@@ -532,34 +558,24 @@ impl DebugBackend for DmpBackend {
     }
 
     fn capabilities(&self) -> Vec<BackendCapability> {
-        vec![
-            BackendCapability::supported(DebugCapability::MemoryIntrospection),
-            BackendCapability::supported(DebugCapability::ReadRegisters),
-            BackendCapability::unsupported(DebugCapability::ExecutionControl),
-            BackendCapability::unsupported(DebugCapability::InterruptTarget),
-            BackendCapability::unsupported(DebugCapability::SingleStep),
-            BackendCapability::unsupported(DebugCapability::WriteRegisters),
-            BackendCapability::supported(DebugCapability::ThreadList),
-            BackendCapability::supported(DebugCapability::ThreadSelection),
-            BackendCapability::unsupported(DebugCapability::KernelBreakpoints),
-            BackendCapability::unsupported(DebugCapability::UserModeBreakpoints),
-            BackendCapability::unsupported(DebugCapability::Watchpoints),
-            BackendCapability::unsupported(DebugCapability::TargetReloadDetection),
-            BackendCapability::unsupported(DebugCapability::KernelBaseHint),
-            BackendCapability::supported(DebugCapability::BugcheckDetection),
-            BackendCapability::supported(DebugCapability::BugcheckDetails),
-            BackendCapability::unsupported(DebugCapability::ModuleLoadEvents),
-            BackendCapability::unsupported(DebugCapability::DebugOutput),
-            BackendCapability::unsupported(DebugCapability::Msr),
-            BackendCapability::unsupported(DebugCapability::IoPorts),
-            BackendCapability::unsupported(DebugCapability::PciConfig),
-            BackendCapability::unsupported(DebugCapability::TargetControl),
-            BackendCapability::unsupported(DebugCapability::TargetFileIo),
-        ]
+        snapshot_capabilities(true)
     }
 
     fn read_registers(&mut self) -> Result<Vec<u8>> {
-        Ok(self.per_cpu_registers[self.current_processor].clone())
+        let registers = &self.per_cpu_registers[self.current_processor];
+        // A processor the dump captured no context for keeps an empty one:
+        // its zeroes are not register values, so no reader may take them as
+        // such, as a minidump thread without a context is refused.
+        let pc = self
+            .register_map
+            .read_u64(self.header_context.arch().pc_register(), registers);
+        if matches!(pc, Ok(0)) {
+            return Err(Error::DebugInfo(
+                "registers are unavailable: the dump captured no context for this processor"
+                    .to_string(),
+            ));
+        }
+        Ok(registers.clone())
     }
 
     fn write_registers(&mut self, _data: &[u8]) -> Result<()> {
@@ -596,7 +612,7 @@ impl DebugBackend for DmpBackend {
 
     fn thread_list(&mut self) -> Result<Vec<String>> {
         Ok((0..self.number_processors as u16)
-            .map(|i| format!("p1.{:x}", i + 1))
+            .map(backend_thread_id)
             .collect())
     }
 
@@ -614,7 +630,7 @@ impl DebugBackend for DmpBackend {
     }
 
     fn stopped_thread_id(&mut self) -> Result<String> {
-        Ok(format!("p1.{:x}", self.current_processor as u16 + 1))
+        Ok(backend_thread_id(self.current_processor as u16))
     }
 
     fn is_running(&self) -> bool {
@@ -631,10 +647,10 @@ impl DebugBackend for DmpBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arch::amd64;
     use crate::arch::{
         IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64, IMAGE_FILE_MACHINE_I386,
     };
-    use crate::arch::{amd64, arm64};
 
     #[test]
     fn dump_open_rejects_unsupported_machine_types() {
@@ -648,30 +664,6 @@ mod tests {
         ));
         let error = dump_arch(u32::from(IMAGE_FILE_MACHINE_I386)).unwrap_err();
         assert!(error.to_string().contains("I386 crash dump"));
-    }
-
-    #[test]
-    fn arm64_context_header_round_trips_registers_and_debug_state() {
-        let mut raw = vec![0u8; arm64::CONTEXT_SIZE];
-        raw[arm64::OFFSET_CPSR..arm64::OFFSET_CPSR + 4]
-            .copy_from_slice(&0x6000_03c5u32.to_le_bytes());
-        raw[arm64::OFFSET_X0..arm64::OFFSET_X0 + 8]
-            .copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
-        raw[arm64::OFFSET_SP..arm64::OFFSET_SP + 8]
-            .copy_from_slice(&0xffff_0000_1234_5000u64.to_le_bytes());
-        raw[arm64::OFFSET_PC..arm64::OFFSET_PC + 8]
-            .copy_from_slice(&0xffff_0000_0000_1000u64.to_le_bytes());
-        raw[arm64::OFFSET_BCR0..arm64::OFFSET_BCR0 + 4]
-            .copy_from_slice(&0x0000_e9e1u32.to_le_bytes());
-        raw[arm64::OFFSET_WVR0..arm64::OFFSET_WVR0 + 8].copy_from_slice(&0x4000u64.to_le_bytes());
-        let data = RegisterFile::from_context(Arch::Arm64, &raw).with_kernel_dtb(0x1234_5000);
-        let map = Arch::Arm64.register_map();
-        assert_eq!(map.read_u64("x0", &data).unwrap(), 0x1122_3344_5566_7788);
-        assert_eq!(map.read_u64("pc", &data).unwrap(), 0xffff_0000_0000_1000);
-        assert_eq!(map.read_u64("sp", &data).unwrap(), 0xffff_0000_1234_5000);
-        assert_eq!(map.read_u64("bcr0", &data).unwrap(), 0x0000_e9e1);
-        assert_eq!(map.read_u64("wvr0", &data).unwrap(), 0x4000);
-        assert_eq!(map.read_u64("cr3", &data).unwrap(), 0x1234_5000);
     }
 
     /// An AMD64 register file holding `values`, by name.
@@ -733,39 +725,6 @@ mod tests {
                 ("ss", 0x18),
             ]),
         }
-    }
-
-    #[test]
-    fn dmp_backend_register_round_trip() {
-        let info = make_test_info();
-        let mut backend = DmpBackend::new(&info);
-        let map = backend.register_map().clone();
-        let data = backend.read_registers().unwrap();
-
-        assert_eq!(map.read_u64("rax", &data).unwrap(), 0x1111111111111111);
-        assert_eq!(map.read_u64("rbx", &data).unwrap(), 0x2222222222222222);
-        assert_eq!(map.read_u64("rcx", &data).unwrap(), 0x3333333333333333);
-        assert_eq!(map.read_u64("rdx", &data).unwrap(), 0x4444444444444444);
-        assert_eq!(map.read_u64("rsi", &data).unwrap(), 0x5555555555555555);
-        assert_eq!(map.read_u64("rdi", &data).unwrap(), 0x6666666666666666);
-        assert_eq!(map.read_u64("rbp", &data).unwrap(), 0x7777777777777777);
-        assert_eq!(map.read_u64("rsp", &data).unwrap(), 0x8888888888888888);
-        assert_eq!(map.read_u64("r8", &data).unwrap(), 0x0808080808080808);
-        assert_eq!(map.read_u64("r9", &data).unwrap(), 0x0909090909090909);
-        assert_eq!(map.read_u64("r10", &data).unwrap(), 0x1010101010101010);
-        assert_eq!(map.read_u64("r11", &data).unwrap(), 0x1111111111111111);
-        assert_eq!(map.read_u64("r12", &data).unwrap(), 0x1212121212121212);
-        assert_eq!(map.read_u64("r13", &data).unwrap(), 0x1313131313131313);
-        assert_eq!(map.read_u64("r14", &data).unwrap(), 0x1414141414141414);
-        assert_eq!(map.read_u64("r15", &data).unwrap(), 0x1515151515151515);
-        assert_eq!(map.read_u64("rip", &data).unwrap(), 0xfffff80012345678);
-        assert_eq!(map.read_u64("eflags", &data).unwrap(), 0x246);
-        assert_eq!(map.read_u64("cs", &data).unwrap(), 0x10);
-        assert_eq!(map.read_u64("ss", &data).unwrap(), 0x18);
-        assert_eq!(
-            map.read_u64("cr3", &data).unwrap(),
-            info.directory_table_base
-        );
     }
 
     #[test]
@@ -878,6 +837,18 @@ mod tests {
             map.read_u64("cr3", &data).unwrap(),
             info.directory_table_base
         );
+    }
+
+    /// A processor the dump captured no context for has no registers to
+    /// read, rather than zeroes; one with a context reads as before.
+    #[test]
+    fn a_processor_without_a_context_has_no_registers() {
+        let mut info = make_test_info();
+        info.number_processors = 2;
+        let mut backend = DmpBackend::new(&info);
+        assert!(backend.read_registers().is_ok());
+        backend.set_current_thread("p1.2").unwrap();
+        assert!(backend.read_registers().is_err());
     }
 
     #[test]

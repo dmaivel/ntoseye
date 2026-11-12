@@ -84,7 +84,10 @@ fn print_control_area(detail: &ControlAreaDetail) {
             ui::addr(subsection.address.0).to_string(),
             ui::addr(subsection.base_pte.0).to_string(),
             format!("{:x}", subsection.ptes),
-            format!("{:x}", subsection.unused_ptes),
+            match &subsection.unused_ptes {
+                DiagnosticValue::Available(unused) => format!("{unused:x}"),
+                DiagnosticValue::Unavailable(_) => "-".to_string(),
+            },
             format!("{:x}", subsection.starting_sector),
             format!("{:x}", subsection.sectors),
             format!("{:x}", subsection.protection),
@@ -163,6 +166,15 @@ fn print_file_cache(detail: &FileCacheDetail) {
         outln!(
             "  {}",
             ui::muted(&format!("free VACBs unavailable: {error}"))
+        );
+    }
+    if detail.unreadable_arrays != 0 || detail.unwalked_views != 0 {
+        outln!(
+            "  {}",
+            ui::muted(&format!(
+                "partial: {} VACB arrays unreadable, {} views not fully walked",
+                detail.unreadable_arrays, detail.unwalked_views
+            ))
         );
     }
     outln!();

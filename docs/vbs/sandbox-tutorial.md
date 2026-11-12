@@ -198,7 +198,7 @@ stack
   03  fffff8051d93c799  win32kbase!rimSignalReadComplete+0x209
   04  fffff8051d94010f  win32kbase!rimProcessDeviceBufferAndStartRead+0x187
   05  fffff8051d93fa7f  win32kbase!rimInputApc+0x1af
-  ... 14 more frames
+  ... more frames
 ```
 
 The Sandbox's `dwm.exe` closed a handle on its VP 2, processor 2 in its view, as `win32kbase` handled the mouse's input. The target's own Windows runs `NtClose` too, at its own address, and the debug register traps any code there, so ntoseye resumes the hits that are not the Sandbox's. {command}`k`, {command}`r` and {command}`dt` read the Sandbox at the stop, and {command}`t`, {command}`p` and {command}`gu` step the thread:
@@ -253,7 +253,7 @@ stack
   03  fffff804a1c9f314  nt!HvcallFastExtended+0x164
   04  fffff806c1bfb6ed  winhvr!WinHvpVpDispatchLoop+0x38d
   05  fffff806c1bfb297  winhvr!WinHvRunVpDispatchLoop+0x157
-  ... 3 more frames
+  ... more frames
 ```
 
 The stop shows two sides of the same call. The `serving` line names the Sandbox's VP 2, whose hypercall the hypervisor handles. The thread and the stack are the target's: a `vmmemSandbox` thread, whose `winhvr!WinHvRunVpDispatchLoop` asked the hypervisor, with a hypercall of its own, to run the Sandbox's VP on this processor ([how stops in the hypervisor show](hypervisor-stops.md)). {command}`!hvcall` decodes the Sandbox's call:

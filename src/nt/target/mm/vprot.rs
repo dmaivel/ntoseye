@@ -37,9 +37,6 @@ const PAGE_WRITECOMBINE: u32 = 0x400;
 /// The MM protection a software PTE of a decommitted page carries
 /// (`MM_DECOMMIT`: guard with no access).
 const MM_DECOMMIT: u64 = 0x10;
-const PTE_TABLE_SPAN: u64 = 1 << 21;
-const PDE_TABLE_SPAN: u64 = 1 << 30;
-const PPE_TABLE_SPAN: u64 = 1 << 39;
 /// Page-table steps one region scan may take; each covers a page, or a
 /// whole table's span when the table above it is absent. Past it the region
 /// size is a lower bound.
@@ -166,12 +163,12 @@ impl PteFormat {
         })
     }
 
-    /// Whether a PDE maps a large page itself.
-    fn maps_large_page(&self, entry: u64) -> bool {
+    /// Whether an upper-level entry at `level` maps a large page itself.
+    fn maps_large_page(&self, level: PageTableLevel, entry: u64) -> bool {
         matches!(
             self.arch
                 .paging()
-                .decode_entry(PageTableLevel::Pde, PageTableEntry(entry)),
+                .decode_entry(level, PageTableEntry(entry)),
             TableEntry::Leaf(_)
         )
     }
@@ -265,24 +262,22 @@ impl PageWalk<'_> {
     /// in the page file makes the page an `Err`.
     fn state_at(&mut self, va: u64) -> Result<(PageState, u64)> {
         let span_end = |span: u64| (va | (span - 1)).saturating_add(1);
-        let [pxe, ppe, pde, pte] = self.self_map.entries(va);
-        let mut entry = 0;
-        for (address, span) in [
-            (pxe, PPE_TABLE_SPAN),
-            (ppe, PDE_TABLE_SPAN),
-            (pde, PTE_TABLE_SPAN),
-        ] {
-            entry = self.memory.read(address)?;
+        let mut entries = self.self_map.entries(va);
+        let Some((_, pte)) = entries.next_back() else {
+            return self.untouched(va, va.saturating_add(PAGE_SIZE as u64));
+        };
+        // The tables above the PTE's, each entry mapping `1 << shift` bytes.
+        // A valid large entry at any of them (a 1 GiB PPE, a 2 MiB PDE) maps
+        // the whole span, and the levels below it are data, not tables.
+        for (level, address) in entries {
+            let entry: u64 = self.memory.read(address)?;
+            let span = 1u64 << level.shift();
             if entry == 0 {
                 return self.untouched(va, span_end(span));
             }
-        }
-        // The PDE: valid and large, it maps the whole span.
-        if self.format.maps_large_page(entry) {
-            return Ok((
-                Some(self.format.valid_protection(entry)),
-                span_end(PTE_TABLE_SPAN),
-            ));
+            if self.format.maps_large_page(level, entry) {
+                return Ok((Some(self.format.valid_protection(entry)), span_end(span)));
+            }
         }
         let table = pte.0 & !(PAGE_SIZE as u64 - 1);
         if self.table.as_ref().is_none_or(|(at, _)| *at != table) {
@@ -457,10 +452,63 @@ impl Target {
             });
         };
         let mut walk = self.page_walk(process, region)?;
-        let (state, mut end) = walk.state_at(base.0)?;
+        let run = self.scan_run(&mut walk, base.0, region.end.0)?;
+        Ok(Self::basic_information(
+            process, region, &walk, address, base, run,
+        ))
+    }
+
+    /// Every region within `vads` (`process`'s VADs, as
+    /// [`Self::enumerate_vad_regions_for_process_info`] lists them) whose
+    /// pages share one state and protection, in address order, as
+    /// `VirtualQuery` reports them from each VAD's start: what a minidump's
+    /// memory-info list records. The free gaps between VADs are not listed.
+    /// A VAD whose pages cannot be read past some point lists the rest as
+    /// one reserved region.
+    pub fn virtual_query_regions(
+        &self,
+        process: &ProcessInfo,
+        vads: &[MemoryRegionInfo],
+    ) -> Result<Vec<MemoryBasicInformation>> {
+        let mut regions = Vec::new();
+        for vad in vads {
+            let mut walk = self.page_walk(process, vad)?;
+            let mut base = vad.start.0;
+            while base < vad.end.0 {
+                if self.interrupted() {
+                    return Err(Error::DebugInfo("interrupted".into()));
+                }
+                let run = self
+                    .scan_run(&mut walk, base, vad.end.0)
+                    .unwrap_or((None, vad.end.0, true));
+                let end = run.1;
+                regions.push(Self::basic_information(
+                    process,
+                    vad,
+                    &walk,
+                    VirtAddr(base),
+                    VirtAddr(base),
+                    run,
+                ));
+                base = end;
+            }
+        }
+        Ok(regions)
+    }
+
+    /// From `base`, up to `region_end`, the run of pages `walk` reads as
+    /// sharing one state: that state, the run's end, and whether the scan
+    /// stopped at its step bound or an unreadable page rather than a change.
+    fn scan_run(
+        &self,
+        walk: &mut PageWalk<'_>,
+        base: u64,
+        region_end: u64,
+    ) -> Result<(PageState, u64, bool)> {
+        let (state, mut end) = walk.state_at(base)?;
         let mut truncated = false;
         let mut steps = 1;
-        while end < region.end.0 {
+        while end < region_end {
             if steps >= MAX_VPROT_STEPS || self.interrupted() {
                 truncated = true;
                 break;
@@ -475,7 +523,19 @@ impl Target {
                 }
             }
         }
-        let end = end.min(region.end.0);
+        Ok((state, end.min(region_end), truncated))
+    }
+
+    /// The `VirtualQuery` answer for `run` (a [`Self::scan_run`]) of
+    /// `region` from `base`, asked at `address`.
+    fn basic_information(
+        process: &ProcessInfo,
+        region: &MemoryRegionInfo,
+        walk: &PageWalk<'_>,
+        address: VirtAddr,
+        base: VirtAddr,
+        (state, end, truncated): (PageState, u64, bool),
+    ) -> MemoryBasicInformation {
         let kind = if region.vad_type == Some(VadType::ImageMap) {
             MEM_IMAGE
         } else if walk.vad.private {
@@ -483,7 +543,7 @@ impl Target {
         } else {
             MEM_MAPPED
         };
-        Ok(MemoryBasicInformation {
+        MemoryBasicInformation {
             process: Some(process.clone()),
             address,
             base_address: base,
@@ -499,7 +559,7 @@ impl Target {
             kind,
             vad: Some(region.node_address),
             truncated,
-        })
+        }
     }
 
     /// `!vprot` on a user-mode minidump: the region of its memory-info list

@@ -3,19 +3,31 @@ use crate::{
     backend::phys::PhysMem,
     base::{
         error::{Error, Result},
-        memory::{DTB_IDENTITY, MemoryOps, SectionLayout, SectionViews},
+        memory::{
+            CompressedPages, DTB_IDENTITY, MemoryOps, PAGE_FILE_LOW, SectionLayout, SectionViews,
+            StoreLayout,
+        },
         types::*,
     },
     nt::{
-        dmp::DmpInfo, layout::ParsedType, pe::headers::CodeView, symbols::SymbolStore,
-        target::ListTermination, target::object::DriverObjectInfo,
+        dmp::DmpInfo,
+        layout::ParsedType,
+        pe::{self, PeImage, headers::CodeView},
+        symbols::{ImageFetch, SymbolStore},
+        target::ListTermination,
+        target::mm::PteSelfMap,
+        target::object::DriverObjectInfo,
     },
 };
 use ntoseye_macros::record;
+use pelite::pe64::{Pe, PeView};
 use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, atomic::AtomicBool};
-use vad::{MissingOffset, VadTreeOffsets};
+use std::sync::{
+    Arc, Mutex, MutexGuard, OnceLock, PoisonError,
+    atomic::{AtomicBool, Ordering},
+};
+use vad::{VadTreeOffsets, vad_root_offset};
 
 mod discovery;
 pub mod ept;
@@ -31,6 +43,7 @@ mod modules;
 pub mod pdb_recovery;
 mod process;
 pub mod secure_kernel;
+pub mod store_layout;
 mod symbol_load;
 mod trustlet_layout;
 pub mod vad;
@@ -194,10 +207,15 @@ pub struct ModuleSymbolDiagnostic {
 
 /// Whether a symbol load covers modules in session space (win32k and
 /// friends), which only a process attached to a session maps.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionSpace {
     Load,
     Skip,
+    /// Read their images through these roots, one process's per session,
+    /// the first that holds an image's PDB identity; the symbols stay under
+    /// the load's own root. Sessions load images of their own (`cdd.dll`
+    /// only where there is a display).
+    Through(Vec<Dtb>),
 }
 
 /// When a symbol load rebuilds a missing PDB from guest memory (see
@@ -278,6 +296,27 @@ pub struct Guest {
     /// calibrated. A calibration that failed is not kept: a later halt may
     /// have the mapped VPs it needs.
     vp_register_layouts: Mutex<HashMap<u64, vp_registers::VpRegisterLayout>>,
+    /// The process the last process list walk found for each page-table
+    /// root, masked, kept across halts and checked before it is used (see
+    /// [`Self::process_for_root`]).
+    root_owners: Mutex<HashMap<Dtb, ProcessInfo>>,
+    /// Each processor's `KiProcessorBlock` entry, once it held one (see
+    /// [`Self::processor_block`]).
+    processor_blocks: Mutex<HashMap<u16, VirtAddr>>,
+    /// The kernel's module list kept across halts, where the backend reports
+    /// every module load and unload (see [`Self::keep_kernel_modules`]).
+    kept_kernel_modules: Mutex<KeptModules>,
+}
+
+/// Whether, and what, [`Guest::kernel_modules`] keeps across halts.
+#[derive(Default)]
+enum KeptModules {
+    /// Walked once a halt: nothing reports a module load.
+    #[default]
+    Off,
+    /// To keep the next list read whole.
+    Unread,
+    Kept(Vec<ModuleInfo>),
 }
 
 /// Guest-derived lists memoized for one halt epoch (see
@@ -290,7 +329,8 @@ pub struct Guest {
 struct HaltMemo {
     epoch: Option<u64>,
     processes: Option<Vec<ProcessInfo>>,
-    kernel_modules: Option<Vec<ModuleInfo>>,
+    /// The kernel modules, and whether the walk read the whole list.
+    kernel_modules: Option<(Vec<ModuleInfo>, bool)>,
     drivers: Option<Vec<DriverObjectInfo>>,
     /// Loader lists by `_EPROCESS`; every thread of a process walked in one
     /// halt shares them.
@@ -336,12 +376,33 @@ impl Guest {
             .set_invalid_pte_mask(invalid_pte_mask(&ntoskrnl).unwrap_or(0));
         ntoskrnl
             .phys
+            .set_page_file_low(page_file_low(&ntoskrnl).unwrap_or(PAGE_FILE_LOW));
+        ntoskrnl
+            .phys
             .set_section_views(section_layout(&ntoskrnl).map(SectionViews::new));
-        if let Ok(pte_base) = ntoskrnl
-            .symbol("MmPteBase")
-            .and_then(|symbol| symbol.read_pointer())
-        {
-            ntoskrnl.phys.set_pte_self_map(pte_base.0);
+        // Reading the kernel's code for the store layout waits until a page
+        // may be in the store, and is done once; the store itself is looked
+        // for until it exists. The resolver holds the physical memory
+        // weakly, since that memory holds the resolver.
+        let phys = Arc::downgrade(&ntoskrnl.phys);
+        let symbols = Arc::clone(ntoskrnl.symbols());
+        let (dtb, base, arch, guid) = (
+            ntoskrnl.dtb(),
+            ntoskrnl.base_address,
+            ntoskrnl.arch(),
+            ntoskrnl.guid,
+        );
+        let mut layout = None;
+        ntoskrnl
+            .phys
+            .set_compressed_pages(Box::new(move |interrupt: &AtomicBool| {
+                let mut kernel = Image::new(phys.upgrade()?, Arc::clone(&symbols), dtb, base, arch);
+                kernel.guid = guid;
+                compressed_pages(&mut kernel, &mut layout, interrupt)
+            }));
+        if let Ok(pte_base) = ntoskrnl.pte_base() {
+            let (base, len) = PteSelfMap::new(pte_base.0, arch.paging()).extent();
+            ntoskrnl.phys.set_pte_self_map(base, len);
         }
         Self {
             kernel_transition_code: OnceLock::new(),
@@ -358,6 +419,9 @@ impl Guest {
             vp_slots: Mutex::new(HashMap::new()),
             processor_vps: Mutex::new(None),
             vp_register_layouts: Mutex::new(HashMap::new()),
+            root_owners: Mutex::new(HashMap::new()),
+            processor_blocks: Mutex::new(HashMap::new()),
+            kept_kernel_modules: Mutex::new(KeptModules::Off),
         }
     }
 
@@ -511,6 +575,31 @@ impl Guest {
         self.memo.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Processor `index`'s `KiProcessorBlock` entry, its KPRCB, which `read`
+    /// reads; remembered for the boot once it is set, since a processor's
+    /// KPRCB stays where the kernel put it when the processor started. A null
+    /// entry (a processor not started yet) is read again next time. Every
+    /// stop finds its thread through it, and over KD a read is a request.
+    pub fn processor_block(
+        &self,
+        index: u16,
+        read: impl FnOnce() -> Result<VirtAddr>,
+    ) -> Result<VirtAddr> {
+        let lock = || {
+            self.processor_blocks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+        };
+        if let Some(&block) = lock().get(&index) {
+            return Ok(block);
+        }
+        let block = read()?;
+        if !block.is_zero() {
+            lock().insert(index, block);
+        }
+        Ok(block)
+    }
+
     /// Serve `slot` from the current halt's memo, walking with `walk` on a
     /// miss. Memory without a halt signal is never memoized.
     fn memoized<T: Clone>(
@@ -576,7 +665,7 @@ impl Guest {
     }
 
     fn with_kernel(ntoskrnl: Image) -> Result<Self> {
-        let ntoskrnl = ntoskrnl.load_symbols()?;
+        let ntoskrnl = Self::in_system_space(ntoskrnl.load_symbols()?)?;
         // Type/enum layout lookups prefer the kernel's definitions over
         // same-named user-mode types once attached to a process; tell the
         // symbol store which guid is the kernel's.
@@ -595,8 +684,9 @@ impl Guest {
     ) -> Result<Self> {
         let is_triage = kernel_dtb == DTB_IDENTITY;
 
-        // Dumps carry the machine type; live sessions reach this only from
-        // discovery, which already resolved the arch.
+        // Dumps carry the machine type. The other caller is the partition
+        // view over eVMCS state, whose physical memory has no dump header;
+        // eVMCS exists only on x64, so AMD64 is right there.
         let arch = phys
             .dmp_info()
             .and_then(DmpInfo::arch)
@@ -652,9 +742,78 @@ impl Guest {
             }
             Err(e) => return Err(e),
         };
+        let ntoskrnl = if is_triage {
+            ntoskrnl
+        } else {
+            Self::in_system_space(ntoskrnl)?
+        };
 
         ntoskrnl.register_as_kernel();
         Ok(Self::from_kernel(ntoskrnl))
+    }
+
+    /// `ntoskrnl`, its symbols loaded in the address space a transport
+    /// named, moved to the System process's. KD names the stopped
+    /// processor's, which is a user process's when the break-in interrupted
+    /// one, and a dump header the one current at the crash; the kernel's
+    /// modules are keyed by the kernel's space, which the symbol store shows
+    /// from every process, so under a user process's space that process's
+    /// own modules would show from every process too. The PDB is loaded
+    /// already, so the second load only registers the module. AArch64's
+    /// kernel root is TTBR1, which no process switch changes, and a
+    /// process's `DirectoryTableBase` is its TTBR0, so it is left alone.
+    fn in_system_space(ntoskrnl: Image) -> Result<Image> {
+        if ntoskrnl.arch() != Arch::Amd64 {
+            return Ok(ntoskrnl);
+        }
+        let Some(system) = system_dtb(&ntoskrnl) else {
+            return Ok(ntoskrnl);
+        };
+        let mask = ntoskrnl.arch().dtb_page_mask();
+        if system == ntoskrnl.dtb() & mask {
+            return Ok(ntoskrnl);
+        }
+        ntoskrnl.symbols().clear_modules_for_dtb(ntoskrnl.dtb());
+        Image::new(
+            ntoskrnl.phys.clone(),
+            ntoskrnl.symbols().clone(),
+            system,
+            ntoskrnl.base_address,
+            ntoskrnl.arch(),
+        )
+        .load_symbols()
+    }
+}
+
+/// The System process's address-space root, `PsInitialSystemProcess`'s
+/// `KPROCESS.DirectoryTableBase`, masked to its page as a transport's
+/// kernel root is.
+fn system_dtb(kernel: &Image) -> Option<Dtb> {
+    let system = kernel
+        .symbol("PsInitialSystemProcess")
+        .ok()?
+        .read_pointer()
+        .ok()?;
+    let types = kernel.types();
+    let pcb = types.layout("_EPROCESS").ok()?.field_offset("Pcb").ok()?;
+    let offset = types
+        .layout("_KPROCESS")
+        .ok()?
+        .field_offset("DirectoryTableBase")
+        .ok()?;
+    // Pointer-wide: a `ULONG` on x86, the first of two on XP x64.
+    let dtb = kernel.memory().read_pointer(system + pcb + offset).ok()?.0;
+    Some(dtb & kernel.arch().dtb_page_mask()).filter(|dtb| *dtb != 0)
+}
+
+/// The first bit of a software PTE's page-file number
+/// (`_MMPTE_SOFTWARE.PageFileLow`): bit 12 on kernels with the L1TF
+/// mitigation, bit 1 before it. `None` when the PDB does not type it.
+fn page_file_low(kernel: &Image) -> Option<u32> {
+    let software = kernel.types().layout("_MMPTE_SOFTWARE").ok()?;
+    match software.fields.get("PageFileLow")?.type_data {
+        ParsedType::Bitfield { pos, .. } => Some(u32::from(pos)),
+        _ => None,
     }
 }
 
@@ -677,27 +836,200 @@ fn invalid_pte_mask(kernel: &Image) -> Option<u64> {
     kernel.memory().read::<u64>(state + hardware + mask).ok()
 }
 
+/// The RVAs of the kernel functions the store layout is read from, by
+/// name.
+fn store_functions(kernel: &Image) -> Option<HashMap<String, u64>> {
+    let guid = kernel.guid?;
+    let symbols = kernel.symbols();
+    let mut names: Vec<String> = [
+        "SMKM_STORE<SM_TRAITS>::",
+        "SMKM_STORE_MGR<SM_TRAITS>::",
+        "ST_STORE<SM_TRAITS>::",
+        "B_TREE<_SM_PAGE_KEY, ",
+    ]
+    .iter()
+    .flat_map(|prefix| symbols.names_starting_with(guid, prefix))
+    .collect();
+    names.extend(
+        [
+            "SmStoreDecompressBuffer",
+            "RtlDecompressBufferEx",
+            "RtlDecompressBufferProcs",
+            "KeStackAttachProcess",
+            "KiStackAttachProcess",
+        ]
+        .map(String::from),
+    );
+    Some(
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let rva = symbols.symbol_rva(guid, &name).ok()??;
+                Some((name, u64::from(rva)))
+            })
+            .collect(),
+    )
+}
+
+/// The file names the symbol servers keep kernels under: the usual one,
+/// and x64's kernel for 5-level paging.
+const KERNEL_FILE_NAMES: [&str; 2] = ["ntoskrnl.exe", "ntkrla57.exe"];
+
+/// The kernel's file, matched by its mapped header page `mapped`: from the
+/// image cache, and from the symbol servers too when reads go through the
+/// target, where reading the kernel's 12 MiB of code takes over half a
+/// minute.
+fn kernel_file(kernel: &Image, mapped: &[u8]) -> Option<Arc<PeImage>> {
+    let fetches: &[ImageFetch] = if kernel.phys.reads_through_target() {
+        &[ImageFetch::CacheOnly, ImageFetch::Download]
+    } else {
+        &[ImageFetch::CacheOnly]
+    };
+    fetches
+        .iter()
+        .flat_map(|&fetch| KERNEL_FILE_NAMES.map(|name| (name, fetch)))
+        .find_map(|(name, fetch)| kernel.symbols().module_image_matching(name, mapped, fetch))
+}
+
+/// The layout of the kernel's memory-compression store, from its code
+/// (AMD64 or ARM64): the kernel file's when [`kernel_file`] finds
+/// it, at the file's own base as the corpus test reads it, else the mapped
+/// image's.
+fn store_layout_of(kernel: &mut Image, interrupt: &AtomicBool) -> Option<StoreLayout> {
+    let headers = kernel.view()?.image().to_vec();
+    let functions = store_functions(kernel)?;
+    let arch = kernel.arch();
+    let derive = |base: u64, bytes: &[u8], code: Vec<(u32, u32)>| {
+        let functions = functions
+            .iter()
+            .map(|(name, rva)| (name.clone(), base + rva))
+            .collect();
+        let code = store_layout::KernelCode {
+            image: hv_layout::ImageView {
+                base,
+                bytes,
+                code,
+                data: Vec::new(),
+            },
+            functions: &functions,
+        };
+        match arch {
+            Arch::Amd64 => store_layout::derive(&code),
+            Arch::Arm64 => store_layout::arm64::derive(&code),
+        }
+        .ok()
+    };
+    if let Some(file) = kernel_file(kernel, &headers) {
+        let bytes = file.headers();
+        let view = PeView::from_bytes(bytes).ok()?;
+        return derive(
+            view.optional_header().ImageBase,
+            bytes,
+            pe::executable_ranges(&view),
+        );
+    }
+    let base = kernel.base_address.0;
+    let code = store_layout::mapped_code(&kernel.memory(), base, &headers, interrupt).ok()?;
+    derive(base, &code.bytes, code.code)
+}
+
+/// The guest's memory-compression store, when its PDB types the
+/// partition's store fields, the store has an owner process (it has none
+/// when compression is off, or before the store manager creates it after
+/// boot), and the kernel's code gives the layout. `layout` keeps the
+/// derivation's outcome, so the code is read once: a layout the code does
+/// not give is not looked for again, unless Ctrl+C (`interrupt`) stopped
+/// the derivation.
+fn compressed_pages(
+    kernel: &mut Image,
+    layout: &mut Option<Option<StoreLayout>>,
+    interrupt: &AtomicBool,
+) -> Option<CompressedPages> {
+    let memory = kernel.memory();
+    let types = kernel.types();
+    let partition = kernel.symbol("MiSystemPartition").ok()?.address();
+    let partition_type = types.layout("_MI_PARTITION").ok()?;
+    let stores_type = types.layout("_MI_PARTITION_STORES").ok()?;
+    let stores = partition + partition_type.field_offset("Store").ok()?;
+    let page_file = memory
+        .read::<u32>(stores + stores_type.field_offset("VirtualPageFileNumber").ok()?)
+        .ok()?;
+    let owner = memory
+        .read_pointer(stores + stores_type.field_offset("StoreProcess").ok()?)
+        .ok()?;
+    if owner.0 == 0 {
+        return None;
+    }
+    // From 22H2 the manager is the system partition's SmPartition; before
+    // it, SmGlobals itself.
+    let manager = match types
+        .layout("_EPARTITION")
+        .ok()
+        .and_then(|epartition| epartition.field_offset("SmPartition").ok())
+    {
+        Some(sm_partition) => {
+            let core = partition_type.field_offset("Core").ok()?
+                + types
+                    .layout("_MI_PARTITION_CORE")
+                    .ok()?
+                    .field_offset("PartitionObject")
+                    .ok()?;
+            let epartition = memory.read_pointer(partition + core).ok()?;
+            memory.read_pointer(epartition + sm_partition).ok()?.0
+        }
+        None => kernel.symbol("SmGlobals").ok()?.address().0,
+    };
+    let eprocess = types.layout("_EPROCESS").ok()?;
+    let kprocess = types.layout("_KPROCESS").ok()?;
+    let root = memory
+        .read_pointer(
+            owner
+                + eprocess.field_offset("Pcb").ok()?
+                + kprocess.field_offset("DirectoryTableBase").ok()?,
+        )
+        .ok()?
+        .0;
+    let owner_root = root & kernel.arch().dtb_page_mask();
+    let layout = match layout {
+        Some(known) => known.clone()?,
+        None => {
+            let derived = store_layout_of(kernel, interrupt);
+            if derived.is_some() || !interrupt.load(Ordering::Relaxed) {
+                *layout = Some(derived.clone());
+            }
+            derived?
+        }
+    };
+    Some(CompressedPages {
+        layout,
+        manager: VirtAddr(manager),
+        owner,
+        owner_root,
+        page_file: u8::try_from(page_file).ok()?,
+    })
+}
+
 /// Where the kernel keeps what [`SectionViews`] reads: the process list and
 /// each process's VAD tree. `None` when the PDB lacks any of it.
 fn section_layout(kernel: &Image) -> Option<SectionLayout> {
     let types = kernel.types();
     let eprocess = types.layout("_EPROCESS").ok()?;
     let kprocess = types.layout("_KPROCESS").ok()?;
-    let tree = types.layout("_RTL_AVL_TREE").ok()?;
     let short = types.layout("_MMVAD_SHORT").ok()?;
-    let links = VadTreeOffsets::resolve(types, &short, MissingOffset::Fail).ok()?;
+    let links = VadTreeOffsets::resolve(types, &short).ok()?;
     let vad = types.layout("_MMVAD").ok()?;
     let flags = types.layout("_MMVAD_FLAGS").ok()?;
     let ParsedType::Bitfield { pos, .. } = flags.fields.get("PrivateMemory")?.type_data else {
         return None;
     };
     Some(SectionLayout {
+        arch: kernel.arch(),
         process_list_head: kernel.symbol("PsActiveProcessHead").ok()?.address(),
         active_process_links: eprocess.field_offset("ActiveProcessLinks").ok()?,
         directory_table_base: eprocess.field_offset("Pcb").ok()?
             + kprocess.field_offset("DirectoryTableBase").ok()?,
         root_mask: kernel.arch().dtb_page_mask(),
-        vad_root: eprocess.field_offset("VadRoot").ok()? + tree.field_offset("Root").ok()?,
+        vad_root: vad_root_offset(types, &eprocess).ok()?,
         left: links.left,
         right: links.right,
         vad_node: links.vad_node,

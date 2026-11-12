@@ -10,9 +10,11 @@ use crate::arch::Arch;
 use crate::base::bytes::utf16le_lossy;
 use crate::base::error::{Error, Result, best_effort};
 use crate::base::memory::{
-    MemoryOps, TerminatedRead, for_each_page_chunk, pattern_offsets, read_page_chunks,
+    MemoryOps, PAGE_SIZE, TerminatedRead, for_each_page_chunk, read_page_chunks,
 };
-use crate::base::time::days_to_ymd;
+use crate::base::time::{
+    FILETIME_TICKS_PER_SECOND, FILETIME_UNIX_EPOCH_SECONDS, unix_seconds_to_iso,
+};
 use crate::base::types::VirtAddr;
 use crate::hosts::repl::args::{ArgCursor, ArgCx, ArgError};
 use crate::hosts::repl::*;
@@ -30,8 +32,6 @@ use crate::session::Session;
 
 pub const MAX_DISPLAY_BYTES: usize = 1024 * 1024;
 pub const MAX_DISASSEMBLY_INSTRUCTIONS: usize = 4096;
-const FILETIME_UNIX_MIN_SECONDS: i64 = -62_135_596_800;
-const FILETIME_UNIX_MAX_SECONDS: i64 = 253_402_300_799;
 /// Characters `d*a`/`d*u` show of each string, as `da`/`du` do by default.
 const POINTER_STRING_CHARS: usize = 256;
 /// Characters `da`/`du` show without a count.
@@ -85,7 +85,7 @@ fn read_best_effort(
     range: &AddressRange,
 ) -> Result<(Vec<u8>, Vec<bool>)> {
     read_page_chunks(range.start, range.len(), |address, buf| match memory {
-        MemoryKind::Virtual => session.read_masked(address, buf),
+        MemoryKind::Virtual => session.target.read_masked(address, buf),
         MemoryKind::Physical => session.target.read_physical(address.0, buf),
     })
 }
@@ -149,8 +149,19 @@ pub(super) fn dump_memory(
 }
 
 impl Render for MemoryDump {
-    fn render(&self, _: &mut ReplState<'_>, (): ()) {
+    fn render(&self, state: &mut ReplState<'_>, (): ()) {
         display_memory_with_validity(self.start, &self.data, Some(&self.valid), &self.mode);
+        // Question marks for NT addresses at a stop in the hypervisor are not
+        // paged-out memory: the context's address space maps none of NT's.
+        let target = &state.ctx.target;
+        if let Some(offset) = self.valid.iter().position(|read| !read)
+            && target.in_hypervisor_address_space()
+        {
+            let address = self.start + offset as u64;
+            if let Some(why) = crate::hosts::repl::unreadable_reason(target, address) {
+                crate::base::diagnostics::print_note(format!("{}: {why}", ui::addr(address.0)));
+            }
+        }
     }
 }
 
@@ -473,7 +484,10 @@ fn print_symbol_values(session: &Session, rows: &[SymbolValueRow], item_size: us
     let returns = |value: u64| {
         let mut before = [0u8; 8];
         value.checked_sub(before.len() as u64).is_some_and(|from| {
-            session.read_masked(VirtAddr(from), &mut before).is_ok()
+            session
+                .target
+                .read_masked(VirtAddr(from), &mut before)
+                .is_ok()
                 && target
                     .code_machine(VirtAddr(value))
                     .instruction_set()
@@ -509,7 +523,7 @@ impl ReplState<'_> {
     pub fn display_symbol_range(&self, range: &AddressRange, item_size: usize) -> Result<()> {
         match symbol_values(self.ctx, range, item_size) {
             Ok(values) => values.show(self.ctx),
-            Err(error) => error!("{error}"),
+            Err(error) => crate::hosts::repl::report_error(self, &error),
         }
         Ok(())
     }
@@ -611,6 +625,7 @@ fn pointers(
                         } else {
                             let mut pointed = vec![0u8; item_size];
                             session
+                                .target
                                 .read_masked(VirtAddr(pointer), &mut pointed)
                                 .ok()
                                 .and_then(|()| le_value(&pointed))
@@ -935,10 +950,10 @@ fn counted_string(
             let byte_len = (length as usize / unit_size) * unit_size;
             if byte_len == 0 || buffer.is_zero() {
                 CountedText::Empty
-            } else {
+            } else if let Some(end) = buffer.0.checked_add(byte_len as u64) {
                 let range = AddressRange {
                     start: buffer,
-                    end: buffer + byte_len as u64,
+                    end: VirtAddr(end),
                 };
                 let (data, valid) = read_best_effort(session, MemoryKind::Virtual, &range)?;
                 let text = match kind {
@@ -949,6 +964,10 @@ fn counted_string(
                     text,
                     complete: valid.iter().all(|ok| *ok),
                 }
+            } else {
+                // A buffer that runs past the top of the address space is a
+                // corrupt descriptor.
+                CountedText::Unreadable
             }
         }
         _ => CountedText::Unreadable,
@@ -1098,6 +1117,7 @@ fn pagein(
     #[arg(parse = pagein_request)] request: PageInRequest,
 ) -> Result<()> {
     let PageInRequest { process, address } = request;
+    let dtb = process.as_ref().map(|process| process.dtb);
     outln!("resuming the target so its debugger worker can run");
     state.clear_selected_frame();
     let report = state
@@ -1113,8 +1133,14 @@ fn pagein(
     if !report.resident {
         // MmPrefetchVirtualMemory declines addresses that are not backed
         // at all, and the worker reports completion either way.
+        let target = &state.ctx.target;
+        let dtb = dtb.unwrap_or_else(|| target.current_dtb());
+        let why = target.non_resident(dtb, address).map_or_else(
+            || "it may be unmapped rather than paged out".to_string(),
+            |why| why.to_string(),
+        );
         return Err(Error::DebugInfo(format!(
-            "{} is still unreadable; it may be unmapped rather than paged out",
+            "{} is still unreadable: {why}",
             ui::addr(address.0)
         )));
     }
@@ -1226,14 +1252,13 @@ impl Render for ValuesWritten {
 /// addresses, or guest-physical ones. `noun` names what they are in an
 /// error. Every memory-writing command and SDK method writes through it.
 pub fn write_memory(
-    session: &Session,
+    session: &mut Session,
     memory: MemoryKind,
     address: VirtAddr,
     bytes: &[u8],
     noun: &str,
 ) -> Result<()> {
     session
-        .target
         .write_memory(memory, address.0, bytes)
         .map_err(|error| {
             let space = match memory {
@@ -1245,13 +1270,13 @@ pub fn write_memory(
 }
 
 /// Write `bytes` at `address` in the inspection space.
-fn write_virtual(session: &Session, address: VirtAddr, bytes: &[u8], noun: &str) -> Result<()> {
+fn write_virtual(session: &mut Session, address: VirtAddr, bytes: &[u8], noun: &str) -> Result<()> {
     write_memory(session, MemoryKind::Virtual, address, bytes, noun)
 }
 
 /// Write `values` as `unit`s at `address`.
 fn write_integers(
-    session: &Session,
+    session: &mut Session,
     address: VirtAddr,
     values: Vec<u64>,
     unit: WriteUnit,
@@ -1311,7 +1336,7 @@ pub fn write_values(
     forms = [write_bytes, write_u8],
 )]
 fn eb(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(parse = write_values)] values: Vec<u64>,
 ) -> Result<ValuesWritten> {
@@ -1321,7 +1346,7 @@ fn eb(
 /// Write bytes to this address space.
 #[command(form_of = eb, python = Memory, python_name = "write")]
 fn write_bytes(
-    session: &Session,
+    session: &mut Session,
     #[arg(receiver)] memory: MemoryKind,
     address: VirtAddr,
     data: Vec<u8>,
@@ -1332,7 +1357,7 @@ fn write_bytes(
 /// Write a little-endian byte.
 #[command(form_of = eb, python = Memory)]
 fn write_u8(
-    session: &Session,
+    session: &mut Session,
     #[arg(receiver)] memory: MemoryKind,
     address: VirtAddr,
     value: u8,
@@ -1349,7 +1374,7 @@ fn write_u8(
     forms = [write_u16],
 )]
 fn ew(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(parse = write_values)] values: Vec<u64>,
 ) -> Result<ValuesWritten> {
@@ -1359,7 +1384,7 @@ fn ew(
 /// Write a little-endian 16-bit integer.
 #[command(form_of = ew, python = Memory)]
 fn write_u16(
-    session: &Session,
+    session: &mut Session,
     #[arg(receiver)] memory: MemoryKind,
     address: VirtAddr,
     value: u16,
@@ -1377,7 +1402,7 @@ fn write_u16(
     forms = [write_u32],
 )]
 fn ed(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(parse = write_values)] values: Vec<u64>,
 ) -> Result<ValuesWritten> {
@@ -1387,7 +1412,7 @@ fn ed(
 /// Write a little-endian 32-bit integer.
 #[command(form_of = ed, python = Memory)]
 fn write_u32(
-    session: &Session,
+    session: &mut Session,
     #[arg(receiver)] memory: MemoryKind,
     address: VirtAddr,
     value: u32,
@@ -1405,7 +1430,7 @@ fn write_u32(
     forms = [write_u64],
 )]
 fn eq(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(parse = write_values)] values: Vec<u64>,
 ) -> Result<ValuesWritten> {
@@ -1415,7 +1440,7 @@ fn eq(
 /// Write a little-endian 64-bit integer.
 #[command(form_of = eq, python = Memory)]
 fn write_u64(
-    session: &Session,
+    session: &mut Session,
     #[arg(receiver)] memory: MemoryKind,
     address: VirtAddr,
     value: u64,
@@ -1455,7 +1480,7 @@ fn float_values(
     python = none,
 )]
 fn ef(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(parse = float_values)] numbers: Vec<f64>,
     #[arg(invoked)] name: &str,
@@ -1499,7 +1524,7 @@ impl Render for StringWritten {
 /// Write `text` at `address` as ANSI or UTF-16, NUL-terminated or not;
 /// `command` names it in an error.
 fn write_string(
-    session: &Session,
+    session: &mut Session,
     address: VirtAddr,
     text: &str,
     unicode: bool,
@@ -1532,7 +1557,7 @@ fn write_string(
     python = none,
 )]
 fn ea(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(rest, usage = "<text>", complete = None)] text: String,
 ) -> Result<StringWritten> {
@@ -1548,7 +1573,7 @@ fn ea(
     python = none,
 )]
 fn eu(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(rest, usage = "<text>", complete = None)] text: String,
 ) -> Result<StringWritten> {
@@ -1564,7 +1589,7 @@ fn eu(
     python = none,
 )]
 fn eza(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(rest, usage = "<text>", complete = None)] text: String,
 ) -> Result<StringWritten> {
@@ -1580,7 +1605,7 @@ fn eza(
     python = none,
 )]
 fn ezu(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = write_address)] address: VirtAddr,
     #[arg(rest, usage = "<text>", complete = None)] text: String,
 ) -> Result<StringWritten> {
@@ -1620,24 +1645,23 @@ fn writemem(
     let mut file = File::create(&path)
         .map_err(|error| Error::DebugInfo(format!("failed to create '{path}': {error}")))?;
     let mut unreadable = 0usize;
-    let mut write_error = None;
-    for_each_page_chunk(range.start, range.len(), |_, address, len| {
-        if write_error.is_some() {
-            return;
+    // Read in display-sized slices so a large range is never held whole.
+    let mut offset = 0usize;
+    while offset < range.len() {
+        let len = (range.len() - offset).min(MAX_DISPLAY_BYTES);
+        let (mut bytes, valid) =
+            read_page_chunks(range.start + offset as u64, len, |address, buf| {
+                session.target.read_masked(address, buf)
+            })?;
+        for (byte, valid) in bytes.iter_mut().zip(&valid) {
+            if !valid {
+                *byte = 0;
+                unreadable += 1;
+            }
         }
-        let mut bytes = vec![0u8; len];
-        if session.read_masked(address, &mut bytes).is_err() {
-            bytes.fill(0);
-            unreadable += len;
-        }
-        if let Err(error) = file.write_all(&bytes) {
-            write_error = Some(error.to_string());
-        }
-    });
-    if let Some(error) = write_error {
-        return Err(Error::DebugInfo(format!(
-            "failed to write '{path}': {error}"
-        )));
+        file.write_all(&bytes)
+            .map_err(|error| Error::DebugInfo(format!("failed to write '{path}': {error}")))?;
+        offset += len;
     }
     Ok(MemoryToFile {
         path,
@@ -1683,7 +1707,7 @@ pub struct FileToMemory {
     python = none,
 )]
 fn readmem(
-    session: &Session,
+    session: &mut Session,
     #[arg(name = "file")] path: String,
     #[arg(parse = file_range)] range: AddressRange,
 ) -> Result<FileToMemory> {
@@ -1697,19 +1721,17 @@ fn readmem(
         unwritten: 0,
         read_error: None,
     };
+    let mut bytes = [0u8; PAGE_SIZE];
     for_each_page_chunk(range.start, range.len(), |offset, address, len| {
         if loaded.read_error.is_some() {
             return;
         }
-        let mut bytes = vec![0u8; len];
-        if let Err(error) = file.read_exact(&mut bytes) {
+        let bytes = &mut bytes[..len];
+        if let Err(error) = file.read_exact(bytes) {
             loaded.read_error = Some((offset, error.to_string()));
             return;
         }
-        if let Err(error) = session
-            .target
-            .write_memory(MemoryKind::Virtual, address.0, &bytes)
-        {
+        if let Err(error) = session.write_memory(MemoryKind::Virtual, address.0, bytes) {
             loaded.failed.push((address, error));
             loaded.unwritten += len;
         }
@@ -1793,32 +1815,20 @@ impl Render for NumberFormats {
         field("float", format_float(f32::from_bits(value as u32)));
         field("double", format_float(f64::from_bits(value)));
 
-        const FILETIME_UNIX_OFFSET_SECONDS: i64 = 11_644_473_600;
-        const FILETIME_MAX_TICKS: u64 = 265_046_774_400_000_000;
-        let filetime_seconds = value / 10_000_000;
-        let filetime_unix_seconds =
-            (filetime_seconds as i64).saturating_sub(FILETIME_UNIX_OFFSET_SECONDS);
-        if value <= FILETIME_MAX_TICKS
-            && (FILETIME_UNIX_MIN_SECONDS..=FILETIME_UNIX_MAX_SECONDS)
-                .contains(&filetime_unix_seconds)
-        {
-            let ticks = (value % 10_000_000) as u32;
-            field(
-                "time (FILETIME)",
-                format_unix_timestamp(filetime_unix_seconds, ticks),
-            );
-        } else {
-            field("time (FILETIME)", "out of range".to_string());
-        }
-        let unix_seconds = value as i64;
-        if (FILETIME_UNIX_MIN_SECONDS..=FILETIME_UNIX_MAX_SECONDS).contains(&unix_seconds) {
-            field(
-                "time (Unix seconds)",
-                format_unix_timestamp(unix_seconds, 0),
-            );
-        } else {
-            field("time (Unix seconds)", "out of range".to_string());
-        }
+        // Every u64 FILETIME's seconds fit an i64; the sign matters for
+        // the ones before 1970.
+        let filetime_seconds =
+            (value / FILETIME_TICKS_PER_SECOND) as i64 - FILETIME_UNIX_EPOCH_SECONDS as i64;
+        let filetime_ticks = (value % FILETIME_TICKS_PER_SECOND) as u32;
+        field(
+            "time (FILETIME)",
+            unix_seconds_to_iso(filetime_seconds, filetime_ticks)
+                .unwrap_or_else(|| "out of range".to_string()),
+        );
+        field(
+            "time (Unix seconds)",
+            unix_seconds_to_iso(value as i64, 0).unwrap_or_else(|| "out of range".to_string()),
+        );
     }
 }
 
@@ -1857,7 +1867,7 @@ fn search_pattern(
 ) -> std::result::Result<Vec<u8>, ArgError> {
     let words: Vec<&str> = words.iter().map(AsRef::as_ref).collect();
     kind.pattern(&words, |value| {
-        Expr::eval_with_radix(value, &cx.state.ctx.target, cx.state.radix).map(|value| value.0)
+        Expr::eval_with_radix(value, &cx.state.ctx.target, cx.state.ctx.radix).map(|value| value.0)
     })
     .map_err(|error| ArgError::Message(error.to_string()))
 }
@@ -1895,7 +1905,7 @@ impl Render for MemoryFilled {
 ///
 /// The pattern is bytes, in the same format as for `s`: `90`, `48 89 5c`,
 /// `48895c`, or `\x48\x89`. The command repeats the pattern to fill the
-/// range (`f @rsp L20 cc`).
+/// range (`f @rsp L20 cc`). It fills up to 16 MiB.
 #[command(
     names = ["f"],
     category = "memory and disassembly",
@@ -1904,13 +1914,20 @@ impl Render for MemoryFilled {
     python = none,
 )]
 fn fill(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = fill_range)] range: AddressRange,
     #[arg(parse = fill_pattern)] pattern: Vec<u8>,
 ) -> Result<MemoryFilled> {
+    // The fill is built whole and written at once, so it is bounded.
+    const MAX_FILL_BYTES: usize = 16 << 20;
+    if range.len() > MAX_FILL_BYTES {
+        return Err(Error::DebugInfo(format!(
+            "cannot fill {:#x} bytes: at most {MAX_FILL_BYTES:#x} are filled at once",
+            range.len()
+        )));
+    }
     let data = repeat_pattern(&pattern, range.len());
     session
-        .target
         .write_memory(MemoryKind::Virtual, range.start.0, &data)
         .map_err(|error| Error::DebugInfo(format!("failed to fill memory: {error}")))?;
     Ok(MemoryFilled {
@@ -2037,7 +2054,7 @@ impl Render for MemoryCopied {
     python = none,
 )]
 fn move_memory(
-    session: &Session,
+    session: &mut Session,
     #[arg(parse = paired_range)] range: AddressRange,
     destination: VirtAddr,
 ) -> Result<MemoryCopied> {
@@ -2063,7 +2080,6 @@ fn move_memory(
         )));
     }
     session
-        .target
         .write_memory(MemoryKind::Virtual, destination.0, &data)
         .map_err(|error| {
             Error::DebugInfo(format!(
@@ -2142,9 +2158,9 @@ fn search(
 }
 
 /// Find matches, including overlapping ones, with symbol/module/VAD
-/// context. In a virtual space, the search skips pages that it cannot read,
-/// the breakpoints of this session read as the code that they replaced, and
-/// the search returns a maximum of 4096 matches.
+/// context. The search skips pages that it cannot read and returns a
+/// maximum of 4096 matches; in a virtual space, the breakpoints of this
+/// session read as the code that they replaced.
 #[command(form_of = search, python = Memory, python_name = "search")]
 fn memory_search(
     session: &Session,
@@ -2164,17 +2180,16 @@ fn memory_search(
     }
     let target = &session.target;
     let SearchSpace::Virtual(undescribed) = space else {
-        // The range in one read, as `!search` does not chunk it.
-        let mut bytes = vec![0; length];
-        target.read_physical(start, &mut bytes)?;
-        return Ok(pattern_offsets(&bytes, &pattern)
-            .map(|offset| {
-                MemorySearchMatch::undescribed(
-                    start.wrapping_add(offset as u64),
-                    offset as u64,
-                    None,
-                    AddressKind::Physical,
-                )
+        let hits = target
+            .search(VirtAddr(start), &pattern, length, |address, buf| {
+                target.read_physical(address.0, buf)
+            })?
+            .matches;
+        return Ok(hits
+            .into_iter()
+            .map(|address| {
+                let offset = address.wrapping_sub(start);
+                MemorySearchMatch::undescribed(address, offset, None, AddressKind::Physical)
             })
             .collect());
     };
@@ -2257,23 +2272,6 @@ fn checked_display_string_count(max_chars: u64, char_size: usize) -> Result<usiz
 
 fn format_characters(value: u64) -> String {
     value.to_le_bytes().into_iter().map(ascii_char).collect()
-}
-
-/// Format a proleptic-Gregorian UTC timestamp in ISO 8601 (`…Z`) without
-/// pulling a date/time dependency into the debugger. `seconds` is Unix time
-/// and `ticks` the fractional second in FILETIME's 100 ns units.
-fn format_unix_timestamp(seconds: i64, ticks: u32) -> String {
-    let days = seconds.div_euclid(86_400);
-    let day_seconds = seconds.rem_euclid(86_400);
-    let hour = day_seconds / 3_600;
-    let minute = (day_seconds % 3_600) / 60;
-    let second = day_seconds % 60;
-    let (year, month, day) = days_to_ymd(days);
-    if ticks == 0 {
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-    } else {
-        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{ticks:07}Z")
-    }
 }
 
 #[cfg(test)]

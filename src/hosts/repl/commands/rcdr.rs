@@ -38,7 +38,7 @@ use crate::session::Session;
 )]
 fn rcdr_log_list(
     session: &Session,
-    #[arg(complete = Driver)] driver: Option<String>,
+    #[arg(parse = log_list_driver)] driver: Option<String>,
 ) -> Result<RcdrLogList> {
     match driver {
         None => rcdr_drivers(session).map(RcdrLogList::Drivers),
@@ -140,7 +140,30 @@ fn log_dump_driver(
     }
     drop(words);
     let name = name.ok_or(ArgError::Missing)?;
-    Ok(cursor.word_at(name).ok_or(ArgError::Missing)?.into_owned())
+    let word = cursor.word_at(name).ok_or(ArgError::Missing)?;
+    Ok(driver_word(cx, &word))
+}
+
+/// `!rcdrkd.rcdrloglist`'s driver, when given; see [`driver_word`].
+#[grammar(usage = "[driver]", complete = [Driver])]
+fn log_list_driver(
+    cx: &mut ArgCx<'_, '_>,
+    cursor: &mut ArgCursor<'_>,
+) -> std::result::Result<Option<String>, ArgError> {
+    Ok(cursor.word().map(|word| driver_word(cx, &word)))
+}
+
+/// The driver as the recorder lookup takes it: `word` when it names a driver,
+/// else its context address as hex when `word` evaluates (`0n…`, `@$t0`,
+/// `poi(…)`), since the lookup reads an address only as raw hex.
+fn driver_word(cx: &ArgCx<'_, '_>, word: &str) -> String {
+    if cx.state.ctx.target.rcdr_driver_named(word).is_ok() {
+        return word.to_owned();
+    }
+    match cx.eval(word) {
+        Ok(address) => format!("{:#x}", address.0),
+        Err(_) => word.to_owned(),
+    }
 }
 
 /// `!rcdrkd.rcdrlogdump`'s `-a <log>`, the last one given; the line is

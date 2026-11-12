@@ -359,7 +359,12 @@ impl KdBackend {
                 }
             };
             if self.virtual_lines.get((processor, line)).is_none() {
-                let wanted = request_end.next_multiple_of(KD_VIRTUAL_LINE as u64) - line;
+                // The last line of the address space has no end to round up
+                // to; the page-end bound below caps the fill there anyway.
+                let wanted = request_end
+                    .checked_next_multiple_of(KD_VIRTUAL_LINE as u64)
+                    .unwrap_or(u64::MAX)
+                    - line;
                 let to_page_end = PAGE_SIZE as u64 - (line & (PAGE_SIZE as u64 - 1));
                 let fill = wanted.min(self.virtual_fill_cap as u64).min(to_page_end) as usize;
                 let data = match with_framing_read_timeout(

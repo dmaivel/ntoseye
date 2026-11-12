@@ -12,7 +12,8 @@ const INTERRUPT_MAX_RESUMES: usize = 8;
 impl Session {
     /// Break in and classify the stop, breaking in again past one that is
     /// resumed (a hit a filter declines), up to [`INTERRUPT_MAX_RESUMES`]
-    /// times; then the last stop surfaces as a plain one. With it, whether
+    /// times; the last try holds a declined hit as the pause, and a stop
+    /// still resumed then surfaces as a plain one. With it, whether
     /// the stop is the break-in itself rather than one already pending.
     pub fn interrupt_classified(&mut self) -> Result<(StopResolution, bool)> {
         let mut resumed = 0;
@@ -24,8 +25,13 @@ impl Session {
                 event.thread_id,
                 event.program_counter
             );
-            let resolution = self.classify_stop_event(event)?;
-            match resolution {
+            // The last try holds a hit a filter declines as the pause: hits
+            // that come faster than the target polls for the break-in would
+            // otherwise be all a break-in ever collects.
+            self.hold_declined_hits = resumed + 1 >= INTERRUPT_MAX_RESUMES;
+            let resolution = self.classify_stop_event(event);
+            self.hold_declined_hits = false;
+            match resolution? {
                 StopResolution::Resumed => {
                     resumed += 1;
                     step_trace!("break-in resumed past a declined stop ({resumed})");
@@ -82,8 +88,10 @@ impl Session {
         }
     }
 
-    /// Whether an interrupt's stop is the break-in it requested. The KD rule
-    /// is the same status/non-managed-address split used by
+    /// Whether an interrupt's stop is the break-in it requested. A backend
+    /// that tells break-ins apart (gdb's `SIGINT`) reports `break_in`. KD
+    /// reports a break-in as a STATUS_BREAKPOINT, so there the rule is the
+    /// same status/non-managed-address split used by
     /// `stop_is_assisted_refresh_breakin`: a STATUS_BREAKPOINT that classified
     /// as an ordinary stop and is not on one of our sites. A stop the backend
     /// already had pending (`candidate` false) wins even with the same status.
@@ -92,10 +100,11 @@ impl Session {
             return false;
         };
         candidate
-            && event.exception_code == Some(STATUS_BREAKPOINT)
-            && event
-                .program_counter
-                .is_none_or(|pc| self.breakpoints.breakpoint_id_at_address(pc).is_none())
+            && (event.break_in
+                || (event.exception_code == Some(STATUS_BREAKPOINT)
+                    && event
+                        .program_counter
+                        .is_none_or(|pc| self.breakpoints.breakpoint_id_at_address(pc).is_none())))
     }
 
     /// Run `edit` with the target halted, restoring the previous run state.
@@ -110,9 +119,7 @@ impl Session {
         &mut self,
         edit: impl FnOnce(&mut Session) -> Result<T>,
     ) -> Result<T> {
-        let interrupt_supported = self.backend.capabilities().iter().any(|capability| {
-            capability.capability == DebugCapability::InterruptTarget && capability.supported
-        });
+        let interrupt_supported = self.backend.supports(DebugCapability::InterruptTarget);
         if !self.backend.is_running() || !interrupt_supported {
             return edit(self);
         }
@@ -148,6 +155,9 @@ impl Session {
     /// Clear every inspection cache that cannot survive a crash/reboot command
     /// before the shared wait loop re-establishes the next stop.
     pub fn clear_resume_state(&mut self) {
+        // The target runs into the crash, which ends a `.process` context
+        // as any run does.
+        self.target.end_process_context_on_run();
         self.target.selected_frame = None;
         self.target.registers = None;
         self.target.clear_context_dtb_override();
@@ -196,7 +206,7 @@ impl Session {
             self.refresh_context_for_current_thread();
         }
         // The VM is moving on, so any stop `service_idle` parked for the host to
-        // observe is now spent; drop it so a later `wait_for_stop` doesn't replay
+        // observe is now spent; drop it so a later `wait_stop` doesn't replay
         // a stale event.
         self.parked_stop = None;
         self.set_current_stop(None);
@@ -208,7 +218,9 @@ impl Session {
         // A kept stop is this resume's (see `DebugBackend::keep_last_stop`):
         // nothing runs before the wait reports it, so no vCPU steps off a
         // site, which would take that stop for its own.
-        if (self.breakpoints.has_enabled_breakpoints() || !self.module_traps.is_empty())
+        if (self.breakpoints.has_enabled_breakpoints()
+            || !self.module_traps.is_empty()
+            || self.bugcheck_trap.is_some())
             && !self.backend.stop_kept()
         {
             self.backend.set_current_thread(&self.current_thread)?;
@@ -216,10 +228,12 @@ impl Session {
         }
         for id in self.breakpoints.one_shot_hit_ids() {
             self.breakpoints
+                .edit()
                 .remove(self.backend.as_mut(), &self.target, id)?;
         }
 
         self.breakpoints
+            .edit()
             .refresh_enabled(self.backend.as_mut(), &self.target)?;
         self.continue_backend(disposition)?;
         self.record_continuation_disposition(disposition);
@@ -239,6 +253,8 @@ impl Session {
     /// No stopped inspection view survives a successful continuation, including
     /// one performed internally while absorbing a breakpoint or notification.
     pub(super) fn invalidate_running_context(&mut self) {
+        self.step_in_flight = None;
+        self.target.end_process_context_on_run();
         self.target.selected_frame = None;
         self.target.registers = None;
         self.target.breakpoint_stop = None;

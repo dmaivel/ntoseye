@@ -8,7 +8,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::Shutdown;
 use std::thread::{JoinHandle, spawn};
 
-use crate::backend::dbg_backend::TebPath;
+use crate::backend::dbg_backend::ThreadLayout;
 use crate::backend::kd::framing::{
     INITIAL_PACKET_ID, PACKET_TYPE_KD_STATE_MANIPULATE, data_packet,
 };
@@ -40,22 +40,31 @@ fn amd64_hardware_slots_remain_four_shared_slots() {
 }
 
 #[test]
-fn arm64_hardware_slots_remain_two_data_and_eight_execute_slots() {
+fn arm64_hardware_slots_are_the_implemented_ones_of_the_context_slots() {
     let (_kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.arch = Arch::Arm64;
     backend.register_map = Arch::Arm64.register_map().clone();
     backend.exit_prepared = true;
 
+    // Slots stay numbered as the CONTEXT's registers.
     assert_eq!(backend.hardware_breakpoint_slots(), 10);
+    // Unread, only the architecture's two of each are certain.
     assert_eq!(backend.hardware_slot_range(HwBreakpointAccess::Write), 0..2);
+    assert_eq!(
+        backend.hardware_slot_range(HwBreakpointAccess::Execute),
+        2..4
+    );
+
+    // Six breakpoints and four watchpoints, of which the CONTEXT holds two.
+    backend.debug_features = Some(0x1030_5106);
     assert_eq!(
         backend.hardware_slot_range(HwBreakpointAccess::ReadWrite),
         0..2
     );
     assert_eq!(
         backend.hardware_slot_range(HwBreakpointAccess::Execute),
-        2..10
+        2..8
     );
 }
 
@@ -200,7 +209,8 @@ fn arm64_context_debug_registers_update_special_registers() {
 }
 
 /// A halted fake kernel answering manipulate requests from an ordered
-/// `(api, status, data)` script, asserting each request's API number.
+/// `(api, status, data)` script, asserting each request's API number. A
+/// register read's data is its value, which the reply carries in its header.
 fn serve_manipulate(mut kernel: SerialStream, script: Vec<(u32, u32, Vec<u8>)>) -> JoinHandle<()> {
     const UNION: usize = 16;
     spawn(move || {
@@ -217,11 +227,15 @@ fn serve_manipulate(mut kernel: SerialStream, script: Vec<(u32, u32, Vec<u8>)>) 
                 u32::from_le_bytes(request[0..4].try_into().unwrap()),
                 api_number
             );
-            let mut reply = vec![0u8; api::MANIPULATE_HEADER_SIZE];
-            reply[0..4].copy_from_slice(&api_number.to_le_bytes());
+            // Windows answers in the request it received.
+            let mut reply = request[..api::MANIPULATE_HEADER_SIZE].to_vec();
             reply[8..12].copy_from_slice(&status.to_le_bytes());
-            reply[UNION + 12..UNION + 16].copy_from_slice(&(data.len() as u32).to_le_bytes());
-            reply.extend_from_slice(&data);
+            if api_number == api::DBGKD_READ_MACHINE_SPECIFIC_REGISTER {
+                reply[UNION + 4..UNION + 4 + data.len()].copy_from_slice(&data);
+            } else {
+                reply[UNION + 12..UNION + 16].copy_from_slice(&(data.len() as u32).to_le_bytes());
+                reply.extend_from_slice(&data);
+            }
             kernel
                 .write_all(&data_packet(
                     PACKET_TYPE_KD_STATE_MANIPULATE,
@@ -253,6 +267,17 @@ fn arm64_registers_survive_refused_control_space() {
         kernel,
         vec![
             (api::DBGKD_GET_CONTEXT, api::STATUS_SUCCESS, ctx),
+            // TTBR0, ESR and FAR of the processor that stopped the target.
+            (
+                api::DBGKD_READ_MACHINE_SPECIFIC_REGISTER,
+                0xc000_0001,
+                Vec::new(),
+            ),
+            (
+                api::DBGKD_READ_MACHINE_SPECIFIC_REGISTER,
+                0xc000_0001,
+                Vec::new(),
+            ),
             (
                 api::DBGKD_READ_MACHINE_SPECIFIC_REGISTER,
                 0xc000_0001,
@@ -381,6 +406,51 @@ fn registers_read_after_an_msr_write_show_it() {
     worker.join().unwrap();
 }
 
+/// The trap flag and DR6 a stop reported stop answering for the processor
+/// once the host writes its registers: serving them after the write would
+/// clear or keep a trap flag the written state no longer has.
+#[test]
+fn a_register_write_drops_the_stop_report() {
+    use crate::backend::kd::amd64::{CONTROL_EFLAGS_OFFSET, CONTROL_REPORT_SIZE};
+    const TF: u32 = 1 << 8;
+    let (kernel, host) = serial_pair().unwrap();
+    let mut backend = amd64_backend_reading(host);
+    let mut report = vec![0u8; CONTROL_REPORT_SIZE];
+    bytes::write_u32(&mut report, CONTROL_EFLAGS_OFFSET, TF | 0x246);
+    backend.registers.stopped(0, Some(ControlReport(report)));
+    let special = vec![0u8; Arch::Amd64.special_register_map().extent()];
+    let worker = serve_manipulate(
+        kernel,
+        vec![
+            // Refusing `SetContextEx` sends the CONTEXT whole, in one reply.
+            (api::DBGKD_SET_CONTEXT_EX, 0xc000_0001, Vec::new()),
+            (api::DBGKD_SET_CONTEXT, api::STATUS_SUCCESS, Vec::new()),
+            // Mirroring the debug registers into the special registers.
+            (
+                api::DBGKD_READ_CONTROL_SPACE,
+                api::STATUS_SUCCESS,
+                special.clone(),
+            ),
+            (api::DBGKD_WRITE_CONTROL_SPACE, api::STATUS_SUCCESS, special),
+        ],
+    );
+    assert_eq!(
+        backend.stop_trap_state().map(|trap| trap.eflags),
+        Some(u64::from(TF | 0x246))
+    );
+
+    backend
+        .write_registers(&vec![0u8; amd64::REGISTER_BUFFER_SIZE])
+        .unwrap();
+
+    assert!(
+        backend.stop_trap_state().is_none(),
+        "the stop's TF and DR6 described the registers before the write"
+    );
+    drop(backend);
+    worker.join().unwrap();
+}
+
 /// Windows' KD does not return an ARM64 thread's `x18`. In kernel mode it is
 /// the KPCR, whatever KD reported (seen: 0, and the KPRCB); in user mode it
 /// is the TEB, read through the KPCR's current thread, and KD reports 0. A
@@ -392,9 +462,11 @@ fn an_arm64_context_gets_its_real_x18() {
     const KPCR: u64 = 0xffff_f800_a1b7_0000;
     const THREAD: u64 = 0xffff_ba87_e0ab_3080;
     const TEB: u64 = 0x0000_00c8_4ac8_e000;
-    const PATH: TebPath = TebPath {
+    const PATH: ThreadLayout = ThreadLayout {
         current_thread: 0x988,
         teb: 0xf0,
+        process: 0xb8,
+        directory_table_base: 0x28,
     };
     struct Guest(Option<u64>);
     impl Arm64X18Source for Guest {
@@ -427,4 +499,92 @@ fn an_arm64_context_gets_its_real_x18() {
         arm64_x18(&context(EL1H, 0), Some(PATH), &mut Guest(None)),
         None
     );
+}
+
+/// The KPCR that gives a kernel-mode ARM64 thread its `x18` is read once a
+/// boot: the next halt's registers reuse it without asking, and after a
+/// reboot, whether a stop reports it or a reload hands over the new
+/// kernel's root, `x18` is the new boot's KPCR.
+#[test]
+fn an_arm64_kpcr_is_read_once_a_boot() {
+    const EL1H: u32 = 0b0101;
+    const REFUSED: u32 = 0xc000_0001;
+    let (kernel, host) = serial_pair().unwrap();
+    let mut backend = kd_backend_with_framing(host);
+    backend.arch = Arch::Arm64;
+    backend.register_map = Arch::Arm64.register_map().clone();
+    backend.link.halt();
+    backend.exit_prepared = true;
+
+    let mut context = vec![0u8; arm64::CONTEXT_SIZE];
+    bytes::write_u32(&mut context, arm64::OFFSET_CPSR, EL1H);
+    let msr = |status: u32, value: Option<u64>| {
+        let data = value.map_or_else(Vec::new, |value| value.to_le_bytes().to_vec());
+        (api::DBGKD_READ_MACHINE_SPECIFIC_REGISTER, status, data)
+    };
+    // GetContext, then TTBR0, ESR and FAR (refused, so 0), then TPIDR_EL1
+    // when the KPCR is not known; the first read's refused control space is
+    // not asked again.
+    let read = |tpidr: Option<u64>, first: bool| {
+        let mut script = vec![
+            (api::DBGKD_GET_CONTEXT, api::STATUS_SUCCESS, context.clone()),
+            msr(REFUSED, None),
+            msr(REFUSED, None),
+            msr(REFUSED, None),
+        ];
+        script.extend(tpidr.map(|value| msr(api::STATUS_SUCCESS, Some(value))));
+        if first {
+            script.push((api::DBGKD_READ_CONTROL_SPACE, REFUSED, Vec::new()));
+        }
+        script
+    };
+    const KPCR: u64 = 0xffff_f800_a1b7_0000;
+    const REPORTED: u64 = 0xffff_f801_22c4_0000;
+    const RELOADED: u64 = 0xffff_f802_9e10_0000;
+    let script = [
+        read(Some(KPCR | 0x2), true),
+        read(None, false),
+        read(Some(REPORTED), false),
+        read(Some(RELOADED), false),
+    ]
+    .concat();
+    let worker = serve_manipulate(kernel, script);
+    let x18 = |backend: &mut KdBackend| {
+        let registers = backend.read_registers().unwrap();
+        backend.register_map.read_u64("x18", &registers).unwrap()
+    };
+    let next_halt = |backend: &mut KdBackend| {
+        backend.record_running();
+        backend.link.halt();
+    };
+
+    assert_eq!(x18(&mut backend), KPCR);
+    next_halt(&mut backend);
+    assert_eq!(x18(&mut backend), KPCR);
+
+    backend.record_running();
+    backend.record_stop(&StateChange {
+        processor: 0,
+        number_processors: 1,
+        new_state: DBG_KD_EXCEPTION_STATE_CHANGE,
+        exception_code: STATUS_BREAKPOINT,
+        exception_first_chance: Some(true),
+        exception_address: None,
+        program_counter: 0xffff_f801_0011_2233,
+        kernel_base_hint: None,
+        load_symbols: None,
+        exception_record: None,
+        is_bugcheck: false,
+        bugcheck: None,
+        target_reloaded: true,
+        assisted_breakin: false,
+        control_report: None,
+    });
+    assert_eq!(x18(&mut backend), REPORTED);
+
+    next_halt(&mut backend);
+    backend.set_kernel_dtb(0x4_0000);
+    assert_eq!(x18(&mut backend), RELOADED);
+    drop(backend);
+    worker.join().unwrap();
 }

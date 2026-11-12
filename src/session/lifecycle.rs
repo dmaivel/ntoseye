@@ -13,14 +13,16 @@ use crate::backend::gdb::GdbClient;
 use crate::backend::kd::{KdBackend, KdMemorySource};
 use crate::backend::memory_backend::MemoryBackend;
 use crate::backend::phys::{HaltClock, PhysMem};
+use crate::base::env;
 use crate::base::error::{Error, Result};
 use crate::base::memory::MemoryOps;
 use crate::base::notice::Notice;
 use crate::base::types::VirtAddr;
-use crate::nt::breakpoints::{BreakpointManager, SiteJournal};
+use crate::nt::breakpoints::{BreakpointManager, Published, SiteFrames, SiteJournal};
 use crate::nt::bugchecks::plausible_bugcheck_code;
 use crate::nt::cpu_state;
 use crate::nt::dmp::{DmpBackend, DmpInfo};
+use crate::nt::expr::NumberRadix;
 use crate::nt::symbols::ntoseye_home;
 use crate::nt::target::hang::bugcheck_processor_from_freeze_states;
 use crate::nt::target::{Target, TargetKind};
@@ -46,7 +48,7 @@ fn locate_debugger_data(target: &mut Target, backend: &mut dyn DebugBackend) {
 /// its PRCB; the dump header holds only the crashing processor's. Failures
 /// become the backend's notices, and the header's context still stands. An
 /// AMD64 dump whose PRCB context offset is unknown keeps the header's
-/// context alone.
+/// context alone, though its PRCBs still give the control registers.
 fn read_processor_contexts(target: &Target, info: &DmpInfo, backend: &mut DmpBackend) {
     let processors = backend.processor_count();
     let saved = match info.context.arch() {
@@ -57,13 +59,10 @@ fn read_processor_contexts(target: &Target, info: &DmpInfo, backend: &mut DmpBac
             let offset = info.offset_prcb_context.or_else(|| {
                 cpu_state::prcb_context_offset(target, VirtAddr(info.debugger_data_block?))
             });
-            let Some(offset) = offset else {
-                return;
-            };
             cpu_state::read_amd64_prcb_contexts(target, processors, offset)
         }
     };
-    backend.set_processor_contexts(saved.contexts, saved.warnings);
+    backend.set_processor_contexts(saved.contexts, saved.special_registers, saved.warnings);
     // Without a header context to match, the processor that bugchecked is
     // the one it did not freeze.
     if backend.header_context_is_empty()
@@ -155,7 +154,7 @@ impl Session {
                 // abort; NTOSEYE_GDB_ON_HVF=1 is for a VM running a fixed one.
                 if *backend == Backend::Gdb
                     && phys.guest_debug_aborts_vm()
-                    && std::env::var_os("NTOSEYE_GDB_ON_HVF").is_none_or(|value| value != "1")
+                    && !env::switch_on("NTOSEYE_GDB_ON_HVF")
                 {
                     return Err(Error::GdbAbortsHvfVm);
                 }
@@ -322,7 +321,8 @@ impl Session {
         let key = instance_key(resource);
         let journal = SiteJournal::open(&dir, &key, kernel_base.0);
         let opcode = self.target.arch().breakpoint_instruction();
-        let mut repair = journal.repair(self.target.phys.as_ref(), opcode);
+        let frames = SiteFrames::new(&self.target);
+        let mut repair = journal.repair(&frames, opcode);
         let orphaned = std::fs::read_dir(&dir)
             .into_iter()
             .flatten()
@@ -332,13 +332,7 @@ impl Session {
             let Some(_lock) = instance_lock(&other).ok().filter(SingleInstance::is_single) else {
                 continue;
             };
-            let found = SiteJournal::repair_orphaned(
-                &dir,
-                &other,
-                kernel_base.0,
-                self.target.phys.as_ref(),
-                opcode,
-            );
+            let found = SiteJournal::repair_orphaned(&dir, &other, kernel_base.0, &frames, opcode);
             repair.restored += found.restored;
             repair.failed += found.failed;
         }
@@ -389,22 +383,32 @@ impl Session {
         // ARM64 register snapshots expose TTBR1 via the synthetic `cr3` slot;
         // hand the resolved kernel root to the backend so it can fill it.
         backend.set_kernel_dtb(target.kernel_dtb());
-        backend.set_teb_path(crate::nt::cpu_state::teb_path(&target));
+        backend.set_thread_layout(crate::nt::cpu_state::thread_layout(&target));
+        if let Ok(count) = crate::nt::cpu_state::processor_count(&target) {
+            backend.set_processor_count(count);
+        }
         backend.set_windows_hypervisor(target.windows_hypervisor_running());
+        if backend.reports_kernel_module_changes() {
+            target.keep_kernel_modules();
+        }
         let register_map = backend.register_map().clone();
 
         // Seed the selected thread from the backend when it exposes register
-        // context; otherwise default to the first processor.
-        let has_register_context = backend
-            .capabilities()
-            .iter()
-            .any(|c| c.capability == DebugCapability::ReadRegisters && c.supported);
+        // context; otherwise the first processor it lists.
+        let has_register_context = backend.supports(DebugCapability::ReadRegisters);
+        let first_listed = |backend: &mut Box<dyn DebugBackend>| {
+            backend
+                .thread_list()
+                .ok()
+                .and_then(|ids| ids.into_iter().next())
+                .unwrap_or_else(|| "1".to_string())
+        };
         let current_thread = if has_register_context {
             backend
                 .stopped_thread_id()
-                .unwrap_or_else(|_| "1".to_string())
+                .unwrap_or_else(|_| first_listed(&mut backend))
         } else {
-            "1".to_string()
+            first_listed(&mut backend)
         };
 
         static NEXT_SESSION_ID: AtomicUsize = AtomicUsize::new(1);
@@ -414,22 +418,30 @@ impl Session {
         let reload_module_list_pending = target
             .startup_message_data()
             .is_ok_and(|startup| startup.loaded_module_list.is_zero());
+        let sites = &target.code_sites;
+        let breakpoints = Published::new(BreakpointManager::new(), Arc::clone(sites));
+        let bugcheck_trap = Published::new(None, Arc::clone(sites));
+        let module_traps = Published::new(Vec::new(), Arc::clone(sites));
         let mut session = Self {
             id: NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed),
             target,
             backend,
-            breakpoints: BreakpointManager::new(),
+            breakpoints,
             register_map,
             current_thread,
             exception_policies: ExceptionPolicyTable::default(),
             parked_windows_thread: None,
             reload_module_list_pending,
-            bugcheck_trap: None,
-            module_traps: Vec::new(),
-            module_trap_interrupted: None,
+            bugcheck_trap,
+            module_traps,
+            trap_interrupted: None,
+            step_in_flight: None,
+            last_user_image: None,
+            hold_declined_hits: false,
             reload_surface_pending: false,
             parked_stop: None,
             pending_walk: None,
+            handed_back_run: None,
             current_stop: None,
             stop_snapshot: None,
             halt_requested: false,
@@ -444,6 +456,7 @@ impl Session {
             shown_stop: None,
             compact_stops: false,
             brief_stops: false,
+            radix: NumberRadix::Hexadecimal,
             displays: Vec::new(),
             kernel_prints: Default::default(),
             _instance_guard: None,
@@ -504,8 +517,9 @@ impl Session {
     }
 
     /// Bring the target to a real halt before teardown: consume a stop that is
-    /// already pending if it is meaningful, else break in. The REPL's ^D path.
-    pub fn halt_for_exit(&mut self) -> Result<()> {
+    /// already pending if it is meaningful, else break in, so the exit does
+    /// not stack a break-in on a stop that already landed.
+    fn halt_for_exit(&mut self) -> Result<()> {
         if let Some(event) = self.backend.try_wait_for_stop(EXIT_STOP_POLL)?
             && !matches!(
                 self.classify_stop_event(event)?,
@@ -528,7 +542,7 @@ impl Session {
         // Halting is only for restoring sites; with none to restore a passive
         // backend (which cannot interrupt) exits cleanly too.
         let halted = if self.backend.is_running() && self.has_installed_sites() {
-            self.interrupt().map(|_| ())
+            self.halt_for_exit()
         } else {
             Ok(())
         };

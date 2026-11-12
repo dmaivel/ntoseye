@@ -16,9 +16,14 @@ use gdbstub::target::ext::base::multithread::{
 
 use crate::backend::dbg_backend::{ContinueDisposition, ModuleEvent};
 use crate::backend::gdb::trace_packet;
-use crate::base::ntstatus::exception_code_name;
+use crate::base::ntstatus::{
+    STATUS_ACCESS_VIOLATION, STATUS_BREAKPOINT, STATUS_FLOAT_DIVIDE_BY_ZERO,
+    STATUS_FLOAT_INVALID_OPERATION, STATUS_ILLEGAL_INSTRUCTION, STATUS_IN_PAGE_ERROR,
+    STATUS_INTEGER_DIVIDE_BY_ZERO, STATUS_INTEGER_OVERFLOW, STATUS_PRIVILEGED_INSTRUCTION,
+    STATUS_SINGLE_STEP,
+};
 use crate::base::output;
-use crate::hosts::repl::STATUS_BREAKPOINT;
+use crate::session::driver::describe_bugcheck;
 use crate::session::stops::module_event_line;
 use crate::session::{Cancel, Motion, RunOutcome, Stop, StopKind};
 
@@ -27,15 +32,6 @@ use super::{GdbTarget, PlantedKind};
 
 /// How long each wait for a stop runs before checking the client socket.
 const RUN_POLL: Duration = Duration::from_millis(50);
-const STATUS_SINGLE_STEP: u32 = 0x8000_0004;
-const STATUS_ACCESS_VIOLATION: u32 = 0xC000_0005;
-const STATUS_IN_PAGE_ERROR: u32 = 0xC000_0006;
-const STATUS_ILLEGAL_INSTRUCTION: u32 = 0xC000_001D;
-const STATUS_FLOAT_DIVIDE_BY_ZERO: u32 = 0xC000_008E;
-const STATUS_FLOAT_INVALID_OPERATION: u32 = 0xC000_0090;
-const STATUS_INTEGER_DIVIDE_BY_ZERO: u32 = 0xC000_0094;
-const STATUS_INTEGER_OVERFLOW: u32 = 0xC000_0095;
-const STATUS_PRIVILEGED_INSTRUCTION: u32 = 0xC000_0096;
 
 /// What a wait for the target produced.
 pub(super) enum Wait {
@@ -146,7 +142,11 @@ impl GdbTarget<'_> {
                 }
                 self.sync_threads();
                 let tid = self.current_tid();
-                if let Some(planted) = self.planted.iter().find(|planted| planted.id == hit.id) {
+                if let Some(planted) = self
+                    .planted
+                    .iter()
+                    .find(|planted| planted.id == hit.id && planted.serial == hit.serial)
+                {
                     return match planted.kind {
                         PlantedKind::Software => MultiThreadStopReason::SwBreak(tid),
                         PlantedKind::Hardware => MultiThreadStopReason::HwBreak(tid),
@@ -179,28 +179,11 @@ impl GdbTarget<'_> {
                 Signal::SIGINT
             }
             StopKind::Exception { exception } => {
-                let code = exception.code;
-                let chance = match exception.first_chance {
-                    Some(true) => " (first chance)",
-                    Some(false) => " (second chance)",
-                    None => "",
-                };
-                let name = exception_code_name(code);
-                self.note(format!("{name} ({code:#010x}){chance} at {rip:#x}"));
-                exception_signal(code)
+                self.note(exception.describe(rip));
+                exception_signal(exception.code)
             }
             StopKind::Bugcheck { bugcheck } => {
-                let detail = match bugcheck {
-                    Some(info) => format!(
-                        "bugcheck {:#x} ({:#x}, {:#x}, {:#x}, {:#x})",
-                        info.code,
-                        info.parameters[0],
-                        info.parameters[1],
-                        info.parameters[2],
-                        info.parameters[3]
-                    ),
-                    None => "bugcheck (code unavailable from the transport)".to_string(),
-                };
+                let detail = describe_bugcheck(bugcheck.as_ref());
                 match stop.rip {
                     Some(rip) => self.note(format!("{detail} at {rip:#x}")),
                     None => self.note(detail),
@@ -209,22 +192,32 @@ impl GdbTarget<'_> {
                 Signal::SIGABRT
             }
             StopKind::Reload { reload } => {
-                let base = reload
-                    .kernel_base
-                    .map(|base| format!("{base:#x}"))
-                    .unwrap_or_else(|| "unknown".to_string());
-                let early = if reload.coherent {
-                    ""
-                } else {
-                    " (early boot: modules and processes are not available yet)"
-                };
-                self.note(format!("target rebooted; nt base {base}{early}"));
+                self.note(reload.describe());
                 // Every breakpoint the client planted belonged to the old boot.
                 self.planted.clear();
                 Signal::SIGTRAP
             }
         };
         self.signal(signal)
+    }
+
+    /// The `?` reply for a user-mode minidump that records an exception:
+    /// the exception's signal on the thread that raised it. gdbstub answers
+    /// `?` with `SIGTRAP` on any thread, which would hide the crash.
+    pub(super) fn halt_reply(&mut self, multiprocess: bool) -> Option<Vec<u8>> {
+        let info = self.session.target.user_dump_info()?;
+        let exception = info.exception.as_ref()?;
+        let signal = exception_signal(exception.code);
+        let thread = info.backend_thread_id(exception.thread_id);
+        self.sync_threads();
+        let tid = self.tid_of(&thread).get();
+        // gdbstub names the one process 1, as the thread list does.
+        let thread = if multiprocess {
+            format!("p1.{tid:x}")
+        } else {
+            format!("{tid:x}")
+        };
+        Some(format!("T{:02x}thread:{thread};", signal.0).into_bytes())
     }
 
     /// `signal` on the thread that stopped.

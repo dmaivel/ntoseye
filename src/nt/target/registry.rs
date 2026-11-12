@@ -212,15 +212,21 @@ pub struct HiveStorage {
 }
 
 /// A loaded hive (`_CMHIVE`).
+/// Where `hive` is mounted, when known.
+fn mount_of(hive: &Hive) -> Option<&str> {
+    hive.mount.as_result().ok()?.as_deref()
+}
+
 #[record(impl)]
 #[derive(Debug, Clone)]
 pub struct Hive {
     pub address: VirtAddr,
-    /// The master hive (`nt!CmpMasterHive`), whose root is `\\REGISTRY`.
+    /// The master hive (`nt!CmpMasterHive`), whose root is `\REGISTRY`.
     pub master: bool,
-    /// Where it is mounted (`HiveRootPath`), `\\REGISTRY` for the master
-    /// hive.
-    pub mount: Option<String>,
+    /// Where it is mounted (`HiveRootPath`), `\REGISTRY` for the master
+    /// hive; `None` for one not mounted. Unavailable before Vista, whose
+    /// hives do not record it, and where the path does not read.
+    pub mount: DiagnosticValue<Option<String>>,
     /// The file it was loaded from (`FileUserName`, else `FileFullPath`).
     pub file: Option<String>,
     /// `_HHIVE.BaseBlock`, and the end of the file's name it records.
@@ -989,9 +995,15 @@ fn read_hive(types: Types<'_>, address: VirtAddr, master: bool) -> Result<Hive> 
         address,
         master,
         mount: if master {
-            Some("\\REGISTRY".to_string())
+            DiagnosticValue::Available(Some("\\REGISTRY".to_string()))
         } else {
-            text("HiveRootPath")
+            match cmhive.unicode_string("HiveRootPath") {
+                Err(Error::FieldNotFound(_)) => {
+                    DiagnosticValue::unavailable("_CMHIVE.HiveRootPath not on this build")
+                }
+                Err(error) => DiagnosticValue::unavailable(error.to_string()),
+                Ok(root) => DiagnosticValue::Available(Some(root).filter(|root| !root.is_empty())),
+            }
         },
         file: text("FileUserName").or_else(|| text("FileFullPath")),
         base_block,
@@ -1603,9 +1615,7 @@ impl<'a> Registry<'a> {
                         // such as an application hive under \REGISTRY\A.
                         let wanted = format!("{current}\\{name}");
                         let Some(mounted) = self.hives.iter().find(|hive| {
-                            hive.mount
-                                .as_deref()
-                                .is_some_and(|mount| names_equal(mount, &wanted))
+                            mount_of(hive).is_some_and(|mount| names_equal(mount, &wanted))
                         }) else {
                             return Err(Error::DebugInfo(format!(
                                 "{current} has no subkey {name}"
@@ -1614,7 +1624,7 @@ impl<'a> Registry<'a> {
                         hive = mounted;
                         cell = Self::root_cell(hive)?;
                         node = self.node(hive, cell).map_err(Error::DebugInfo)?;
-                        current = mounted.mount.clone().unwrap_or(wanted);
+                        current = mount_of(mounted).map_or(wanted, str::to_string);
                     }
                 }
                 index += 1;
@@ -1632,10 +1642,9 @@ impl<'a> Registry<'a> {
         let mut current = node.clone();
         for _ in 0..MAX_DEPTH {
             if current.flags & KEY_HIVE_ENTRY != 0 {
-                let mount = hive
-                    .mount
-                    .clone()
-                    .ok_or_else(|| "its hive has no mount point".to_string())?;
+                let mount = mount_of(hive)
+                    .ok_or_else(|| "its hive has no mount point".to_string())?
+                    .to_string();
                 names.reverse();
                 return Ok(std::iter::once(mount)
                     .chain(names)
@@ -1815,6 +1824,37 @@ impl Target {
     /// The names of the subkeys of the key at `path` that read.
     pub fn registry_subkey_names(&self, path: &str) -> Result<Vec<String>> {
         self.registry()?.1.subkey_names(path)
+    }
+
+    /// The full path of the key each key control block (KCB) in `kcbs`
+    /// stands for, as its hive names it (`\REGISTRY\MACHINE\SOFTWARE\Microsoft`),
+    /// from its hive and cell; `None` for one whose key does not read. The
+    /// registry is read once for all of them.
+    pub fn registry_key_paths(&self, kcbs: &[VirtAddr]) -> Vec<Option<String>> {
+        let Ok((_, registry)) = self.registry() else {
+            return vec![None; kcbs.len()];
+        };
+        let Ok(layout) = self
+            .guest()
+            .and_then(|guest| guest.ntoskrnl.types().layout("_CM_KEY_CONTROL_BLOCK"))
+        else {
+            return vec![None; kcbs.len()];
+        };
+        kcbs.iter()
+            .map(|&kcb| {
+                let hive = VirtAddr(
+                    self.read_kernel_layout_field(&layout, kcb, "KeyHive")
+                        .ok()?,
+                );
+                let cell: u32 = self
+                    .read_kernel_layout_field(&layout, kcb, "KeyCell")
+                    .ok()?;
+                let location = registry.cell_location(hive, cell).ok()?;
+                // The node follows the cell's size field.
+                let key = registry.key_at(hive, location.address + 4u64).ok()?;
+                Some(key.path)
+            })
+            .collect()
     }
 }
 
@@ -2437,9 +2477,9 @@ mod tests {
             panic!("two hives: {hives:?}");
         };
         assert!(master.master);
-        assert_eq!(master.mount.as_deref(), Some("\\REGISTRY"));
+        assert_eq!(mount_of(master), Some("\\REGISTRY"));
         assert_eq!(system.address, VirtAddr(SYSTEM));
-        assert_eq!(system.mount.as_deref(), Some(MOUNT_PATH));
+        assert_eq!(mount_of(system), Some(MOUNT_PATH));
         assert_eq!(
             system.root_cell,
             DiagnosticValue::Available(fixture.system_root)

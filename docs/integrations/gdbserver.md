@@ -113,8 +113,8 @@ Binary Ninja can exit if it disconnects while it reads memory. By then, the serv
 | Step and continue | Step single-steps the selected vCPU, and continue resumes all vCPUs. Over `kd` and `kdnet`, the other vCPUs run during a step, and on an ARM64 target only the vCPU that stopped can step. A step or continue that cannot run is reported as `SIGINT`, with the reason on the console |
 | Interrupt | Break-in, reported as `SIGINT` |
 | `monitor` | Any ntoseye command that does not resume, step, reboot, or crash the target. `q` and `.shell` are not available |
-| Library list | Kernel modules, plus the modules of the current process after {command}`.process`. Each library is named `/` followed by its file name |
-| Program | `/ntoskrnl.exe`, with the relocation of the kernel from the preferred base of its file (`qOffsets`) |
+| Library list | Kernel modules, plus the modules of the current process after {command}`.process`. On a user-mode minidump, the dump's modules. Each library is named `/` followed by its file name |
+| Program | `/ntoskrnl.exe`, or the main image of a user-mode minidump, with its relocation from the preferred base of its file (`qOffsets`) |
 | Memory map | The user and kernel halves of the address space, with each library image as a separate region |
 | Console output | Guest `DbgPrint` output and stop details, while the target runs |
 | Remote files (`vFile`) | Read-only. The PE file of the loaded module that has the requested file name, and a generated `/proc/<pid>/maps` |
@@ -129,7 +129,7 @@ Each stop halts the full target. If the target stops on a breakpoint that the cl
 | Integer or floating-point fault | `SIGFPE` |
 | Bugcheck | `SIGABRT` |
 
-Hardware breakpoints and watchpoints need KD or KDNET, and they use the same four debug-register slots as {command}`ba`.
+Hardware breakpoints and watchpoints need the `kd`, `kdnet`, or `gdb` backend, and they use the same debug-register slots as {command}`ba`.
 
 ## Remote file access
 
@@ -145,6 +145,8 @@ An open never waits for the network, because clients time out quickly (IDA after
 
 If an image is not in the cache yet, the server downloads it in the background, one image at a time, and opens of that image fail until it arrives. To wait for the image, run `.fetchimage <module>`.
 
+An image that the symbol server does not have is tried once per session, so a later client does not queue it again; {command}`.reload` or a change of the symbol path tries it again.
+
 When the server attaches, it starts to download the kernel image, because IDA opens that image on each attach. gdb opens the image of each module when it connects, so the first gdb connection puts all the module images in the download queue.
 
 The server generates `/proc/<pid>/maps` when a client opens it, for any pid or `self`. The file covers the same address space as the memory map and contains:
@@ -156,7 +158,7 @@ The server generates `/proc/<pid>/maps` when a client opens it, for any pid or `
 
 Memory reads and new breakpoints use ntoseye's inspection context instead of the thread that the client selects.
 
-To read the user space of a process, change the context with `monitor .process <eprocess>`. New breakpoints then apply only to that process, as with {command}`bp` in the REPL.
+To read the user space of a process, change the context with `monitor .process <eprocess>`. New breakpoints then apply only to that process, as with {command}`bp` in the REPL. The context ends when the target runs, as in WinDbg; `monitor .process /i <eprocess>` keeps it until the process exits.
 
 The client caches memory and gets no notice of the context change, so refresh its views after you change the context. In IDA, select **Debugger > Refresh memory**.
 
@@ -172,7 +174,7 @@ Breakpoints that you set with `monitor bp ... do "..."` still run their actions.
 
 The server keeps the session when one client disconnects and another connects, and it serves one client at a time. When a client connects, the target is halted.
 
-When a client detaches or disconnects, the server removes that client's breakpoints and resumes the guest, but breakpoints that you set through `monitor` stay for the next client.
+When a client detaches or disconnects, the server removes that client's breakpoints and resumes the guest, but breakpoints that you set through `monitor` stay for the next client. If one of the client's breakpoints cannot be removed, the guest stays halted and the server reports the failure, as {command}`q` does.
 
 `SIGINT`, `SIGTERM`, and `SIGHUP` stop the server, which removes all breakpoints and resumes the guest before it exits.
 
@@ -182,7 +184,7 @@ When a client detaches or disconnects, the server removes that client's breakpoi
 
 ## Troubleshooting
 
-`NTOSEYE_GDB_TRACE=1` prints each packet to stderr, and each line shows the seconds since the first line. There are two types of lines, both on the same clock:
+`NTOSEYE_TRACE=gdb` prints each packet to stderr, and each line shows the seconds since the first line. There are two types of lines, both on the same clock:
 
 - `client` lines show the conversation between the server and its client.
 - `stub` lines show the conversation between the `gdb` backend and the hypervisor's stub.

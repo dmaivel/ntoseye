@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use crate::arch::{HwBreakpointAccess, RegisterMap};
 use crate::backend::dbg_backend::{
-    BackendCapability, ContinueDisposition, DebugBackend, DebugOutputPage, PciConfigAddress,
-    ProcessorRead, StopEvent, TebPath, TrapState,
+    BackendCapability, ContinueDisposition, DebugBackend, DebugOutputPage, ExceptionRecord,
+    PciConfigAddress, ProcessorRead, StopEvent, ThreadLayout, TrapState,
 };
 use crate::backend::debugger_data::DebuggerDataCandidate;
 use crate::backend::phys::PhysMem;
@@ -97,6 +97,14 @@ impl DebugBackend for KdBackendHandle {
     fn debug_traps_reach_target(&self) -> bool {
         true
     }
+    fn steps_only_the_stopping_processor(&self) -> bool {
+        self.lock().steps_only_the_stopping_processor()
+    }
+    // Windows sends a load-symbols state change for every kernel image it
+    // loads or unloads while a kernel debugger is attached.
+    fn reports_kernel_module_changes(&self) -> bool {
+        true
+    }
 
     fn revalidate_host_memory(&mut self, phys: &PhysMem) -> Result<()> {
         // Target-mediated memory is the target itself: there is no host
@@ -118,8 +126,8 @@ impl DebugBackend for KdBackendHandle {
         self.lock().set_kernel_dtb(dtb);
     }
 
-    fn set_teb_path(&mut self, path: Option<TebPath>) {
-        self.lock().set_teb_path(path);
+    fn set_thread_layout(&mut self, path: Option<ThreadLayout>) {
+        self.lock().set_thread_layout(path);
     }
 
     fn read_registers(&mut self) -> Result<Vec<u8>> {
@@ -132,6 +140,14 @@ impl DebugBackend for KdBackendHandle {
 
     fn surface_next_break_at(&mut self, address: Option<u64>) {
         self.lock().surface_next_break_at(address);
+    }
+
+    fn note_breakin_site(&mut self, address: u64) {
+        self.lock().note_breakin_site(address);
+    }
+
+    fn last_exception_record(&self) -> Option<ExceptionRecord> {
+        self.lock().last_exception_record()
     }
 
     fn write_registers(&mut self, data: &[u8]) -> Result<()> {
@@ -267,6 +283,10 @@ impl DebugBackend for KdBackendHandle {
 
     fn note_target_rediscovery_complete(&mut self) {
         self.lock().note_target_rediscovery_complete();
+    }
+
+    fn forget_target_breakpoints(&mut self) {
+        self.lock().forget_target_breakpoints();
     }
 
     fn target_manages_breakpoint_sites(&self) -> bool {

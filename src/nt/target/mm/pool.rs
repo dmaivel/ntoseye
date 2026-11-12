@@ -14,11 +14,12 @@ use crate::base::types::VirtAddr;
 use crate::nt::symbols::glob_matches;
 use crate::nt::target::Target;
 use crate::nt::target::pool::{
-    BigPoolEntry, NONPAGED_POOL, PAGED_POOL, POOL_ALIGN, POOL_PAGE_SIZE, PoolHeader,
-    annotate_near_symbol, big_pool_layout, classify_pool_region, collect_pool_usage, find_big_pool,
-    locate_pool_block_in_page, pool_block_state, pool_header_candidates, pool_layout,
-    pool_page_blocks, pool_range, scan_big_pool_entries, scan_present_pool_pages,
-    segment_heap_hint, tag_looks_printable, tag_string,
+    BigPoolEntry, HeaderPoolEncoding, NONPAGED_POOL, PAGED_POOL, POOL_ALIGN, POOL_PAGE_SIZE,
+    PoolHeader, PoolPageReader, PoolUsageRow, annotate_near_symbol, big_pool_layout,
+    classify_pool_region, collect_pool_usage, find_big_pool, header_pool_type,
+    locate_pool_block_in_page, pool_block_state, pool_header_candidates, pool_layout, pool_range,
+    scan_big_pool_entries, scan_present_pool_pages, segment_heap_hint, tag_looks_printable,
+    tag_string,
 };
 
 const MAX_POOLFIND_RESULTS: usize = 1024;
@@ -30,8 +31,11 @@ impl Target {
     /// are retained separately when the address lies in one.
     pub fn inspect_pool(&self, address: VirtAddr) -> Result<PoolPageDetail> {
         let layout = pool_layout(self)?;
+        // A page-aligned address that the big-pool table does not settle is
+        // still decoded as a classic page below, which reports the table's
+        // error if no block holds it.
         if address.0 & (POOL_PAGE_SIZE - 1) == 0
-            && let Some(big) = find_big_pool(self, &layout, address)
+            && let Ok(Some(big)) = find_big_pool(self, &layout, address)
         {
             return Ok(PoolPageDetail {
                 target: address,
@@ -52,18 +56,32 @@ impl Target {
             .iter()
             .enumerate()
             .map(|(block_index, block)| {
-                pool_block_detail(block, index == Some(block_index), address)
+                pool_block_detail(
+                    block,
+                    index == Some(block_index),
+                    address,
+                    layout.header_pool,
+                )
             })
             .collect::<Vec<_>>();
-        let big = if index.is_none() {
-            find_big_pool(self, &layout, address).map(|entry| big_pool_detail(address, &entry))
+        let (big, message) = if index.is_none() {
+            match find_big_pool(self, &layout, address) {
+                Ok(Some(entry)) => (Some(big_pool_detail(address, &entry)), None),
+                Ok(None) => (
+                    None,
+                    Some(
+                        "address does not lie inside a recognizable _POOL_HEADER block".to_string(),
+                    ),
+                ),
+                Err(error) => (
+                    None,
+                    Some(format!(
+                        "address does not lie inside a recognizable _POOL_HEADER block, and {error}"
+                    )),
+                ),
+            }
         } else {
-            None
-        };
-        let message = if index.is_none() && big.is_none() {
-            Some("address does not lie inside a recognizable _POOL_HEADER block".to_string())
-        } else {
-            None
+            (None, None)
         };
         let page_kind = if big.is_some() {
             "big"
@@ -105,7 +123,7 @@ impl Target {
     pub fn validate_pool(&self, address: VirtAddr) -> Result<PoolValidationDetail> {
         let layout = pool_layout(self)?;
         let page = VirtAddr(address.0 & !(POOL_PAGE_SIZE - 1));
-        if let Some(big) = find_big_pool(self, &layout, page) {
+        if let Some(big) = find_big_pool(self, &layout, page)? {
             return Err(Error::DebugInfo(format!(
                 "{:#x} is in a big-pool allocation ('{}', {:#x} bytes at {:#x}), which has no block headers",
                 address.0,
@@ -126,14 +144,21 @@ impl Target {
                 None
             }
         });
-        let blocks = pool_page_blocks(&layout, page, &bytes);
+        let blocks = PoolPageReader::new(self, &layout).page_blocks(page, &bytes);
         let candidates = pool_header_candidates(&layout, page, &bytes);
         let page_layout = if segment_heap_hint(self).is_some() {
             PoolPageLayout::SegmentHeap
         } else {
             PoolPageLayout::Chained
         };
-        let problem = first_pool_problem(page_layout, &blocks, &candidates, page, paged);
+        let problem = first_pool_problem(
+            page_layout,
+            &blocks,
+            &candidates,
+            page,
+            paged,
+            layout.header_pool,
+        );
         Ok(PoolValidationDetail {
             address,
             page,
@@ -143,7 +168,7 @@ impl Target {
                 .iter()
                 .map(|block| {
                     let marked = (block.header.0..block.header.0 + block.size).contains(&address.0);
-                    pool_block_detail(block, marked, address)
+                    pool_block_detail(block, marked, address, layout.header_pool)
                 })
                 .collect(),
             problem,
@@ -163,24 +188,13 @@ impl Target {
             .rows
             .into_iter()
             .filter(|row| {
-                tag_filter
-                    .map(|filter| glob_matches(filter, &tag_string(row.tag), false))
-                    .unwrap_or(true)
+                row.in_use()
+                    && tag_filter
+                        .map(|filter| glob_matches(filter, &tag_string(row.tag), false))
+                        .unwrap_or(true)
             })
             .collect::<Vec<_>>();
-        match sort {
-            PoolUsageSort::NonPagedBytes => rows.sort_by(|a, b| {
-                b.nonpaged_bytes
-                    .cmp(&a.nonpaged_bytes)
-                    .then_with(|| a.tag.cmp(&b.tag))
-            }),
-            PoolUsageSort::PagedBytes => rows.sort_by(|a, b| {
-                b.paged_bytes
-                    .cmp(&a.paged_bytes)
-                    .then_with(|| a.tag.cmp(&b.tag))
-            }),
-            PoolUsageSort::Tag => rows.sort_by_key(|row| row.tag),
-        }
+        sort_usage_rows(&mut rows, sort);
         let rows_truncated = summary.rows_truncated || rows.len() > MAX_POOLUSED_ROWS;
         rows.truncate(MAX_POOLUSED_ROWS);
         Ok(PoolUsageDetail {
@@ -202,6 +216,7 @@ impl Target {
         let mut matches = Vec::new();
         let mut ranges = Vec::new();
         if let Some(layout) = &layout {
+            let mut reader = PoolPageReader::new(self, layout);
             for kind in [PoolType::NonPaged, PoolType::Paged] {
                 if pool_type.is_some_and(|wanted| wanted != kind) {
                     continue;
@@ -222,25 +237,28 @@ impl Target {
                 };
                 let end = VirtAddr(end.0 & !(PAGE_SIZE as u64 - 1));
                 let scan = scan_present_pool_pages(self, start, end, |page_va, page| {
-                    for block in pool_page_blocks(layout, page_va, page) {
-                        if block.synthetic_free || !glob_matches(tag, &tag_string(block.tag), false)
+                    for block in reader.page_blocks(page_va, page) {
+                        // A tag that does not read is data the lax scan
+                        // took for a header (the tracker table counts no
+                        // such tag), which only a wildcard would match.
+                        if block.synthetic_free
+                            || !tag_looks_printable(block.tag)
+                            || !glob_matches(tag, &tag_string(block.tag), false)
                         {
                             continue;
                         }
-                        let kind = if block.pool_type == 1 {
-                            PoolType::Paged
-                        } else {
-                            PoolType::NonPaged
-                        };
                         matches.push(PoolFindMatch {
                             source: pool.name.to_string(),
                             address: block.body,
                             size: block.size,
                             tag: block.tag,
                             tag_name: tag_string(block.tag),
-                            allocated: pool_block_state(&block) != PoolBlockState::Free,
-                            state: pool_block_state(&block),
-                            pool_type: Some(kind),
+                            allocated: pool_block_state(&block, layout.header_pool)
+                                != PoolBlockState::Free,
+                            state: pool_block_state(&block, layout.header_pool),
+                            pool_type: layout
+                                .header_pool
+                                .and_then(|encoding| header_pool_type(block.pool_type, encoding)),
                             table_entry: None,
                             index: None,
                         });
@@ -263,14 +281,16 @@ impl Target {
                 }
             }
         }
-        let big_status = if let Some(layout) = layout.as_ref() {
-            Some(
+        // The big-page table is independent of the pool headers: a kernel
+        // whose symbols lack `_POOL_HEADER` may still describe it.
+        let big_status = Some(match big_pool_layout(self) {
+            Ok((big_pool_type, uses_struct, has_pool_type, has_slush)) => {
                 scan_big_pool_entries(
                     self,
-                    layout.big_pool_type.as_deref(),
-                    layout.big_pool_uses_struct,
-                    layout.big_pool_has_pool_type,
-                    layout.big_pool_has_slush,
+                    Some(&big_pool_type),
+                    uses_struct,
+                    has_pool_type,
+                    has_slush,
                     |entry| {
                         if matches.len() < MAX_POOLFIND_RESULTS
                             && pool_type
@@ -297,55 +317,15 @@ impl Target {
                         matches.len() >= MAX_POOLFIND_RESULTS
                     },
                 )
-                .status,
-            )
-        } else {
-            match big_pool_layout(self) {
-                Ok((big_pool_type, uses_struct, has_pool_type, has_slush)) => Some(
-                    scan_big_pool_entries(
-                        self,
-                        Some(&big_pool_type),
-                        uses_struct,
-                        has_pool_type,
-                        has_slush,
-                        |entry| {
-                            if matches.len() < MAX_POOLFIND_RESULTS
-                                && pool_type.is_none_or(|kind| {
-                                    entry.nonpaged == (kind == PoolType::NonPaged)
-                                })
-                                && glob_matches(tag, &tag_string(entry.tag), false)
-                            {
-                                matches.push(PoolFindMatch {
-                                    source: "BigPool".to_string(),
-                                    address: entry.va,
-                                    size: entry.size,
-                                    tag: entry.tag,
-                                    tag_name: tag_string(entry.tag),
-                                    allocated: true,
-                                    state: PoolBlockState::Allocated,
-                                    pool_type: Some(if entry.nonpaged {
-                                        PoolType::NonPaged
-                                    } else {
-                                        PoolType::Paged
-                                    }),
-                                    table_entry: Some(entry.entry),
-                                    index: Some(entry.index),
-                                });
-                            }
-                            matches.len() >= MAX_POOLFIND_RESULTS
-                        },
-                    )
-                    .status,
-                ),
-                Err(error) => Some(format!("big-page layout unavailable: {error}")),
+                .status
             }
-        };
+            Err(error) => format!("big-page layout unavailable: {error}"),
+        });
         let truncated = matches.len() >= MAX_POOLFIND_RESULTS;
         let interrupted = self.interrupted();
         Ok(PoolFindDetail {
             tag: tag.to_string(),
             pool_type,
-            found: matches.len(),
             matches,
             ranges,
             big_status,
@@ -355,16 +335,37 @@ impl Target {
     }
 }
 
+/// `rows` in `!poolused`'s order: by tag, as its characters read, or by
+/// nonpaged or paged bytes, largest first.
+fn sort_usage_rows(rows: &mut [PoolUsageRow], sort: PoolUsageSort) {
+    match sort {
+        PoolUsageSort::NonPagedBytes => rows.sort_by(|a, b| {
+            b.nonpaged_bytes
+                .cmp(&a.nonpaged_bytes)
+                .then_with(|| a.tag.to_le_bytes().cmp(&b.tag.to_le_bytes()))
+        }),
+        PoolUsageSort::PagedBytes => rows.sort_by(|a, b| {
+            b.paged_bytes
+                .cmp(&a.paged_bytes)
+                .then_with(|| a.tag.to_le_bytes().cmp(&b.tag.to_le_bytes()))
+        }),
+        // A tag's characters are its bytes in memory order.
+        PoolUsageSort::Tag => rows.sort_by_key(|row| row.tag.to_le_bytes()),
+    }
+}
+
 /// The first inconsistency among the blocks of the `layout` pool page at
-/// `page`: `blocks` is [`pool_page_blocks`]'s reading of it and `candidates`
+/// `page`: `blocks` is [`PoolPageReader::page_blocks`]'s reading of it and `candidates`
 /// [`pool_header_candidates`]'s; `paged` says which pool the page's range
-/// belongs to, when known.
+/// belongs to, when known, and `header_pool` how a header's `PoolType`
+/// names its pool.
 fn first_pool_problem(
     layout: PoolPageLayout,
     blocks: &[PoolHeader],
     candidates: &[PoolHeader],
     page: VirtAddr,
     paged: Option<bool>,
+    header_pool: Option<HeaderPoolEncoding>,
 ) -> Option<PoolProblem> {
     let page_end = page.0 + POOL_PAGE_SIZE;
     let problem = |header: VirtAddr, message: String| Some(PoolProblem { header, message });
@@ -382,15 +383,15 @@ fn first_pool_problem(
     }
     for (index, block) in blocks.iter().enumerate() {
         let end = block.header.0 + block.size;
-        // The classic header's PoolType is the POOL_TYPE + 1, whose bit 0 is
-        // the paged bit. The segment heap's encoding is not documented, so
-        // its pool type goes unchecked.
+        // A segment-heap page's blocks can include data the scan tolerated
+        // as headers, so only a classic page's are held to its pool.
         if layout == PoolPageLayout::Chained
             && !block.synthetic_free
-            && block.pool_type != 0
             && let Some(paged) = paged
+            && let Some(pool) =
+                header_pool.and_then(|encoding| header_pool_type(block.pool_type, encoding))
         {
-            let type_paged = (block.pool_type - 1) & 1 != 0;
+            let type_paged = pool == PoolType::Paged;
             if type_paged != paged {
                 return problem(
                     block.header,
@@ -484,8 +485,13 @@ fn segment_heap_header(header: &PoolHeader) -> bool {
         && tag_looks_printable(header.tag)
 }
 
-fn pool_block_detail(block: &PoolHeader, marked: bool, target: VirtAddr) -> PoolBlockDetail {
-    let state = pool_block_state(block);
+fn pool_block_detail(
+    block: &PoolHeader,
+    marked: bool,
+    target: VirtAddr,
+    encoding: Option<HeaderPoolEncoding>,
+) -> PoolBlockDetail {
+    let state = pool_block_state(block, encoding);
     PoolBlockDetail {
         header: block.header,
         body: block.body,
@@ -533,6 +539,42 @@ mod tests {
     const PAGE: VirtAddr = VirtAddr(0xffff_8000_0000_0000);
     const TAG: u32 = u32::from_le_bytes(*b"Test");
 
+    fn usage(tag: &[u8; 4], nonpaged: (i64, i64, i64)) -> PoolUsageRow {
+        PoolUsageRow {
+            tag: u32::from_le_bytes(*tag),
+            nonpaged_allocs: Some(nonpaged.0),
+            nonpaged_frees: Some(nonpaged.1),
+            nonpaged_bytes: Some(nonpaged.2),
+            paged_allocs: Some(0),
+            paged_frees: Some(0),
+            paged_bytes: Some(0),
+        }
+    }
+
+    /// Tags sort as their characters read, as WinDbg lists them, not by
+    /// the little-endian number they are stored as (which orders them by
+    /// their last character).
+    #[test]
+    fn usage_rows_sort_by_tag_text() {
+        let mut rows = [b"lcA\0", b"Proc", b"ConT", b"EP\0\0"].map(|tag| usage(tag, (1, 0, 16)));
+        sort_usage_rows(&mut rows, PoolUsageSort::Tag);
+        let order: Vec<[u8; 4]> = rows.iter().map(|row| row.tag.to_le_bytes()).collect();
+        assert_eq!(order, [*b"ConT", *b"EP\0\0", *b"Proc", *b"lcA\0"]);
+    }
+
+    /// A tag is in use while it has more allocations than frees, summed
+    /// over the processors' tables; one whose every allocation was freed
+    /// is not, whatever any one processor's table says.
+    #[test]
+    fn a_tag_is_in_use_while_allocations_are_outstanding() {
+        assert!(usage(b"Proc", (5, 4, 0x100)).in_use());
+        assert!(!usage(b"Proc", (7, 7, 0)).in_use());
+        let mut without_counts = usage(b"Proc", (0, 0, 0x40));
+        without_counts.nonpaged_allocs = None;
+        without_counts.nonpaged_frees = None;
+        assert!(without_counts.in_use(), "bytes stand in for missing counts");
+    }
+
     fn header(offset: u64, size: u64, previous_size: u64, pool_type: u8) -> PoolHeader {
         PoolHeader {
             header: VirtAddr(PAGE.0 + offset),
@@ -542,6 +584,7 @@ mod tests {
             pool_type,
             tag: TAG,
             synthetic_free: false,
+            lfh_busy: None,
         }
     }
 
@@ -551,25 +594,48 @@ mod tests {
         candidates: &[PoolHeader],
         paged: Option<bool>,
     ) -> Option<u64> {
-        first_pool_problem(layout, blocks, candidates, PAGE, paged)
+        problem_in(TYPE_ITSELF, layout, blocks, candidates, paged)
+    }
+
+    fn problem_in(
+        encoding: HeaderPoolEncoding,
+        layout: PoolPageLayout,
+        blocks: &[PoolHeader],
+        candidates: &[PoolHeader],
+        paged: Option<bool>,
+    ) -> Option<u64> {
+        first_pool_problem(layout, blocks, candidates, PAGE, paged, Some(encoding))
             .map(|problem| problem.header.0 - PAGE.0)
     }
 
     const CHAINED: PoolPageLayout = PoolPageLayout::Chained;
+    /// Headers holding the `POOL_TYPE` itself (Vista on), whose
+    /// `PagedPool` is 1.
+    const TYPE_ITSELF: HeaderPoolEncoding = HeaderPoolEncoding {
+        paged_pool: 1,
+        plus_one: false,
+    };
+    /// What a header's `PoolType` reads there for a nonpaged and a paged
+    /// block.
+    const NONPAGED: u8 = 2;
+    const PAGED: u8 = 3;
 
     #[test]
     fn chained_page_flags_a_previous_size_that_breaks_the_chain() {
         let blocks = [
-            header(0, 0x100, 0, 1),
-            header(0x100, 0x200, 0x100, 1),
-            header(0x300, 0xd00, 0x180, 1),
+            header(0, 0x100, 0, NONPAGED),
+            header(0x100, 0x200, 0x100, NONPAGED),
+            header(0x300, 0xd00, 0x180, NONPAGED),
         ];
         assert_eq!(
             problem_at(CHAINED, &blocks, &blocks, Some(false)),
             Some(0x300)
         );
         // No link holds, as when the only link is the corrupt one.
-        let blocks = [header(0, 0x100, 0, 1), header(0x100, 0xf00, 0x80, 1)];
+        let blocks = [
+            header(0, 0x100, 0, NONPAGED),
+            header(0x100, 0xf00, 0x80, NONPAGED),
+        ];
         assert_eq!(
             problem_at(CHAINED, &blocks, &blocks, Some(false)),
             Some(0x100)
@@ -578,22 +644,63 @@ mod tests {
 
     #[test]
     fn chained_page_must_end_at_the_page_end() {
-        let blocks = [header(0, 0x100, 0, 1), header(0x100, 0x200, 0x100, 1)];
+        let blocks = [
+            header(0, 0x100, 0, NONPAGED),
+            header(0x100, 0x200, 0x100, NONPAGED),
+        ];
         assert_eq!(
             problem_at(CHAINED, &blocks, &blocks, Some(false)),
             Some(0x100)
         );
-        let whole = [header(0, 0x100, 0, 1), header(0x100, 0xf00, 0x100, 1)];
+        let whole = [
+            header(0, 0x100, 0, NONPAGED),
+            header(0x100, 0xf00, 0x100, NONPAGED),
+        ];
         assert_eq!(problem_at(CHAINED, &whole, &whole, Some(false)), None);
     }
 
+    /// The paged bit is `PagedPool`'s, whatever else the type holds: a
+    /// nonpaged block reads 2, which is not PagedPool + 1.
     #[test]
     fn chained_pool_type_must_match_the_page_region() {
-        // PoolType 2 is PagedPool + 1.
-        let blocks = [header(0, 0x100, 0, 2), header(0x100, 0xf00, 0x100, 2)];
+        let blocks = [
+            header(0, 0x100, 0, PAGED),
+            header(0x100, 0xf00, 0x100, PAGED),
+        ];
         assert_eq!(problem_at(CHAINED, &blocks, &blocks, Some(false)), Some(0));
         assert_eq!(problem_at(CHAINED, &blocks, &blocks, Some(true)), None);
         assert_eq!(problem_at(CHAINED, &blocks, &blocks, None), None);
+        let blocks = [
+            header(0, 0x100, 0, NONPAGED),
+            header(0x100, 0xf00, 0x100, NONPAGED),
+        ];
+        assert_eq!(problem_at(CHAINED, &blocks, &blocks, Some(true)), Some(0));
+        assert_eq!(problem_at(CHAINED, &blocks, &blocks, Some(false)), None);
+    }
+
+    /// Windows Server 2003's headers hold the type plus one, with 4 set
+    /// while allocated: a nonpaged block reads 5, which read as the type
+    /// itself would say paged, and a paged one 6.
+    #[test]
+    fn server_2003_headers_hold_the_pool_type_plus_one() {
+        let plus_one = HeaderPoolEncoding {
+            paged_pool: 1,
+            plus_one: true,
+        };
+        let nonpaged = [header(0, 0x100, 0, 5), header(0x100, 0xf00, 0x100, 5)];
+        assert_eq!(
+            problem_in(plus_one, CHAINED, &nonpaged, &nonpaged, Some(false)),
+            None
+        );
+        assert_eq!(
+            problem_in(plus_one, CHAINED, &nonpaged, &nonpaged, Some(true)),
+            Some(0)
+        );
+        let paged = [header(0, 0x100, 0, 6), header(0x100, 0xf00, 0x100, 6)];
+        assert_eq!(
+            problem_in(plus_one, CHAINED, &paged, &paged, Some(true)),
+            None
+        );
     }
 
     #[test]

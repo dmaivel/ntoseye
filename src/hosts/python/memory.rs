@@ -121,7 +121,7 @@ impl Memory {
             if physical {
                 session.target.read_physical(addr, buf).map_err(err)
             } else {
-                session.read_masked(VirtAddr(addr), buf).map_err(err)
+                session.target.read_masked(VirtAddr(addr), buf).map_err(err)
             }
         })
     }

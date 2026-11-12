@@ -238,9 +238,9 @@ pub struct StopEvent {
     pub target_kernel_base_hint: Option<VirtAddr>,
     /// Set when the transport surfaced a kernel module load/unload notification.
     pub modules_changed: bool,
-    /// The load or unload a module notification reports, with the base of
-    /// the image; `None` for every other stop.
-    pub module_event: Option<(ModuleEvent, VirtAddr)>,
+    /// The load or unload a module notification reports; `None` for every
+    /// other stop.
+    pub module_event: Option<ModuleNotification>,
     /// Set when this stop was caused by a debugger-generated assist break-in
     /// during a target refresh/reconnect sequence, rather than by a user break
     /// or target exception.
@@ -250,8 +250,35 @@ pub struct StopEvent {
     pub break_in: bool,
 }
 
-/// A kernel image entering or leaving the module list: the events `sx* ld`
-/// and `sx* ud` filter, spelled as `sx` spells them.
+/// The exception record a stop reported (`EXCEPTION_RECORD64`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExceptionRecord {
+    pub code: u32,
+    pub flags: u32,
+    /// The record this one is chained to, 0 for none.
+    pub record: u64,
+    pub address: u64,
+    /// `ExceptionInformation[..NumberParameters]`.
+    pub parameters: Vec<u64>,
+}
+
+/// An image a module notification reports loading or unloading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleNotification {
+    pub kind: ModuleEvent,
+    pub base: VirtAddr,
+    /// The image's size; 0 when the transport does not say.
+    pub size: u32,
+    /// The image's path as the transport names it
+    /// (`\Windows\System32\ntdll.dll`), when it names one.
+    pub path: Option<String>,
+    /// For a user-mode image, the process mapping it as KD names it: the low
+    /// 32 bits of its `EPROCESS`. `None` for a kernel image.
+    pub process: Option<u64>,
+}
+
+/// An image entering or leaving a module list: the events `sx* ld` and
+/// `sx* ud` filter, spelled as `sx` spells them.
 #[record]
 #[derive(Copy, PartialEq, Eq)]
 pub enum ModuleEvent {
@@ -406,16 +433,63 @@ impl BackendCapability {
     }
 }
 
+/// What a static snapshot (a crash dump or a user-mode minidump) can do:
+/// read memory, registers and thread contexts, and nothing that runs or
+/// changes the target. `bugchecks` when it records the bugcheck it was
+/// written for.
+pub fn snapshot_capabilities(bugchecks: bool) -> Vec<BackendCapability> {
+    use DebugCapability::*;
+    [
+        MemoryIntrospection,
+        ReadRegisters,
+        ExecutionControl,
+        InterruptTarget,
+        SingleStep,
+        WriteRegisters,
+        ThreadList,
+        ThreadSelection,
+        KernelBreakpoints,
+        UserModeBreakpoints,
+        Watchpoints,
+        TargetReloadDetection,
+        KernelBaseHint,
+        BugcheckDetection,
+        BugcheckDetails,
+        ModuleLoadEvents,
+        DebugOutput,
+        Msr,
+        IoPorts,
+        PciConfig,
+        TargetControl,
+        TargetFileIo,
+    ]
+    .into_iter()
+    .map(|capability| BackendCapability {
+        capability,
+        supported: match capability {
+            MemoryIntrospection | ReadRegisters | ThreadList | ThreadSelection => true,
+            BugcheckDetection | BugcheckDetails => bugchecks,
+            _ => false,
+        },
+    })
+    .collect()
+}
+
+/// The refusal of `operation` by `snapshot`, a static snapshot such as "crash
+/// dump".
+pub fn snapshot_refusal(snapshot: &str, operation: &str) -> Error {
+    Error::DebugInfo(format!(
+        "{snapshot} is a static snapshot; {operation} is not available"
+    ))
+}
+
 /// The refusal a halted-only operation owes a backend that can never halt.
 ///
 /// Without execution control a backend reports `is_running()` forever, so
 /// "the VM is running, break in first" names a state the user cannot reach.
 pub fn halt_unreachable_reason(backend: &dyn DebugBackend) -> Option<String> {
-    let controllable = backend
-        .capabilities()
-        .iter()
-        .any(|entry| entry.capability == DebugCapability::ExecutionControl && entry.supported);
-    (!controllable).then(|| format!("the {} backend cannot halt the target", backend.name()))
+    (!backend.supports(DebugCapability::ExecutionControl))
+        .then(|| format!("the {} backend cannot halt the target", backend.name()))
 }
 
 /// Single-step residue a resume has to clear: RFLAGS.TF and the DR6 B0-B3
@@ -479,6 +553,12 @@ pub fn processor_index_from_backend_thread_id(thread_id: &str) -> Option<u16> {
     u16::from_str_radix(tid, 16).ok()?.checked_sub(1)
 }
 
+/// The backend thread id of the zero-based processor `index`; the inverse of
+/// [`processor_index_from_backend_thread_id`].
+pub fn backend_thread_id(index: u16) -> String {
+    format!("p1.{:x}", u32::from(index) + 1)
+}
+
 /// What a backend thread id is shown as: a processor by its number as
 /// Windows numbers it (`3`; a guest partition's VP is that guest's
 /// processor), any other thread, such as a user-mode dump's `7b0.404`, by
@@ -505,13 +585,19 @@ pub const STEP_UNDER_WINDOWS_HYPERVISOR: &str = "single-stepping is unsafe over 
      Windows runs its own hypervisor (VBS, Hyper-V): a step can complete inside the hypervisor and \
      leave its trap to Windows. Use the kd or kdnet backend to step";
 
-/// Where the current thread's TEB is: the pointer to the current thread at
-/// `kpcr + current_thread` (`_KPCR.Prcb.CurrentThread`), and the TEB pointer
-/// at `thread + teb` (`_KTHREAD.Teb`).
+/// Where a processor's current thread keeps its TEB and address space: the
+/// pointer to the thread at `kpcr + current_thread`
+/// (`_KPCR.Prcb.CurrentThread`), its TEB pointer at `thread + teb`
+/// (`_KTHREAD.Teb`), the process whose address space it runs in at
+/// `thread + process` (`_KTHREAD.ApcState.Process`), and that process's
+/// page-table root at `process + directory_table_base`
+/// (`_KPROCESS.DirectoryTableBase`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TebPath {
+pub struct ThreadLayout {
     pub current_thread: u64,
     pub teb: u64,
+    pub process: u64,
+    pub directory_table_base: u64,
 }
 
 /// Debug transport abstraction; guest memory access is provided separately by
@@ -529,10 +615,17 @@ pub trait DebugBackend {
     /// DTB. No-op on backends whose register file carries the DTB natively.
     fn set_kernel_dtb(&mut self, _dtb: u64) {}
 
-    /// Provide where the current thread's TEB is, from the kernel's PDB, so
-    /// a register snapshot whose transport drops the TEB (KD on ARM64 in
-    /// user mode, where `x18` holds it) can fill it. No-op elsewhere.
-    fn set_teb_path(&mut self, _path: Option<TebPath>) {}
+    /// Provide where a processor's current thread keeps its TEB and address
+    /// space, from the kernel's PDB, so a register snapshot whose transport
+    /// drops them (KD on ARM64: `x18` in user mode, and every processor's
+    /// but the stopping one's system registers) can fill them. No-op
+    /// elsewhere.
+    fn set_thread_layout(&mut self, _path: Option<ThreadLayout>) {}
+
+    /// Provide the number of processors the kernel reports, for a backend
+    /// that has no list of its own but can still select one to inspect (the
+    /// memory backend). No-op elsewhere.
+    fn set_processor_count(&mut self, _count: u16) {}
 
     fn read_registers(&mut self) -> Result<Vec<u8>>;
     fn write_registers(&mut self, data: &[u8]) -> Result<()>;
@@ -562,6 +655,19 @@ pub trait DebugBackend {
     /// `DbgBreakPointWithStatus`. This says one such break was asked for.
     /// One-shot, consumed by the next resume.
     fn surface_next_break_at(&mut self, _address: Option<u64>) {}
+
+    /// `address` is where the kernel's own break-ins land
+    /// (`nt!DbgBreakPointWithStatus`), so a stop there that no host asked
+    /// for is noise: a break-in the transport sent while the target was
+    /// already halted, which the kernel kept and takes on its next clock
+    /// tick.
+    fn note_breakin_site(&mut self, _address: u64) {}
+
+    /// The whole exception record of the last stop, when it was an
+    /// exception and the transport reports the record.
+    fn last_exception_record(&self) -> Option<ExceptionRecord> {
+        None
+    }
 
     fn set_breakpoint(&mut self, addr: u64) -> Result<()>;
     fn remove_breakpoint(&mut self, addr: u64) -> Result<()>;
@@ -683,6 +789,13 @@ pub trait DebugBackend {
         capabilities
     }
 
+    /// Whether [`Self::capabilities`] reports `capability` as supported.
+    fn supports(&self, capability: DebugCapability) -> bool {
+        self.capabilities()
+            .iter()
+            .any(|entry| entry.capability == capability && entry.supported)
+    }
+
     /// Notify the backend about a breakpoint patched outside `set_breakpoint`
     fn note_breakpoint_installed(&mut self, _addr: u64) {}
     fn note_breakpoint_uninstalled(&mut self, _addr: u64) {}
@@ -709,6 +822,14 @@ pub trait DebugBackend {
     /// reload. Backends can use this to tune reconnect assistance while booting.
     fn note_target_rediscovery_pending(&mut self) {}
     fn note_target_rediscovery_complete(&mut self) {}
+
+    /// The session is rebuilding the target after a reload: forget the
+    /// software breakpoints planted before it, whose sites the session
+    /// plants anew. A backend whose target keeps the sites (KD's breakpoint
+    /// table) must not forget them on its own when it sees a reset: a stop
+    /// the session never classifies (a step's) would leave the session
+    /// tracking sites the backend no longer knows.
+    fn forget_target_breakpoints(&mut self) {}
 
     /// Where the transport says the kernel is after a target reload. KD reads
     /// it from GetVersion and the page-table root, so the rebuild needs no RAM
@@ -755,6 +876,20 @@ pub trait DebugBackend {
     /// [`STEP_UNDER_WINDOWS_HYPERVISOR`]. Steps and breakpoints are then run
     /// past with [`Self::continue_current_thread`] to temporary sites instead.
     fn single_step_unsafe(&self) -> bool {
+        false
+    }
+
+    /// Whether only the processor that reported the stop can be stepped. A
+    /// step armed on another processor before that stop then stays armed,
+    /// and the step goes on by resuming the target, not by stepping again.
+    fn steps_only_the_stopping_processor(&self) -> bool {
+        false
+    }
+
+    /// Whether the target reports each kernel module it loads or unloads as
+    /// a stop (KD's load-symbols state change), so a kernel module list read
+    /// earlier holds until the next report.
+    fn reports_kernel_module_changes(&self) -> bool {
         false
     }
 
@@ -1006,7 +1141,13 @@ mod tests {
         log.record(b"no newline yet");
         assert!(log.read_since(0).lines.is_empty());
         log.record(b"\n");
-        assert_eq!(log.read_since(0).lines.len(), 1);
+        let texts: Vec<String> = log
+            .read_since(0)
+            .lines
+            .into_iter()
+            .map(|l| l.text)
+            .collect();
+        assert_eq!(texts, ["no newline yet"]);
     }
 
     #[test]

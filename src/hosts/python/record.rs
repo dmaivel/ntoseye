@@ -172,7 +172,7 @@ impl BaseRecord {
 
 /// The package's generic `Diagnostic` class, which fields that can fail to
 /// read on their own are built as.
-pub(crate) fn diagnostic_class(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+pub fn diagnostic_class(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     cached(py, &DIAGNOSTIC, "Diagnostic")
 }
 

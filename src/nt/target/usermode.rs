@@ -1,9 +1,10 @@
 use std::fs;
+use std::ops::Range;
 
 use crate::arch::Arch;
 use crate::base::disasm::instruction_length;
 use crate::base::error::{Error, Result};
-use crate::base::memory::MemoryOps;
+use crate::base::memory::{MemoryOps, PAGE_SIZE};
 use crate::base::ntstatus::{ntstatus_name, win32_error_name};
 use crate::base::types::{Dtb, VirtAddr};
 use crate::nt::guest::{
@@ -11,20 +12,24 @@ use crate::nt::guest::{
     walk_loader_list, walk_loader_list32,
 };
 use crate::nt::layout::{StructRef, Types};
-use crate::nt::pe::{image_base, read_pe_header_page, size_of_image};
+use crate::nt::pe::{apply_base_relocations, image_base, read_pe_header_page, size_of_image};
+use crate::nt::target::mm::PfnSelector;
 use crate::nt::target::{DiagnosticValue, ListTermination, Target, TargetKind};
 use iced_x86::{Code, Decoder, DecoderOptions};
 use ntoseye_macros::record;
 use pelite::{PeView, Wrap};
 
 pub mod address;
+pub mod critsec;
 pub mod handles;
+pub mod runaway;
 
 const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
 const IMAGE_SCN_MEM_DISCARDABLE: u32 = 0x0200_0000;
 const IMAGE_DIRECTORY_ENTRY_BASERELOC: usize = 5;
-const IMAGE_REL_BASED_HIGHLOW: u16 = 3;
-const IMAGE_REL_BASED_DIR64: u16 = 10;
+const IMAGE_DIRECTORY_ENTRY_IAT: usize = 12;
+/// Patch labels (`SwapContext_PatchXSave`) looked up in one image.
+const MAX_PATCH_SITES: usize = 256;
 const MAX_REPORT_RANGES: usize = 64;
 const MAX_BYTE_DIFFS: usize = 4096;
 const SECTION_READ_CHUNK: usize = 0x1000;
@@ -46,8 +51,9 @@ pub struct ProcessParameters {
     pub runtime_data: DiagnosticValue<String>,
     /// The environment block's address.
     pub environment: DiagnosticValue<VirtAddr>,
-    /// The environment block's size in bytes.
-    pub environment_size: DiagnosticValue<u64>,
+    /// The environment block's size in bytes; `None` on builds whose
+    /// parameters do not record it (Windows Server 2003).
+    pub environment_size: Option<DiagnosticValue<u64>>,
 }
 
 /// A `_PEB_LDR_DATA` list head.
@@ -92,8 +98,9 @@ pub struct Peb {
     pub os_build_number: DiagnosticValue<u64>,
     pub session_id: DiagnosticValue<u64>,
     pub number_of_processors: DiagnosticValue<u64>,
-    /// The API set schema.
-    pub api_set_map: DiagnosticValue<VirtAddr>,
+    /// The API set schema; `None` on builds without API sets (before
+    /// Windows 7).
+    pub api_set_map: Option<DiagnosticValue<VirtAddr>>,
     /// The loader's module list heads.
     pub loader_lists: DiagnosticValue<LoaderLists>,
     /// The WOW64 `_PEB32`. `None` for a native process.
@@ -249,8 +256,9 @@ pub struct LastError32 {
 }
 
 /// A kind of known kernel self-patch recognized by `!chkimg`: `import
-/// optimization`, `retpoline`, `KiPatchSelf/JMP thunk`, or `kernel VA
-/// region rebase`.
+/// optimization`, `retpoline`, `KiPatchSelf/JMP thunk`, `kernel VA region
+/// rebase`, `import address table`, `service table`, or `processor patch
+/// site`.
 #[record]
 #[derive(Copy, PartialEq, Eq)]
 pub enum SelfPatchKind {
@@ -264,14 +272,30 @@ pub enum SelfPatchKind {
     /// boot: the image holds the region's old fixed base.
     #[record(label = "kernel VA region rebase")]
     RegionRebase,
+    /// The import address table (the image's IAT data directory), which
+    /// the loader fills with the imports' addresses.
+    #[record(label = "import address table")]
+    ImportAddressTable,
+    /// `nt!KiServiceTable`, whose entries the kernel packs at boot into
+    /// offsets with the argument counts.
+    #[record(label = "service table")]
+    ServiceTable,
+    /// An instruction the kernel labels for patching
+    /// (`SwapContext_PatchXSave`) and rewrites at boot for the processor's
+    /// features, `fxsave` to `xsave` or `xsaveopt`.
+    #[record(label = "processor patch site")]
+    PatchSite,
 }
 
 impl SelfPatchKind {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 7] = [
         Self::ImportOptimization,
         Self::Retpoline,
         Self::KiPatchSelf,
         Self::RegionRebase,
+        Self::ImportAddressTable,
+        Self::ServiceTable,
+        Self::PatchSite,
     ];
 }
 
@@ -287,6 +311,13 @@ pub struct ImageSelfPatchCounts {
     /// Relocated addresses of the kernel VA regions that the kernel moves at
     /// boot.
     pub region_rebase: u64,
+    /// Import address table entries the loader filled.
+    pub import_address_table: u64,
+    /// `KiServiceTable` entries the kernel packed.
+    pub service_table: u64,
+    /// Instructions at the kernel's patch labels, rewritten for the
+    /// processor.
+    pub patch_site: u64,
 }
 
 #[record]
@@ -307,6 +338,9 @@ impl ImageSelfPatchCounts {
             SelfPatchKind::Retpoline => &mut self.retpoline,
             SelfPatchKind::KiPatchSelf => &mut self.ki_patch_self,
             SelfPatchKind::RegionRebase => &mut self.region_rebase,
+            SelfPatchKind::ImportAddressTable => &mut self.import_address_table,
+            SelfPatchKind::ServiceTable => &mut self.service_table,
+            SelfPatchKind::PatchSite => &mut self.patch_site,
         }
     }
 
@@ -459,10 +493,18 @@ struct SectionCheckResult {
     diff_overflow: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct SelfPatchMatch {
     kind: SelfPatchKind,
     function: Option<String>,
+}
+
+/// RVAs of an image that the loader or the kernel's boot rewrites in
+/// place, and what the change is.
+#[derive(Debug)]
+struct BootTimeRange {
+    rvas: Range<u64>,
+    patch: SelfPatchMatch,
 }
 
 /// The process a command given none decodes (see [`Target::current_process`]).
@@ -536,10 +578,7 @@ fn read_unicode_or_empty(record: &StructRef<'_>, field: &str) -> DiagnosticValue
     DiagnosticValue::from_result(record.unicode_string(field))
 }
 
-fn decode_process_parameters(
-    record: &StructRef<'_>,
-    environment_size: Result<u64>,
-) -> ProcessParameters {
+fn decode_process_parameters(record: &StructRef<'_>) -> ProcessParameters {
     let current_directory = record
         .embedded("CurrentDirectory")
         .and_then(|directory| directory.unicode_string("DosPath"))
@@ -555,7 +594,11 @@ fn decode_process_parameters(
         shell_info: read_unicode_or_empty(record, "ShellInfo"),
         runtime_data: read_unicode_or_empty(record, "RuntimeData"),
         environment: DiagnosticValue::from_result(record.read_pointer("Environment")),
-        environment_size: DiagnosticValue::from_result(environment_size),
+        environment_size: record
+            .layout()
+            .fields
+            .contains_key("EnvironmentSize")
+            .then(|| DiagnosticValue::from_result(record.read_uint("EnvironmentSize"))),
     }
 }
 
@@ -744,11 +787,7 @@ impl Target {
                 DiagnosticValue::from_result(
                     types
                         .struct_at("_RTL_USER_PROCESS_PARAMETERS", *address)
-                        .map(|record| {
-                            let record = record.prefetch();
-                            let environment_size = record.read_field::<u64>("EnvironmentSize");
-                            decode_process_parameters(&record, environment_size)
-                        }),
+                        .map(|record| decode_process_parameters(&record.prefetch())),
                 )
             }
             DiagnosticValue::Available(_) => DiagnosticValue::unavailable("pointer is null"),
@@ -800,7 +839,11 @@ impl Target {
                     .read_field::<u32>("NumberOfProcessors")
                     .map(u64::from),
             ),
-            api_set_map: DiagnosticValue::from_result(peb_ref.read_pointer("ApiSetMap")),
+            api_set_map: peb_ref
+                .layout()
+                .fields
+                .contains_key("ApiSetMap")
+                .then(|| DiagnosticValue::from_result(peb_ref.read_pointer("ApiSetMap"))),
             loader_lists,
             peb32,
         })
@@ -848,12 +891,7 @@ impl Target {
                 DiagnosticValue::from_result(
                     types
                         .struct_at("ntdll32!_RTL_USER_PROCESS_PARAMETERS", *address)
-                        .map(|record| {
-                            let record = record.prefetch();
-                            let environment_size =
-                                record.read_field::<u32>("EnvironmentSize").map(u64::from);
-                            decode_process_parameters(&record, environment_size)
-                        }),
+                        .map(|record| decode_process_parameters(&record.prefetch())),
                 )
             }
             DiagnosticValue::Available(_) => DiagnosticValue::unavailable("pointer is null"),
@@ -969,7 +1007,8 @@ impl Target {
             wow_teb_offset,
             wow64_reserved: DiagnosticValue::from_result(
                 teb_ref
-                    .read_pointer("Wow32Reserved")
+                    .read_pointer("WOW32Reserved")
+                    .or_else(|_| teb_ref.read_pointer("Wow32Reserved"))
                     .or_else(|_| teb_ref.read_pointer("Wow64Reserved")),
             ),
             activation_context: DiagnosticValue::from_result(
@@ -1222,7 +1261,19 @@ impl Target {
             });
         }
         apply_relocations(&view, &bytes, module_info.base_address.0, &mut sections);
-        let allow_kernel_self_patches = is_kernel_self_patch_module(&module_info);
+        // The kernel applies the same load-time patches (import calls,
+        // retpoline and CFG dispatch) to every image it loads, itself and
+        // each driver; they are the kernel's, so a user-mode image's
+        // differences all count.
+        let allow_kernel_self_patches = self
+            .arch()
+            .paging()
+            .is_kernel_address(module_info.base_address);
+        let boot_time = if allow_kernel_self_patches {
+            self.boot_time_ranges(&view, &module_info, &sections)
+        } else {
+            Vec::new()
+        };
         let preferred_base = image_base(&view);
         let mut section_results = Vec::with_capacity(sections.len());
         let mut genuine_total = 0u64;
@@ -1242,6 +1293,7 @@ impl Target {
                 preferred_base,
                 &module_info,
                 allow_kernel_self_patches,
+                &boot_time,
                 include_diffs,
                 read_code,
             );
@@ -1273,13 +1325,7 @@ impl Target {
                 );
             }
             self_patch_range_overflow |= result.self_patch_range_overflow;
-            for diff in result.diffs {
-                if diffs.len() < MAX_BYTE_DIFFS {
-                    diffs.push(diff);
-                } else {
-                    diff_overflow = true;
-                }
-            }
+            diffs.extend(result.diffs);
             section_results.push(ImageSectionCheck {
                 name: section.name.clone(),
                 rva: section.rva,
@@ -1291,6 +1337,13 @@ impl Target {
                 unavailable: result.unavailable,
             });
             diff_overflow |= result.diff_overflow;
+        }
+        // The genuine diffs first, in address order, then the set-aside
+        // patches, so a limited listing shows the ones that matter.
+        diffs.sort_by_key(|diff| diff.kind.is_some());
+        if diffs.len() > MAX_BYTE_DIFFS {
+            diffs.truncate(MAX_BYTE_DIFFS);
+            diff_overflow = true;
         }
         Ok(ImageCheck {
             module: module_info.name,
@@ -1317,6 +1370,7 @@ impl Target {
         preferred_base: u64,
         module: &ModuleInfo,
         allow_kernel_self_patches: bool,
+        boot_time: &[BootTimeRange],
         include_diffs: bool,
         read_code: &dyn Fn(VirtAddr, &mut [u8]) -> Result<()>,
     ) -> SectionCheckResult {
@@ -1333,10 +1387,10 @@ impl Target {
             let take = (section.expected.len() - offset).min(SECTION_READ_CHUNK);
             let address = base + section.rva as u64 + offset as u64;
             if let Err(error) = read_code(address, &mut live[offset..offset + take]) {
-                if is_skippable_section_read_error(&error) {
+                if let Some(reason) = section_skip_reason(&error) {
                     return SectionCheckResult {
                         skipped: true,
-                        skip_reason: Some("paged out"),
+                        skip_reason: Some(reason),
                         ..SectionCheckResult::default()
                     };
                 }
@@ -1346,7 +1400,18 @@ impl Target {
                 };
             }
         }
+        if allow_kernel_self_patches
+            && self.section_reclaimed(base + section.rva as u64, &section.expected, &live)
+        {
+            return SectionCheckResult {
+                skipped: true,
+                skip_reason: Some("freed by the kernel"),
+                ..SectionCheckResult::default()
+            };
+        }
         let mut result = SectionCheckResult::default();
+        // Byte diffs kept so far: genuine, then set aside.
+        let mut kept = [0usize; 2];
         let mut offset = 0usize;
         let machine = self.executing_machine(base + section.rva as u64);
         while offset < section.expected.len() {
@@ -1377,40 +1442,60 @@ impl Target {
                 } else {
                     None
                 };
-                let mut run_start = None;
+                let instruction_rva = section.rva as u64 + offset as u64;
+                // A byte the loader or boot rewrites in place is that
+                // change's, whatever the instruction decoded around it.
+                let byte_patch = |index: usize| {
+                    let rva = instruction_rva + index as u64;
+                    boot_time
+                        .iter()
+                        .find(|range| range.rvas.contains(&rva))
+                        .map(|range| &range.patch)
+                        .or(patch.as_ref())
+                };
+                let mut run: Option<(usize, Option<&SelfPatchMatch>)> = None;
                 for index in 0..expected.len() {
-                    if expected[index] == actual[index] {
-                        if let Some(start) = run_start.take() {
-                            record_mismatch_run(
-                                &mut result,
-                                patch.as_ref(),
-                                section.rva as u64 + offset as u64 + start as u64,
-                                section.rva as u64 + offset as u64 + index as u64,
-                            );
-                        }
-                        continue;
+                    let byte_patch = (expected[index] != actual[index]).then(|| byte_patch(index));
+                    if let Some((start, run_patch)) = run
+                        && byte_patch != Some(run_patch)
+                    {
+                        record_mismatch_run(
+                            &mut result,
+                            run_patch,
+                            instruction_rva + start as u64,
+                            instruction_rva + index as u64,
+                        );
+                        run = None;
                     }
-                    if run_start.is_none() {
-                        run_start = Some(index);
+                    let Some(byte_patch) = byte_patch else {
+                        continue;
+                    };
+                    if run.is_none() {
+                        run = Some((index, byte_patch));
                     }
                     if include_diffs {
-                        if result.diffs.len() < MAX_BYTE_DIFFS {
+                        // Each kind fills its own share, so the set-aside
+                        // patches never crowd out the genuine diffs.
+                        let kind = byte_patch.map(|patch| patch.kind);
+                        let share = &mut kept[usize::from(kind.is_some())];
+                        if *share < MAX_BYTE_DIFFS {
+                            *share += 1;
                             result.diffs.push(ImageByteDiff {
                                 rva: section.rva + (offset + index) as u32,
                                 expected: expected[index],
                                 actual: actual[index],
-                                kind: patch.as_ref().map(|patch| patch.kind),
+                                kind,
                             });
                         } else {
                             result.diff_overflow = true;
                         }
                     }
                 }
-                if let Some(start) = run_start {
+                if let Some((start, run_patch)) = run {
                     record_mismatch_run(
                         &mut result,
-                        patch.as_ref(),
-                        section.rva as u64 + offset as u64 + start as u64,
+                        run_patch,
+                        instruction_rva + start as u64,
                         section.rva as u64 + end as u64,
                     );
                 }
@@ -1418,6 +1503,133 @@ impl Target {
             offset = end;
         }
         result
+    }
+
+    /// Whether the kernel freed the image section at `start` after boot and
+    /// gave its pages to other owners. Windows frees sections the PE does not
+    /// mark discardable (INITKDBG on ARM64), and the large page that maps the
+    /// kernel still maps them, so neither the headers nor a failed read
+    /// tells; the PFN database does. A page still the image's is active
+    /// and its `_MMPFN.PteAddress` is the 4 KiB self-map entry of its own
+    /// address, large page or not; a reused one names its new owner's PTE.
+    /// Only pages that differ from the file are looked up.
+    fn section_reclaimed(&self, start: VirtAddr, expected: &[u8], live: &[u8]) -> bool {
+        let Ok(self_map) = self.pte_self_map() else {
+            return false;
+        };
+        // One reclaimed page must not hide a genuine mismatch on a page the
+        // image still owns, so every differing page has to be reclaimed.
+        let mut differing = expected
+            .chunks(PAGE_SIZE)
+            .zip(live.chunks(PAGE_SIZE))
+            .enumerate()
+            .filter(|(_, (expected, live))| expected != live)
+            .peekable();
+        differing.peek().is_some()
+            && differing.all(|(index, _)| {
+                let page = start + (index * PAGE_SIZE) as u64;
+                let Some(physical) = self
+                    .virt_to_phys(Some(self.kernel_dtb()), page)
+                    .ok()
+                    .flatten()
+                else {
+                    return false;
+                };
+                // A record whose layout lacks a member fails to decode
+                // rather than reading as some list, so it frees nothing.
+                let Ok(pfn) = self.inspect_pfn(PfnSelector::Pfn(physical / PAGE_SIZE as u64))
+                else {
+                    return false;
+                };
+                let Some((_, pte)) = self_map.entries(page.0).last() else {
+                    return false;
+                };
+                pfn.page_location.name() != "ActiveAndValid" || pfn.pte_address != pte
+            })
+    }
+
+    /// The places in `module` that the loader or the kernel's boot
+    /// rewrites in place, found by the image's data directories and the
+    /// kernel's symbols rather than by what the bytes became: the import
+    /// address table the loader fills, the kernel's `KiServiceTable`, which
+    /// it packs into offsets, and the instructions it labels
+    /// `<function>_Patch<what>` and rewrites for the processor.
+    fn boot_time_ranges(
+        &self,
+        view: &PeView<'_>,
+        module: &ModuleInfo,
+        sections: &[CheckSection],
+    ) -> Vec<BootTimeRange> {
+        let mut ranges = Vec::new();
+        let base = module.base_address;
+        let rva = |address: VirtAddr| address.0.checked_sub(base.0);
+        if let Some(iat) = view.data_directory().get(IMAGE_DIRECTORY_ENTRY_IAT)
+            && iat.Size != 0
+        {
+            let start = u64::from(iat.VirtualAddress);
+            ranges.push(BootTimeRange {
+                rvas: start..start + u64::from(iat.Size),
+                patch: SelfPatchMatch {
+                    kind: SelfPatchKind::ImportAddressTable,
+                    function: None,
+                },
+            });
+        }
+        if let Ok(guest) = self.guest()
+            && guest.ntoskrnl.base_address == base
+            && let Ok(table) = guest.ntoskrnl.symbol("KiServiceTable")
+            && let Ok(limit) = guest
+                .ntoskrnl
+                .symbol("KiServiceLimit")
+                .and_then(|limit| limit.read::<u32>())
+            && let Some(start) = rva(table.address())
+        {
+            // `KiServiceLimit` entries of 32 bits: each function's RVA in
+            // the file, its packed offset once booted.
+            ranges.push(BootTimeRange {
+                rvas: start..start + u64::from(limit) * 4,
+                patch: SelfPatchMatch {
+                    kind: SelfPatchKind::ServiceTable,
+                    function: Some(format!("{}!KiServiceTable", module.short_name)),
+                },
+            });
+        }
+        let dtb = self.kernel_dtb();
+        for name in self.symbols.search_symbols_in_modules(
+            dtb,
+            &module.short_name,
+            "*_Patch*",
+            MAX_PATCH_SITES,
+        ) {
+            let Some(address) = self
+                .symbols
+                .find_symbol_across_modules(dtb, &name)
+                .ok()
+                .flatten()
+            else {
+                continue;
+            };
+            let Some(start) = rva(address) else {
+                continue;
+            };
+            let Some(code) = sections.iter().find_map(|section| {
+                let offset = usize::try_from(start.checked_sub(u64::from(section.rva))?).ok()?;
+                section.expected.get(offset..)
+            }) else {
+                continue;
+            };
+            let Some(length) = instruction_length(code, self.executing_machine(address)) else {
+                continue;
+            };
+            ranges.push(BootTimeRange {
+                rvas: start..start + length as u64,
+                patch: SelfPatchMatch {
+                    kind: SelfPatchKind::PatchSite,
+                    function: Some(name),
+                },
+            });
+        }
+        ranges
     }
 
     fn classify_self_patch(
@@ -1652,23 +1864,17 @@ fn push_self_patch_range(
     }
 }
 
-fn is_kernel_self_patch_module(module: &ModuleInfo) -> bool {
-    module.short_name.eq_ignore_ascii_case("nt")
-        || module.name.rsplit(['\\', '/']).next().is_some_and(|name| {
-            name.eq_ignore_ascii_case("ntoskrnl.exe")
-                || name.to_ascii_lowercase().starts_with("ntkrnl")
-        })
-}
-
-fn is_skippable_section_read_error(error: &Error) -> bool {
-    matches!(
-        error,
-        Error::BadVirtualAddress(_)
-            | Error::PartialRead(_)
-            | Error::AddressNotInDump(_)
-            | Error::NotCaptured { .. }
-            | Error::BadPhysicalAddress(_)
-    )
+/// Why a section whose read failed with `error` is skipped rather than
+/// reported unavailable: its code is not in memory, or not in the dump;
+/// `None` for a failure that is neither.
+fn section_skip_reason(error: &Error) -> Option<&'static str> {
+    match error {
+        Error::BadVirtualAddress(_) | Error::PartialRead(_) | Error::BadPhysicalAddress(_) => {
+            Some("paged out")
+        }
+        Error::AddressNotInDump(_) | Error::NotCaptured { .. } => Some("not in the dump"),
+        _ => None,
+    }
 }
 
 fn rel32_target(address: u64, bytes: &[u8]) -> Option<u64> {
@@ -1792,6 +1998,7 @@ fn module_identity(target: &Target, module: &ModuleInfo) -> Result<(u32, u32)> {
     Ok((
         module
             .time_date_stamp
+            .filter(|timestamp| *timestamp != 0)
             .unwrap_or(view.file_header().TimeDateStamp),
         if module.size == 0 {
             size_of_image(&view)
@@ -1854,7 +2061,7 @@ fn apply_relocations(
     sections: &mut [CheckSection],
 ) {
     let preferred_base = image_base(view);
-    let delta = actual_base.wrapping_sub(preferred_base) as i64;
+    let delta = actual_base.wrapping_sub(preferred_base);
     if delta == 0 {
         return;
     }
@@ -1879,61 +2086,18 @@ fn apply_relocations(
                 .flatten()
         })
     };
-    let Some(mut cursor) = rva_to_raw(directory.VirtualAddress) else {
+    let Some(start) = rva_to_raw(directory.VirtualAddress) else {
         return;
     };
-    let end = cursor
+    let end = start
         .checked_add(directory.Size as usize)
         .unwrap_or(image.len())
         .min(image.len());
-    while cursor + 8 <= end {
-        let page = u32::from_le_bytes(image[cursor..cursor + 4].try_into().unwrap());
-        let block_size =
-            u32::from_le_bytes(image[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
-        if block_size < 8 || block_size > end - cursor {
-            break;
-        }
-        let count = (block_size - 8) / 2;
-        for index in 0..count {
-            let offset = cursor + 8 + index * 2;
-            let entry = u16::from_le_bytes(image[offset..offset + 2].try_into().unwrap());
-            let kind = entry >> 12;
-            let rva = page.saturating_add(u32::from(entry & 0x0fff));
-            let (width, apply) = match kind {
-                IMAGE_REL_BASED_DIR64 => (8usize, true),
-                IMAGE_REL_BASED_HIGHLOW => (4usize, true),
-                _ => (0usize, false),
-            };
-            if !apply {
-                continue;
-            }
-            for section in sections.iter_mut() {
-                let Some(offset) = rva
-                    .checked_sub(section.rva)
-                    .and_then(|offset| usize::try_from(offset).ok())
-                else {
-                    continue;
-                };
-                if offset + width > section.expected.len() {
-                    continue;
-                }
-                if width == 8 {
-                    let value = u64::from_le_bytes(
-                        section.expected[offset..offset + 8].try_into().unwrap(),
-                    );
-                    section.expected[offset..offset + 8]
-                        .copy_from_slice(&value.wrapping_add_signed(delta).to_le_bytes());
-                } else {
-                    let value = u32::from_le_bytes(
-                        section.expected[offset..offset + 4].try_into().unwrap(),
-                    );
-                    section.expected[offset..offset + 4]
-                        .copy_from_slice(&value.wrapping_add(delta as u32).to_le_bytes());
-                }
-                break;
-            }
-        }
-        cursor += block_size;
+    let Some(relocations) = image.get(start..end) else {
+        return;
+    };
+    for section in sections {
+        apply_base_relocations(relocations, delta, section.rva, &mut section.expected);
     }
 }
 

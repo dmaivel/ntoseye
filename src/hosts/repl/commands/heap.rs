@@ -18,11 +18,13 @@ use ntoseye_macros::{command, grammar};
 /// Summarize, walk, or search the user-mode heaps of the attached process,
 /// or of a user-mode minidump's process.
 ///
-/// With no arguments or with -s, the command lists each heap in the PEB with
-/// its kind and sizes. -h decodes the segments of one heap, and -a does the
+/// With no arguments or with -s, the command lists each heap of the process
+/// with its kind and sizes: the heaps on ntdll!RtlpProcessHeaps where ntdll
+/// keeps that list, else those in the PEB's ProcessHeaps array. -h decodes
+/// the segments of one heap, and -a does the
 /// same and also lists each entry, chunk, and block. -x finds the block that
 /// contains an address, and -p -a does the same search. To identify a heap,
-/// use its index in the PEB list or its address. The command decodes NT
+/// use its index in that list or its address. The command decodes NT
 /// heaps, including legacy-LFH blocks, and segment heaps, including VS, LFH,
 /// page, and large allocations. It gets the encoding keys from ntdll
 /// symbols. For NT heaps, it uses _HEAP.Encoding and finds legacy-LFH blocks
@@ -422,7 +424,10 @@ impl ReplState<'_> {
                     heap.encoding
                         .map_or_else(|| "-".into(), |encoding| format!("{encoding:#x}")),
                 ),
-                ("total free", format!("{:#x}", heap.total_free_units * 16)),
+                (
+                    "total free",
+                    format!("{:#x}", heap.total_free_units.saturating_mul(heap.granule)),
+                ),
                 (
                     "virtual threshold",
                     format!("{:#x}", heap.virtual_threshold),
@@ -545,29 +550,43 @@ impl ReplState<'_> {
 
     fn segment_detail(&self, detail: &SegmentHeapDetail, list_entries: bool) {
         let heap = &detail.heap;
+        // Guest counters: a corrupt heap must not overflow them.
+        let bytes = |pages: u64| pages.saturating_mul(0x1000);
         outln!("segment heap {}", ui::addr(heap.address.0));
         print_fields(
             2,
             &[
                 ("global flags", format!("{:#x}", heap.global_flags)),
-                ("reserved", format!("{:#x}", heap.reserved_pages * 0x1000)),
-                ("committed", format!("{:#x}", heap.committed_pages * 0x1000)),
+                ("reserved", format!("{:#x}", bytes(heap.reserved_pages))),
+                ("committed", format!("{:#x}", bytes(heap.committed_pages))),
                 (
                     "free committed",
-                    format!(
-                        "{:#x} (LFH {:#x}, VS {:#x})",
-                        heap.free_committed_pages * 0x1000,
-                        heap.lfh_free_committed_pages * 0x1000,
-                        heap.vs_free_committed_pages * 0x1000
-                    ),
+                    match heap.vs_free_committed_pages {
+                        Some(vs) => format!(
+                            "{:#x} (LFH {:#x}, VS {:#x})",
+                            bytes(heap.free_committed_pages),
+                            bytes(heap.lfh_free_committed_pages),
+                            bytes(vs)
+                        ),
+                        None => format!(
+                            "{:#x} (LFH {:#x})",
+                            bytes(heap.free_committed_pages),
+                            bytes(heap.lfh_free_committed_pages)
+                        ),
+                    },
                 ),
                 (
                     "large allocations",
                     format!(
-                        "{} (reserved {:#x}, committed {:#x})",
+                        "{}{} (reserved {:#x}, committed {:#x})",
                         heap.large_allocations.len(),
-                        heap.large_reserved_pages * 0x1000,
-                        heap.large_committed_pages * 0x1000
+                        if heap.large_truncated {
+                            "+ (walk limit reached)"
+                        } else {
+                            ""
+                        },
+                        bytes(heap.large_reserved_pages),
+                        bytes(heap.large_committed_pages)
                     ),
                 ),
                 ("heap key", format!("{:#x}", heap.encoding_keys.heap_key)),
@@ -657,7 +676,9 @@ impl ReplState<'_> {
                 (Some(SegmentSubsegment::Lfh(subsegment)), _) => {
                     outln!(
                         "{head}  LFH subsegment  bucket {}: {} x {:#x}, {} busy, {} free",
-                        subsegment.bucket,
+                        subsegment
+                            .bucket
+                            .map_or_else(|| "-".into(), |bucket| bucket.to_string()),
                         subsegment.block_count,
                         subsegment.block_size,
                         subsegment.busy_count(),
@@ -700,7 +721,7 @@ impl ReplState<'_> {
         let Some(heap) = &detail.heap else {
             if detail.failures.is_empty() {
                 outln!(
-                    "{:#x} is not inside any heap in the PEB list",
+                    "{:#x} is not inside any heap of the process",
                     detail.address.0
                 );
             } else {
@@ -836,7 +857,12 @@ fn block_fields(block: &BlockMatch) -> Vec<(&'static str, String)> {
                 ),
             ),
             ("LFH subsegment", ui::addr(subsegment.address.0)),
-            ("bucket", subsegment.bucket.to_string()),
+            (
+                "bucket",
+                subsegment
+                    .bucket
+                    .map_or_else(|| "-".into(), |bucket| bucket.to_string()),
+            ),
             (
                 "blocks",
                 format!("{} x {:#x}", subsegment.block_count, subsegment.block_size),
@@ -899,20 +925,23 @@ mod tests {
         assert!(matches!(parse(&["-s"]), Some(Request::Summary)));
         assert!(matches!(
             parse(&["0"]),
-            Some(Request::Detail { entries: false, .. })
+            Some(Request::Detail { heap, entries: false }) if heap == "0"
         ));
         assert!(matches!(
             parse(&["-h", "0x1190000"]),
-            Some(Request::Detail { entries: false, .. })
+            Some(Request::Detail { heap, entries: false }) if heap == "0x1190000"
         ));
         assert!(matches!(
             parse(&["-a", "0"]),
-            Some(Request::Detail { entries: true, .. })
+            Some(Request::Detail { heap, entries: true }) if heap == "0"
         ));
-        assert!(matches!(parse(&["-x", "@rcx"]), Some(Request::Find(_))));
+        assert!(matches!(
+            parse(&["-x", "@rcx"]),
+            Some(Request::Find(text)) if text == "@rcx"
+        ));
         assert!(matches!(
             parse(&["-p", "-a", "@rcx"]),
-            Some(Request::Find(_))
+            Some(Request::Find(text)) if text == "@rcx"
         ));
         for bad in [
             &["-h"][..],

@@ -4,7 +4,7 @@
 use super::download::task_progress_style;
 use super::{
     IndexedSymbol, LoadedModule, SymbolCandidate, SymbolIndex, SymbolStore, SymbolVisibility,
-    format_symbol_with_offset,
+    format_symbol_with_offset, glob_matches,
 };
 use crate::base::{
     error::{Error, Result},
@@ -245,6 +245,45 @@ impl SymbolStore {
         Vec::new()
     }
 
+    /// Module-qualified names of the symbols matching `query` in each module
+    /// whose short name matches the glob `module` (`kernel*`, `*`), at most
+    /// `limit`: the modules in name order, each one's best first. A module
+    /// loaded twice under one name, as a WOW64 process's `ntdll` is, lists a
+    /// name both have once, since the name resolves in both.
+    pub fn search_symbols_in_modules(
+        &self,
+        dtb: Dtb,
+        module: &str,
+        query: &str,
+        limit: usize,
+    ) -> Vec<String> {
+        let mut modules: Vec<(String, u128)> = self
+            .modules
+            .iter()
+            .filter(|loaded| {
+                self.module_in_scope(loaded, dtb) && glob_matches(module, &loaded.short_name, true)
+            })
+            .map(|loaded| (loaded.short_name.clone(), loaded.guid))
+            .collect();
+        modules.sort_by_key(|(name, _)| name.to_ascii_lowercase());
+        let mut seen = HashSet::new();
+        let mut names = Vec::new();
+        for (short_name, guid) in modules {
+            let Some(remaining) = limit.checked_sub(names.len()).filter(|left| *left > 0) else {
+                break;
+            };
+            if let Some(index) = self.index.get(&guid) {
+                for name in index.search(query, remaining) {
+                    let qualified = format!("{short_name}!{name}");
+                    if seen.insert(qualified.to_ascii_lowercase()) {
+                        names.push(qualified);
+                    }
+                }
+            }
+        }
+        names
+    }
+
     pub fn find_closest_symbol_for_address(
         &self,
         dtb: Dtb,
@@ -339,6 +378,19 @@ impl SymbolStore {
         records
     }
 
+    /// The names of `guid`'s symbols that start with `prefix`, in order.
+    pub fn names_starting_with(&self, guid: u128, prefix: &str) -> Vec<String> {
+        let Some(index) = self.index.get(&guid) else {
+            return Vec::new();
+        };
+        let start = index.names.partition_point(|name| name.as_str() < prefix);
+        index.names[start..]
+            .iter()
+            .take_while(|name| name.starts_with(prefix))
+            .cloned()
+            .collect()
+    }
+
     pub fn symbol_rva<S>(&self, guid: u128, symbol_name: S) -> Result<Option<u32>>
     where
         S: AsRef<str>,
@@ -388,6 +440,22 @@ impl SymbolStore {
             && extents.get(&rva).is_some_and(|&length| offset >= length)
         {
             return None;
+        }
+        // A public PDB gives functions no length, but the next symbol can lie
+        // far past a function's end, across padding into the next section.
+        // Neither a private procedure's own length nor its section's end can
+        // be crossed.
+        if let Some(procedures) = self.procedures.get(&guid)
+            && let Ok(index) = procedures.binary_search_by_key(&rva, |procedure| procedure.rva)
+            && offset >= procedures[index].len
+        {
+            return None;
+        }
+        if let Some(sections) = self.sections.get(&guid) {
+            let index = sections.partition_point(|&(start, _)| start <= rva);
+            if index > 0 && target_rva >= sections[index - 1].1 {
+                return None;
+            }
         }
         let first = entries.partition_point(|entry| entry.rva < rva);
         Some((entries[first].name.to_string(), offset))

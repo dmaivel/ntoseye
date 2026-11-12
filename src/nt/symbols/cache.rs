@@ -3,7 +3,7 @@
 
 use super::download::{download_job, install_local_file};
 use super::ntoseye_home;
-use super::{DownloadJob, ImageFetch, SymbolSource, SymbolStore, server_urls};
+use super::{DownloadJob, ImageFetch, SymbolSource, SymbolStore};
 use crate::{
     base::{
         error::{Error, Result},
@@ -12,7 +12,10 @@ use crate::{
     },
     nt::{
         guest::ModuleInfo,
-        pe::{PeImage, image_file_identity, read_pe_image_from_file},
+        pe::{
+            PeImage, headers_match_relocated, image_file_identity, pe_headers_end,
+            read_pe_image_from_file,
+        },
     },
 };
 use indicatif::ProgressBar;
@@ -239,7 +242,7 @@ impl SymbolStore {
         time_date_stamp: u32,
         size_of_image: u32,
     ) -> Result<PathBuf> {
-        let job = Self::build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
+        let job = self.build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
         match self.local_image(&job, time_date_stamp, size_of_image) {
             Some(local) => install_local_file(&local, &job.path)?,
             None => download_job(&job, output::progress_bar(0, "downloading symbols"))?,
@@ -288,27 +291,45 @@ impl SymbolStore {
     /// The module image's path when it is already in the cache; otherwise
     /// `None`, with the download queued for a background thread (once, however
     /// often this is asked) and its outcome reported through the store's
-    /// notices. For callers that must answer at once, such as a protocol
-    /// request with a client-side timeout.
+    /// notices. An image whose download failed is not queued again until
+    /// `.reload` or a change of the symbol path (see
+    /// [`Self::forget_unavailable`]); asking for it returns why it failed. For
+    /// callers that must answer at once, such as a protocol request with a
+    /// client-side timeout.
     pub fn image_or_fetch_later(
         self: &Arc<Self>,
         image_file_name: &str,
         time_date_stamp: u32,
         size_of_image: u32,
     ) -> Result<Option<PathBuf>> {
-        let job = Self::build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
+        let job = self.build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
+        self.fetch_image_later(job)
+    }
+
+    /// The image `job` names when it is already in place; otherwise `None`,
+    /// with `job` queued as [`Self::image_or_fetch_later`] describes.
+    pub fn fetch_image_later(self: &Arc<Self>, job: DownloadJob) -> Result<Option<PathBuf>> {
         if !job.needs_download() {
             return Ok(Some(job.path));
         }
-        if !self.image_fetches.lock().insert(job.path.clone()) {
-            return Ok(None);
+        {
+            // Checked under the fetch set's lock: the worker records a
+            // failure before it takes the path out of the set, so a request
+            // cannot slip between the two and queue the image again.
+            let mut fetches = self.image_fetches.lock();
+            if let Some(reason) = self.unavailable(&job) {
+                return Err(Error::DebugInfo(reason));
+            }
+            if !fetches.insert(job.path.clone()) {
+                return Ok(None);
+            }
         }
         let path = job.path.clone();
         let name = job.filename.clone();
         if let Err(error) = self.queue_image_fetch(job) {
             self.image_fetches.lock().remove(&path);
             return Err(Error::DebugInfo(format!(
-                "could not start the background fetch of {image_file_name}: {error}"
+                "could not start the background fetch of {name}: {error}"
             )));
         }
         self.push_notice(Notice::info(format!("fetching {name} in the background")));
@@ -332,16 +353,29 @@ impl SymbolStore {
                             let Some(store) = store.upgrade() else {
                                 return;
                             };
-                            store.image_fetches.lock().remove(&job.path);
                             let name = &job.filename;
-                            store.push_notice(match outcome {
+                            let notice = match outcome {
                                 Ok(()) => {
                                     Notice::info(format!("background fetch finished for {name}"))
                                 }
-                                Err(error) => Notice::warning(format!(
-                                    "background fetch failed for {name}: {error}"
-                                )),
-                            });
+                                Err(error) => {
+                                    // Any failure, not only a server's
+                                    // "not found", as a download in the
+                                    // foreground does: every gdb client asks
+                                    // for every loaded module's image when it
+                                    // connects, so an image no server has, or
+                                    // a host offline, would cost a request
+                                    // and two notices per module per client.
+                                    // `.reload` or a new symbol path retries.
+                                    let error = error.to_string();
+                                    store.remember_unavailable(&job, &error);
+                                    Notice::warning(format!(
+                                        "background fetch failed for {name}: {error}"
+                                    ))
+                                }
+                            };
+                            store.image_fetches.lock().remove(&job.path);
+                            store.push_notice(notice);
                         }
                     })?;
                 queue.insert(sender)
@@ -366,7 +400,7 @@ impl SymbolStore {
         size_of_image: u32,
         fetch: ImageFetch,
     ) -> Result<Arc<PeImage>> {
-        let job = Self::build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
+        let job = self.build_image_download_job(image_file_name, time_date_stamp, size_of_image)?;
         if let Some(image) = self.on_disk_images.get(&job.path) {
             return Ok(Arc::clone(&image));
         }
@@ -406,14 +440,50 @@ impl SymbolStore {
         Ok(image)
     }
 
+    /// The module's on-disk image when it is the file the image whose
+    /// header page is `mapped` was loaded from: found by the header's
+    /// `TimeDateStamp` and `SizeOfImage` where `fetch` allows, and opening
+    /// with the same headers but for `ImageBase`, which the loader rewrites.
+    pub fn module_image_matching(
+        &self,
+        image_file_name: &str,
+        mapped: &[u8],
+        fetch: ImageFetch,
+    ) -> Option<Arc<PeImage>> {
+        use pelite::pe64::{Pe, PeView};
+        let view = PeView::from_bytes(mapped).ok()?;
+        let disk = self
+            .module_image_on_disk(
+                image_file_name,
+                view.file_header().TimeDateStamp,
+                view.optional_header().SizeOfImage,
+                fetch,
+            )
+            .ok()?;
+        let end = pe_headers_end(mapped)?;
+        headers_match_relocated(disk.headers().get(..end)?, mapped.get(..end)?).then_some(disk)
+    }
+
     pub fn build_image_download_job(
+        &self,
         image_file_name: &str,
         time_date_stamp: u32,
         size_of_image: u32,
     ) -> Result<DownloadJob> {
         let server_name = Self::symbol_server_file_name(image_file_name);
         let key = image_key(time_date_stamp, size_of_image);
-        let urls = server_urls(&format!("{server_name}/{key}/{server_name}"));
+        let urls = self
+            .sources
+            .read()
+            .iter()
+            .filter_map(|source| match source {
+                SymbolSource::Http(base) => Some(format!(
+                    "{}/{server_name}/{key}/{server_name}",
+                    base.trim_end_matches('/')
+                )),
+                _ => None,
+            })
+            .collect();
         let storage_dir = symbols_directory().ok_or(Error::StorageNotFound)?;
         let path = store_path(&storage_dir, server_name, &key);
 

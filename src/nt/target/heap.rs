@@ -11,9 +11,11 @@ use ntoseye_macros::record;
 use crate::backend::phys::PhysMem;
 use crate::base::error::{Error, Result};
 use crate::base::memory::{AddressSpace, MemoryOps};
-use crate::base::types::{Dtb, VirtAddr};
+use crate::base::types::{Dtb, PAGE_SHIFT, VirtAddr};
 use crate::nt::layout::{ParsedType, TypeInfo, le_uint};
-use crate::nt::target::{DiagnosticValue, ListCursor, Target};
+use crate::nt::target::{
+    DiagnosticValue, ListCursor, ListTermination, Target, bounded_record_list_walk,
+};
 
 pub const NT_HEAP_SIGNATURE: u32 = 0xEEFF_EEFF;
 pub const SEGMENT_HEAP_SIGNATURE: u32 = 0xDDEE_DDEE;
@@ -37,10 +39,10 @@ const NT_ENTRY_LFH_BLOCK: u8 = 0x80;
 /// use keeps `ALLOCATED` on every descriptor, its head adds `FIRST`, and a
 /// head handed to a sub-allocator adds `SUBSEGMENT` (with `VS` for the
 /// variable-size one). A free range's head keeps only `FIRST`.
-const RANGE_ALLOCATED: u8 = 0x01;
-const RANGE_FIRST: u8 = 0x02;
-const RANGE_VS: u8 = 0x04;
-const RANGE_SUBSEGMENT: u8 = 0x08;
+pub const RANGE_ALLOCATED: u8 = 0x01;
+pub const RANGE_FIRST: u8 = 0x02;
+pub const RANGE_VS: u8 = 0x04;
+pub const RANGE_SUBSEGMENT: u8 = 0x08;
 
 const PAGE: u64 = 0x1000;
 /// Bound on entries decoded from one NT segment, VS subsegment, or LFH
@@ -49,6 +51,8 @@ const MAX_ENTRIES: usize = 1 << 20;
 const MAX_LIST: usize = 4096;
 const MAX_HEAPS: usize = 1024;
 const MAX_TREE: usize = 1 << 16;
+/// The most bytes of an NT heap segment read at once while walking entries.
+const RUN_WINDOW: u64 = 1 << 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeapKind {
@@ -130,7 +134,7 @@ pub struct ProcessHeap {
     pub address: VirtAddr,
     pub kind: HeapKind,
     /// Classification can fail when one heap pointer is unreadable; callers
-    /// can keep that item in a listing instead of losing the whole PEB list.
+    /// can keep that item in a listing instead of losing the whole list.
     pub classification_error: Option<String>,
 }
 
@@ -277,27 +281,97 @@ impl<'a> HeapReader<'a> {
     }
 
     /// Records of an intrusive `_LIST_ENTRY` list, given the head and the
-    /// link's offset inside each record. Bounded and cycle-safe.
+    /// link's offset inside each record. Bounded and cycle-safe; a walk that
+    /// does not come back to the head is an error, since the records it
+    /// missed would otherwise vanish from the heap without notice.
     fn list(&self, head: VirtAddr, link_offset: u64) -> Result<Vec<VirtAddr>> {
-        let mut records = Vec::new();
-        let mut cursor = ListCursor::new(head, MAX_LIST);
-        cursor.advance(Ok(VirtAddr(self.read_pointer(head)?)));
-        while let Some(link) = cursor.take_current() {
-            records.push(VirtAddr(link.0.wrapping_sub(link_offset)));
-            cursor.advance(Ok(VirtAddr(self.read_pointer(link)?)));
+        let (records, termination) =
+            bounded_record_list_walk(head, link_offset, MAX_LIST, |link| {
+                self.read_pointer(link).map(VirtAddr)
+            });
+        match termination.diagnostic() {
+            None => Ok(records),
+            Some(why) => Err(Error::DebugInfo(format!(
+                "the list at {head} stops after {} entries: {why}",
+                records.len()
+            ))),
         }
-        Ok(records)
     }
 
-    /// The heaps `_PEB.ProcessHeaps` lists, classified by signature. `peb` is
-    /// the 32-bit PEB for a WOW64 process.
+    /// The process's heaps, in creation order, classified by signature. `peb`
+    /// is the 32-bit PEB for a WOW64 process.
     pub fn process_heaps(&self, peb: VirtAddr) -> Result<Vec<ProcessHeap>> {
         self.process_heaps_with_status(peb).map(|(heaps, _)| heaps)
     }
 
     /// As [`Self::process_heaps`], also reporting whether `MAX_HEAPS` clipped
-    /// the advertised PEB list.
+    /// the list.
     pub fn process_heaps_with_status(&self, peb: VirtAddr) -> Result<(Vec<ProcessHeap>, bool)> {
+        let (addresses, truncated) = match self.heap_descriptor_list()? {
+            Some(list) => list,
+            None => self.peb_heap_array(peb)?,
+        };
+        let heaps = addresses
+            .into_iter()
+            .enumerate()
+            .map(|(index, address)| {
+                let (kind, classification_error) = match self.classify(address) {
+                    Ok(kind) => (kind, None),
+                    Err(error) => (HeapKind::Unknown(0), Some(error.to_string())),
+                };
+                ProcessHeap {
+                    index,
+                    address,
+                    kind,
+                    classification_error,
+                }
+            })
+            .collect();
+        Ok((heaps, truncated))
+    }
+
+    /// The heaps on `ntdll!RtlpProcessHeaps`, a list of
+    /// `_RTLP_PROCESS_HEAP_DESCRIPTOR`s, and whether `MAX_HEAPS` clipped it.
+    /// An ntdll that keeps this list (Windows 11 build 26200's does, 22631's
+    /// does not) leaves `_PEB.ProcessHeaps` pointing at a static one-entry
+    /// buffer that names only the process heap. None when this ntdll has no
+    /// such list.
+    fn heap_descriptor_list(&self) -> Result<Option<(Vec<VirtAddr>, bool)>> {
+        let (Ok(descriptor), Ok(head)) = (
+            self.layout("_RTLP_PROCESS_HEAP_DESCRIPTOR"),
+            self.symbol("RtlpProcessHeaps"),
+        ) else {
+            return Ok(None);
+        };
+        let link = descriptor.offset("DescriptorLink")? as u64;
+        let heap = descriptor.offset("Heap")? as u64;
+        let mut heaps = Vec::new();
+        let mut cursor = ListCursor::new(head, MAX_HEAPS);
+        cursor.advance(Ok(VirtAddr(self.read_pointer(head)?)));
+        while let Some(entry) = cursor.take_current() {
+            let record = VirtAddr(entry.0.wrapping_sub(link));
+            heaps.push(VirtAddr(self.read_pointer(record + heap)?));
+            cursor.advance(Ok(VirtAddr(self.read_pointer(entry)?)));
+        }
+        // Only the walk bound is a clean clip; any other stop means heaps
+        // past it were never listed, and a search would miss them silently.
+        let truncated = match cursor.finish() {
+            ListTermination::Head => false,
+            ListTermination::Bound => true,
+            other => {
+                return Err(Error::DebugInfo(format!(
+                    "RtlpProcessHeaps stops after {} heaps: {}",
+                    heaps.len(),
+                    other.diagnostic().unwrap_or_default()
+                )));
+            }
+        };
+        Ok(Some((heaps, truncated)))
+    }
+
+    /// The heaps of the `_PEB.ProcessHeaps` array, and whether `MAX_HEAPS`
+    /// clipped `NumberOfHeaps`.
+    fn peb_heap_array(&self, peb: VirtAddr) -> Result<(Vec<VirtAddr>, bool)> {
         let peb_layout = self.layout("_PEB")?;
         let image = self.read_struct(&peb_layout, peb)?;
         let count = peb_layout.read(&image, 0, "NumberOfHeaps")? as usize;
@@ -307,33 +381,23 @@ impl<'a> HeapReader<'a> {
         }
         let truncated = count > MAX_HEAPS;
         let count = count.min(MAX_HEAPS);
-        let pointers = self.read(table, count * self.pointer_size)?;
-        let heaps = pointers
+        let heaps = self
+            .read(table, count * self.pointer_size)?
             .chunks_exact(self.pointer_size)
-            .enumerate()
-            .map(|(index, bytes)| {
-                let address = VirtAddr(le_uint(bytes));
-                let (kind, classification_error) = match self.classify(address) {
-                    Ok(kind) => (kind, None),
-                    Err(error) => (HeapKind::Unknown(0), Some(error.to_string())),
-                };
-                Ok(ProcessHeap {
-                    index,
-                    address,
-                    kind,
-                    classification_error,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+            .map(|bytes| VirtAddr(le_uint(bytes)))
+            .collect();
         Ok((heaps, truncated))
     }
 
     pub fn classify(&self, heap: VirtAddr) -> Result<HeapKind> {
-        let segment = self.layout("_SEGMENT_HEAP")?;
-        let signature_offset = segment.offset("Signature")?;
-        let signature: u32 = self.memory.read(heap + signature_offset as u64)?;
-        if signature == SEGMENT_HEAP_SIGNATURE {
-            return Ok(HeapKind::Segment);
+        // ntdll has no segment heap before Windows 10 (Windows 7's PDB has
+        // no `_SEGMENT_HEAP`), so every heap there is an NT heap.
+        if let Ok(segment) = self.layout("_SEGMENT_HEAP") {
+            let signature_offset = segment.offset("Signature")?;
+            let signature: u32 = self.memory.read(heap + signature_offset as u64)?;
+            if signature == SEGMENT_HEAP_SIGNATURE {
+                return Ok(HeapKind::Segment);
+            }
         }
         let nt = self.layout("_HEAP")?;
         let nt_signature: u32 = self.memory.read(heap + nt.offset("Signature")? as u64)?;
@@ -483,11 +547,17 @@ impl NtEntry {
     }
 
     /// The number of bytes that the caller requested: the block size minus
-    /// the header and the unused bytes.
+    /// the unused bytes, which ntdll counts with the header's overhead in
+    /// them (an x64 header's first qword holds the previous block's data, so
+    /// only its second is overhead). A free block was requested by no one
+    /// and its header counts no unused bytes, so its size is the space after
+    /// the header.
     #[record(getter)]
     pub fn user_size(&self) -> u64 {
+        if !self.busy() {
+            return self.size.saturating_sub(self.granule);
+        }
         self.size
-            .saturating_sub(self.granule)
             .saturating_sub(u64::from(self.unused_bytes & !NT_ENTRY_LFH_BLOCK))
     }
 }
@@ -547,6 +617,12 @@ impl HeapReader<'_> {
                 address
             )));
         }
+        if heap.offset("SegmentList").is_err() && heap.offset("Segments").is_ok() {
+            return Err(Error::DebugInfo(
+                "the heap layout before Vista (a Segments array, unencoded entries) is not decoded"
+                    .into(),
+            ));
+        }
         let encode_mask = heap.read(&image, 0, "EncodeFlagMask")? as u32;
         let granule = self.layout("_HEAP_ENTRY")?.size() as u64;
         let encoding = decode_nt_heap_encoding(
@@ -561,20 +637,22 @@ impl HeapReader<'_> {
         for record in self.list(address + heap.offset("SegmentList")? as u64, segment_link)? {
             segments.push(self.nt_segment(&segment_layout, record)?);
         }
-        let virtual_layout = self.layout("_HEAP_VIRTUAL_ALLOC_ENTRY")?;
-        let virtual_link = virtual_layout.offset("Entry")? as u64;
+        let virtual_head = address + heap.offset("VirtualAllocdBlocks")? as u64;
         let mut virtual_blocks = Vec::new();
-        for record in self.list(
-            address + heap.offset("VirtualAllocdBlocks")? as u64,
-            virtual_link,
-        )? {
-            let entry = self.read_struct(&virtual_layout, record)?;
-            virtual_blocks.push(NtVirtualBlock {
-                entry: record,
-                commit_size: virtual_layout.read(&entry, 0, "CommitSize")?,
-                reserve_size: virtual_layout.read(&entry, 0, "ReserveSize")?,
-                user: record + virtual_layout.size() as u64,
-            });
+        // Only a heap with virtual blocks needs their layout, which Windows
+        // 7's x86 ntdll PDB does not describe.
+        if self.read_pointer(virtual_head)? != virtual_head.0 {
+            let virtual_layout = self.layout("_HEAP_VIRTUAL_ALLOC_ENTRY")?;
+            let virtual_link = virtual_layout.offset("Entry")? as u64;
+            for record in self.list(virtual_head, virtual_link)? {
+                let entry = self.read_struct(&virtual_layout, record)?;
+                virtual_blocks.push(NtVirtualBlock {
+                    entry: record,
+                    commit_size: virtual_layout.read(&entry, 0, "CommitSize")?,
+                    reserve_size: virtual_layout.read(&entry, 0, "ReserveSize")?,
+                    user: record + virtual_layout.size() as u64,
+                });
+            }
         }
         let front_end = VirtAddr(heap.read(&image, 0, "FrontEndHeap")?);
         Ok(NtHeap {
@@ -661,7 +739,10 @@ impl HeapReader<'_> {
                         .min()
                         .unwrap_or(end.0)
                         .min(end.0);
-                    let bytes = self.read_prefix(cursor, (run_end - cursor.0) as usize);
+                    // The span ends at a guest-controlled address; read it in
+                    // bounded windows so a corrupt end cannot size the buffer.
+                    let window = (run_end - cursor.0).min(RUN_WINDOW);
+                    let bytes = self.read_prefix(cursor, window as usize);
                     if bytes.len() < granule as usize {
                         stopped = Some((cursor, "header is not readable (page not resident)"));
                         break;
@@ -729,9 +810,10 @@ impl HeapReader<'_> {
         }
         let bitmap_layout = self.field_layout(&header_layout, "BusyBitmap")?;
         let bitmap_at = header_layout.offset("BusyBitmap")?;
-        let bits = bitmap_layout.read(&image, bitmap_at, "SizeOfBitMap")? as u32;
         let buffer = VirtAddr(bitmap_layout.read(&image, bitmap_at, "Buffer")?);
-        let words = (bits.max(block_count) as usize).div_ceil(self.pointer_size * 8);
+        // Only the blocks' bits are consulted, and `BlockCount` is a USHORT,
+        // so a corrupt `SizeOfBitMap` cannot inflate the read.
+        let words = (block_count as usize).div_ceil(self.pointer_size * 8);
         let busy = self.read(buffer, words * self.pointer_size)?;
         Ok(Some(NtUserBlocks {
             header,
@@ -796,7 +878,8 @@ pub struct SegmentHeap {
     pub committed_pages: u64,
     pub free_committed_pages: u64,
     pub lfh_free_committed_pages: u64,
-    pub vs_free_committed_pages: u64,
+    /// `None` before Windows 11 24H2, which counts no VS share apart.
+    pub vs_free_committed_pages: Option<u64>,
     pub large_reserved_pages: u64,
     pub large_committed_pages: u64,
     /// The segment contexts, as decoded; `SegmentHeapDetail.contexts` has
@@ -804,6 +887,8 @@ pub struct SegmentHeap {
     #[record(skip)]
     pub contexts: Vec<SegContext>,
     pub large_allocations: Vec<LargeAllocation>,
+    /// Whether `large_allocations` stops at the tree walk limit.
+    pub large_truncated: bool,
     /// `ntdll!RtlpHpHeapGlobals`: the VS header key and the LFH offsets key.
     #[record(rename = "keys")]
     pub encoding_keys: SegmentKeys,
@@ -903,13 +988,13 @@ impl PageRange {
     /// The size in bytes: `units * unit_size`.
     #[record(getter)]
     pub fn size(&self) -> u64 {
-        self.units * self.unit_size
+        self.units.saturating_mul(self.unit_size)
     }
 
     /// The first byte after the range.
     #[record(getter)]
     pub fn end(&self) -> VirtAddr {
-        self.address + self.size()
+        VirtAddr(self.address.0.saturating_add(self.size()))
     }
 
     pub fn contains(&self, address: VirtAddr) -> bool {
@@ -982,25 +1067,31 @@ pub struct LfhSubsegment {
     pub address: VirtAddr,
     /// Bytes per block.
     pub block_size: u64,
+    /// Every block, those the subsegment withholds (`WitheldBlockCount`)
+    /// with the rest (`BlockCount`).
     pub block_count: u32,
     pub free_count: u32,
-    /// The LFH bucket of the subsegment.
-    pub bucket: u16,
+    /// The LFH bucket of the subsegment. None while a subsegment without
+    /// `BucketRef` is in its delayed-free state, which hides its owner.
+    pub bucket: Option<u16>,
     pub first_block: VirtAddr,
     /// The `BlockBitmap` words (a qword on x64, a dword on x86), each
-    /// holding `blocks_per_word` blocks: the low bit for a block is set
-    /// while the block is busy.
-    #[record(hex)]
+    /// holding `blocks_per_word` blocks: block `i`'s bit `(i %
+    /// blocks_per_word) * bit_stride` is set while the block is busy.
     pub bitmap: Vec<u64>,
     pub blocks_per_word: u32,
+    /// 1 where a word keeps only busy bits, 2 where each block's busy bit
+    /// has a second bit after it.
+    pub bit_stride: u32,
 }
 
 #[record]
 impl LfhSubsegment {
     pub fn is_busy(&self, index: u32) -> bool {
+        let bit = (index % self.blocks_per_word) * self.bit_stride;
         self.bitmap
             .get((index / self.blocks_per_word) as usize)
-            .is_some_and(|word| word >> (index % self.blocks_per_word) & 1 != 0)
+            .is_some_and(|word| word >> bit & 1 != 0)
     }
 
     #[record(getter)]
@@ -1031,11 +1122,11 @@ impl LargeAllocation {
     /// The size in bytes: `pages` pages.
     #[record(getter)]
     pub fn size(&self) -> u64 {
-        self.pages * PAGE
+        self.pages.saturating_mul(PAGE)
     }
 
     pub fn contains(&self, address: VirtAddr) -> bool {
-        (self.address.0..self.address.0 + self.size()).contains(&address.0)
+        (self.address.0..self.address.0.saturating_add(self.size())).contains(&address.0)
     }
 }
 
@@ -1064,7 +1155,7 @@ impl HeapReader<'_> {
         }
         let tree = self.layout("_RTL_RB_TREE")?;
         let root = VirtAddr(tree.read(&image, heap.offset("LargeAllocMetadata")?, "Root")?);
-        let large_allocations = self.large_allocations(root)?;
+        let (large_allocations, large_truncated) = self.large_allocations(root)?;
         Ok(SegmentHeap {
             address,
             global_flags: heap.read(&image, 0, "GlobalFlags")? as u32,
@@ -1072,11 +1163,12 @@ impl HeapReader<'_> {
             committed_pages: stats.read(&image, stats_at, "TotalCommittedPages")?,
             free_committed_pages: stats.read(&image, stats_at, "FreeCommittedPages")?,
             lfh_free_committed_pages: stats.read(&image, stats_at, "LfhFreeCommittedPages")?,
-            vs_free_committed_pages: stats.read(&image, stats_at, "VsFreeCommittedPages")?,
+            vs_free_committed_pages: stats.read(&image, stats_at, "VsFreeCommittedPages").ok(),
             large_reserved_pages: heap.read(&image, 0, "LargeReservedPages")?,
             large_committed_pages: heap.read(&image, 0, "LargeCommittedPages")?,
             contexts,
             large_allocations,
+            large_truncated,
             encoding_keys: keys,
             granule,
         })
@@ -1101,6 +1193,11 @@ impl HeapReader<'_> {
         index: usize,
     ) -> Result<SegContext> {
         let unit_shift = layout.read(image, at, "UnitShift")? as u8;
+        if unit_shift >= 64 {
+            return Err(Error::DebugInfo(format!(
+                "segment heap context at {address} has UnitShift {unit_shift}"
+            )));
+        }
         let first_descriptor = layout.read(image, at, "FirstDescriptorIndex")? as u8;
         let head = address + layout.offset("SegmentListHead")? as u64;
         let mut segments = Vec::new();
@@ -1167,7 +1264,9 @@ impl HeapReader<'_> {
         Ok(PageSegment { address, ranges })
     }
 
-    fn large_allocations(&self, root: VirtAddr) -> Result<Vec<LargeAllocation>> {
+    /// The large allocations of the tree at `root`, and whether `MAX_TREE`
+    /// clipped the walk.
+    fn large_allocations(&self, root: VirtAddr) -> Result<(Vec<LargeAllocation>, bool)> {
         let node = self.layout("_RTL_BALANCED_NODE")?;
         let data = self.layout("_HEAP_LARGE_ALLOC_DATA")?;
         let node_at = data.offset("TreeNode")? as u64;
@@ -1179,10 +1278,16 @@ impl HeapReader<'_> {
         let mut out = Vec::new();
         let mut stack = vec![root];
         let mut seen = std::collections::HashSet::new();
+        let mut truncated = false;
         while let Some(current) = stack.pop() {
-            if current.is_zero() || !seen.insert(current.0) || seen.len() > MAX_TREE {
+            if current.is_zero() || seen.contains(&current.0) {
                 continue;
             }
+            if seen.len() >= MAX_TREE {
+                truncated = true;
+                break;
+            }
+            seen.insert(current.0);
             let record = VirtAddr(current.0.wrapping_sub(node_at));
             let image = self.read_struct(&data, record)?;
             let virtual_address = data.read(&image, 0, "VirtualAddress")?;
@@ -1197,7 +1302,7 @@ impl HeapReader<'_> {
             stack.push(child(&image, left));
         }
         out.sort_by_key(|allocation| allocation.address.0);
-        Ok(out)
+        Ok((out, truncated))
     }
 
     /// Decode the VS subsegment occupying a page range: header, then the
@@ -1215,7 +1320,8 @@ impl HeapReader<'_> {
         let sizes_at = chunk_layout.offset("Sizes")?;
         let sizes_len = sizes_layout.size();
         let first_chunk = range.address + (layout.size() as u64).next_multiple_of(granule);
-        let size = (size_units * granule)
+        let size = size_units
+            .saturating_mul(granule)
             .min(range.size().saturating_sub(first_chunk.0 - range.address.0));
         let bytes = self.read_prefix(first_chunk, size as usize);
         let mut chunks = Vec::new();
@@ -1223,15 +1329,14 @@ impl HeapReader<'_> {
         while at + granule <= bytes.len() as u64 && chunks.len() < MAX_ENTRIES {
             let address = first_chunk + at;
             let header = &bytes[at as usize..at as usize + granule as usize];
-            let mut decoded = header.to_vec();
             let sizes = le_uint(&header[sizes_at..sizes_at + sizes_len])
                 ^ heap.encoding_keys.heap_key
                 ^ address.0;
-            decoded[sizes_at..sizes_at + sizes_len]
-                .copy_from_slice(&sizes.to_le_bytes()[..sizes_len]);
-            let chunk_size = sizes_layout.read(&decoded, sizes_at, "UnsafeSize")? * granule;
-            let previous_size = sizes_layout.read(&decoded, sizes_at, "UnsafePrevSize")? * granule;
-            let busy = sizes_layout.read(&decoded, sizes_at, "Allocated")? != 0;
+            let sizes = sizes.to_le_bytes();
+            let sizes = &sizes[..sizes_len];
+            let chunk_size = sizes_layout.read(sizes, 0, "UnsafeSize")? * granule;
+            let previous_size = sizes_layout.read(sizes, 0, "UnsafePrevSize")? * granule;
+            let busy = sizes_layout.read(sizes, 0, "Allocated")? != 0;
             let unused_flagged = chunk_layout.read(header, 0, "UnusedBytes")? != 0;
             let unused_bytes = (busy && unused_flagged && chunk_size >= granule + 2)
                 .then(|| {
@@ -1261,47 +1366,68 @@ impl HeapReader<'_> {
         })
     }
 
-    /// Decode the LFH subsegment occupying a page range. The block geometry
-    /// is XORed with the LFH key and the subsegment's page number.
+    /// Decode the LFH subsegment occupying a page range (see
+    /// [`lfh_geometry`] for its block geometry).
     pub fn lfh_subsegment(&self, heap: &SegmentHeap, range: &PageRange) -> Result<LfhSubsegment> {
         let layout = self.layout("_HEAP_LFH_SUBSEGMENT")?;
+        let offsets = self.layout("_HEAP_LFH_SUBSEGMENT_ENCODED_OFFSETS")?;
         let image = self.read_struct(&layout, range.address)?;
-        let block_count = layout.read(&image, 0, "BlockCount")? as u32;
-        let encoded = layout.read(&image, 0, "BlockOffsets")? as u32;
-        let decoded = encoded ^ heap.encoding_keys.lfh_key as u32 ^ (range.address.0 >> 12) as u32;
-        let block_size = u64::from(decoded & 0xFFFF);
-        let first_offset = u64::from(decoded >> 16);
-        let word_size = layout
-            .0
-            .fields
-            .get("BlockBitmap")
-            .and_then(|info| match &info.type_data {
-                ParsedType::Array(_, count) if *count > 0 => Some(info.size / u64::from(*count)),
-                _ => None,
-            })
-            .filter(|size| matches!(size, 4 | 8))
-            .ok_or_else(|| Error::FieldTypeMismatch("BlockBitmap".into(), "word array".into()))?
-            as usize;
-        let blocks_per_word = (word_size * 4) as u32;
-        let words = (block_count as usize).div_ceil(word_size * 4);
+        let geometry = lfh_geometry(
+            &layout.0,
+            &offsets.0,
+            &image,
+            heap.encoding_keys.lfh_key,
+            range.address,
+            range.units * range.unit_size,
+            heap.granule,
+        )
+        .ok_or_else(|| {
+            Error::DebugInfo(format!(
+                "LFH subsegment {} does not decode: its BlockOffsets gives blocks that do not fit it under either keying",
+                range.address
+            ))
+        })?;
+        let word_size = geometry.word_size as usize;
         let bitmap = self
             .read(
-                range.address + layout.offset("BlockBitmap")? as u64,
-                words * word_size,
+                range.address + geometry.bitmap_offset,
+                geometry.words as usize * word_size,
             )?
             .chunks_exact(word_size)
             .map(le_uint)
             .collect();
+        let bucket = if layout.0.fields.contains_key("BucketRef") {
+            Some(layout.read(&image, 0, "BucketRef")? as u16)
+        } else {
+            self.lfh_owner_bucket(&layout, &image)?
+        };
         Ok(LfhSubsegment {
             address: range.address,
-            block_size,
-            block_count,
+            block_size: geometry.block_size,
+            block_count: geometry.blocks as u32,
             free_count: layout.read(&image, 0, "FreeCount")? as u32,
-            bucket: layout.read(&image, 0, "BucketRef")? as u16,
-            first_block: range.address + first_offset,
+            bucket,
+            first_block: range.address + geometry.first_offset,
             bitmap,
-            blocks_per_word,
+            blocks_per_word: geometry.blocks_per_word as u32,
+            bit_stride: geometry.bit_stride as u32,
         })
+    }
+
+    /// The bucket of an LFH subsegment whose layout has no `BucketRef`
+    /// (Windows 11 22631's): `Owner` points at the bucket's or an affinity
+    /// slot's `_HEAP_LFH_SUBSEGMENT_OWNER`, which carries `BucketIndex`.
+    /// `Owner` shares its word with `DelayFree`; while that bit is set the
+    /// word counts delayed frees and names no owner, so the bucket is
+    /// unknown.
+    fn lfh_owner_bucket(&self, layout: &Layout, image: &[u8]) -> Result<Option<u16>> {
+        let delay_free = self.field_layout(layout, "DelayFree")?;
+        if delay_free.read(image, layout.offset("DelayFree")?, "DelayFree")? != 0 {
+            return Ok(None);
+        }
+        let owner_layout = self.layout("_HEAP_LFH_SUBSEGMENT_OWNER")?;
+        let owner = self.read_struct(&owner_layout, VirtAddr(layout.read(image, 0, "Owner")?))?;
+        Ok(Some(owner_layout.read(&owner, 0, "BucketIndex")? as u16))
     }
 }
 
@@ -1361,6 +1487,47 @@ pub enum BlockMatch {
 }
 
 impl HeapReader<'_> {
+    /// The address ranges `heap` reserved, as `(start, end)`, each its own
+    /// allocation: an NT heap's segments (the first holds the `_HEAP`) and
+    /// virtual blocks; a segment heap's `_SEGMENT_HEAP`, page segments, and
+    /// large allocations. None for a heap of unknown kind.
+    pub fn heap_extents(&self, heap: &ProcessHeap) -> Result<Vec<(VirtAddr, VirtAddr)>> {
+        match heap.kind {
+            HeapKind::Nt => {
+                let nt = self.nt_heap(heap.address)?;
+                let segments = nt
+                    .segments
+                    .iter()
+                    .map(|segment| (segment.base, segment.end()));
+                let blocks = nt.virtual_blocks.iter().map(|block| {
+                    let size = block.reserve_size.max(block.commit_size);
+                    (block.entry, block.entry + size)
+                });
+                Ok(segments.chain(blocks).collect())
+            }
+            HeapKind::Segment => {
+                let segment = self.segment_heap(heap.address)?;
+                let header = self.layout("_SEGMENT_HEAP")?.size() as u64;
+                let pages = segment.contexts.iter().flat_map(|context| {
+                    let size = context.segment_size();
+                    context
+                        .segments
+                        .iter()
+                        .map(move |page| (page.address, page.address + size))
+                });
+                let large = segment
+                    .large_allocations
+                    .iter()
+                    .map(|large| (large.address, large.address + large.size()));
+                Ok(std::iter::once((segment.address, segment.address + header))
+                    .chain(pages)
+                    .chain(large)
+                    .collect())
+            }
+            HeapKind::Unknown(_) => Ok(Vec::new()),
+        }
+    }
+
     pub fn find_in_nt(&self, heap: &NtHeap, address: VirtAddr) -> Result<Option<BlockMatch>> {
         for block in &heap.virtual_blocks {
             if (block.entry.0..block.entry.0 + block.reserve_size.max(block.commit_size))
@@ -1483,14 +1650,14 @@ impl HeapReader<'_> {
 pub struct HeapSummaryDetail {
     pub peb: VirtAddr,
     pub heaps: Vec<HeapInfo>,
-    /// True when the PEB advertised more than `MAX_HEAPS` entries.
+    /// True when the heap list holds more than `MAX_HEAPS` entries.
     pub truncated: bool,
 }
 
-/// One heap of a process, from its PEB heap list (`!heap -s`).
+/// One heap of a process, from its heap list (`!heap -s`).
 #[record(impl)]
 pub struct HeapInfo {
-    /// The index of the heap in the PEB list.
+    /// The index of the heap in the process's heap list.
     pub index: usize,
     /// The heap address.
     pub address: VirtAddr,
@@ -1538,7 +1705,7 @@ pub struct HeapStats {
 /// One decoded heap (`!heap -h|-a <heap>`, `Heap.inspect()`).
 #[record(impl)]
 pub struct HeapDetail {
-    /// Position in the PEB heap list.
+    /// Position in the process's heap list.
     pub index: usize,
     pub address: VirtAddr,
     #[record(skip)]
@@ -1694,7 +1861,7 @@ pub struct HeapBlock {
 /// A heap, identified by its PEB-list position, address, and kind.
 #[record(impl)]
 pub struct HeapIdentity {
-    /// Position in the PEB heap list.
+    /// Position in the process's heap list.
     pub index: usize,
     pub address: VirtAddr,
     #[record(skip)]
@@ -1724,8 +1891,8 @@ pub struct HeapBlockSearch {
     pub address: VirtAddr,
     /// Whether a heap contains the address.
     pub found: bool,
-    /// Whether the PEB listed more heaps than the search bound, in which
-    /// case the search may have missed the block.
+    /// Whether the process listed more heaps than the search bound, in
+    /// which case the search may have missed the block.
     pub truncated: bool,
     /// The heap that contains the address. None if no heap contains it.
     pub heap: Option<HeapIdentity>,
@@ -1747,7 +1914,7 @@ pub struct HeapBlockSearch {
 /// A heap that `!heap -x` could not search, and why.
 #[derive(Clone, Debug)]
 pub struct HeapSearchFailure {
-    /// Position in the PEB heap list.
+    /// Position in the process's heap list.
     pub index: usize,
     pub address: VirtAddr,
     pub kind: HeapKind,
@@ -1780,7 +1947,7 @@ fn heap_summary_stats(reader: &HeapReader<'_>, heap: &ProcessHeap) -> Diagnostic
                 flags: nt.flags,
                 reserved,
                 committed: reserved.saturating_sub(uncommitted),
-                free: nt.total_free_units.saturating_mul(16),
+                free: nt.total_free_units.saturating_mul(nt.granule),
                 segments: nt.segments.len() as u64,
                 virtual_blocks: nt.virtual_blocks.len() as u64,
                 front_end: nt.front_end,
@@ -1820,10 +1987,12 @@ fn heap_summary_stats(reader: &HeapReader<'_>, heap: &ProcessHeap) -> Diagnostic
                 }
             }))
         }
-        HeapKind::Unknown(signature) => DiagnosticValue::unavailable(format!(
-            "heap carries neither heap signature (found {signature:#x})"
-        )),
+        HeapKind::Unknown(signature) => DiagnosticValue::unavailable(unknown_heap_error(signature)),
     }
+}
+
+fn unknown_heap_error(signature: u32) -> String {
+    format!("heap carries neither heap signature (found {signature:#x})")
 }
 
 fn nt_lfh_block_detail(region: &NtUserBlocks, entry: &NtEntry, index: u32) -> HeapBlock {
@@ -2050,7 +2219,7 @@ impl Target {
         Ok((process.dtb, peb, wow64))
     }
 
-    /// Decode the attached process's PEB heap list.  `stats` is unavailable
+    /// Decode the attached process's heap list.  `stats` is unavailable
     /// for an individual heap when its signature, layout, memory, or required
     /// symbols cannot be read; other heaps remain in the returned list.
     pub fn heap_summary(&self) -> Result<HeapSummaryDetail> {
@@ -2091,7 +2260,7 @@ impl Target {
                 HeapSelector::Address(address) => address.0,
             };
             Error::DebugInfo(format!(
-                "{value:#x} is neither a heap index (0..{}) nor a heap in the PEB list",
+                "{value:#x} is neither a heap index (0..{}) nor a heap of the process",
                 heaps.len()
             ))
         })?;
@@ -2119,9 +2288,7 @@ impl Target {
                 Err(error) => detail.error = Some(error.to_string()),
             },
             HeapKind::Unknown(signature) => {
-                detail.error = Some(format!(
-                    "heap carries neither heap signature (found {signature:#x})"
-                ));
+                detail.error = Some(unknown_heap_error(signature));
             }
         }
         Ok(detail)
@@ -2167,7 +2334,10 @@ impl Target {
                         continue;
                     }
                 },
-                HeapKind::Unknown(_) => Ok(None),
+                HeapKind::Unknown(signature) => {
+                    fail(&heap, unknown_heap_error(signature));
+                    continue;
+                }
             };
             let block = match found {
                 Ok(block) => block,
@@ -2207,9 +2377,111 @@ impl Target {
     }
 }
 
+/// Where an LFH subsegment keeps its blocks and their busy bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LfhGeometry {
+    pub block_size: u64,
+    /// From the subsegment's start.
+    pub first_offset: u64,
+    /// Every block: `BlockCount`, and the `WitheldBlockCount` blocks the
+    /// subsegment withholds, which take their places among the others.
+    pub blocks: u64,
+    pub withheld: u64,
+    /// Where `BlockBitmap` begins, the size of its words, and how many of
+    /// them hold the blocks: block `i`'s busy bit is bit
+    /// `(i % blocks_per_word) * bit_stride` of word `i / blocks_per_word`.
+    pub bitmap_offset: u64,
+    pub word_size: u64,
+    pub words: u64,
+    pub blocks_per_word: u64,
+    pub bit_stride: u64,
+}
+
+/// The geometry of the LFH subsegment at `subsegment`, `size` bytes long,
+/// whose header `image` is laid out as `layout` (`_HEAP_LFH_SUBSEGMENT`)
+/// and `offsets` (`_HEAP_LFH_SUBSEGMENT_ENCODED_OFFSETS`) and whose blocks
+/// align to `align`. None when its `BlockOffsets` decodes to no blocks that
+/// fit it.
+///
+/// `BlockOffsets` is XORed with the LFH key and with the subsegment's page
+/// number, which builds cut to 32 bits two ways: Windows 11 26200 (its
+/// ntdll and kernel) takes all of the page number, 22631's ntdll the low 32
+/// bits of the address shifted down a page. Below 4 GiB they agree; above,
+/// the one whose blocks fit the subsegment is its own.
+pub fn lfh_geometry(
+    layout: &TypeInfo,
+    offsets: &TypeInfo,
+    image: &[u8],
+    lfh_key: u64,
+    subsegment: VirtAddr,
+    size: u64,
+    align: u64,
+) -> Option<LfhGeometry> {
+    let read = |layout: &TypeInfo, bytes: &[u8], name: &str| {
+        let info = layout.field(name).ok()?;
+        let at = info.offset as usize;
+        let width = (info.size as usize).clamp(1, 8);
+        Some(info.decode(le_uint(bytes.get(at..at + width)?)))
+    };
+    let withheld = read(layout, image, "WitheldBlockCount").unwrap_or(0);
+    let blocks = read(layout, image, "BlockCount")?.checked_add(withheld)?;
+    let bitmap = layout.field("BlockBitmap").ok()?;
+    let word_size = match bitmap.type_data {
+        ParsedType::Array(_, count) if count > 0 => bitmap.size / u64::from(count),
+        _ => return None,
+    };
+    if !matches!(word_size, 4 | 8) {
+        return None;
+    }
+    let word_bits = word_size * 8;
+    // A header with `BitmapSearchWidth` keeps one busy bit per block, and
+    // a word holds as many blocks as that search reaches: all its bits (the
+    // 26200 kernel's) where it runs past half of them, else its low half
+    // (26200's ntdll; up to that many blocks, both read alike). A header
+    // without keeps two bits per block, the busy one first (22631's ntdll).
+    let (blocks_per_word, bit_stride) = match read(layout, image, "BitmapSearchWidth") {
+        Some(width) if width > word_bits / 2 => (word_bits, 1),
+        Some(_) => (word_bits / 2, 1),
+        None => (word_bits / 2, 2),
+    };
+    let words = blocks.div_ceil(blocks_per_word);
+    let bitmap_offset = u64::from(bitmap.offset);
+    let at = layout.field_offset("BlockOffsets").ok()? as usize;
+    let encoded = le_uint(image.get(at..at + offsets.size)?);
+    let pages = [
+        subsegment.0 >> PAGE_SHIFT,
+        u64::from(subsegment.0 as u32 >> PAGE_SHIFT),
+    ];
+    pages.into_iter().find_map(|page| {
+        let decoded = (encoded ^ lfh_key ^ page).to_le_bytes();
+        let decoded = decoded.get(..offsets.size)?;
+        let block_size = read(offsets, decoded, "BlockSize")?;
+        let first_offset = read(offsets, decoded, "FirstBlockOffset")?;
+        let end = blocks.checked_mul(block_size)?.checked_add(first_offset)?;
+        let fits = blocks > 0
+            && block_size >= align
+            && block_size % align == 0
+            && first_offset % align == 0
+            && first_offset >= bitmap_offset + words * word_size
+            && end <= size;
+        fits.then_some(LfhGeometry {
+            block_size,
+            first_offset,
+            blocks,
+            withheld,
+            bitmap_offset,
+            word_size,
+            words,
+            blocks_per_word,
+            bit_stride,
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nt::layout::FieldInfo;
 
     #[test]
     fn active_nt_heap_encoding_requires_its_layout_field() {
@@ -2242,7 +2514,7 @@ mod tests {
         assert!(entry.busy());
         assert!(entry.checksum_ok);
         assert_eq!(entry.unused_bytes, 0x14);
-        assert_eq!(entry.user_size(), 0x50 - 0x10 - 0x14);
+        assert_eq!(entry.user_size(), 0x50 - 0x14);
 
         let corrupt = decode_nt_entry(VirtAddr(0x1190740), raw ^ 0x100, Some(encoding), 16);
         assert!(!corrupt.checksum_ok);
@@ -2252,7 +2524,184 @@ mod tests {
         let x86 = decode_nt_entry(VirtAddr(0x1190740), raw, Some(encoding), 8);
         assert_eq!(x86.size, 0x28);
         assert_eq!(x86.user(), VirtAddr(0x1190748));
-        assert_eq!(x86.user_size(), 0x28 - 8 - 0x14);
+        assert_eq!(x86.user_size(), 0x28 - 0x14);
+    }
+
+    /// A free block's header records no unused bytes (Windows 7's
+    /// `UnusedBytes` is 0 in a free 0x20e0-byte block), so the space a
+    /// caller could use is what follows the header, not the whole block.
+    #[test]
+    fn a_free_nt_entry_leaves_its_header_out_of_the_user_size() {
+        let plain = [0x0eu8, 0x02, 0x00, 0x0c, 0x05, 0x00, 0x00, 0x00];
+        let entry = decode_nt_entry(VirtAddr(0x1190740), u64::from_le_bytes(plain), None, 16);
+        assert_eq!(entry.size, 0x20e0);
+        assert!(!entry.busy());
+        assert_eq!(entry.user_size(), 0x20e0 - 0x10);
+    }
+
+    /// `_HEAP_LFH_SUBSEGMENT_ENCODED_OFFSETS`.
+    fn encoded_offsets() -> TypeInfo {
+        let ushort = |offset| FieldInfo {
+            offset,
+            size: 2,
+            type_data: ParsedType::Primitive("USHORT".into()),
+        };
+        TypeInfo {
+            name: "_HEAP_LFH_SUBSEGMENT_ENCODED_OFFSETS".into(),
+            size: 4,
+            fields: [
+                ("BlockSize".to_string(), ushort(0)),
+                ("FirstBlockOffset".to_string(), ushort(2)),
+            ]
+            .into_iter()
+            .collect(),
+            pointer_size: 8,
+        }
+    }
+
+    /// The fields of an x64 or ARM64 `_HEAP_LFH_SUBSEGMENT` the geometry
+    /// reads, `BitmapSearchWidth` (at 0x32, before a bitmap at 0x40) where
+    /// `search_width` is given as 26200 lays it out, else 22631's ntdll's
+    /// (a bitmap at 0x30), and a header holding `encoded`, `blocks`, and
+    /// `withheld`.
+    fn lfh_header(
+        search_width: Option<u8>,
+        encoded: u32,
+        blocks: u16,
+        withheld: u8,
+    ) -> (TypeInfo, Vec<u8>) {
+        let field = |offset, size, name: &str| FieldInfo {
+            offset,
+            size,
+            type_data: ParsedType::Primitive(name.into()),
+        };
+        let (withheld_at, bitmap_at) = if search_width.is_some() {
+            (0x25, 0x40)
+        } else {
+            (0x27, 0x30)
+        };
+        let mut fields = vec![
+            ("BlockCount", field(0x22, 2, "USHORT")),
+            ("WitheldBlockCount", field(withheld_at, 1, "UCHAR")),
+            ("BlockOffsets", field(0x28, 4, "ULONG")),
+            (
+                "BlockBitmap",
+                FieldInfo {
+                    offset: bitmap_at,
+                    size: 8,
+                    type_data: ParsedType::Array(
+                        Box::new(ParsedType::Primitive("ULONGLONG".into())),
+                        1,
+                    ),
+                },
+            ),
+        ];
+        let mut image = vec![0u8; bitmap_at as usize + 8];
+        image[0x22..0x24].copy_from_slice(&blocks.to_le_bytes());
+        image[withheld_at as usize] = withheld;
+        image[0x28..0x2c].copy_from_slice(&encoded.to_le_bytes());
+        if let Some(width) = search_width {
+            fields.push(("BitmapSearchWidth", field(0x32, 1, "UCHAR")));
+            image[0x32] = width;
+        }
+        let layout = TypeInfo {
+            name: "_HEAP_LFH_SUBSEGMENT".into(),
+            size: image.len(),
+            fields: fields
+                .into_iter()
+                .map(|(name, info)| (name.to_string(), info))
+                .collect(),
+            pointer_size: 8,
+        };
+        (layout, image)
+    }
+
+    fn geometry(
+        header: (TypeInfo, Vec<u8>),
+        key: u64,
+        subsegment: u64,
+        size: u64,
+    ) -> Option<LfhGeometry> {
+        let (layout, image) = header;
+        lfh_geometry(
+            &layout,
+            &encoded_offsets(),
+            &image,
+            key,
+            VirtAddr(subsegment),
+            size,
+            0x10,
+        )
+    }
+
+    /// Two subsegments of an ARM64 Windows 11 22631 charmap's process heap:
+    /// 83 blocks of 0x30 after 0x50 bytes of header and bitmap, and 248 of
+    /// 0x10 after 0x80. The page number's bits above the low 32 of the
+    /// address take no part, and each block keeps two bits.
+    #[test]
+    fn lfh_block_offsets_decode_with_the_truncated_page_number() {
+        let key = 0x4055_f3e2_076d_0278;
+        assert_eq!(
+            geometry(
+                lfh_header(None, 0x0731_bc5b, 83, 0),
+                key,
+                0x250_cbe1_3000,
+                0x1000
+            ),
+            Some(LfhGeometry {
+                block_size: 0x30,
+                first_offset: 0x50,
+                blocks: 83,
+                withheld: 0,
+                bitmap_offset: 0x30,
+                word_size: 8,
+                words: 3,
+                blocks_per_word: 32,
+                bit_stride: 2,
+            })
+        );
+        let second = geometry(
+            lfh_header(None, 0x07e1_bc71, 248, 0),
+            key,
+            0x250_cbe1_9000,
+            0x1000,
+        );
+        assert_eq!(
+            second.map(|geometry| (geometry.block_size, geometry.first_offset)),
+            Some((0x10, 0x80))
+        );
+    }
+
+    /// A Windows 11 26200 kernel pool subsegment, whose `BlockOffsets`
+    /// decodes only with all of the page number: 14 blocks of 0x110 from
+    /// 0x50.
+    #[test]
+    fn kernel_lfh_block_offsets_decode_with_the_whole_page_number() {
+        let header = lfh_header(Some(14), 0x8027_e5e2, 14, 0);
+        let geometry = geometry(header, 0xeaf9_43fb_5837_b63c, 0xffff_cd84_052c_e000, 0x1000);
+        assert_eq!(
+            geometry.map(|geometry| (geometry.block_size, geometry.first_offset)),
+            Some((0x110, 0x50))
+        );
+    }
+
+    /// An 8-page 26200 kernel subsegment: 163 blocks of 0xc0 from 0x70, and
+    /// 7 it withholds among them, a bit each, 64 to a word.
+    #[test]
+    fn kernel_lfh_bitmaps_hold_a_bit_per_block_withheld_ones_too() {
+        let header = lfh_header(Some(0x40), 0xb030_5350, 163, 7);
+        let geometry = geometry(header, 0xeaf9_43fb_5837_b63c, 0xffff_8e87_7e5a_c000, 0x8000);
+        assert_eq!(
+            geometry.map(|geometry| (
+                geometry.block_size,
+                geometry.first_offset,
+                geometry.blocks,
+                geometry.words,
+                geometry.blocks_per_word,
+                geometry.bit_stride
+            )),
+            Some((0xc0, 0x70, 170, 3, 64, 1))
+        );
     }
 
     #[test]
@@ -2262,11 +2711,12 @@ mod tests {
             block_size: 0x30,
             block_count: 40,
             free_count: 3,
-            bucket: 0,
+            bucket: Some(0),
             first_block: VirtAddr(0x1060),
             // Blocks 0 and 33 busy; the high halves are not block state.
             bitmap: vec![0xFFFF_FFFF_0000_0001, 0xFFFF_FFFF_0000_0002],
             blocks_per_word: 32,
+            bit_stride: 1,
         };
         assert!(subsegment.is_busy(0));
         assert!(!subsegment.is_busy(1));
@@ -2274,5 +2724,27 @@ mod tests {
         assert!(subsegment.is_busy(33));
         assert_eq!(subsegment.busy_count(), 2);
         assert_eq!(subsegment.block(33), VirtAddr(0x1060 + 33 * 0x30));
+    }
+
+    /// 22631's ntdll keeps two bits per block, the busy one first: the
+    /// 83-block subsegment above, with no block free.
+    #[test]
+    fn lfh_bitmaps_of_two_bits_per_block_read_the_first() {
+        let subsegment = LfhSubsegment {
+            address: VirtAddr(0x250_cbe1_3000),
+            block_size: 0x30,
+            block_count: 83,
+            free_count: 0,
+            bucket: Some(3),
+            first_block: VirtAddr(0x250_cbe1_3050),
+            bitmap: vec![
+                0x5777_5555_d775_5f5d,
+                0x5555_d55d_55f5_7df5,
+                0xffff_ffd5_d555_fd75,
+            ],
+            blocks_per_word: 32,
+            bit_stride: 2,
+        };
+        assert_eq!(subsegment.busy_count(), 83);
     }
 }

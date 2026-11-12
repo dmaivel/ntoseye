@@ -13,7 +13,7 @@ use crate::base::types::CodeMachine;
 use super::Arm64;
 
 /// The instruction word at the start of `bytes`.
-fn word(bytes: &[u8]) -> Option<u32> {
+pub fn word(bytes: &[u8]) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?))
 }
 
@@ -477,6 +477,22 @@ mod tests {
                 "text drift for {word:#010x}"
             );
             assert_eq!(mnemonic_text(&tokens), row_mnemonic(*word), "{word:#010x}");
+            checked += 1;
+        }
+
+        // A negative immediate reads as one; the decoder writes it that way
+        // and the row's text is the decoder's, so this pins the case the
+        // previous decoder got wrong (it printed the two's complement).
+        for (word, text) in [
+            (0xa9bd7bfdu32, "stp fp, lr, [sp, #-0x30]!"),
+            (0xf85f83a0, "ldur x0, [fp, #-0x8]"),
+        ] {
+            let ip = 0x1000;
+            let joined: String = row_tokens(&formatted(decode_word(word).unwrap(), ip))
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect();
+            assert_eq!(joined, text, "{word:#010x}");
             checked += 1;
         }
 

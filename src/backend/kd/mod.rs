@@ -1,26 +1,32 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use ntoseye_macros::record;
 
-use crate::arch::{Arch, HwBreakpointAccess, RegisterMap};
+use crate::arch::{Arch, Family, HwBreakpointAccess, RegisterMap};
 use crate::backend::dbg_backend::{
     BackendCapability, BugcheckInfo, ContinueDisposition, DebugBackend, DebugCapability, DebugLog,
-    DebugOutputPage, PciConfigAddress, ProcessorRead, StopEvent, TebPath, TrapState,
+    DebugOutputPage, ExceptionRecord, PciConfigAddress, ProcessorRead, StopEvent, ThreadLayout,
+    TrapState, backend_thread_id, processor_index_from_backend_thread_id,
 };
 use crate::backend::debugger_data::DebuggerDataCandidate;
-use crate::backend::kd::framing::KdFraming;
+use crate::backend::kd::framing::{KdFraming, is_temporary_io_error};
 use crate::base::error::{Error, Result};
 use crate::base::memory::TranslationCache;
 use crate::base::notice::Notice;
+use crate::base::ntstatus::{
+    STATUS_BREAKPOINT, STATUS_SINGLE_STEP, STATUS_UNSUCCESSFUL, STATUS_WX86_BREAKPOINT,
+    STATUS_WX86_SINGLE_STEP,
+};
 use crate::base::types::{Dtb, KernelLocation, VirtAddr};
 
 macro_rules! kd_trace {
     ($($arg:tt)*) => {
-        if $crate::backend::kd::trace_enabled() {
+        if $crate::base::env::Trace::Kd.enabled() {
             eprintln!("[{:>9.3}] {}", $crate::backend::kd::trace_elapsed().as_secs_f64(), format_args!($($arg)*));
         }
     };
@@ -28,15 +34,10 @@ macro_rules! kd_trace {
 
 macro_rules! kd_trace_bytes {
     ($($arg:tt)*) => {
-        if $crate::backend::kd::trace_bytes_enabled() {
+        if $crate::base::env::Trace::KdBytes.enabled() {
             eprint!($($arg)*);
         }
     };
-}
-
-pub fn trace_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("NTOSEYE_KD_TRACE").is_some())
 }
 
 /// Seconds since the first trace line, so a trace shows what each request
@@ -44,11 +45,6 @@ pub fn trace_enabled() -> bool {
 pub fn trace_elapsed() -> Duration {
     static START: LazyLock<Instant> = LazyLock::new(Instant::now);
     START.elapsed()
-}
-
-pub fn trace_bytes_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("NTOSEYE_KD_TRACE_BYTES").is_some())
 }
 
 mod amd64;
@@ -65,10 +61,10 @@ mod kdnet;
 mod machine;
 mod memory;
 mod pump;
-mod registers;
+pub mod registers;
 mod run;
 mod transport;
-use breakpoints::PendingWriteBreakpoint;
+use breakpoints::{PendingWriteBreakpoint, StrandedEntries};
 use halt::HaltRegisters;
 use machine::machine;
 use memory::LineCache;
@@ -81,6 +77,21 @@ pub use file_io::*;
 mod event_loop;
 pub use event_loop::*;
 
+/// `DBGKD_LOAD_SYMBOLS64`, and the image path KD sends after the state
+/// change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LoadSymbols {
+    base: VirtAddr,
+    size: u32,
+    /// `ProcessId`, which for a user-mode image carries the low 32 bits of
+    /// the `EPROCESS` mapping it: Windows passes the process object and KD
+    /// keeps 32 bits of it.
+    process: u64,
+    /// `UnloadSymbols`: the image is unloading.
+    unload: bool,
+    path: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct StateChange {
     processor: u16,
@@ -90,11 +101,15 @@ pub struct StateChange {
     exception_first_chance: Option<bool>,
     exception_address: Option<u64>,
     program_counter: u64,
+    /// The base of the kernel image a load-symbols state change reports
+    /// (the kernel's own, for the first after a boot).
     kernel_base_hint: Option<VirtAddr>,
-    /// `DBGKD_LOAD_SYMBOLS64.UnloadSymbols` of a load-symbols state change:
-    /// the image at `kernel_base_hint` is unloading. False for every other
+    /// What a load-symbols state change reports; `None` for every other
     /// kind.
-    unload_symbols: bool,
+    load_symbols: Option<LoadSymbols>,
+    /// The `EXCEPTION_RECORD64` an exception state change reports; `None`
+    /// for every other kind.
+    exception_record: Option<ExceptionRecord>,
     is_bugcheck: bool,
     bugcheck: Option<BugcheckInfo>,
     target_reloaded: bool,
@@ -102,6 +117,28 @@ pub struct StateChange {
     /// `DBGKD_ANY_CONTROL_REPORT`, verbatim. Every stop carries it, so the
     /// fields it holds cost nothing: see [`ControlReport`].
     control_report: Option<ControlReport>,
+}
+
+impl StateChange {
+    /// Which stop it reports (see [`framing::StopKey`]).
+    pub fn key(&self) -> framing::StopKey {
+        (self.processor, self.program_counter, self.exception_code)
+    }
+
+    /// The bytes from the stop's PC whose breakpoint-table entries the
+    /// target deleted before reporting it: `KdpSetCommonState` copies up to
+    /// [`api::DBGKD_MAXSTREAM`] bytes from there into the report, fewer when
+    /// the next page is unreadable, and deletes the entries in just what it
+    /// copied. A report the architecture's reader does not interpret is
+    /// taken to cover the whole stream.
+    pub fn report_window(&self, arch: Arch) -> Range<u64> {
+        let len = self
+            .control_report
+            .as_ref()
+            .and_then(|report| machine(arch).reported_instruction_count(report))
+            .unwrap_or(api::DBGKD_MAXSTREAM);
+        self.program_counter..self.program_counter.saturating_add(len)
+    }
 }
 
 /// The control report a 64-bit KD state change carries after its exception
@@ -133,8 +170,39 @@ const DBG_KD_LOAD_SYMBOLS_STATE_CHANGE: u32 = 0x0000_3031;
 /// Command-string notification (e.g. `.echo` from the target); also transparent
 const DBG_KD_COMMAND_STRING_STATE_CHANGE: u32 = 0x0000_3032;
 
-const STATUS_BREAKPOINT: u32 = 0x8000_0003;
-const STATUS_SINGLE_STEP: u32 = 0x8000_0004;
+/// The `ExceptionInformation[0]` of the `STATUS_BREAKPOINT` that Windows on
+/// ARM64 raises for a hardware watchpoint hit (`BREAKPOINT_HW_WATCH`, with
+/// the address accessed in `[1]`) and a hardware breakpoint hit
+/// (`BREAKPOINT_HW_BREAK`), as ksarm64.h defines them. Windows on x64
+/// raises `STATUS_SINGLE_STEP` for both.
+const BREAKPOINT_HW_WATCH: u64 = 6;
+const BREAKPOINT_HW_BREAK: u64 = 7;
+
+/// `code`, raised with `parameters`, as the trap it is to the debugger: a
+/// WOW64 thread's x86 single step and breakpoint are the native ones,
+/// whatever code Windows gave them, and a hardware breakpoint or watchpoint
+/// hit that Windows on ARM64 reports as a breakpoint of its own type is the
+/// debug trap x64 reports it as. Taken for a `brk`, the hit would be
+/// resumed as one that no breakpoint is at.
+fn native_trap_code(code: u32, parameters: &[u64]) -> u32 {
+    match (code, parameters.first()) {
+        (STATUS_WX86_SINGLE_STEP, _) => STATUS_SINGLE_STEP,
+        (STATUS_WX86_BREAKPOINT, _) => STATUS_BREAKPOINT,
+        (STATUS_BREAKPOINT, Some(&(BREAKPOINT_HW_WATCH | BREAKPOINT_HW_BREAK))) => {
+            STATUS_SINGLE_STEP
+        }
+        (code, _) => code,
+    }
+}
+
+/// The address a hardware watchpoint hit accessed, when `record` reports
+/// one as Windows on ARM64 does (see [`BREAKPOINT_HW_WATCH`]).
+fn hardware_watch_address(record: &ExceptionRecord) -> Option<u64> {
+    match record.parameters[..] {
+        [BREAKPOINT_HW_WATCH, address, ..] if record.code == STATUS_BREAKPOINT => Some(address),
+        _ => None,
+    }
+}
 const KD_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Bytes of configuration space per `DbgKdGetBusDataApi` request, well inside
 /// a KD packet.
@@ -149,7 +217,6 @@ const DBGKD_CREATE_FILE_API: u32 = 0x0000_3430;
 const DBGKD_READ_FILE_API: u32 = 0x0000_3431;
 const DBGKD_WRITE_FILE_API: u32 = 0x0000_3432;
 const DBGKD_CLOSE_FILE_API: u32 = 0x0000_3433;
-const STATUS_UNSUCCESSFUL: u32 = 0xc000_0001;
 const KD_REFRESH_MESSAGE: &[u8] = b"KDTARGET: Refreshing KD connection";
 const KD_INITIAL_TIMEOUT_ENV: &str = "NTOSEYE_KD_TIMEOUT";
 const KD_INITIAL_TIMEOUT_DEFAULT: Duration = Duration::from_secs(8);
@@ -162,20 +229,12 @@ const KD_RECONNECT_BREAKIN_TRACE_EVERY: u32 = 8;
 /// burst, so a timeout this size only ever fires in the idle gap between packets.
 const PUMP_POLL: Duration = Duration::from_millis(100);
 
-fn thread_id_for(processor: u16) -> String {
-    format!("p1.{:x}", u32::from(processor) + 1)
-}
-
 fn parse_thread_id(tid: &str) -> Result<u16> {
-    let stripped = tid
-        .strip_prefix("p1.")
-        .ok_or_else(|| Error::Kd(format!("unrecognised thread id {tid}")))?;
-    let idx =
-        u16::from_str_radix(stripped, 16).map_err(|_| Error::Kd(format!("bad thread id {tid}")))?;
-    if idx == 0 {
-        return Err(Error::Kd(format!("thread id {tid} has zero index")));
+    if !tid.starts_with("p1.") {
+        return Err(Error::Kd(format!("unrecognised thread id {tid}")));
     }
-    Ok(idx - 1)
+    processor_index_from_backend_thread_id(tid)
+        .ok_or_else(|| Error::Kd(format!("bad thread id {tid}")))
 }
 
 fn parse_thread_id_for_processor_count(tid: &str, processor_count: u16) -> Result<u16> {
@@ -284,22 +343,32 @@ pub struct KdBackend {
     /// register slot.
     kernel_dtb_override: u64,
     /// Where the current thread's TEB is, from the session; see
-    /// [`DebugBackend::set_teb_path`].
-    teb_path: Option<TebPath>,
+    /// [`DebugBackend::set_thread_layout`].
+    thread_layout: Option<ThreadLayout>,
     processor_count: u16,
     current_processor: u16,
     last_stop_processor: u16,
     last_exception_code: u32,
     last_rip: u64,
-    /// The PCs of the extra reports the last step's processor switch put on
-    /// the wire (see `single_step`). Each deleted the breakpoint-table
-    /// entries in its window, as the stop's own report does; see
-    /// [`DebugBackend::sites_dropped_by_stop`].
-    switch_report_pcs: Vec<u64>,
     reconnect_assist_after_continue: Option<Duration>,
     bp_handles: HashMap<u64, u32>,
+    /// Our sites a report deleted from the target's table (see
+    /// [`DebugBackend::sites_dropped_by_stop`]), moved out of `bp_handles`
+    /// as the report arrives: the target frees their handles at once and
+    /// hands them to the next install, so restoring one by its old handle
+    /// would delete whichever entry took it over. A step on another
+    /// processor puts two more reports on the wire, and they count too.
+    /// An address leaves the set when it is installed or removed again.
+    dropped_bp_addresses: HashSet<u64>,
     managed_bp_addresses: HashSet<u64>,
+    /// Where break-ins land: the connect's stop, when it was one, and the
+    /// kernel's break-in site once the host names it
+    /// ([`DebugBackend::note_breakin_site`]). A connect to a target already
+    /// halted at a break of its own collects that break instead, and the
+    /// kernel keeps the break-in for its next clock tick.
     breakin_addresses: HashSet<u64>,
+    /// The exception record of the last stop, when it was an exception.
+    last_exception_record: Option<ExceptionRecord>,
     /// Our breakpoints removed since the target last resumed; see
     /// [`ContinueDrain`].
     retired_bp_addresses: HashSet<u64>,
@@ -323,6 +392,15 @@ pub struct KdBackend {
     /// Avoid repeated round trips or timeouts after an ARM64 control-space read fails.
     special_registers_unsupported: bool,
     efer_cache: HashMap<u16, u64>,
+    /// Each processor's KPCR, as [`Self::processor_kpcr`] read it this boot:
+    /// the kernel places a processor's KPCR when it starts the processor,
+    /// and a reboot (a stop that reports one, or a reload that
+    /// [`DebugBackend::set_kernel_dtb`] hands a new kernel root) empties it.
+    kpcr_cache: HashMap<u16, u64>,
+    /// The processor's debug feature register, which counts the hardware
+    /// breakpoints it implements, read at attach; `None` where the family
+    /// has none or the target refused it.
+    debug_features: Option<u64>,
     /// Virtual memory read through the target for the current halt; see
     /// [`Self::read_virtual_bytes`].
     virtual_lines: LineCache<(u16, u64)>,
@@ -346,9 +424,9 @@ pub struct KdBackend {
     /// Operator-facing diagnostics raised mid-operation, drained by the
     /// session through [`DebugBackend::take_notices`].
     notices: Vec<Notice>,
-    /// Table handles reclaimed from dead sessions; see
+    /// Table entries left by dead sessions; see
     /// [`restore_unowned_breakpoint_handles`](breakpoints::restore_unowned_breakpoint_handles).
-    released_handles: HashSet<u32>,
+    stranded: breakpoints::StrandedEntries,
     /// Why a request cannot be served while the target runs, for the error
     /// a running target answers with; see [`Self::note_host_memory_unavailable`].
     running_reason: &'static str,
@@ -417,6 +495,15 @@ impl KdBackend {
     fn framing_unchecked(&mut self) -> Result<&mut KdFraming<KdTransport>> {
         self.link.framing(self.running_reason)
     }
+
+    /// Whether the target reached a new stop while it answered a request
+    /// (see `HeldStop`), which the next wait reports.
+    fn holds_stop(&self) -> bool {
+        matches!(
+            &self.link,
+            Link::Halted(framing) | Link::RunningInline(framing) if framing.holds_stop()
+        )
+    }
 }
 
 impl DebugBackend for KdBackend {
@@ -429,17 +516,24 @@ impl DebugBackend for KdBackend {
     fn debug_traps_reach_target(&self) -> bool {
         true
     }
+    // A frozen ARM64 processor reports its state inside
+    // nt!KiFreezeTargetExecution with debug exceptions masked, where no
+    // step can occur; see `single_step`.
+    fn steps_only_the_stopping_processor(&self) -> bool {
+        self.arch.family() == Family::Arm
+    }
     fn name(&self) -> &'static str {
         self.backend_name
     }
 
     fn set_kernel_dtb(&mut self, dtb: u64) {
         self.kernel_dtb_override = dtb;
+        self.kpcr_cache.clear();
         kd_trace!("kd: kernel page-table root = {dtb:#x}");
     }
 
-    fn set_teb_path(&mut self, path: Option<TebPath>) {
-        self.teb_path = path;
+    fn set_thread_layout(&mut self, path: Option<ThreadLayout>) {
+        self.thread_layout = path;
     }
 
     fn read_registers(&mut self) -> Result<Vec<u8>> {
@@ -452,6 +546,14 @@ impl DebugBackend for KdBackend {
 
     fn surface_next_break_at(&mut self, address: Option<u64>) {
         self.surface_break_at = address;
+    }
+
+    fn note_breakin_site(&mut self, address: u64) {
+        self.breakin_addresses.insert(address);
+    }
+
+    fn last_exception_record(&self) -> Option<ExceptionRecord> {
+        self.last_exception_record.clone()
     }
 
     fn write_registers(&mut self, data: &[u8]) -> Result<()> {
@@ -477,7 +579,9 @@ impl DebugBackend for KdBackend {
     }
 
     fn hardware_slot_range(&self, access: HwBreakpointAccess) -> std::ops::Range<usize> {
-        self.arch.debug_registers().slots_for(access)
+        self.arch
+            .debug_registers()
+            .implemented_slots_for(access, self.debug_features)
     }
 
     fn set_hardware_breakpoint(
@@ -691,23 +795,15 @@ impl DebugBackend for KdBackend {
         true
     }
 
-    /// `KdpReportExceptionStateChange` calls `KdpDeleteBreakpointRange` over
-    /// the `DBGKD_MAXSTREAM` bytes it reports from the stop PC, so every
-    /// table entry there is gone (and its handle dead) once the stop is on
-    /// the wire. The full window is reported even when the stream was cut
-    /// short by a page end: rewriting a surviving entry only churns it.
-    /// A step on another processor puts two more reports on the wire, and
-    /// their windows count too.
+    /// `KdpSetCommonState` calls `KdpDeleteBreakpointRange` over the
+    /// instruction bytes it reports from the stop PC, so every table entry
+    /// there is gone (and its handle dead) once the stop is on the wire. A
+    /// stream cut short by an unreadable page leaves the entries past its
+    /// end alone, and they are not reported. A step on another processor
+    /// puts two more reports on the wire, and a stop the event pump absorbs
+    /// one more; their windows count too.
     fn sites_dropped_by_stop(&self) -> Vec<u64> {
-        let windows: Vec<_> = std::iter::once(self.last_rip)
-            .chain(self.switch_report_pcs.iter().copied())
-            .map(|pc| pc..pc.saturating_add(api::DBGKD_MAXSTREAM))
-            .collect();
-        self.bp_handles
-            .keys()
-            .copied()
-            .filter(|addr| windows.iter().any(|window| window.contains(addr)))
-            .collect()
+        self.dropped_bp_addresses.iter().copied().collect()
     }
 
     fn note_target_rediscovery_pending(&mut self) {
@@ -716,6 +812,19 @@ impl DebugBackend for KdBackend {
 
     fn note_target_rediscovery_complete(&mut self) {
         self.reconnect_assist_after_continue = None;
+    }
+
+    fn forget_target_breakpoints(&mut self) {
+        kd_trace!("kd: the session reloads the target; forgetting its breakpoints");
+        self.bp_handles.clear();
+        self.dropped_bp_addresses.clear();
+        self.managed_bp_addresses.clear();
+        self.retired_bp_addresses.clear();
+        self.pending_write_breakpoint = None;
+        // A reboot emptied the target's breakpoint table, and the entries
+        // earlier sessions stranded in it went with it; after a reset that
+        // was no reboot, they are found again when an install needs them.
+        self.stranded = StrandedEntries::default();
     }
 
     fn target_kernel_location(&mut self) -> Result<Option<KernelLocation>> {
@@ -759,7 +868,7 @@ impl DebugBackend for KdBackend {
     }
 
     fn thread_list(&mut self) -> Result<Vec<String>> {
-        Ok((0..self.processor_count).map(thread_id_for).collect())
+        Ok((0..self.processor_count).map(backend_thread_id).collect())
     }
 
     fn set_current_thread(&mut self, thread_id: &str) -> Result<()> {
@@ -771,7 +880,7 @@ impl DebugBackend for KdBackend {
     }
 
     fn stopped_thread_id(&mut self) -> Result<String> {
-        Ok(thread_id_for(self.current_processor))
+        Ok(backend_thread_id(self.current_processor))
     }
 
     fn is_running(&self) -> bool {
@@ -779,8 +888,13 @@ impl DebugBackend for KdBackend {
     }
 
     fn has_pending_stop(&self) -> bool {
-        // The pump reported a stop nobody has drained yet; `is_running` is stale.
-        matches!(&self.link, Link::RunningPumped(pump) if pump.reported_stop.load(Ordering::SeqCst))
+        // The pump reported a stop nobody has drained yet; `is_running` is
+        // stale. Or the target reached a new stop while it answered a
+        // request (see `HeldStop`).
+        match &self.link {
+            Link::RunningPumped(pump) => pump.reported_stop.load(Ordering::SeqCst),
+            _ => self.holds_stop(),
+        }
     }
 
     fn prepare_for_exit(&mut self, leave_running: bool) -> Result<()> {

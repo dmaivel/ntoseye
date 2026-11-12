@@ -3,8 +3,8 @@
 
 use super::{
     CodeOwner, CulpritAttribution, CulpritConfidence, CulpritEvidence, CulpritEvidenceKind,
-    CulpritSubject, DynamicCodeCulprit, PowerThreadRole, TriageReport, canonical_module_component,
-    evidence_module_for_address, names_match,
+    CulpritSubject, DynamicCodeCulprit, PowerThreadRole, TriageReport, evidence_module_for_address,
+    names_match,
 };
 use crate::nt::bugchecks::module_filename;
 use crate::nt::guest::ModuleInfo;
@@ -203,10 +203,7 @@ fn add_culprit_evidence(
 }
 
 fn is_kernel_module(name: &str) -> bool {
-    matches!(
-        canonical_module_component(name).as_str(),
-        "nt" | "ntoskrnl" | "ntkrnlmp" | "ntkrnlpa" | "ntkrpamp"
-    )
+    ModuleInfo::derive_short_name(name) == "nt"
 }
 
 /// Whether a user-mode module is part of Windows or of a language runtime:

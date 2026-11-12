@@ -41,8 +41,8 @@ use crate::session::typeview::Expand;
 use crate::session::{Cancel, Motion, RunOutcome, Session, StepMode};
 use crate::{Backend, TargetSpec};
 
-use breakpoints::BreakpointState;
-use run_control::StepRequest;
+use breakpoints::{BreakpointState, Owned};
+use run_control::{StepInProgress, StepRequest};
 use stack::DapThread;
 use wire::{ClientMessage, Request};
 
@@ -52,8 +52,8 @@ const RUN_POLL: Duration = Duration::from_millis(50);
 /// Why a request that needs a target cannot be served.
 const NO_TARGET: &str = "no target is attached; send a launch or attach request";
 
-/// Why a user-mode minidump refuses to run, step, or change.
-const SNAPSHOT: &str = "a user-mode minidump is a static snapshot";
+/// Why a crash dump, kernel or user-mode, refuses to run, step, or change.
+const SNAPSHOT: &str = "a crash dump is a static snapshot";
 
 /// Whether the guest is running, halted, or the client has detached.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -181,11 +181,15 @@ struct Server {
     /// ntoseye breakpoint ids owned by the client's `setBreakpoints` for one
     /// source path. Each DAP breakpoint can expand into several ids, because a
     /// source line may match several addresses (inlined or ICF'd code).
-    source_breakpoints: HashMap<String, Vec<Vec<u32>>>,
-    function_breakpoints: Vec<u32>,
-    instruction_breakpoints: Vec<u32>,
-    data_breakpoints: Vec<u32>,
+    /// The first of each group is the id the client was given.
+    source_breakpoints: HashMap<String, Vec<Vec<Owned>>>,
+    function_breakpoints: Vec<Vec<Owned>>,
+    instruction_breakpoints: Vec<Vec<Owned>>,
+    data_breakpoints: Vec<Vec<Owned>>,
     last_stop: Option<StopInfo>,
+    /// The step whose runs are under way, between the response to its
+    /// request and the stop it ends on.
+    step: Option<StepInProgress>,
     /// Last state reported per installed breakpoint id, so a deferred
     /// breakpoint that arms (or a resolved one whose module unloads) produces
     /// exactly one `breakpoint` event instead of one per stop. The address is
@@ -211,6 +215,9 @@ struct Server {
     supports_invalidated: bool,
     configured: bool,
     done: bool,
+    /// The command line's `--memory-source`, for a KD or KDNET target a
+    /// `launch`/`attach` request names no `memorySource` for.
+    memory_source: KdMemorySource,
 }
 
 /// Serve the Debug Adapter Protocol until the client disconnects.
@@ -218,8 +225,14 @@ struct Server {
 /// `spec` attaches at startup (from the CLI flags); without it the adapter
 /// waits for the `launch`/`attach` request to name a target. `port` serves one
 /// TCP client on loopback instead of stdio, which is what editors configured
-/// with a `debugServer` port expect.
-pub fn run(spec: Option<TargetSpec>, port: Option<u16>) -> Result<()> {
+/// with a `debugServer` port expect. `memory_source` is the command line's
+/// `--memory-source`, for a KD or KDNET target a request opens without
+/// naming one.
+pub fn run(
+    spec: Option<TargetSpec>,
+    memory_source: KdMemorySource,
+    port: Option<u16>,
+) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     // Shared with the reader thread so a `pause` can interrupt a run the loop
     // is already blocked in.
@@ -255,6 +268,7 @@ pub fn run(spec: Option<TargetSpec>, port: Option<u16>) -> Result<()> {
     };
 
     let mut server = Server::new(session, out, rx, Arc::clone(&cancel));
+    server.memory_source = memory_source;
     server.terminating = termination::install(&cancel);
     server.serve();
     if let Some(session) = server.session.as_mut()
@@ -291,6 +305,7 @@ impl Server {
             instruction_breakpoints: Vec::new(),
             data_breakpoints: Vec::new(),
             last_stop: None,
+            step: None,
             verified: HashMap::new(),
             debug_seq: 0,
             cancel,
@@ -300,6 +315,7 @@ impl Server {
             supports_invalidated: false,
             configured: false,
             done: false,
+            memory_source: KdMemorySource::Auto,
         }
     }
 
@@ -368,8 +384,14 @@ impl Server {
                 }
                 match self.drive(Motion::Wait, &Cancel::within(RUN_POLL)) {
                     Ok(RunOutcome::Running) => {}
-                    Ok(RunOutcome::Stopped(stop)) => self.report_stop(stop),
+                    Ok(RunOutcome::Stopped(stop)) => self.on_stopped(stop),
                     Err(error) => {
+                        // A step whose thread exited ends here, halted
+                        // where the session broke in.
+                        if self.step.is_some() {
+                            self.report_ended_step(&error);
+                            return;
+                        }
                         self.emit_output("stderr", format!("target wait failed: {error}\n"));
                         // Stop polling a transport that just failed, instead
                         // of repeating the same error every tick. The client
@@ -481,10 +503,7 @@ impl Server {
             return;
         };
         // A dump or passive memory view was never halted, so nothing resumes.
-        let resumable = session
-            .capabilities()
-            .iter()
-            .any(|entry| entry.capability == DebugCapability::ExecutionControl && entry.supported);
+        let resumable = session.backend.supports(DebugCapability::ExecutionControl);
         match session.cleanup_for_exit() {
             Ok(()) if resumable => {
                 self.emit_output("console", "ntoseye: detached; guest resumed\n")
@@ -510,25 +529,34 @@ impl Server {
             .is_some_and(|session| session.target.user_dump().is_some())
     }
 
-    /// Refuse `operation` (running, stepping, or a write) on a user-mode
-    /// minidump.
-    fn refuse_on_user_dump(&self, operation: &str) -> result::Result<(), String> {
-        if self.user_dump() {
+    /// Whether the target is a crash dump, kernel or user-mode, which never
+    /// runs or changes.
+    fn dump(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.target.phys.is_dump())
+    }
+
+    /// Refuse `operation` (running, stepping, or a write) on a crash dump.
+    fn refuse_on_dump(&self, operation: &str) -> result::Result<(), String> {
+        if self.dump() {
             return Err(format!("{SNAPSHOT}; {operation} is not available"));
         }
         Ok(())
     }
 
     fn dispatch(&mut self, request: Request) {
-        // A user dump never runs, so no breakpoint can verify; each one the
-        // client asks for is answered unverified, with the reason.
-        if self.user_dump()
+        // A dump never runs, so no breakpoint can verify; each one the
+        // client asks for is answered unverified, with the reason, and the
+        // session's `sx` policy is left as it is.
+        if self.dump()
             && matches!(
                 request.command.as_str(),
                 "setBreakpoints"
                     | "setFunctionBreakpoints"
                     | "setInstructionBreakpoints"
                     | "setDataBreakpoints"
+                    | "setExceptionBreakpoints"
             )
         {
             let result = breakpoints::unverified(
@@ -582,7 +610,7 @@ impl Server {
             "disassemble" => self.on_disassemble(&request.arguments),
             "modules" => self.on_modules(&request.arguments),
             "setExpression" => self
-                .refuse_on_user_dump("setting an expression")
+                .refuse_on_dump("setting an expression")
                 .and(Err("unsupported request 'setExpression'".to_string())),
             other => Err(format!("unsupported request '{other}'")),
         };
@@ -606,7 +634,7 @@ impl Server {
         self.supports_invalidated = arg_bool(args, "supportsInvalidatedEvent").unwrap_or(false);
         let mut capabilities = capabilities();
         // A target named on the command line is already open.
-        if self.user_dump() {
+        if self.dump() {
             merge(&mut capabilities, snapshot_capabilities());
         }
         Ok(Some(capabilities))
@@ -622,7 +650,7 @@ impl Server {
             );
             return Ok(None);
         }
-        let spec = target_spec(args)?;
+        let spec = target_spec(self.memory_source, args)?;
         let mut session = open_session(&spec, &mut |line| eprintln!("{line}"))
             .map_err(|error| error.to_string())?;
         share_cancel(&mut session, &self.cancel);
@@ -631,7 +659,7 @@ impl Server {
         self.debug_seq = 0;
         // `initialize` advertised a kernel target's capabilities before the
         // target was named.
-        if self.user_dump() {
+        if self.dump() {
             self.send_event(
                 "capabilities",
                 json!({"capabilities": snapshot_capabilities()}),
@@ -791,7 +819,7 @@ fn capabilities() -> Value {
     })
 }
 
-/// What a user-mode minidump changes in [`capabilities`]: it never runs and
+/// What a crash dump changes in [`capabilities`]: it never runs and
 /// cannot be written, so no breakpoint, step granularity, write, or
 /// exception filter applies.
 fn snapshot_capabilities() -> Value {
@@ -821,13 +849,20 @@ fn merge(base: &mut Value, overrides: Value) {
 /// `disconnect`, or a termination signal would not end a step whose stop
 /// never arrives.
 fn share_cancel(session: &mut Session, cancel: &Arc<AtomicBool>) {
-    session.target.interrupt = Arc::clone(cancel);
+    session.target.set_interrupt(Arc::clone(cancel));
 }
 
 /// Build a target spec from `launch`/`attach` arguments. Kernel debugging has
-/// no process to launch, so both requests mean the same thing.
-fn target_spec(args: &Value) -> result::Result<TargetSpec, String> {
-    if let Some(dump) = arg_str(args, "dump") {
+/// no process to launch, so both requests mean the same thing. A KD or KDNET
+/// target that names no `memorySource` takes `default_memory_source`.
+fn target_spec(
+    default_memory_source: KdMemorySource,
+    args: &Value,
+) -> result::Result<TargetSpec, String> {
+    if let Some(dump) = args.get("dump") {
+        let dump = dump
+            .as_str()
+            .ok_or_else(|| "dump must be the path of a dump file".to_string())?;
         if args.get("kdHandshakeTimeout").is_some() {
             return Err("dump does not use 'kdHandshakeTimeout'".to_string());
         }
@@ -847,6 +882,7 @@ fn target_spec(args: &Value) -> result::Result<TargetSpec, String> {
     };
     let memory_source = match arg_str(args, "memorySource") {
         Some(source) => source.parse::<KdMemorySource>()?,
+        None if matches!(backend, Backend::Kd | Backend::KdNet) => default_memory_source,
         None => KdMemorySource::Auto,
     };
     let spec = TargetSpec::Live {

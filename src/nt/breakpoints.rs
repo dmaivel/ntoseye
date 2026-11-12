@@ -22,13 +22,17 @@ mod install;
 mod journal;
 mod manager;
 mod resolve;
+mod sites;
 mod spec;
 #[cfg(test)]
 mod test_backend;
 
+pub use config::same_address_space;
 use install::BreakpointBackend;
-pub use install::{lift_target_site, plant_target_site};
-pub use journal::{Repair, SiteJournal};
+pub use install::{BreakpointPatch, SiteFrames, lift_target_site, plant_target_site, site_in_view};
+pub use journal::{Repair, Restore, SiteJournal, SiteMemory};
+pub use manager::written_and_replanted;
+pub use sites::{CodeSites, Edit, PlantedSite, Publish, Published, TrapKind, overlaps};
 
 /// A hardware (debug-register) breakpoint's parameters: the access it traps on,
 /// the watch width in bytes, and its backend slot (a logical record for GDB).
@@ -306,9 +310,9 @@ pub struct BreakpointManager {
 }
 
 #[derive(Debug)]
-pub enum BreakpointHitResult {
+pub enum BreakpointHitResult<'a> {
     /// Breakpoint hit
-    Hit(BreakpointInfo),
+    Hit(&'a BreakpointInfo),
     /// Program counter does not match any breakpoint.
     NotBreakpoint,
 }

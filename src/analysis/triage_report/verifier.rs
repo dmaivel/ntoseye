@@ -1,7 +1,7 @@
 //! Driver Verifier bugcheck analysis.
 
 use super::{VerifierAddress, VerifierArgument, VerifierFinding};
-use crate::nt::bugchecks::BugcheckAnalysis;
+use crate::nt::bugchecks::{BugcheckAnalysis, verifier_violation};
 
 pub(super) fn verifier_finding(bugcheck: &BugcheckAnalysis) -> Option<VerifierFinding> {
     if !matches!(
@@ -17,11 +17,7 @@ pub(super) fn verifier_finding(bugcheck: &BugcheckAnalysis) -> Option<VerifierFi
         return None;
     }
     let subcode = bugcheck.args.first().map(|arg| arg.value).unwrap_or(0);
-    let known_description = match (bugcheck.code, subcode) {
-        (0x0000_00c4, 0xf6) => Some("a kernel handle was referenced as a user-mode handle"),
-        (0x0000_00e6, 0x26) => Some("an IOMMU detected a DMA violation"),
-        _ => None,
-    };
+    let known_description = verifier_violation(bugcheck.code, subcode);
     let addresses = match (bugcheck.code, subcode) {
         (0x0000_00c4, 0xf6) => bugcheck
             .args
