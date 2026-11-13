@@ -4,7 +4,6 @@ use super::*;
 use crate::base::bytes;
 
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 
 use crate::backend::kd::breakpoints::{
     KD_BREAKPOINT_TABLE_SIZE, PendingWriteBreakpoint, Reclaim, StrandedEntries,
@@ -14,6 +13,7 @@ use crate::backend::kd::framing::{
     CONTROL_PACKET_LEADER, INITIAL_PACKET_ID, PACKET_TYPE_KD_ACKNOWLEDGE,
     PACKET_TYPE_KD_STATE_MANIPULATE, data_packet,
 };
+use crate::backend::kd::transport::serial_pair;
 
 fn write_breakpoint_reply_payload(processor: u16, addr: u64, handle: u32) -> Vec<u8> {
     const MANIPULATE_UNION_OFFSET: usize = 16;
@@ -30,7 +30,7 @@ fn write_breakpoint_reply_payload(processor: u16, addr: u64, handle: u32) -> Vec
 
 #[test]
 fn breakpoint_install_reclaims_slots_stranded_by_a_dead_session() {
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.link.halt();
     backend.exit_prepared = true;
@@ -80,7 +80,7 @@ fn breakpoint_install_reclaims_slots_stranded_by_a_dead_session() {
 /// tells them apart. An entry kept is not reported as released.
 #[test]
 fn a_stranded_entry_the_target_keeps_is_not_counted_as_released() {
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.link.halt();
     backend.exit_prepared = true;
@@ -131,7 +131,7 @@ fn a_stranded_entry_the_target_keeps_is_not_counted_as_released() {
 /// it. Each reply echoes the request's union, as Windows does. Yields each
 /// request's API and trailing data.
 fn serve_one_site(
-    mut kernel: UnixStream,
+    mut kernel: SerialStream,
     code: u8,
     saved: u8,
     script: Vec<(u32, u32)>,
@@ -195,7 +195,7 @@ fn serve_one_site(
 #[test]
 fn an_install_handed_a_kept_entry_plants_its_breakpoint() {
     const ADDR: u64 = 0xffff_f800_0001_2000;
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.link.halt();
     backend.exit_prepared = true;
@@ -240,7 +240,7 @@ fn an_install_handed_a_kept_entry_plants_its_breakpoint() {
 #[test]
 fn an_entry_a_replant_could_not_release_is_left_to_the_next_reclaim() {
     const ADDR: u64 = 0xffff_f800_0001_2000;
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.link.halt();
     backend.exit_prepared = true;
@@ -287,8 +287,8 @@ fn a_refused_restore_keeps_a_site_that_still_holds_a_breakpoint() {
     bytes::write_u32(&mut probe, 16 + 12, 1);
     probe.push(0xcc);
 
-    let (host, target) = UnixStream::pair().unwrap();
-    (&target)
+    let (host, mut target) = serial_pair().unwrap();
+    target
         .write_all(&scripted_target(&[refused, probe]))
         .unwrap();
     let mut backend = kd_backend_with_framing(host);
@@ -310,7 +310,7 @@ fn a_refused_restore_keeps_a_site_that_still_holds_a_breakpoint() {
 
 #[test]
 fn pending_write_breakpoint_retry_completes_late_reply_without_resend() {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     kernel
         .set_read_timeout(Some(Duration::from_millis(200)))
         .unwrap();
@@ -351,7 +351,7 @@ fn pending_write_breakpoint_retry_completes_late_reply_without_resend() {
 
 #[test]
 fn pending_write_breakpoint_blocks_unrelated_kd_requests() {
-    let (_kernel, host) = UnixStream::pair().unwrap();
+    let (_kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     let addr = 0xfffff800_12345678;
     backend.pending_write_breakpoint = Some(PendingWriteBreakpoint { addr, processor: 0 });
@@ -373,7 +373,7 @@ fn pending_write_breakpoint_blocks_unrelated_kd_requests() {
 /// only clearing some of its own breakpoints frees an entry.
 #[test]
 fn a_table_full_of_this_sessions_breakpoints_says_so() {
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.link.halt();
     backend.exit_prepared = true;
@@ -408,7 +408,7 @@ fn a_table_full_of_this_sessions_breakpoints_says_so() {
 /// it.
 #[test]
 fn a_reset_reported_with_a_stop_keeps_the_breakpoints_until_the_session_reloads() {
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.link.halt();
     backend.exit_prepared = true;

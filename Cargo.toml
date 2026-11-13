@@ -9,7 +9,7 @@ name = "ntoseye"
 version.workspace = true
 edition = "2024"
 authors = [ "dmaivel" ]
-description = "WinDbg-like kernel debugger for Windows, from Linux and macOS"
+description = "WinDbg-like kernel debugger for Windows, from Linux, macOS, and Windows"
 license = "MIT"
 homepage = "https://ntoseye.com"
 repository = "https://github.com/dmaivel/ntoseye"
@@ -25,7 +25,7 @@ required-features = ["cli"]
 
 [dependencies]
 iced-x86 = "1.21.0"
-bad64 = "0.12"
+exarmo-aarch64 = "0.4.0"
 indicatif = "0.18.3"
 memmap2 = "0.9.9"
 owo-colors = "4.2.3"
@@ -93,6 +93,21 @@ nix = { version = "0.31.3", features = [ "process", "uio" ] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
+    "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Security",
+] }
+
 [features]
 default = ["cli", "mcp", "dap", "gdbserver", "python-embed"]
 # The command engine (parser, dispatcher, renderers) every host drives; the
@@ -125,6 +140,22 @@ iced-x86 = { version = "1.21.0", features = ["code_asm"] }
 
 [profile.dev.package.pdb2]
 debug-assertions = false
+
+# exarmo's instruction model is one enum of every A64 encoding, tens of
+# thousands of variants. MSVC link.exe overflows its own stack writing their
+# type information, so a debug build of these crates carries none; there is
+# nothing of theirs to step into.
+[profile.dev.package.exarmo-aarch64]
+debug = false
+
+[profile.dev.package.exarmo-core]
+debug = false
+
+[profile.test.package.exarmo-aarch64]
+debug = false
+
+[profile.test.package.exarmo-core]
+debug = false
 
 [lints.clippy]
 too_many_arguments = "allow"

@@ -3,7 +3,6 @@
 
 use std::fs::File;
 use std::io;
-use std::os::unix::fs::FileExt;
 
 use gdbstub::target::ext::host_io::{
     FsKind, HostIo, HostIoClose, HostIoCloseOps, HostIoErrno, HostIoError, HostIoFstat,
@@ -12,6 +11,22 @@ use gdbstub::target::ext::host_io::{
 };
 
 use super::GdbTarget;
+
+/// Read at an absolute offset without moving the file's own cursor.
+#[cfg(unix)]
+pub(super) fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    use std::os::unix::fs::FileExt;
+
+    file.read_at(buf, offset)
+}
+
+/// Read at an absolute offset without moving the file's own cursor.
+#[cfg(windows)]
+pub(super) fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    use std::os::windows::fs::FileExt;
+
+    file.seek_read(buf, offset)
+}
 
 /// Whether a remote path names a process's memory map, `/proc/<pid>/maps`.
 fn is_proc_maps(path: &str) -> bool {
@@ -34,7 +49,7 @@ impl OpenFile {
     /// reads for where they stop.
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         match self {
-            Self::Image(file) => file.read_at(buf, offset),
+            Self::Image(file) => read_at(file, buf, offset),
             Self::Generated(bytes) => {
                 let rest = usize::try_from(offset)
                     .ok()

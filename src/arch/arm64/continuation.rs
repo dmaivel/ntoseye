@@ -5,9 +5,11 @@
 
 use std::ops::Deref;
 
-use bad64::{Op, Operand, Reg, Shift, SysReg};
+use exarmo_aarch64::{
+    BranchKind, Modifier, ModifierKind, Offset, Operand, Reg, Writeback, decode_word,
+};
 
-use super::disasm::{immediate_value, word};
+use super::disasm::word;
 
 /// The bits of a virtual address: Windows translates 48-bit halves (see the
 /// paging's canonical halves), and pointer authentication codes sit above
@@ -62,50 +64,51 @@ impl Deref for Successors {
 /// raises an exception or returns from one (see [`enters_or_leaves_exception`]),
 /// which continues at a vector or a saved state it does not name.
 pub fn successors(bytes: &[u8], pc: u64, read: impl Fn(&str) -> Option<u64>) -> Option<Successors> {
-    let instruction = bad64::decode(word(bytes)?, pc).ok()?;
+    let instruction = decode_word(word(bytes)?).ok()?;
+    let branch = instruction.at(pc).branch();
+    if enters_or_leaves_exception(branch.kind) {
+        return None;
+    }
+    let mnemonic = instruction.mnemonic().name();
     let operands = instruction.operands();
     let target = || {
-        operands.iter().find_map(|operand| match *operand {
-            Operand::Label(imm) => Some(immediate_value(imm) as u64),
+        operands.iter().find_map(|operand| match operand {
+            Operand::Label { offset, pc: read } => Some(read.target(pc, *offset, 64)),
             _ => None,
         })
     };
     let register = || match operands.first() {
-        Some(Operand::Reg { reg, .. }) => read(reg.name()),
+        Some(Operand::Reg(reg)) => read(&reg.reg.to_string()),
         _ => None,
     };
-    let link = || read(Reg::X30.name());
+    let link = || read("lr");
+    // A branch that authenticates goes to its address with the code taken
+    // out; the plain forms use the register as it is.
+    let authenticated = mnemonic.starts_with("bra")
+        || mnemonic.starts_with("blra")
+        || (mnemonic.starts_with("ret") && mnemonic.len() > 3);
+    let branch_to = |address: u64| {
+        Successors::one(if authenticated {
+            strip_pointer_authentication(address)
+        } else {
+            address
+        })
+    };
     let next = pc.wrapping_add(4);
-    let op = instruction.op();
-    if enters_or_leaves_exception(op) {
-        return None;
-    }
-    let mnemonic = op.mnem();
-    Some(match op {
-        Op::B | Op::BL | Op::B_AL | Op::B_NV => Successors::one(target()?),
-        Op::RET if operands.is_empty() => Successors::one(link()?),
-        Op::RET | Op::BR | Op::BLR => Successors::one(register()?),
-        // An authenticated branch that does not fault goes to its register's
-        // address with the authentication code taken out. The `sppc` returns'
-        // operand is the modifier, not the target, which is the link
-        // register too.
-        Op::RETAA | Op::RETAB | Op::RETAASPPC | Op::RETABSPPC | Op::RETAASPPCR | Op::RETABSPPCR => {
-            Successors::one(strip_pointer_authentication(link()?))
-        }
-        Op::BRAA
-        | Op::BRAAZ
-        | Op::BRAB
-        | Op::BRABZ
-        | Op::BLRAA
-        | Op::BLRAAZ
-        | Op::BLRAB
-        | Op::BLRABZ => Successors::one(strip_pointer_authentication(register()?)),
-        // `b.<cond>`, and the compare-and-branches: `cbz`/`cbnz` and the
-        // `cb<cc>`/`cbb<cc>`/`cbh<cc>` of two registers.
-        Op::TBZ | Op::TBNZ => Successors::either(next, target()?),
-        _ if mnemonic.starts_with("b.") || mnemonic.starts_with("cb") => {
+    Some(match branch.kind {
+        // `b`, `b.al`/`b.nv`, and `bl` (which names its target too).
+        BranchKind::Direct | BranchKind::DirectCall if branch.conditional => {
             Successors::either(next, target()?)
         }
+        BranchKind::Direct | BranchKind::DirectCall => Successors::one(target()?),
+        // `ret`, and `retaa`/`retab`/`retaasppc`/... which authenticate the
+        // link register.
+        BranchKind::Return => match operands.first() {
+            Some(Operand::Reg(reg)) => branch_to(read(&reg.reg.to_string())?),
+            _ => branch_to(link()?),
+        },
+        // `br`, `braa`/`braaz`/..., `blr`, `blraa`/`blraaz`/...
+        BranchKind::Indirect | BranchKind::IndirectCall => branch_to(register()?),
         _ => Successors::one(next),
     })
 }
@@ -119,62 +122,87 @@ pub fn successors(bytes: &[u8], pc: u64, read: impl Fn(&str) -> Option<u64>) -> 
 /// switch stacks, or SP set some other way (`mov sp, x29`, `and sp, ...`, a
 /// register amount), or an encoding that does not decode.
 pub fn stack_floor(bytes: &[u8], sp: u64) -> Option<u64> {
-    let instruction = bad64::decode(word(bytes)?, 0).ok()?;
-    let op = instruction.op();
-    if enters_or_leaves_exception(op) {
+    let instruction = decode_word(word(bytes)?).ok()?;
+    let mnemonic = instruction.mnemonic();
+    if enters_or_leaves_exception(instruction.at(0).branch().kind) {
         return None;
     }
     let lowered_by = |delta: i128| Some(sp.wrapping_add_signed(i64::try_from(delta.min(0)).ok()?));
     let operands = instruction.operands();
     for (index, operand) in operands.iter().enumerate() {
-        match *operand {
-            Operand::MemPreIdx { reg: Reg::SP, imm }
-            | Operand::MemPostIdxImm { reg: Reg::SP, imm } => {
-                return lowered_by(immediate_value(imm));
+        // An access through SP, and what it leaves SP at.
+        let Operand::Mem(mem) = operand else {
+            // The stack selection, which switches stacks: a PSTATE field
+            // (`msr spsel, #1`) or the register itself (`msr sp_el0, x0`).
+            let selects_stack = match operand {
+                Operand::SysOp(field) => field.def().name == "spsel",
+                Operand::SysReg(reg) => matches!(reg.name(), Some("spsel" | "sp_el0")),
+                _ => false,
+            };
+            if selects_stack && mnemonic == exarmo_aarch64::Mnemonic::Msr {
+                return None;
             }
-            Operand::MemPostIdxReg([Reg::SP, _]) => return None,
+            continue;
+        };
+        if !names_sp(mem.base) {
+            continue;
+        }
+        return match mem.writeback {
+            Writeback::Pre | Writeback::Post => match mem.offset {
+                Offset::Imm {
+                    value,
+                    mul_vl: false,
+                } => lowered_by(i128::from(value)),
+                // A register amount, or one in vector lengths, is not a byte
+                // delta this can follow.
+                _ => None,
+            },
             // The structure loads and stores (`ld1`, `st1`, ...) follow their
             // address with the writeback: the transfer size, which raises
             // SP, or a register.
-            Operand::MemReg(Reg::SP) => {
-                return match operands.get(index + 1) {
-                    None | Some(Operand::Imm32 { .. } | Operand::Imm64 { .. }) => Some(sp),
-                    Some(_) => None,
-                };
-            }
-            Operand::SysReg(SysReg::PSTATE_SPSEL | SysReg::SP_EL0) if op == Op::MSR => {
-                return None;
-            }
-            _ => {}
-        }
+            Writeback::None => match operands.get(index + 1) {
+                None | Some(Operand::Imm { .. }) => Some(sp),
+                Some(_) => None,
+            },
+        };
     }
     // SP is a destination only as the first operand; `cmp`, `cmn` and `tst`
     // name it there as a source.
     let writes_sp = matches!(
-        operands.first(),
-        Some(Operand::Reg {
-            reg: Reg::SP | Reg::WSP,
-            ..
-        })
-    ) && !matches!(op, Op::CMP | Op::CMN | Op::TST);
+        (mnemonic, operands.first()),
+        (
+            mnemonic,
+            Some(Operand::Reg(reg))
+        ) if names_sp(reg.reg)
+            && !matches!(
+                mnemonic,
+                exarmo_aarch64::Mnemonic::Cmp
+                    | exarmo_aarch64::Mnemonic::Cmn
+                    | exarmo_aarch64::Mnemonic::Tst
+            )
+    );
     if !writes_sp {
         return Some(sp);
     }
-    match (op, &operands[1..]) {
+    match (mnemonic, &operands.as_slice()[1..]) {
         (
-            Op::ADD | Op::SUB,
-            [
-                Operand::Reg { reg: Reg::SP, .. },
-                Operand::Imm64 { imm, shift },
-            ],
-        ) => {
-            let amount = immediate_value(*imm)
-                << match shift {
-                    None => 0,
-                    Some(Shift::LSL(amount)) => *amount,
-                    Some(_) => return None,
-                };
-            lowered_by(if op == Op::SUB { -amount } else { amount })
+            exarmo_aarch64::Mnemonic::Add | exarmo_aarch64::Mnemonic::Sub,
+            [Operand::Reg(reg), Operand::Imm { value, modifier }],
+        ) if names_sp(reg.reg) => {
+            let shift = match *modifier {
+                None => 0,
+                Some(Modifier {
+                    kind: ModifierKind::Lsl,
+                    amount,
+                }) => amount?,
+                Some(_) => return None,
+            };
+            let amount = i128::from(*value) << shift;
+            lowered_by(if mnemonic == exarmo_aarch64::Mnemonic::Sub {
+                -amount
+            } else {
+                amount
+            })
         }
         _ => None,
     }
@@ -192,27 +220,28 @@ pub fn strip_pointer_authentication(address: u64) -> u64 {
     }
 }
 
-/// Whether `op` raises an exception (a system call, hypervisor or monitor
-/// call, breakpoint, halt, undefined instruction, debug state change) or
-/// returns from one: execution goes on at a vector or a saved state, on that
-/// level's stack.
-fn enters_or_leaves_exception(op: Op) -> bool {
+/// Whether the instruction raises an exception (a system call, hypervisor or
+/// monitor call, breakpoint, halt, undefined instruction, debug state change)
+/// or returns from one: execution goes on at a vector or a saved state, on
+/// that level's stack.
+fn enters_or_leaves_exception(kind: BranchKind) -> bool {
     matches!(
-        op,
-        Op::SVC
-            | Op::HVC
-            | Op::SMC
-            | Op::BRK
-            | Op::HLT
-            | Op::UDF
-            | Op::DCPS1
-            | Op::DCPS2
-            | Op::DCPS3
-            | Op::DRPS
-            | Op::ERET
-            | Op::ERETAA
-            | Op::ERETAB
+        kind,
+        BranchKind::SystemCall
+            | BranchKind::Exception
+            | BranchKind::Halt
+            | BranchKind::ExceptionReturn
     )
+}
+
+/// Whether `reg` is the stack pointer, in either width; slot 31 of a
+/// zero-register file is the zero register, not a place.
+fn names_sp(reg: Reg) -> bool {
+    match reg {
+        Reg::XSp(reg) => reg.is_sp(),
+        Reg::WSp(reg) => reg.is_sp(),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

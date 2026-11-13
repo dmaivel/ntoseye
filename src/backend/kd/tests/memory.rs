@@ -3,7 +3,6 @@
 use super::*;
 
 use std::io::Write;
-use std::os::unix::net::UnixStream;
 use std::thread::{JoinHandle, spawn};
 
 use crate::backend::kd::framing::{
@@ -11,6 +10,7 @@ use crate::backend::kd::framing::{
     data_packet,
 };
 use crate::backend::kd::memory::KD_VIRTUAL_LINE;
+use crate::backend::kd::transport::{SerialStream, serial_pair};
 use crate::backend::phys::PhysMem;
 use crate::base::memory::{AddressSpace, MemoryOps, PAGE_SIZE};
 use crate::nt::guest::{Guest, Image};
@@ -35,7 +35,7 @@ fn physical_memory_reply_payload(processor: u16, addr: u64, data: &[u8]) -> Vec<
 
 #[test]
 fn kd_memory_reads_physical_bytes_through_shared_backend() {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.link.halt();
     backend.exit_prepared = true;
@@ -83,7 +83,7 @@ fn kd_memory_reads_physical_bytes_through_shared_backend() {
 /// reload never returned.
 #[test]
 fn a_reload_over_kd_memory_does_not_wait_on_its_own_backend() {
-    let (_kernel, host) = UnixStream::pair().unwrap();
+    let (_kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.link.halt();
     backend.exit_prepared = true;
@@ -103,7 +103,7 @@ fn a_reload_over_kd_memory_does_not_wait_on_its_own_backend() {
 
 #[test]
 fn kd_memory_rejects_reads_while_target_runs() {
-    let (_kernel, host) = UnixStream::pair().unwrap();
+    let (_kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.exit_prepared = true;
     let memory = KdMemory {
@@ -133,7 +133,7 @@ fn a_page_the_target_refuses_is_read_through_its_frame() {
     put_u64(&mut physical, entry(0x4000, 0), 0x5000 | 0b11);
     put_u64(&mut physical, 0x4000, 0x1122_3344_5566_7788);
 
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.link.halt();
     backend.exit_prepared = true;
@@ -163,14 +163,14 @@ fn a_page_the_target_refuses_is_read_through_its_frame() {
 /// Like a real one it answers a request that touches mapped memory in
 /// full, with zeros where no region says otherwise, and refuses one that
 /// touches none.
-fn serve_virtual_memory(kernel: UnixStream, regions: Vec<(u64, Vec<u8>)>) -> JoinHandle<usize> {
+fn serve_virtual_memory(kernel: SerialStream, regions: Vec<(u64, Vec<u8>)>) -> JoinHandle<usize> {
     serve_virtual_memory_capped(kernel, regions, usize::MAX)
 }
 
 /// [`serve_virtual_memory`] over a transport whose reply carries at most
 /// `reply_cap` bytes of data, as a KDNET datagram does.
 fn serve_virtual_memory_capped(
-    mut kernel: UnixStream,
+    mut kernel: SerialStream,
     mut regions: Vec<(u64, Vec<u8>)>,
     reply_cap: usize,
 ) -> JoinHandle<usize> {
@@ -285,7 +285,7 @@ fn synthetic_guest(
     types: Vec<TypeInfo>,
     symbols: &[(&str, u32)],
 ) -> (Guest, Arc<Mutex<KdBackend>>, JoinHandle<usize>) {
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.link.halt();
     backend.exit_prepared = true;
@@ -905,7 +905,7 @@ fn page_table_lines_serve_a_halt_and_drop_on_write_and_resume() {
 
 #[test]
 fn truncated_fills_keep_whole_lines_and_finish_the_read() {
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.link.halt();
     backend.exit_prepared = true;

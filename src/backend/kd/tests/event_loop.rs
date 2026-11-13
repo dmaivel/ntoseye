@@ -3,7 +3,6 @@
 use super::*;
 
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::thread::spawn;
@@ -17,10 +16,11 @@ use crate::backend::kd::framing::{
     PACKET_TYPE_KD_STATE_MANIPULATE, control_packet, data_packet,
 };
 use crate::backend::kd::run::stop_event;
+use crate::backend::kd::transport::{SerialStream, serial_pair};
 
 #[test]
 fn transparent_arm64_state_change_uses_arm64_continue_layout() {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     let stop = StateChange {
         processor: 2,
         number_processors: 4,
@@ -375,7 +375,7 @@ fn continue_drains_in_place_rebreak_stale_breakin_and_retired_breakpoint_trap() 
 
 #[test]
 fn pump_services_state_change_and_returns_framing() {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     let framing = KdFraming::new(host.into());
     let (tx, rx) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -419,7 +419,7 @@ fn pump_services_state_change_and_returns_framing() {
 
 #[test]
 fn pump_absorbs_rebreak_after_continue_and_reports_real_stop() {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     kernel
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
@@ -456,7 +456,7 @@ fn pump_absorbs_rebreak_after_continue_and_reports_real_stop() {
     };
 
     let mut kernel_id = INITIAL_PACKET_ID;
-    let mut send = |kernel: &mut UnixStream, packet_type: u16, payload: &[u8]| {
+    let mut send = |kernel: &mut SerialStream, packet_type: u16, payload: &[u8]| {
         kernel
             .write_all(&data_packet(packet_type, kernel_id, payload))
             .unwrap();
@@ -541,7 +541,7 @@ fn pump_absorbs_rebreak_after_continue_and_reports_real_stop() {
 
 #[test]
 fn pump_sends_breakin_after_peer_reset_while_waiting_for_reconnect() {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     kernel
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -596,7 +596,7 @@ fn pump_sends_breakin_after_peer_reset_while_waiting_for_reconnect() {
 
 #[test]
 fn pump_tags_stop_after_assisted_reconnect_breakin() {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     kernel
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -665,7 +665,7 @@ fn pump_tags_stop_after_assisted_reconnect_breakin() {
 
 #[test]
 fn pump_surfaces_reloaded_transparent_state_change() {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     let framing = KdFraming::new(host.into());
     let (tx, rx) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -714,7 +714,7 @@ fn pump_surfaces_reloaded_transparent_state_change() {
 
 #[test]
 fn pump_surfaces_load_symbols_as_a_module_change_stop() {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     let framing = KdFraming::new(host.into());
     let (tx, rx) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -760,7 +760,7 @@ fn pump_surfaces_load_symbols_as_a_module_change_stop() {
 
 #[test]
 fn pump_sends_breakin_when_started_in_reconnect_assist_mode() {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     kernel
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -813,7 +813,7 @@ fn pump_sends_breakin_when_started_in_reconnect_assist_mode() {
 
 #[test]
 fn pump_does_not_send_delayed_reconnect_assist_before_delay() {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     kernel
         .set_read_timeout(Some(Duration::from_millis(5)))
         .unwrap();
@@ -865,7 +865,7 @@ fn pump_does_not_send_delayed_reconnect_assist_before_delay() {
 
 #[test]
 fn await_refresh_sets_flag_without_breakin() {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     kernel
         .set_read_timeout(Some(Duration::from_millis(5)))
         .unwrap();
@@ -954,7 +954,7 @@ fn await_refresh_sets_flag_without_breakin() {
 /// Drive `await_state_change` in bugcheck-aware mode: the fake kernel sends
 /// `prints` then an exception state-change, ACKing whatever comes back.
 fn await_bugcheck_aware(prints: &[&[u8]], pc: u64) -> StateChange {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     kernel
         .set_read_timeout(Some(Duration::from_millis(20)))
         .unwrap();
@@ -1038,7 +1038,7 @@ fn fatal_system_error_print_marks_the_next_stop_with_captured_bugcheck() {
 /// stop: held again, it came back without its bugcheck.
 #[test]
 fn a_bugcheck_while_a_request_is_answered_is_the_next_stop() {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, mut host) = serial_pair().unwrap();
     host.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     let context: Vec<u8> = (0..64u8).collect();
     let pc = 0xffff_f800_1960_c930;
@@ -1121,7 +1121,7 @@ fn only_exception_state_changes_surface_as_breaks() {
 
 #[test]
 fn pump_exits_on_shutdown_when_idle() {
-    let (_kernel, host) = UnixStream::pair().unwrap();
+    let (_kernel, host) = serial_pair().unwrap();
     let framing = KdFraming::new(host.into());
     let (tx, rx) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));

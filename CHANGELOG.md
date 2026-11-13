@@ -13,6 +13,16 @@ Keeping this file:
 - To release, rename "## Unreleased" to "## vX.Y.Z (YYYY-MM-DD)", the version in Cargo.toml. The release workflow refuses a tag whose version has no section here, or an empty one; dist publishes the section as the release notes, under the tag as the release title.
 -->
 
+## Unreleased
+
+### Added
+
+- ntoseye builds and runs on Windows on x86-64, installed with `cargo install ntoseye` or built from source (there are no prebuilt binaries or wheels for Windows): the prompt, the `kd`, `kdnet`, `gdb` and `memory` backends, crash-dump analysis, MCP, DAP and gdbserver all work in a build for `x86_64-pc-windows-msvc`. There, `kd` takes a named pipe instead of a Unix socket (`--connect \\.\pipe\ntoseye-kd`, the default; a bare name is taken relative to `\\.\pipe\`), which is the pipe QEMU's `-chardev pipe,id=kd,path=ntoseye-kd` creates and waits on, `--backend memory` reads a running `qemu-system-*.exe` or `vmware-vmx.exe` VM's memory through `ReadProcessMemory`, and `ntoseye configure` prints the guest and QEMU commands instead of editing a hypervisor.
+
+### Changed
+
+- AArch64 instructions are decoded by [exarmo](https://github.com/Vector35/exarmo), a decoder generated from Arm's machine-readable ISA specification, in place of the bindings to Binary Ninja's C decoder (`bad64`). The text, operands and coloring are the same: the registers the assembler names (`fp`, `lr`), the same `#0x…` numerals, and the same branch targets. A build no longer needs a C toolchain for the decoder, so `cargo install` and `cargo build` on Linux no longer need clang.
+
 ## v0.53.0 (2026-11-06)
 
 Stops over KD are several times faster, `dx` and `dt` show typed globals from private PDBs, and many bugs are fixed, in `!heap` and `!pool` on recent Windows 11 builds, in stack walks, and in symbols.

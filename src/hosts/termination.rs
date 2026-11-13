@@ -31,9 +31,22 @@ extern "C" fn note_termination(_signal: c_int) {
     }
 }
 
-/// Install detach handlers for SIGTERM, SIGHUP, and SIGINT, and return the
-/// flag the server loop polls. `cancel` is raised too, so a blocking run
-/// gives up promptly.
+/// Raise the shared flags from a console event: Ctrl+C, Ctrl+Break, a closed
+/// console, or a logoff/shutdown. Handler safe, for the same reason
+/// [`note_termination`] is.
+#[cfg(windows)]
+unsafe extern "system" fn console_handler(_event: u32) -> i32 {
+    TERMINATION.store(true, Ordering::SeqCst);
+    if let Some(cancel) = RUN_CANCEL.get() {
+        cancel.store(true, Ordering::SeqCst);
+    }
+    1 // handled: the OS kills the process once no handler asks it to wait
+}
+
+/// Install detach handlers for SIGTERM, SIGHUP, and SIGINT — the console
+/// events Ctrl+C, Ctrl+Break, close, and logoff/shutdown on Windows — and
+/// return the flag the server loop polls. `cancel` is raised too, so a
+/// blocking run gives up promptly.
 pub fn install(cancel: &Arc<AtomicBool>) -> Arc<AtomicBool> {
     // Initialize before the handler can run: a store into an initialized
     // `LazyLock` is a plain atomic write.
@@ -45,6 +58,11 @@ pub fn install(cancel: &Arc<AtomicBool>) -> Arc<AtomicBool> {
         unsafe {
             install_signal(signal, note_termination as *const () as sighandler_t);
         }
+    }
+    // SAFETY: the handler only performs atomic stores.
+    #[cfg(windows)]
+    unsafe {
+        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(console_handler), 1);
     }
     flag
 }

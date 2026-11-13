@@ -29,6 +29,8 @@ Power off the VM before you run `ntoseye configure`, and keep only one VMware VM
 
 If another virtual serial device uses COM1, configure the next `serialN` entry and use `debugport:N+1` in the `bcdedit /dbgsettings` command.
 
+On a Windows host, the same serial port is a named pipe instead: use `serial0.fileName = "\\.\pipe\ntoseye-kd"` and connect with `ntoseye --connect \\.\pipe\ntoseye-kd`, which is the default there. `ntoseye configure` does not configure VMware on Windows; it prints the guest commands.
+
 ## KDNET
 
 KDNET uses the guest's virtual NIC and does not need a serial device. Choose a host IP address that the guest can reach through its bridged, NAT, or host-only VMware network, then follow the [KDNET guide](kdnet.md).

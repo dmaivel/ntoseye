@@ -3,7 +3,6 @@
 
 use super::machine::machine;
 use std::collections::{HashMap, HashSet};
-use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,7 +21,7 @@ use super::breakpoints::{
 use super::halt::HaltRegisters;
 use super::kdnet::KdNetStream;
 use super::memory::{KD_REMOTE_MEMORY_CHUNK, LineCache};
-use super::transport::KdTransport;
+use super::transport::{KdTransport, SerialStream};
 use super::{
     DBG_KD_EXCEPTION_STATE_CHANGE, DEBUG_LOG_CAPACITY, KD_REQUEST_TIMEOUT, KdBackend,
     KdTargetHints, Link, STATUS_BREAKPOINT, api, handshake_timeout, is_initial_resync_error,
@@ -51,11 +50,12 @@ pub(super) fn normalize_kernel_dtb(arch: Arch, register_value: u64) -> Dtb {
 }
 
 impl KdBackend {
-    /// Connect to a KDCOM serial pipe and stop at the initial state-change.
-    /// Connection progress (the wait for a target can run for a minute) is
-    /// reported one line at a time through `progress`. `timeout` is the wait
-    /// for the initial handshake in positive seconds; `None` uses
-    /// `NTOSEYE_KD_TIMEOUT`, or 8 seconds when it is unset.
+    /// Connect to a KDCOM serial pipe — a Unix socket, or a Windows named
+    /// pipe such as `\\.\pipe\ntoseye-kd` — and stop at the initial
+    /// state-change. Connection progress (the wait for a target can run for
+    /// a minute) is reported one line at a time through `progress`.
+    /// `timeout` is the wait for the initial handshake in positive seconds;
+    /// `None` uses `NTOSEYE_KD_TIMEOUT`, or 8 seconds when it is unset.
     pub fn connect(
         socket_path: &str,
         timeout: Option<u64>,
@@ -63,7 +63,19 @@ impl KdBackend {
     ) -> Result<Self> {
         let timeout = timeout.map(handshake_timeout).transpose()?;
         progress(&format!("kd: using KDCOM backend on {socket_path}"));
-        let stream = UnixStream::connect(socket_path)
+        #[cfg(windows)]
+        if socket_path.contains('/') || socket_path.contains(':') {
+            return Err(Error::InvalidArgument(
+                "KD serial endpoint on Windows is a named pipe (\\\\.\\pipe\\<name>); \
+                 TCP and Unix sockets are not supported"
+                    .into(),
+            ));
+        }
+        #[cfg(unix)]
+        let stream = SerialStream::connect(socket_path)
+            .map_err(|err| kd_socket_connect_error(socket_path, err))?;
+        #[cfg(windows)]
+        let stream = SerialStream::open(socket_path)
             .map_err(|err| kd_socket_connect_error(socket_path, err))?;
         Self::connect_transport(
             KdTransport::Serial(stream),

@@ -4,7 +4,6 @@ use super::*;
 use crate::base::bytes;
 
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::thread::{JoinHandle, spawn};
@@ -15,6 +14,7 @@ use crate::backend::kd::amd64::{
 };
 use crate::backend::kd::breakpoints::KD_BREAKPOINT_TABLE_SIZE;
 use crate::backend::kd::framing::PACKET_TYPE_KD_STATE_CHANGE64;
+use crate::backend::kd::transport::{SerialStream, serial_pair};
 
 const STATUS_WAKE_SYSTEM_DEBUGGER: u32 = 0x8000_0007;
 /// `DBGKD_MANIPULATE_STATE64` union offset; `ContinueApi2` puts `TraceFlag`
@@ -24,7 +24,7 @@ const MANIPULATE_UNION: usize = 16;
 #[test]
 fn a_stop_report_answers_for_the_trap_state_until_the_target_runs() {
     const TF: u64 = 1 << 8;
-    let (_kernel, host) = UnixStream::pair().unwrap();
+    let (_kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
 
     let mut report = vec![0u8; CONTROL_REPORT_SIZE];
@@ -117,8 +117,8 @@ fn resume_does_not_step_past_a_breakpoint_it_does_not_own() {
             ));
         }
 
-        let (host, target) = UnixStream::pair().unwrap();
-        (&target).write_all(&scripted_target(&replies)).unwrap();
+        let (host, mut target) = serial_pair().unwrap();
+        target.write_all(&scripted_target(&replies)).unwrap();
         let mut backend = kd_backend_with_framing(host);
         backend.last_exception_code = STATUS_BREAKPOINT;
         backend.last_stop_processor = 0;
@@ -135,9 +135,13 @@ fn resume_does_not_step_past_a_breakpoint_it_does_not_own() {
         }
 
         let outcome = backend.skip_hardcoded_breakpoint(0);
-        target.set_nonblocking(true).unwrap();
+        // Drain what the host wrote without waiting for a peer that keeps
+        // its end open: the shortest read timeout returns what is there.
+        target
+            .set_read_timeout(Some(std::time::Duration::from_millis(1)))
+            .unwrap();
         let mut sent = Vec::new();
-        let _ = (&target).read_to_end(&mut sent);
+        let _ = target.read_to_end(&mut sent);
         assert!(
             !sent
                 .windows(4)
@@ -150,7 +154,7 @@ fn resume_does_not_step_past_a_breakpoint_it_does_not_own() {
 
 #[test]
 fn known_breakin_stop_is_marked_assisted_unless_managed() {
-    let (_kernel, host) = UnixStream::pair().unwrap();
+    let (_kernel, host) = serial_pair().unwrap();
     let breakin_clone = host.try_clone().unwrap();
     let pump_host = host.try_clone().unwrap();
     let pump = PumpHandle {
@@ -194,7 +198,7 @@ fn known_breakin_stop_is_marked_assisted_unless_managed() {
 
 #[test]
 fn a_breakin_answered_by_another_stop_is_absorbed_when_it_arrives_late() {
-    let (_kernel, host) = UnixStream::pair().unwrap();
+    let (_kernel, host) = serial_pair().unwrap();
     let breakin_clone = host.try_clone().unwrap();
     let pump_host = host.try_clone().unwrap();
     let pump = PumpHandle {
@@ -244,7 +248,7 @@ fn a_breakin_answered_by_another_stop_is_absorbed_when_it_arrives_late() {
 
 #[test]
 fn a_break_at_the_named_breakin_site_is_noise_after_a_connect_that_stopped_elsewhere() {
-    let (_kernel, host) = UnixStream::pair().unwrap();
+    let (_kernel, host) = serial_pair().unwrap();
     let breakin_clone = host.try_clone().unwrap();
     let pump_host = host.try_clone().unwrap();
     let pump = PumpHandle {
@@ -325,7 +329,10 @@ fn processor_report(processor: u16, code: u32, pc: u64, dr7: u64) -> Vec<u8> {
 /// A halted fake kernel that answers each host request with the next state
 /// change in `reports`, and hands back every request it received once the
 /// host hangs up.
-fn serve_state_changes(mut kernel: UnixStream, reports: Vec<Vec<u8>>) -> JoinHandle<Vec<Vec<u8>>> {
+fn serve_state_changes(
+    mut kernel: SerialStream,
+    reports: Vec<Vec<u8>>,
+) -> JoinHandle<Vec<Vec<u8>>> {
     spawn(move || {
         let mut kernel_id = INITIAL_PACKET_ID;
         let mut reports = reports.into_iter();
@@ -366,7 +373,7 @@ fn continue_fields(requests: &[Vec<u8>]) -> Vec<(u32, u16, u32, u64)> {
 fn a_step_on_another_processor_switches_to_it_and_resumes_through_the_one_that_stopped() {
     const STEPPED_DR7: u64 = 0x0404;
     const OWNER_DR7: u64 = 0x0401;
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let worker = serve_state_changes(
         kernel,
         vec![
@@ -403,7 +410,7 @@ fn a_step_on_another_processor_switches_to_it_and_resumes_through_the_one_that_s
 
 #[test]
 fn a_switch_answered_by_another_processor_leaves_that_processor_holding_the_target() {
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let worker = serve_state_changes(
         kernel,
         vec![processor_report(
@@ -437,7 +444,7 @@ fn a_switch_answered_by_another_processor_leaves_that_processor_holding_the_targ
 /// a step there would wait forever on a running target.
 #[test]
 fn an_arm64_step_on_another_processor_fails_without_resuming() {
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let worker = serve_state_changes(kernel, Vec::new());
     let mut backend = kd_backend_with_framing(host);
     backend.arch = Arch::Arm64;
@@ -462,7 +469,7 @@ fn a_switched_step_reports_the_sites_its_extra_reports_dropped() {
     const WAKE_PC: u64 = 0xffff_f800_0000_2000;
     const OWNER_PC: u64 = 0xffff_f800_0000_1001;
     const STEP_PC: u64 = 0xffff_f800_0000_5000;
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let worker = serve_state_changes(
         kernel,
         vec![
@@ -499,7 +506,7 @@ fn a_switched_step_reports_the_sites_its_extra_reports_dropped() {
 fn lifting_a_site_a_stop_dropped_leaves_the_entry_that_reused_its_handle() {
     const TRAP: u64 = 0xffff_f800_0000_1000;
     const NEW: u64 = 0xffff_f800_0000_7000;
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let worker = serve_breakpoints(
         kernel,
         vec![(api::DBGKD_WRITE_BREAKPOINT, api::STATUS_SUCCESS, 1)],
@@ -529,7 +536,7 @@ fn lifting_a_site_a_stop_dropped_leaves_the_entry_that_reused_its_handle() {
 #[test]
 fn a_stop_drops_only_the_sites_in_the_stream_it_reported() {
     const PC: u64 = 0xffff_f800_0000_1ffc;
-    let (_kernel, host) = UnixStream::pair().unwrap();
+    let (_kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.exit_prepared = true;
     backend.bp_handles.insert(PC + 2, 1);

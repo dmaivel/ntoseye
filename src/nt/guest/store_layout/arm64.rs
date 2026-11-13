@@ -5,35 +5,280 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use bad64::{Imm, Instruction, Op, Operand, Reg, Shift};
+use exarmo_aarch64::{
+    Cond, Instruction as Decoded, Mnemonic, Modifier, ModifierKind, Offset, Operand, Reg,
+    Writeback, XRegZr, decode_word,
+};
 
 use super::{KernelCode, layout_error, only, winner};
 use crate::base::error::Result;
 use crate::base::memory::{ChunkFields, Compression, StoreLayout};
 
-/// x0..x30; the zero register, sp and others have no slot.
+/// A decoded instruction with the address it sits at: A64 branch targets are
+/// written as offsets from the PC.
+#[derive(Clone, Copy)]
+struct Instruction {
+    ip: u64,
+    decoded: Decoded,
+    operands: exarmo_aarch64::Operands,
+}
+
+impl Instruction {
+    fn new(ip: u64, decoded: Decoded) -> Self {
+        Self {
+            ip,
+            decoded,
+            operands: decoded.operands(),
+        }
+    }
+
+    fn op(&self) -> Op {
+        op_of(&self.decoded)
+    }
+
+    fn operands(&self) -> &[Operand] {
+        self.operands.as_slice()
+    }
+
+    fn address(&self) -> u64 {
+        self.ip
+    }
+}
+
+/// The instruction, as this derivation classes it: the mnemonic, with a
+/// conditional branch's condition folded into it (`b.eq` reads as
+/// `B_EQ`), and [`Op::Other`] for everything the derivation does not follow.
+// The variants are spelled as the mnemonic, so each `Op::X` in the
+// derivation reads as the instruction it follows.
+#[allow(non_camel_case_types, clippy::upper_case_acronyms)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Op {
+    ADD,
+    ADR,
+    ADRP,
+    AND,
+    B,
+    BL,
+    BLR,
+    BLRAA,
+    BLRAAZ,
+    BLRAB,
+    BLRABZ,
+    BR,
+    BRAA,
+    BRAAZ,
+    BRAB,
+    BRABZ,
+    BRK,
+    B_EQ,
+    B_NE,
+    B_CS,
+    B_CC,
+    B_MI,
+    B_PL,
+    B_VS,
+    B_VC,
+    B_HI,
+    B_LS,
+    B_GE,
+    B_LT,
+    B_GT,
+    B_LE,
+    CBZ,
+    CBNZ,
+    CLZ,
+    CMN,
+    CMP,
+    LDAR,
+    LDARB,
+    LDARH,
+    LDNP,
+    LDP,
+    LDPSW,
+    LDR,
+    LDRB,
+    LDRH,
+    LDRSB,
+    LDRSH,
+    LDRSW,
+    LDUR,
+    LDURB,
+    LDURH,
+    LDURSW,
+    LSL,
+    LSR,
+    MOV,
+    MOVZ,
+    RET,
+    RETAA,
+    RETAB,
+    STP,
+    STR,
+    STUR,
+    TBNZ,
+    TBZ,
+    TST,
+    UBFIZ,
+    UDF,
+    Other,
+}
+
+/// The `Op` an instruction reads as.
+fn op_of(instruction: &Decoded) -> Op {
+    use Mnemonic as M;
+    let op = match instruction.mnemonic() {
+        M::Add => Op::ADD,
+        M::Adr => Op::ADR,
+        M::Adrp => Op::ADRP,
+        M::And => Op::AND,
+        M::B => Op::B,
+        M::Bl => Op::BL,
+        M::Blr => Op::BLR,
+        M::Blraa => Op::BLRAA,
+        M::Blraaz => Op::BLRAAZ,
+        M::Blrab => Op::BLRAB,
+        M::Blrabz => Op::BLRABZ,
+        M::Br => Op::BR,
+        M::Braa => Op::BRAA,
+        M::Braaz => Op::BRAAZ,
+        M::Brab => Op::BRAB,
+        M::Brabz => Op::BRABZ,
+        M::Brk => Op::BRK,
+        M::Cbz => Op::CBZ,
+        M::Cbnz => Op::CBNZ,
+        M::Clz => Op::CLZ,
+        M::Cmn => Op::CMN,
+        M::Cmp => Op::CMP,
+        M::Ldar => Op::LDAR,
+        M::Ldarb => Op::LDARB,
+        M::Ldarh => Op::LDARH,
+        M::Ldnp => Op::LDNP,
+        M::Ldp => Op::LDP,
+        M::Ldpsw => Op::LDPSW,
+        M::Ldr => Op::LDR,
+        M::Ldrb => Op::LDRB,
+        M::Ldrh => Op::LDRH,
+        M::Ldrsb => Op::LDRSB,
+        M::Ldrsh => Op::LDRSH,
+        M::Ldrsw => Op::LDRSW,
+        M::Ldur => Op::LDUR,
+        M::Ldurb => Op::LDURB,
+        M::Ldurh => Op::LDURH,
+        M::Ldursw => Op::LDURSW,
+        M::Lsl => Op::LSL,
+        M::Lsr => Op::LSR,
+        M::Mov => Op::MOV,
+        M::Movz => Op::MOVZ,
+        M::Ret => Op::RET,
+        M::Retaa => Op::RETAA,
+        M::Retab => Op::RETAB,
+        M::Stp => Op::STP,
+        M::Str => Op::STR,
+        M::Stur => Op::STUR,
+        M::Tbnz => Op::TBNZ,
+        M::Tbz => Op::TBZ,
+        M::Tst => Op::TST,
+        M::Ubfiz => Op::UBFIZ,
+        M::Udf => Op::UDF,
+        _ => Op::Other,
+    };
+    // `b.<cond>` decodes as `b` with the condition as an operand.
+    if op != Op::B {
+        return op;
+    }
+    match condition(instruction) {
+        Some(Cond::Eq) => Op::B_EQ,
+        Some(Cond::Ne) => Op::B_NE,
+        Some(Cond::Cs) => Op::B_CS,
+        Some(Cond::Cc) => Op::B_CC,
+        Some(Cond::Mi) => Op::B_MI,
+        Some(Cond::Pl) => Op::B_PL,
+        Some(Cond::Vs) => Op::B_VS,
+        Some(Cond::Vc) => Op::B_VC,
+        Some(Cond::Hi) => Op::B_HI,
+        Some(Cond::Ls) => Op::B_LS,
+        Some(Cond::Ge) => Op::B_GE,
+        Some(Cond::Lt) => Op::B_LT,
+        Some(Cond::Gt) => Op::B_GT,
+        Some(Cond::Le) => Op::B_LE,
+        // `b.al` and `b.nv` always branch.
+        Some(Cond::Al | Cond::Nv) | None => Op::B,
+    }
+}
+
+/// The condition a conditional branch tests.
+fn condition(instruction: &Decoded) -> Option<Cond> {
+    instruction
+        .operands()
+        .iter()
+        .find_map(|operand| match operand {
+            Operand::Cond(cond) => Some(*cond),
+            _ => None,
+        })
+}
+
+/// x0..x30; the zero register, sp and others have no slot. A general-purpose
+/// register decodes with either slot-31 rule (`XSp` in `add x13, x15, #0xc0`,
+/// `X` in `mov`), so both files name the same slot.
 fn slot(register: Reg) -> Option<usize> {
-    let number = register as u32;
-    if (Reg::X0 as u32..=Reg::X30 as u32).contains(&number) {
-        return Some((number - Reg::X0 as u32) as usize);
+    let general = matches!(
+        register,
+        Reg::X(_) | Reg::XSp(_) | Reg::W(_) | Reg::WSp(_) | Reg::WX(_) | Reg::WXSp(_)
+    );
+    (general && !is_zero(register) && !is_sp(register)).then(|| register.num() as usize)
+}
+
+/// Whether `register` is the zero register.
+fn is_zero(register: Reg) -> bool {
+    match register {
+        Reg::X(reg) => reg.is_zr(),
+        Reg::W(reg) => reg.is_zr(),
+        Reg::WX(reg) => reg.is_zr(),
+        _ => false,
     }
-    if (Reg::W0 as u32..=Reg::W30 as u32).contains(&number) {
-        return Some((number - Reg::W0 as u32) as usize);
+}
+
+/// Whether `register` is the stack pointer, in either width.
+fn is_sp(register: Reg) -> bool {
+    match register {
+        Reg::XSp(reg) => reg.is_sp(),
+        Reg::WSp(reg) => reg.is_sp(),
+        _ => false,
     }
-    None
 }
 
 /// Whether `register` is the stack pointer or the frame pointer (x29),
 /// through which a function reaches its own locals.
 fn frame(register: Reg) -> bool {
-    matches!(register, Reg::SP | Reg::WSP | Reg::X29)
+    is_sp(register) || (register.num() == 29 && matches!(register, Reg::X(_) | Reg::XSp(_)))
 }
 
-fn immediate(imm: &Imm) -> u64 {
-    match *imm {
-        Imm::Signed(value) => value as u64,
-        Imm::Unsigned(value) => value,
+/// The register's width in bytes.
+fn size(register: Reg) -> usize {
+    match register {
+        Reg::X(_) | Reg::XSp(_) => 8,
+        Reg::W(_) | Reg::WSp(_) => 4,
+        Reg::WX(reg) => {
+            if reg.is_64() {
+                8
+            } else {
+                4
+            }
+        }
+        Reg::WXSp(reg) => {
+            if reg.is_64() {
+                8
+            } else {
+                4
+            }
+        }
+        _ => 0,
     }
+}
+
+/// The first argument's register.
+fn x0() -> Reg {
+    Reg::X(XRegZr::new(0))
 }
 
 /// What a register holds, as far as the derivation follows it.
@@ -91,37 +336,47 @@ fn memory(instruction: &Instruction) -> Option<Memory> {
         .operands()
         .iter()
         .find_map(|operand| match operand {
-            Operand::MemReg(base) | Operand::MemPostIdxImm { reg: base, .. } => Some(Memory {
-                base: *base,
-                offset: 0,
-                index: None,
-            }),
-            Operand::MemOffset { reg, offset, .. } => Some(Memory {
-                base: *reg,
-                offset: immediate(offset),
-                index: None,
-            }),
-            Operand::MemPreIdx { reg, imm } => Some(Memory {
-                base: *reg,
-                offset: immediate(imm),
-                index: None,
-            }),
-            Operand::MemExt { regs, shift, .. } => {
-                let amount = match shift {
-                    Some(
-                        Shift::LSL(n)
-                        | Shift::UXTW(n)
-                        | Shift::SXTW(n)
-                        | Shift::UXTX(n)
-                        | Shift::SXTX(n),
-                    ) => *n,
+            Operand::Mem(mem) => {
+                let amount = |modifier: Option<Modifier>| match modifier {
+                    Some(Modifier {
+                        kind:
+                            ModifierKind::Lsl
+                            | ModifierKind::Uxtw
+                            | ModifierKind::Sxtw
+                            | ModifierKind::Uxtx
+                            | ModifierKind::Sxtx,
+                        amount: Some(amount),
+                    }) => amount,
                     _ => 0,
                 };
-                Some(Memory {
-                    base: regs[0],
-                    offset: 0,
-                    index: Some((regs[1], amount)),
-                })
+                match mem.offset {
+                    // The access is at the base; the offset is the writeback.
+                    _ if mem.writeback == Writeback::Post => None,
+                    Offset::None => Some(Memory {
+                        base: mem.base,
+                        offset: 0,
+                        index: None,
+                    }),
+                    Offset::Imm {
+                        value,
+                        mul_vl: false,
+                    } => Some(Memory {
+                        base: mem.base,
+                        offset: value as u64,
+                        index: None,
+                    }),
+                    Offset::Reg { reg, modifier } => Some(Memory {
+                        base: mem.base,
+                        offset: 0,
+                        index: Some((reg, amount(modifier))),
+                    }),
+                    Offset::Vector { reg, modifier, .. } => Some(Memory {
+                        base: mem.base,
+                        offset: 0,
+                        index: Some((reg, amount(modifier))),
+                    }),
+                    Offset::Imm { .. } => None,
+                }
             }
             _ => None,
         })
@@ -131,7 +386,7 @@ fn memory(instruction: &Instruction) -> Option<Memory> {
 /// and for a load pair, both.
 fn destinations(instruction: &Instruction) -> Vec<Reg> {
     let registers = |operand: &Operand| match operand {
-        Operand::Reg { reg, .. } => Some(*reg),
+        Operand::Reg(reg) => Some(reg.reg),
         _ => None,
     };
     let operands = instruction.operands();
@@ -164,10 +419,6 @@ fn loads(instruction: &Instruction) -> bool {
     ) && destinations(instruction)
         .iter()
         .all(|r| slot(*r).is_some() || is_zero(*r))
-}
-
-fn is_zero(register: Reg) -> bool {
-    matches!(register, Reg::XZR | Reg::WZR)
 }
 
 /// Register and stack-slot values through a function's instructions, in
@@ -213,18 +464,21 @@ impl Tracker {
     }
 
     /// The source operand as a value: a register's, or an immediate.
-    fn operand(&self, operand: &Operand) -> Option<Value> {
+    fn operand(&self, operand: &Operand, ip: u64) -> Option<Value> {
         match operand {
-            Operand::Reg { reg, .. } if is_zero(*reg) => Some(Value::Const(0)),
-            Operand::Reg { reg, .. } => Some(self.get(*reg).cloned().unwrap_or(Value::Opaque)),
-            Operand::Imm32 { imm, shift } | Operand::Imm64 { imm, shift } => {
-                let value = immediate(imm);
-                Some(Value::Const(match shift {
-                    Some(Shift::LSL(amount)) => value.wrapping_shl(*amount),
+            Operand::Reg(reg) if is_zero(reg.reg) => Some(Value::Const(0)),
+            Operand::Reg(reg) => Some(self.get(reg.reg).cloned().unwrap_or(Value::Opaque)),
+            Operand::Imm { value, modifier } => {
+                let value = *value as u64;
+                Some(Value::Const(match modifier {
+                    Some(Modifier {
+                        kind: ModifierKind::Lsl,
+                        amount: Some(amount),
+                    }) => value.wrapping_shl(*amount),
                     _ => value,
                 }))
             }
-            Operand::Label(imm) => Some(Value::Const(immediate(imm))),
+            Operand::Label { offset, pc } => Some(Value::Const(pc.target(ip, *offset, 64))),
             _ => None,
         }
     }
@@ -246,7 +500,7 @@ impl Tracker {
             };
             let at = self.displacement(&memory);
             for (index, register) in destinations(instruction).into_iter().enumerate() {
-                let offset = at.wrapping_add((index * register.size()) as u64);
+                let offset = at.wrapping_add((index * size(register)) as u64);
                 let value = if frame(memory.base) {
                     self.stack.get(&offset).cloned()
                 } else {
@@ -264,12 +518,12 @@ impl Tracker {
                 .iter()
                 .take(if op == Op::STP { 2 } else { 1 })
                 .filter_map(|operand| match operand {
-                    Operand::Reg { reg, .. } => Some(*reg),
+                    Operand::Reg(reg) => Some(reg.reg),
                     _ => None,
                 })
                 .collect();
             for (index, register) in sources.into_iter().enumerate() {
-                let offset = memory.offset.wrapping_add((index * register.size()) as u64);
+                let offset = memory.offset.wrapping_add((index * size(register)) as u64);
                 match self.get(register).cloned() {
                     Some(value) => self.stack.insert(offset, value),
                     None => self.stack.remove(&offset),
@@ -277,17 +531,19 @@ impl Tracker {
             }
             return;
         }
-        let Some(Operand::Reg {
-            reg: destination, ..
-        }) = operands.first()
-        else {
+        let Some(Operand::Reg(destination)) = operands.first() else {
             return;
         };
-        let destination = *destination;
+        let destination = destination.reg;
         let value = match (op, operands) {
-            (Op::MOV | Op::MOVZ | Op::ADRP | Op::ADR, [_, source]) => self.operand(source),
+            (Op::MOV | Op::MOVZ | Op::ADRP | Op::ADR, [_, source]) => {
+                self.operand(source, instruction.ip)
+            }
             (Op::ADD, [_, left, right]) => {
-                match (self.operand(left), self.operand(right)) {
+                match (
+                    self.operand(left, instruction.ip),
+                    self.operand(right, instruction.ip),
+                ) {
                     (Some(Value::Const(a)), Some(Value::Const(b))) => {
                         Some(Value::Const(a.wrapping_add(b)))
                     }
@@ -302,8 +558,15 @@ impl Tracker {
                 }
             }
             (Op::AND, [_, left, right]) => {
-                let mut fields = self.operand(left).map(|v| v.origins()).unwrap_or_default();
-                fields.extend(self.operand(right).map(|v| v.origins()).unwrap_or_default());
+                let mut fields = self
+                    .operand(left, instruction.ip)
+                    .map(|v| v.origins())
+                    .unwrap_or_default();
+                fields.extend(
+                    self.operand(right, instruction.ip)
+                        .map(|v| v.origins())
+                        .unwrap_or_default(),
+                );
                 (!fields.is_empty()).then_some(Value::Origins(fields))
             }
             _ => None,
@@ -325,7 +588,7 @@ fn target(instruction: &Instruction) -> Option<u64> {
         .operands()
         .iter()
         .find_map(|operand| match operand {
-            Operand::Label(imm) => Some(immediate(imm)),
+            Operand::Label { offset, pc } => Some(pc.target(instruction.ip, *offset, 64)),
             _ => None,
         })
 }
@@ -346,9 +609,10 @@ fn instructions(code: &KernelCode<'_>, address: u64) -> Vec<Instruction> {
             else {
                 break;
             };
-            let Ok(instruction) = bad64::decode(u32::from_le_bytes(*word), ip) else {
+            let Ok(decoded) = decode_word(u32::from_le_bytes(*word)) else {
                 break;
             };
+            let instruction = Instruction::new(ip, decoded);
             let op = instruction.op();
             let branch = target(&instruction);
             seen.insert(ip, instruction);
@@ -410,7 +674,7 @@ fn first_arguments(
                 if instruction.op() == Op::BL
                     && target(&instruction).is_some_and(|t| callees.contains(&t))
                 {
-                    found.extend(tracker.get(Reg::X0).and_then(&read));
+                    found.extend(tracker.get(x0()).and_then(&read));
                 }
                 tracker.step(&instruction);
             }
@@ -453,18 +717,9 @@ fn region_array(code: &KernelCode<'_>) -> Result<u32> {
         let operands = instruction.operands();
         let indexed: Vec<Reg> = match (instruction.op(), operands) {
             // `add x22, x8, w25, uxtw #3` scales the index as it adds.
-            (
-                Op::ADD,
-                [
-                    _,
-                    Operand::Reg { reg: a, .. },
-                    Operand::Reg { reg: b, .. } | Operand::ShiftReg { reg: b, .. },
-                ],
-            ) => {
-                vec![*a, *b]
-            }
+            (Op::ADD, [_, Operand::Reg(a), Operand::Reg(b)]) => vec![a.reg, b.reg],
             _ if loads(&instruction)
-                && destinations(&instruction).iter().all(|r| r.size() == 8) =>
+                && destinations(&instruction).iter().all(|r| size(*r) == 8) =>
             {
                 memory(&instruction)
                     .and_then(|m| m.index.map(|(index, _)| vec![m.base, index]))
@@ -510,7 +765,7 @@ fn pages_tree(code: &KernelCode<'_>) -> Result<u32> {
 
 fn register(operand: Option<&Operand>) -> Option<Reg> {
     match operand {
-        Some(Operand::Reg { reg, .. }) => Some(*reg),
+        Some(Operand::Reg(reg)) => Some(reg.reg),
         _ => None,
     }
 }
@@ -534,25 +789,21 @@ fn back_pointer_and_flag(code: &KernelCode<'_>) -> Result<(u32, (u32, u8))> {
             .and_then(|s| bytes.get(&s));
         match instruction.op() {
             Op::BL if target(&instruction).is_some_and(|t| store_methods.contains(&t)) => {
-                back_pointers.extend(tracker.get(Reg::X0).and_then(field));
+                back_pointers.extend(tracker.get(x0()).and_then(field));
             }
             Op::TBZ | Op::TBNZ => {
-                if let (
-                    Some(&(through, at)),
-                    Some(Operand::Imm32 { imm, .. } | Operand::Imm64 { imm, .. }),
-                ) = (tested, operands.get(1))
+                if let (Some(&(through, at)), Some(Operand::Imm { value, .. })) =
+                    (tested, operands.get(1))
                 {
-                    tests.insert((through, at, immediate(imm) as u8));
+                    tests.insert((through, at, *value as u8));
                 }
             }
             Op::TST => {
-                if let (
-                    Some(&(through, at)),
-                    Some(Operand::Imm32 { imm, .. } | Operand::Imm64 { imm, .. }),
-                ) = (tested, operands.get(1))
-                    && immediate(imm).count_ones() == 1
+                if let (Some(&(through, at)), Some(Operand::Imm { value, .. })) =
+                    (tested, operands.get(1))
+                    && (*value as u64).count_ones() == 1
                 {
-                    tests.insert((through, at, immediate(imm).trailing_zeros() as u8));
+                    tests.insert((through, at, (*value as u64).trailing_zeros() as u8));
                 }
             }
             _ => {}
@@ -605,8 +856,8 @@ fn region_key_fields(code: &KernelCode<'_>) -> Result<(u32, u32)> {
         let operands = instruction.operands();
         let destination = register(operands.first());
         match (instruction.op(), operands) {
-            (Op::LSR, [_, _, Operand::Reg { reg: amount, .. }]) => {
-                if let Some(shift) = tracker.get(*amount).and_then(field) {
+            (Op::LSR, [_, _, Operand::Reg(amount)]) => {
+                if let Some(shift) = tracker.get(amount.reg).and_then(field) {
                     let chunk = instructions[index + 1..].iter().take(4).any(|next| {
                         next.op() == Op::CLZ
                             && register(next.operands().get(1)).and_then(slot)
@@ -617,24 +868,11 @@ fn region_key_fields(code: &KernelCode<'_>) -> Result<(u32, u32)> {
                     }
                 }
             }
-            (
-                Op::LSL,
-                [
-                    _,
-                    Operand::Reg { reg: source, .. },
-                    Operand::Imm32 { imm, .. } | Operand::Imm64 { imm, .. },
-                ],
-            )
-            | (
-                Op::UBFIZ,
-                [
-                    _,
-                    Operand::Reg { reg: source, .. },
-                    Operand::Imm32 { imm, .. } | Operand::Imm64 { imm, .. },
-                    _,
-                ],
-            ) if immediate(imm) == 4 => {
-                if let Some(value) = tracker.get(*source) {
+            (Op::LSL, [_, Operand::Reg(source), Operand::Imm { value, .. }])
+            | (Op::UBFIZ, [_, Operand::Reg(source), Operand::Imm { value, .. }, _])
+                if *value as u64 == 4 =>
+            {
+                if let Some(value) = tracker.get(source.reg) {
                     masks.extend(value.origins().into_iter().filter(|f| *f >= 0x100));
                 }
             }
@@ -664,11 +902,11 @@ fn chunk_fields(code: &KernelCode<'_>) -> Result<(u32, ChunkFields)> {
         {
             let at = tracker.displacement(&memory);
             let destinations = destinations(&instruction);
-            if memory.index.is_some() && destinations.iter().all(|r| r.size() == 8) {
+            if memory.index.is_some() && destinations.iter().all(|r| size(*r) == 8) {
                 arrays.extend(u32::try_from(at).ok().filter(|a| *a != 0));
             } else if memory.index.is_none() {
                 for (index, register) in destinations.iter().enumerate() {
-                    if register.size() == 4
+                    if size(*register) == 4
                         && let Ok(offset) = u32::try_from(at + 4 * index as u64)
                         && offset >= 0x40
                     {
@@ -711,7 +949,7 @@ fn compression(code: &KernelCode<'_>) -> Result<Compression> {
                     let [register] = destinations(load)[..] else {
                         return None;
                     };
-                    (register.size() == 4).then_some((m.offset, slot(register)?))
+                    (size(register) == 4).then_some((m.offset, slot(register)?))
                 });
             if let Some((offset, loaded)) = counted {
                 let tested = instructions[index + 1..].iter().take(4).any(|test| {
@@ -736,7 +974,7 @@ fn compression(code: &KernelCode<'_>) -> Result<Compression> {
     for instruction in instructions(code, copy) {
         if instruction.op() == Op::BL && decompress.is_some_and(|d| target(&instruction) == Some(d))
         {
-            formats.extend(tracker.get(Reg::X0).and_then(field));
+            formats.extend(tracker.get(x0()).and_then(field));
         }
         if loads(&instruction)
             && let Some(memory) = memory(&instruction)
@@ -772,11 +1010,9 @@ fn redirect_next(code: &KernelCode<'_>) -> Result<u32> {
                 .and_then(slot)
                 .and_then(|s| keys.get(&s));
             let minus_one = match (compare.op(), operands.get(1)) {
-                (Op::CMN, Some(Operand::Imm32 { imm, .. } | Operand::Imm64 { imm, .. })) => {
-                    immediate(imm) == 1
-                }
+                (Op::CMN, Some(Operand::Imm { value, .. })) => *value as u64 == 1,
                 (Op::CMP, Some(source)) => matches!(
-                    tracker.operand(source),
+                    tracker.operand(source, compare.ip),
                     Some(Value::Const(value)) if value as u32 == u32::MAX
                 ),
                 _ => false,
@@ -799,7 +1035,7 @@ fn redirect_next(code: &KernelCode<'_>) -> Result<u32> {
                         let [register] = destinations(load)[..] else {
                             return None;
                         };
-                        (loads(load) && register.size() == 4 && m.offset != 0)
+                        (loads(load) && size(register) == 4 && m.offset != 0)
                             .then(|| u32::try_from(m.offset).ok())
                             .flatten()
                     });
@@ -815,7 +1051,7 @@ fn redirect_next(code: &KernelCode<'_>) -> Result<u32> {
                 if let Some(slot) = slot(destination) {
                     keys.remove(&slot);
                     if let Some(record) = first_dword
-                        && destination.size() == 4
+                        && size(destination) == 4
                     {
                         keys.insert(slot, record);
                     }
