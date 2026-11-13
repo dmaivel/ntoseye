@@ -1,6 +1,6 @@
 # Install
 
-`ntoseye` runs on Linux (x86-64, ARM64), on macOS on Apple Silicon, and on Windows on x86-64. Each method below installs the same debugger. The methods differ in whether they embed Python, which [custom commands](../scripting/commands.md) need, and in what software you need before you install:
+`ntoseye` runs on Linux (x86-64, ARM64), on macOS on Apple Silicon, and on Windows on x86-64. Prebuilt binaries and wheels cover Linux and macOS; on Windows, install with [cargo](#cargo) or [build from source](#building-from-source). Each method below installs the same debugger. The methods differ in whether they embed Python, which [custom commands](../scripting/commands.md) need, and in what software you need before you install:
 
 | Method | Custom commands | Needs |
 |---|---|---|
@@ -57,11 +57,7 @@ Like `cargo install`, a default build embeds Python and needs the Python develop
 cargo build --release --no-default-features --features cli,mcp,dap,gdbserver
 ```
 
-On Windows, the prebuilt binaries and the wheels are not published yet, so build from source with the MSVC toolchain:
-
-```powershell
-cargo build --release --no-default-features --features cli,mcp,dap,gdbserver
-```
+On Windows, build with the MSVC toolchain.
 
 ## Files and network access
 

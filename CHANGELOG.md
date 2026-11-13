@@ -17,7 +17,7 @@ Keeping this file:
 
 ### Added
 
-- ntoseye runs on Windows on x86-64 as a first-class host: the prompt, the `kd`, `kdnet`, `gdb` and `memory` backends, crash-dump analysis, MCP, DAP and gdbserver all work in a build for `x86_64-pc-windows-msvc`. There, `kd` takes a named pipe instead of a Unix socket (`--connect \\.\pipe\ntoseye-kd`, the default; a bare name is taken relative to `\\.\pipe\`), which is the pipe QEMU's `-chardev pipe,id=kd,path=ntoseye-kd` creates and waits on, `--backend memory` reads a running `qemu-system-*.exe` or `vmware-vmx.exe` VM's memory through `ReadProcessMemory`, and `ntoseye configure` prints the guest and QEMU commands instead of editing a hypervisor.
+- ntoseye builds and runs on Windows on x86-64, installed with `cargo install ntoseye` or built from source (there are no prebuilt binaries or wheels for Windows): the prompt, the `kd`, `kdnet`, `gdb` and `memory` backends, crash-dump analysis, MCP, DAP and gdbserver all work in a build for `x86_64-pc-windows-msvc`. There, `kd` takes a named pipe instead of a Unix socket (`--connect \\.\pipe\ntoseye-kd`, the default; a bare name is taken relative to `\\.\pipe\`), which is the pipe QEMU's `-chardev pipe,id=kd,path=ntoseye-kd` creates and waits on, `--backend memory` reads a running `qemu-system-*.exe` or `vmware-vmx.exe` VM's memory through `ReadProcessMemory`, and `ntoseye configure` prints the guest and QEMU commands instead of editing a hypervisor.
 
 ### Changed
 

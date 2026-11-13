@@ -7,7 +7,7 @@
 [![crates.io](https://img.shields.io/crates/v/ntoseye?style=flat-square&labelColor=1c1c1c&logo=rust&logoColor=white)](https://crates.io/crates/ntoseye)
 [![docs.rs](https://img.shields.io/docsrs/ntoseye?style=flat-square&labelColor=1c1c1c&logo=docsdotrs&logoColor=white)](https://docs.rs/ntoseye)
 
-A WinDbg-like Windows debugger for Linux, macOS, and Windows hosts, with support for kernel-mode and user-mode debugging of virtual and physical machines, and offline crash-dump analysis.
+A WinDbg-like Windows debugger for Linux, macOS, and Windows, with support for kernel-mode and user-mode debugging of virtual and physical machines, and offline crash-dump analysis.
 
 ## Showcase
 
@@ -50,7 +50,7 @@ A WinDbg-like Windows debugger for Linux, macOS, and Windows hosts, with support
 
 ### Supported hypervisors
 
-`ntoseye` supports any target that Windows can debug over [KDNET](https://ntoseye.com/setup/kdnet/). KVM/QEMU, VMware Workstation, and UTM guests additionally get [KDCOM, GDB, and memory-only backends](https://ntoseye.com/setup/backends/); Hyper-V guests get KDCOM over a named pipe, but no GDB or host-memory backend.
+`ntoseye` supports any target that Windows can debug over [KDNET](https://ntoseye.com/setup/kdnet/). KVM/QEMU, VMware Workstation, and UTM guests additionally get [KDCOM, GDB, and memory-only backends](https://ntoseye.com/setup/backends/).
 
 ### Files and network access
 
@@ -66,7 +66,7 @@ A WinDbg-like Windows debugger for Linux, macOS, and Windows hosts, with support
 
 ## Install
 
-`ntoseye` runs on Linux (x86-64, ARM64), on macOS on Apple Silicon, and on Windows on x86-64. Every method below installs the same debugger; they differ in whether it embeds Python, which [custom commands](https://ntoseye.com/scripting/commands/) need, and in what they need installed first:
+`ntoseye` runs on Linux (x86-64, ARM64), on macOS on Apple Silicon, and on Windows on x86-64. Prebuilt binaries and wheels cover Linux and macOS; on Windows, install with [cargo](#cargo) or build from source. Every method below installs the same debugger; they differ in whether it embeds Python, which [custom commands](https://ntoseye.com/scripting/commands/) need, and in what they need installed first:
 
 | Method | Custom commands | Needs |
 |---|---|---|

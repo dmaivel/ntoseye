@@ -41,6 +41,8 @@ jobs:
           - os: macos-latest
             label: dist
             features: --no-default-features --features cli,mcp,dap,gdbserver
+          # Windows is built and tested here but not released: no prebuilt
+          # binary or wheel, so `cargo install` and source builds only.
           - os: windows-latest
             label: dist
             features: --no-default-features --features cli,mcp,dap,gdbserver

@@ -41,15 +41,9 @@ You can debug any Windows 10/11 target that is reachable over the network with `
 
 We did not test these integrations with other hypervisors. Crash-dump analysis supports AMD64 and ARM64 dumps.
 
-Hyper-V has no GDB stub and, in this port, no host-memory provider: use `kd` or `kdnet` with
-`--memory-source kd`. Hyper-V exposes a debug COM port as a named pipe that the debugger connects
-to (`Set-VMComPort -VMName <name> -Number 2 -Path \\.\pipe\<name>` in an elevated PowerShell, with
-`bcdedit /dbgsettings serial debugport:2 baudrate:115200` and `bcdedit /debug on` in the guest).
-Hyper-V destroys that pipe when the guest restarts and creates a new one under the same name;
-`ntoseye` re-opens it, so a live session survives a guest reboot. `kdnet` needs no Hyper-V-specific
-setup, and because there is no host memory source, VTL1 inspection is unavailable on Hyper-V.
-
 On Windows, the `kd` backend connects to a named pipe instead of a Unix socket (`--connect \\.\pipe\ntoseye-kd`, the default; a bare name is taken relative to `\\.\pipe\`), as QEMU's `-chardev pipe,id=kd,path=ntoseye-kd` creates, and the `memory` backend finds a running `qemu-system-*.exe` or `vmware-vmx.exe` by its process image. `ntoseye configure` has no hypervisor to edit there, so it prints the guest commands and the QEMU arguments instead: see the [KVM/QEMU guide](kvm-qemu.md#kd-over-a-named-pipe-windows-host).
+
+Hyper-V has no GDB stub and no host-memory provider: use `kd` or `kdnet` with `--memory-source kd`. Hyper-V exposes a debug COM port as a named pipe that the debugger connects to (`Set-VMComPort -VMName <name> -Number 2 -Path \\.\pipe\<name>` in an elevated PowerShell, with `bcdedit /dbgsettings serial debugport:2 baudrate:115200` and `bcdedit /debug on` in the guest). Hyper-V destroys that pipe when the guest restarts and creates a new one under the same name; `ntoseye` re-opens it, so a live session survives a guest reboot. `kdnet` needs no Hyper-V-specific setup, and because there is no host memory source, VTL1 inspection is unavailable on Hyper-V.
 
 On UTM, the `gdb` backend needs "Use Hypervisor" turned off, because QEMU versions before 10.1 abort the VM when a debugger enables guest debugging on HVF. If "Use Hypervisor" is on, `ntoseye` does not connect. If your QEMU version has the fix, set `NTOSEYE_GDB_ON_HVF=1` to override this check. The [UTM guide](utm.md) has the details. The other backends do not have this problem, because they do not ask the hypervisor for debug traps.
 
