@@ -1,3 +1,4 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MemoryRegion {
     start: u64,
     end: u64,
@@ -150,6 +151,99 @@ mod platform {
         I440fx,
     }
 
+    /// A size from a QEMU command line, with an optional `k`, `M`, `G` or
+    /// `T` suffix. A plain number is `default_unit` bytes: `-m` counts MiB,
+    /// while an `-object` `size=` counts bytes.
+    fn qemu_size(value: &str, default_unit: u64) -> Option<u64> {
+        let value = value.trim();
+        let (digits, unit) = match value.as_bytes().last()?.to_ascii_lowercase() {
+            b'k' => (&value[..value.len() - 1], 1 << 10),
+            b'm' => (&value[..value.len() - 1], 1 << 20),
+            b'g' => (&value[..value.len() - 1], 1 << 30),
+            b't' => (&value[..value.len() - 1], 1 << 40),
+            _ => (value, default_unit),
+        };
+        digits.parse::<u64>().ok()?.checked_mul(unit)
+    }
+
+    /// One field of a QEMU `-object` argument, in either the `key=value`
+    /// form or the JSON form (`{"qom-type":...}`).
+    fn qemu_option_field<'a>(value: &'a str, key: &str) -> Option<&'a str> {
+        let value = value.trim_start_matches('{').trim_end_matches('}');
+        for field in value.split(',') {
+            let (name, value) = match field.split_once('=') {
+                Some(pair) => pair,
+                None => match field.split_once(':') {
+                    Some(pair) => pair,
+                    None => continue,
+                },
+            };
+            if name.trim().trim_matches('"') == key {
+                return Some(value.trim().trim_matches('"'));
+            }
+        }
+        None
+    }
+
+    /// Guest RAM size from QEMU's arguments: the memory backend that
+    /// `-machine memory-backend=` names when there is one, else `-m`. The
+    /// size tells the RAM mapping apart from the process's other large
+    /// mappings, such as an ASan shadow reservation.
+    fn qemu_ram_size_from_args(args: &[&str]) -> Option<u64> {
+        let mut memory_backend = None;
+        let mut backends: Vec<(String, u64)> = Vec::new();
+        let mut m_size = None;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "-m" | "--m" => {
+                    if let Some(value) = args.get(i + 1) {
+                        let size = value.split(',').next().unwrap_or(value);
+                        let size = size.strip_prefix("size=").unwrap_or(size);
+                        m_size = qemu_size(size, 1 << 20);
+                    }
+                    i += 2;
+                    continue;
+                }
+                "-object" | "--object" => {
+                    if let Some(value) = args.get(i + 1)
+                        && let Some(id) = qemu_option_field(value, "id")
+                        && let Some(size) =
+                            qemu_option_field(value, "size").and_then(|size| qemu_size(size, 1))
+                    {
+                        backends.push((id.to_string(), size));
+                    }
+                    i += 2;
+                    continue;
+                }
+                "-machine" | "--machine" | "-M" => {
+                    if let Some(value) = args.get(i + 1)
+                        && let Some(id) = qemu_option_field(value, "memory-backend")
+                    {
+                        memory_backend = Some(id.to_string());
+                    }
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        memory_backend
+            .and_then(|id| backends.into_iter().find(|(name, _)| *name == id))
+            .map(|(_, size)| size)
+            .or(m_size)
+    }
+
+    fn qemu_ram_size(pid: i32) -> Option<u64> {
+        let cmdline = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let args: Vec<&str> = cmdline
+            .split(|&byte| byte == 0)
+            .filter_map(|arg| std::str::from_utf8(arg).ok())
+            .collect();
+        qemu_ram_size_from_args(&args)
+    }
+
     /// The machine QEMU was started with (`-machine`/`-M`, its type first
     /// or as `type=`), from its arguments.
     fn qemu_x86_machine<'a>(args: impl IntoIterator<Item = &'a str>) -> QemuX86Machine {
@@ -197,7 +291,7 @@ mod platform {
         Err(Error::VmNotFound)
     }
 
-    fn primary_memory_region(pid: i32) -> Result<MemoryRegion> {
+    fn primary_memory_region(pid: i32, expected_size: Option<u64>) -> Result<MemoryRegion> {
         let maps = File::open(format!("/proc/{}/maps", pid)).map_err(|e| {
             if e.kind() == std::io::ErrorKind::PermissionDenied {
                 Error::PtraceDenied {
@@ -209,18 +303,24 @@ mod platform {
             }
         })?;
         let reader = BufReader::new(maps);
-        let region = primary_memory_region_from_maps(reader.lines().map_while(|line| line.ok()))
-            .ok_or(Error::NoVmMemoryRegion)?;
+        let region = primary_memory_region_from_maps(
+            reader.lines().map_while(|line| line.ok()),
+            expected_size,
+        )
+        .ok_or(Error::NoVmMemoryRegion)?;
 
         Ok(region)
     }
 
-    fn primary_memory_region_from_maps<I, S>(lines: I) -> Option<MemoryRegion>
+    fn primary_memory_region_from_maps<I, S>(
+        lines: I,
+        expected_size: Option<u64>,
+    ) -> Option<MemoryRegion>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        lines
+        let regions: Vec<MemoryRegion> = lines
             .into_iter()
             .filter_map(|line| {
                 let mut parts = line.as_ref().split_whitespace();
@@ -238,7 +338,14 @@ mod platform {
                     length: end.checked_sub(start)?,
                 })
             })
-            .max_by_key(|region| region.length)
+            .collect();
+
+        // The RAM mapping is the one sized like the guest's memory; the
+        // largest read-write mapping can be an ASan shadow reservation that
+        // is orders of magnitude bigger.
+        expected_size
+            .and_then(|size| regions.iter().find(|region| region.length == size).copied())
+            .or_else(|| regions.into_iter().max_by_key(|region| region.length))
     }
 
     /// Offset of a guest-physical address into the VM's RAM mapping, or
@@ -292,7 +399,11 @@ mod platform {
     impl VmHandle {
         pub fn new() -> Result<Self> {
             let (pid, hv) = find_vm_pid()?;
-            let memory = primary_memory_region(pid)?;
+            let expected_size = match hv {
+                HvKind::Kvm => qemu_ram_size(pid),
+                HvKind::Vmware => None,
+            };
+            let memory = primary_memory_region(pid, expected_size)?;
             let nix_pid = Pid::from_raw(pid);
             probe_ptrace_access(nix_pid, memory.start)?;
             Ok(Self {
@@ -405,11 +516,71 @@ mod platform {
                 "3000-a000 r--p 00000000 00:00 0\n",
                 "a000-14000 ---p 00000000 00:00 0\n",
             );
-            let region = primary_memory_region_from_maps(maps.lines()).unwrap();
+            let region = primary_memory_region_from_maps(maps.lines(), None).unwrap();
 
             assert_eq!(region.start, 0x1000);
             assert_eq!(region.end, 0x3000);
             assert_eq!(region.length, 0x2000);
+        }
+
+        /// ASan reserves a ~15 TiB read-write shadow mapping. The guest RAM
+        /// mapping is the one whose size the QEMU arguments report.
+        #[test]
+        fn guest_memory_selection_uses_the_guest_ram_size() {
+            const GIB: u64 = 1 << 30;
+            let maps = concat!(
+                "2008fff7000-10007fff8000 rw-p 00000000 00:00 0\n",
+                "7baa18400000-7bac18400000 rw-p 00000000 00:00 0\n",
+                "7baa00000000-7baa00100000 r--p 00000000 00:00 0\n",
+            );
+
+            let region = primary_memory_region_from_maps(maps.lines(), Some(8 * GIB)).unwrap();
+            assert_eq!(region.start, 0x7baa_1840_0000);
+            assert_eq!(region.length, 8 * GIB);
+            // Without the size, the ASan shadow mapping still wins.
+            let region = primary_memory_region_from_maps(maps.lines(), None).unwrap();
+            assert_eq!(region.start, 0x2008_fff7_000);
+        }
+
+        #[test]
+        fn qemu_ram_size_reads_the_memory_backend_and_m() {
+            const GIB: u64 = 1 << 30;
+            let keyval = [
+                "qemu-system-x86_64",
+                "-machine",
+                "pc-q35-10.2,usb=off,memory-backend=pc.ram",
+                "-m",
+                "size=8388608k",
+                "-object",
+                "memory-backend-ram,id=pc.ram,size=8G",
+            ];
+            assert_eq!(qemu_ram_size_from_args(&keyval), Some(8 * GIB));
+
+            let json = [
+                "qemu-system-x86_64",
+                "-machine",
+                "pc-q35-10.2,memory-backend=pc.ram",
+                "-m",
+                "size=8388608k",
+                "-object",
+                r#"{"qom-type":"memory-backend-memfd","id":"pc.ram","share":true,"size":8589934592}"#,
+            ];
+            assert_eq!(qemu_ram_size_from_args(&json), Some(8 * GIB));
+
+            let m_only = ["qemu-system-x86_64", "-m", "4G"];
+            assert_eq!(qemu_ram_size_from_args(&m_only), Some(4 * GIB));
+            let m_plain = ["qemu-system-x86_64", "-m", "512"];
+            assert_eq!(qemu_ram_size_from_args(&m_plain), Some(512 << 20));
+        }
+
+        #[test]
+        fn qemu_sizes_accept_units() {
+            assert_eq!(qemu_size("8G", 1), Some(8 << 30));
+            assert_eq!(qemu_size("512M", 1), Some(512 << 20));
+            assert_eq!(qemu_size("1024k", 1), Some(1 << 20));
+            // `-m` counts MiB without a suffix; an object's size counts bytes.
+            assert_eq!(qemu_size("512", 1 << 20), Some(512 << 20));
+            assert_eq!(qemu_size("512", 1), Some(512));
         }
 
         #[test]
