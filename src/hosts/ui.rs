@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use crate::backend::dbg_backend::{thread_kind, thread_label};
+#[cfg(unix)]
 use crate::base::bytes::before_nul;
 use crate::base::disasm::{AsmKind, AsmToken};
 use crate::base::types::VirtAddr;
@@ -145,17 +146,49 @@ pub fn file_link(path: &Path, text: &str) -> String {
         return text.to_string();
     };
     let mut uri = format!("file://{}", *HOSTNAME);
-    for byte in path.as_os_str().as_encoded_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'.' | b'_' | b'~' => {
-                uri.push(char::from(*byte));
-            }
-            _ => {
-                let _ = write!(uri, "%{byte:02X}");
-            }
+    for byte in uri_path(&path).iter() {
+        if uri_safe(*byte) {
+            uri.push(char::from(*byte));
+        } else {
+            let _ = write!(uri, "%{byte:02X}");
         }
     }
     format!("\x1b]8;;{uri}\x1b\\{text}\x1b]8;;\x1b\\")
+}
+
+/// Whether `byte` may appear in the URI as itself: the unreserved characters
+/// (RFC 3986) plus `/`, and the `:` of a Windows drive prefix, which a
+/// terminal's `file:` parser reads as the drive separator.
+fn uri_safe(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'.' | b'_' | b'~'
+    ) || (cfg!(windows) && byte == b':')
+}
+
+/// The path's bytes, as a URI path.
+#[cfg(unix)]
+fn uri_path(path: &Path) -> &[u8] {
+    path.as_os_str().as_encoded_bytes()
+}
+
+/// The path's bytes, as a URI path: with `/` separators, and a leading `/`
+/// before a drive letter, so `C:` is the first path segment rather than the
+/// URI's scheme.
+#[cfg(windows)]
+fn uri_path(path: &Path) -> Vec<u8> {
+    let mut bytes = path.as_os_str().as_encoded_bytes().to_vec();
+    for byte in &mut bytes {
+        if *byte == b'\\' {
+            *byte = b'/';
+        }
+    }
+    if matches!(bytes.first(), Some(first) if first.is_ascii_alphabetic())
+        && bytes.get(1) == Some(&b':')
+    {
+        bytes.insert(0, b'/');
+    }
+    bytes
 }
 
 /// This machine's name, as a `file:` link's host, or empty when unknown.
@@ -184,9 +217,14 @@ fn hostname() -> String {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn hostname() -> String {
-    String::new()
+    // A name a URI host cannot hold is left out, as on Unix.
+    std::env::var("COMPUTERNAME")
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.')
+        .collect()
 }
 
 #[cfg(test)]
@@ -198,14 +236,23 @@ mod tests {
     /// path's characters that would end or change the URI are escaped.
     #[test]
     fn file_link_keeps_its_text_and_escapes_the_path() {
-        let link = file_link(Path::new("/src/my driver/#1.c"), "[local driver.c:42]");
+        let link = file_link(Path::new("my driver/#1.c"), "[local driver.c:42]");
         assert_eq!(strip_ansi(&link), "[local driver.c:42]");
         assert!(
-            link.starts_with(&format!(
-                "\x1b]8;;file://{}/src/my%20driver/%231.c\x1b\\",
-                *HOSTNAME
-            )),
+            link.starts_with(&format!("\x1b]8;;file://{}/", *HOSTNAME)),
             "{link:?}"
         );
+        assert!(link.contains("my%20driver/%231.c"), "{link:?}");
+    }
+
+    /// A Windows path becomes a `file:` path with `/` separators and a
+    /// leading `/` before the drive, so nothing reads `C:` as a scheme and
+    /// no separator is percent-encoded.
+    #[cfg(windows)]
+    #[test]
+    fn file_link_uses_a_drive_path_on_windows() {
+        let link = file_link(Path::new(r"C:\src\a.c"), "[local a.c:1]");
+        assert_eq!(strip_ansi(&link), "[local a.c:1]");
+        assert!(link.contains("/C:/src/a.c"), "{link:?}");
     }
 }

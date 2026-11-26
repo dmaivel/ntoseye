@@ -9,8 +9,13 @@ This page lists common problems by symptom. Problems that are specific to an int
 - A process with `/dev/kvm` open (KVM/QEMU).
 - A `vmware-vmx` process with `/dev/vmmon` open (VMware).
 - A `qemu-aarch64-softmmu` process (UTM).
+- A `qemu-system-<arch>.exe` or `vmware-vmx.exe` process (Windows).
 
 Make sure that the VM is powered on. If the memory of the target is not on this host, use `kd` or `kdnet` with `--memory-source kd`, which reads all data through the target.
+
+**`permission denied accessing VM process`** (Windows). `ntoseye` must run elevated, or in the same user session as the VM, to read its memory. Run it from an Administrator terminal.
+
+**`KD serial pipe '...' does not exist`** (Windows). `ntoseye` connects to a named pipe that QEMU creates and waits on, so start QEMU with `-chardev pipe,id=kd,path=ntoseye-kd -serial chardev:kd` first, then run `ntoseye`. QEMU accepts one client on the pipe: if it says the pipe is already connected, close the other debugger. See [KVM/QEMU](../setup/kvm-qemu.md#kd-over-a-named-pipe-windows-host).
 
 **`permission denied reading from VM process`** (Linux). The Yama policy of the Linux kernel prevents `ntoseye` from reading the memory of another process. Either run `ntoseye` as root, or allow the access for the session with `echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope`.
 

@@ -166,7 +166,6 @@ jobs:
   # Wheels are built on their native architectures for pull requests and tags.
   # Linux builds run inside the native manylinux_2_28 image; the aarch64 image is
   # pinned because maturin-action's default for 2_28 is an x86_64 cross image.
-  # clang is installed there because bad64-sys runs bindgen at build time.
   # Artifact names start with "artifacts-" so cargo-dist's host job includes
   # them in the GitHub Release.
   build-python-wheels:
@@ -201,7 +200,6 @@ jobs:
           manylinux: "2_28"
           container: ${{ matrix.container }}
           rust-toolchain: stable
-          before-script-linux: dnf install -y clang
       # twine check validates metadata only; the target-free tests in a clean
       # venv prove the wheel installs, imports, ships a stub matching its
       # extension, and installs a working `ntoseye` command. `-I` keeps the

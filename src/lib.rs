@@ -1,18 +1,27 @@
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-compile_error!("This application only runs on Linux and macOS hosts.");
+// On MSVC, link.exe prints "Creating library ..." for a target that exports
+// symbols, which this crate's test binaries do; rustc reports that as
+// `linker_messages`. The line says nothing about the build, and the library
+// itself is an rlib that never links.
+#![cfg_attr(test, allow(linker_messages))]
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+compile_error!("This application only runs on Linux, macOS, and Windows hosts.");
 
 use crate::backend::kd::{self, KdMemorySource};
 use crate::base::error::{Error, Result};
 
 pub const DEFAULT_GDB_ADDR: &str = "127.0.0.1:1234";
+#[cfg(unix)]
 pub const DEFAULT_KD_SOCKET: &str = "/tmp/ntoseye-kd.sock";
+#[cfg(windows)]
+pub const DEFAULT_KD_SOCKET: &str = r"\\.\pipe\ntoseye-kd";
 pub const DEFAULT_KDNET_ADDR: &str = "0.0.0.0:50000";
 
 /// A live debug transport. The one enum every host (CLI, MCP, Python SDK)
 /// parses its backend choice into; [`session::Session::open`] builds from it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
-    /// KD over a serial pipe (Unix socket).
+    /// KD over a serial pipe (Unix socket; Windows named pipe).
     Kd,
     /// KD over UDP (KDNET); needs a key.
     KdNet,

@@ -639,6 +639,12 @@ fn instance_key(target: &str) -> String {
 /// (sockets, files) are resolved first so that different relative paths to
 /// the same socket produce the same key.
 fn canonicalize_target(target: &str) -> String {
+    // A pipe path is not a filesystem path: walking its components would
+    // fold the `\\` prefix away and lose the endpoint.
+    #[cfg(windows)]
+    if target.starts_with(r"\\.\pipe\") || target.starts_with(r"\\?\pipe\") {
+        return target.to_ascii_lowercase();
+    }
     if let Some(normalized) = normalize_host_port(target) {
         return normalized;
     }

@@ -4,7 +4,6 @@
 
 use std::fmt::Write as _;
 use std::fs::File;
-use std::os::unix::fs::FileExt;
 
 use gdbstub::common::Pid;
 use gdbstub::target::ext::exec_file::ExecFile;
@@ -119,7 +118,8 @@ impl GdbTarget<'_> {
             .module_image_or_fetch_later(&program.name)
             .ok()??;
         let mut headers = HeaderPage::zeroed();
-        let read = File::open(image).ok()?.read_at(&mut headers[..], 0).ok()?;
+        let file = File::open(image).ok()?;
+        let read = super::host_io::read_at(&file, &mut headers[..], 0).ok()?;
         let view = PeView::from_bytes(&headers[..read]).ok()?;
         Some(program.base_address.0.wrapping_sub(image_base(&view)))
     }

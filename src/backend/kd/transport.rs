@@ -1,13 +1,21 @@
 use std::io::{self, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use super::kdnet::KdNetStream;
 
+#[cfg(windows)]
+mod pipe;
+
+/// The KDCOM stream: a Unix socket, or the Windows named pipe QEMU creates.
+#[cfg(unix)]
+pub type SerialStream = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+pub type SerialStream = pipe::PipeStream;
+
 pub enum KdTransport {
-    Serial(UnixStream),
+    Serial(SerialStream),
     Network(KdNetStream),
 }
 
@@ -47,9 +55,23 @@ impl KdTransport {
     }
 }
 
-impl From<UnixStream> for KdTransport {
-    fn from(stream: UnixStream) -> Self {
+impl From<SerialStream> for KdTransport {
+    fn from(stream: SerialStream) -> Self {
         Self::Serial(stream)
+    }
+}
+
+/// Two connected ends of the serial transport, as a test target stands in
+/// for the guest: a socket pair on Unix, a named-pipe pair on Windows.
+#[cfg(test)]
+pub(crate) fn serial_pair() -> io::Result<(SerialStream, SerialStream)> {
+    #[cfg(unix)]
+    {
+        SerialStream::pair()
+    }
+    #[cfg(windows)]
+    {
+        pipe::pair()
     }
 }
 
@@ -93,7 +115,7 @@ mod tests {
     /// refuse the timeout itself.
     #[test]
     fn a_zero_read_timeout_polls() {
-        let (host, _kernel) = UnixStream::pair().unwrap();
+        let (host, _kernel) = serial_pair().unwrap();
         let mut transport = KdTransport::from(host);
 
         transport.set_read_timeout(Some(Duration::ZERO)).unwrap();

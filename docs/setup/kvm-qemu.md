@@ -54,6 +54,16 @@ every VM, so you must choose one of these options:
 </domain>
 ```
 
+## KD over a named pipe (Windows host)
+
+On Windows, KD's serial port is a named pipe rather than a Unix socket. QEMU creates `\\.\pipe\ntoseye-kd`, which is also ntoseye's default endpoint, and waits for ntoseye to connect before the guest starts:
+
+```
+-chardev pipe,id=kd,path=ntoseye-kd -serial chardev:kd
+```
+
+Start QEMU, then run `ntoseye --connect \\.\pipe\ntoseye-kd`, or just `ntoseye`, which uses that endpoint. QEMU accepts one client on the pipe, so close any other debugger attached to it. The guest commands are the same as above.
+
 ## KDNET
 
 KDNET uses the guest's virtual NIC instead of a serial device. The host address depends on the network:

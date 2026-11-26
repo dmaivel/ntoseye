@@ -80,13 +80,13 @@ struct Cli {
 /// `ntoseye --backend gdb gdbserver` are the same.
 #[derive(Args)]
 struct TargetOptions {
-    /// The debugger backend: 'kd' (Windows KD over serial, the default),
-    /// 'kdnet' (Windows KD over UDP), 'gdb' (QEMU GDB stub), or 'memory'
-    /// (passive inspection of a live VM)
+    /// The debugger backend: 'kd' (Windows KD over a serial pipe, the
+    /// default), 'kdnet' (Windows KD over UDP), 'gdb' (QEMU GDB stub), or
+    /// 'memory' (passive inspection of a live VM)
     #[arg(short = 'b', long, global = true)]
     backend: Option<Backend>,
 
-    /// The backend target: a GDB address, a KD socket path, or a KDNET listen
+    /// The backend target: a GDB address, a KD pipe path, or a KDNET listen
     /// address. The memory backend does not use it
     #[arg(long, global = true)]
     connect: Option<String>,
@@ -240,6 +240,7 @@ file, which you can edit in the virt-manager GUI:
   </qemu:commandline>
 </domain>";
 
+#[cfg(unix)]
 static KD_INSTRUCTIONS: &str = "The KD backend is the default backend of ntoseye.
 It uses the same wire protocol as WinDbg, over a serial pipe between
 QEMU and ntoseye. Because Windows must boot in debug mode, the KD backend
@@ -312,6 +313,41 @@ sudo ntoseye --backend kd --connect \"$HOME/Library/Containers/com.utmapp.QEMUHe
 
 ntoseye supports Windows ARM64 (machine 0xAA64). Disable Secure Boot,
 or bcdedit /debug on does not work.";
+
+#[cfg(windows)]
+static KD_INSTRUCTIONS: &str = r#"The KD backend is the default backend of ntoseye.
+It uses the same wire protocol as WinDbg, over a named pipe between
+QEMU and ntoseye. Because Windows must boot in debug mode, the KD backend
+does not have the 'stealth' property of the gdb backend. When /debug
+is on, anti-debug code, PatchGuard, and some Windows behaviors change.
+
+GUEST: enable kernel debugging over a serial port. Run these commands
+as Administrator, then restart Windows:
+
+bcdedit /debug on
+bcdedit /dbgsettings serial debugport:1 baudrate:115200
+
+If your hypervisor connects the KD serial port as COM2, use
+'debugport:2'.
+
+QEMU creates \\.\pipe\ntoseye-kd and waits for ntoseye to connect:
+
+-chardev pipe,id=kd,path=ntoseye-kd -serial chardev:kd
+
+Start QEMU, then:
+
+ntoseye --connect \\.\pipe\ntoseye-kd
+
+The default endpoint is \\.\pipe\ntoseye-kd; a bare name is taken
+relative to \\.\pipe\.
+
+By default, ntoseye waits 8 seconds for the first KD handshake.
+For a very slow guest, set a different time:
+
+ntoseye --kd-handshake-timeout 20
+
+ntoseye supports Windows ARM64 (machine 0xAA64). Disable Secure Boot,
+or bcdedit /debug on does not work."#;
 
 pub fn main() {
     std::process::exit(run_with_args(std::env::args_os()));

@@ -4,8 +4,8 @@ use super::*;
 use crate::base::bytes;
 
 use std::io::{ErrorKind, Read, Write};
+#[cfg(unix)]
 use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
 use std::thread::{JoinHandle, spawn};
 
 use crate::backend::dbg_backend::ThreadLayout;
@@ -15,6 +15,7 @@ use crate::backend::kd::framing::{
 use crate::backend::kd::registers::{
     Arm64X18Source, arm64_x18, context_into_special, context_payload, special_into_context,
 };
+use crate::backend::kd::transport::{SerialStream, serial_pair};
 
 /// Write `value`'s little-endian bytes at `offset`, where Windows'
 /// `KSPECIAL_REGISTERS` definition puts the field.
@@ -24,7 +25,7 @@ fn put(buffer: &mut [u8], offset: usize, value: &[u8]) {
 
 #[test]
 fn amd64_hardware_slots_remain_four_shared_slots() {
-    let (_kernel, host) = UnixStream::pair().unwrap();
+    let (_kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.exit_prepared = true;
 
@@ -40,7 +41,7 @@ fn amd64_hardware_slots_remain_four_shared_slots() {
 
 #[test]
 fn arm64_hardware_slots_are_the_implemented_ones_of_the_context_slots() {
-    let (_kernel, host) = UnixStream::pair().unwrap();
+    let (_kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.arch = Arch::Arm64;
     backend.register_map = Arch::Arm64.register_map().clone();
@@ -70,10 +71,13 @@ fn arm64_hardware_slots_are_the_implemented_ones_of_the_context_slots() {
 #[test]
 fn oversized_hardware_slot_ids_are_rejected_without_packets() {
     for arch in [Arch::Amd64, Arch::Arm64] {
-        let (mut kernel, host) = UnixStream::pair().unwrap();
+        let (mut kernel, host) = serial_pair().unwrap();
         // An accidental physical-slot request must fail promptly, not wait for a reply.
+        #[cfg(unix)]
         kernel.shutdown(Shutdown::Write).unwrap();
-        kernel.set_nonblocking(true).unwrap();
+        kernel
+            .set_read_timeout(Some(std::time::Duration::from_millis(1)))
+            .unwrap();
         let mut backend = kd_backend_with_framing(host);
         backend.arch = arch;
         backend.link.halt();
@@ -207,7 +211,7 @@ fn arm64_context_debug_registers_update_special_registers() {
 /// A halted fake kernel answering manipulate requests from an ordered
 /// `(api, status, data)` script, asserting each request's API number. A
 /// register read's data is its value, which the reply carries in its header.
-fn serve_manipulate(mut kernel: UnixStream, script: Vec<(u32, u32, Vec<u8>)>) -> JoinHandle<()> {
+fn serve_manipulate(mut kernel: SerialStream, script: Vec<(u32, u32, Vec<u8>)>) -> JoinHandle<()> {
     const UNION: usize = 16;
     spawn(move || {
         let mut kernel_id = INITIAL_PACKET_ID;
@@ -246,7 +250,7 @@ fn serve_manipulate(mut kernel: UnixStream, script: Vec<(u32, u32, Vec<u8>)>) ->
 
 #[test]
 fn arm64_registers_survive_refused_control_space() {
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.arch = Arch::Arm64;
     backend.register_map = Arch::Arm64.register_map().clone();
@@ -300,7 +304,7 @@ fn arm64_registers_survive_refused_control_space() {
 
 /// A halted AMD64 processor whose first register read the kernel answers
 /// with an empty `CONTEXT` and `special` control space, EFER already known.
-fn amd64_backend_reading(host: UnixStream) -> KdBackend {
+fn amd64_backend_reading(host: SerialStream) -> KdBackend {
     let mut backend = kd_backend_with_framing(host);
     backend.link.halt();
     backend.exit_prepared = true;
@@ -314,7 +318,7 @@ fn amd64_backend_reading(host: UnixStream) -> KdBackend {
 #[test]
 fn registers_read_after_arming_a_slot_show_it() {
     const ADDRESS: u64 = 0xffff_f800_1234_5000;
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let mut backend = amd64_backend_reading(host);
     let context = vec![0u8; amd64::CONTEXT_SIZE];
     let special_map = Arch::Amd64.special_register_map();
@@ -368,7 +372,7 @@ fn registers_read_after_arming_a_slot_show_it() {
 #[test]
 fn registers_read_after_an_msr_write_show_it() {
     const MSR_EFER: u32 = 0xc000_0080;
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let mut backend = amd64_backend_reading(host);
     let context = vec![0u8; amd64::CONTEXT_SIZE];
     let special = vec![0u8; Arch::Amd64.special_register_map().extent()];
@@ -409,7 +413,7 @@ fn registers_read_after_an_msr_write_show_it() {
 fn a_register_write_drops_the_stop_report() {
     use crate::backend::kd::amd64::{CONTROL_EFLAGS_OFFSET, CONTROL_REPORT_SIZE};
     const TF: u32 = 1 << 8;
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let mut backend = amd64_backend_reading(host);
     let mut report = vec![0u8; CONTROL_REPORT_SIZE];
     bytes::write_u32(&mut report, CONTROL_EFLAGS_OFFSET, TF | 0x246);
@@ -505,7 +509,7 @@ fn an_arm64_context_gets_its_real_x18() {
 fn an_arm64_kpcr_is_read_once_a_boot() {
     const EL1H: u32 = 0b0101;
     const REFUSED: u32 = 0xc000_0001;
-    let (kernel, host) = UnixStream::pair().unwrap();
+    let (kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.arch = Arch::Arm64;
     backend.register_map = Arch::Arm64.register_map().clone();

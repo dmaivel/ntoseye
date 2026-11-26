@@ -3,7 +3,6 @@
 use super::*;
 
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::thread::spawn;
@@ -12,10 +11,11 @@ use std::time::Instant;
 use crate::backend::kd::framing::{
     BREAKIN_BYTE, INITIAL_PACKET_ID, PACKET_TYPE_KD_STATE_CHANGE64, data_packet,
 };
+use crate::backend::kd::transport::serial_pair;
 
 #[test]
 fn pump_shutdown_without_a_pump_keeps_the_framing() {
-    let (_kernel, host) = UnixStream::pair().unwrap();
+    let (_kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.link.halt();
 
@@ -36,7 +36,7 @@ fn pump_shutdown_without_a_pump_keeps_the_framing() {
 fn the_sites_an_absorbed_stop_deleted_are_dropped_when_the_pump_returns() {
     const ABSORBED: u64 = 0xffff_f800_0000_1000;
     const SHORT: u64 = 0xffff_f800_0000_2ffe;
-    let (_kernel, host) = UnixStream::pair().unwrap();
+    let (_kernel, host) = serial_pair().unwrap();
     let breakin_clone = host.try_clone().unwrap();
     let pump = PumpHandle {
         join: spawn(move || KdFraming::new(host.into())),
@@ -64,7 +64,7 @@ fn the_sites_an_absorbed_stop_deleted_are_dropped_when_the_pump_returns() {
 
 #[test]
 fn pump_shutdown_reclaims_framing_after_reported_error() {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     kernel
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -102,7 +102,7 @@ fn pump_shutdown_reclaims_framing_after_reported_error() {
 
 #[test]
 fn has_pending_stop_flags_undrained_pump_stop_until_consumed() {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     let breakin_clone = host.try_clone().unwrap();
     let framing = KdFraming::new(host.into());
     let (tx, rx) = mpsc::channel();

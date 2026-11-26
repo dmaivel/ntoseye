@@ -3,7 +3,6 @@
 use super::*;
 
 use std::io::Write;
-use std::os::unix::net::UnixStream;
 use std::thread::spawn;
 
 use crate::backend::kd::connect::{detect_arch, normalize_kernel_dtb};
@@ -12,6 +11,7 @@ use crate::backend::kd::framing::{
     data_packet,
 };
 use crate::backend::kd::registers::{ARM64_WINDBG_ID_AA64DFR0_EL1, ARM64_WINDBG_TTBR1_EL1};
+use crate::backend::kd::transport::serial_pair;
 
 #[test]
 fn explicit_kdnet_handshake_timeout_is_used_for_the_initial_wait() {
@@ -61,7 +61,7 @@ fn arm64_ttbr1_normalizes_to_combined_page_table_page() {
 
 #[test]
 fn arm64_target_hints_read_ttbr1_through_kd() {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.arch = Arch::Arm64;
     backend.register_map = Arch::Arm64.register_map().clone();
@@ -169,7 +169,7 @@ fn arm64_target_hints_read_ttbr1_through_kd() {
 /// request's own reply follows it.
 #[test]
 fn a_stale_reply_before_the_requested_one_is_passed_over() {
-    let (mut kernel, host) = UnixStream::pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     let mut backend = kd_backend_with_framing(host);
     backend.link.halt();
     backend.exit_prepared = true;

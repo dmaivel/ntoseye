@@ -14,6 +14,9 @@ impl MemoryRegion {
     }
 }
 
+#[cfg(any(target_os = "linux", windows))]
+mod layout;
+
 #[cfg(target_os = "linux")]
 mod platform {
     use nix::sys::uio::{RemoteIoVec, process_vm_readv, process_vm_writev};
@@ -25,6 +28,7 @@ mod platform {
     use std::io::{IoSlice, IoSliceMut};
 
     use super::MemoryRegion;
+    use super::layout::{RamLayout, guest_ram_region, qemu_ram_size};
     use crate::base::error::{Error, Result};
     use crate::base::memory::MemoryOps;
     use crate::base::types::PhysAddr;
@@ -34,22 +38,6 @@ mod platform {
         Kvm,
         Vmware,
     }
-
-    /// How guest RAM sits in the guest-physical address space. This follows
-    /// the guest architecture, not the hypervisor: x86 machines map RAM from
-    /// 0 around a 32-bit MMIO hole, while QEMU's aarch64 `virt` machine puts
-    /// one contiguous block at 1 GiB with firmware and MMIO below it.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum RamLayout {
-        X86 { hole_start: u64 },
-        Aarch64Virt,
-    }
-
-    /// Base of the `virt` machine's RAM. Everything below is flash and MMIO.
-    const AARCH64_VIRT_RAM_BASE: u64 = 0x4000_0000;
-
-    /// Top of the 32-bit MMIO hole on x86 machines; RAM resumes at 4 GiB.
-    const X86_MMIO_HOLE_END: u64 = 0x1_0000_0000;
 
     pub struct VmHandle {
         memory: MemoryRegion,
@@ -120,165 +108,13 @@ mod platform {
         read_comm(pid).is_some_and(|comm| named_aarch64(&comm))
     }
 
-    fn ram_layout(pid: i32, hv: HvKind, ram_size: u64) -> RamLayout {
-        match hv {
-            HvKind::Kvm if is_aarch64_qemu(pid) => RamLayout::Aarch64Virt,
-            HvKind::Kvm => {
-                let cmdline = fs::read(format!("/proc/{}/cmdline", pid)).unwrap_or_default();
-                let args = cmdline
-                    .split(|&byte| byte == 0)
-                    .map(String::from_utf8_lossy)
-                    .collect::<Vec<_>>();
-                RamLayout::X86 {
-                    hole_start: qemu_x86_hole_start(
-                        qemu_x86_machine(args.iter().map(|arg| arg.as_ref())),
-                        ram_size,
-                    ),
-                }
-            }
-            HvKind::Vmware => RamLayout::X86 {
-                hole_start: 0xC000_0000,
-            },
-        }
-    }
-
-    /// QEMU's two x86 PC machines, which split RAM around the 32-bit MMIO
-    /// hole differently.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum QemuX86Machine {
-        Q35,
-        /// `pc`, QEMU's default machine.
-        I440fx,
-    }
-
-    /// A size from a QEMU command line, with an optional `k`, `M`, `G` or
-    /// `T` suffix. A plain number is `default_unit` bytes: `-m` counts MiB,
-    /// while an `-object` `size=` counts bytes.
-    fn qemu_size(value: &str, default_unit: u64) -> Option<u64> {
-        let value = value.trim();
-        let (digits, unit) = match value.as_bytes().last()?.to_ascii_lowercase() {
-            b'k' => (&value[..value.len() - 1], 1 << 10),
-            b'm' => (&value[..value.len() - 1], 1 << 20),
-            b'g' => (&value[..value.len() - 1], 1 << 30),
-            b't' => (&value[..value.len() - 1], 1 << 40),
-            _ => (value, default_unit),
-        };
-        digits.parse::<u64>().ok()?.checked_mul(unit)
-    }
-
-    /// One field of a QEMU `-object` argument, in either the `key=value`
-    /// form or the JSON form (`{"qom-type":...}`).
-    fn qemu_option_field<'a>(value: &'a str, key: &str) -> Option<&'a str> {
-        let value = value.trim_start_matches('{').trim_end_matches('}');
-        for field in value.split(',') {
-            let (name, value) = match field.split_once('=') {
-                Some(pair) => pair,
-                None => match field.split_once(':') {
-                    Some(pair) => pair,
-                    None => continue,
-                },
-            };
-            if name.trim().trim_matches('"') == key {
-                return Some(value.trim().trim_matches('"'));
-            }
-        }
-        None
-    }
-
-    /// Guest RAM size from QEMU's arguments: the memory backend that
-    /// `-machine memory-backend=` names when there is one, else `-m`. The
-    /// size tells the RAM mapping apart from the process's other large
-    /// mappings, such as an ASan shadow reservation.
-    fn qemu_ram_size_from_args(args: &[&str]) -> Option<u64> {
-        let mut memory_backend = None;
-        let mut backends: Vec<(String, u64)> = Vec::new();
-        let mut m_size = None;
-        let mut i = 0;
-        while i < args.len() {
-            match args[i] {
-                "-m" | "--m" => {
-                    if let Some(value) = args.get(i + 1) {
-                        let size = value.split(',').next().unwrap_or(value);
-                        let size = size.strip_prefix("size=").unwrap_or(size);
-                        m_size = qemu_size(size, 1 << 20);
-                    }
-                    i += 2;
-                    continue;
-                }
-                "-object" | "--object" => {
-                    if let Some(value) = args.get(i + 1)
-                        && let Some(id) = qemu_option_field(value, "id")
-                        && let Some(size) =
-                            qemu_option_field(value, "size").and_then(|size| qemu_size(size, 1))
-                    {
-                        backends.push((id.to_string(), size));
-                    }
-                    i += 2;
-                    continue;
-                }
-                "-machine" | "--machine" | "-M" => {
-                    if let Some(value) = args.get(i + 1)
-                        && let Some(id) = qemu_option_field(value, "memory-backend")
-                    {
-                        memory_backend = Some(id.to_string());
-                    }
-                    i += 2;
-                    continue;
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-        memory_backend
-            .and_then(|id| backends.into_iter().find(|(name, _)| *name == id))
-            .map(|(_, size)| size)
-            .or(m_size)
-    }
-
-    fn qemu_ram_size(pid: i32) -> Option<u64> {
-        let cmdline = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-        let args: Vec<&str> = cmdline
+    /// The VM process's arguments, from `/proc/<pid>/cmdline`.
+    fn process_args(pid: i32) -> Vec<String> {
+        fs::read(format!("/proc/{pid}/cmdline"))
+            .unwrap_or_default()
             .split(|&byte| byte == 0)
-            .filter_map(|arg| std::str::from_utf8(arg).ok())
-            .collect();
-        qemu_ram_size_from_args(&args)
-    }
-
-    /// The machine QEMU was started with (`-machine`/`-M`, its type first
-    /// or as `type=`), from its arguments.
-    fn qemu_x86_machine<'a>(args: impl IntoIterator<Item = &'a str>) -> QemuX86Machine {
-        let mut args = args.into_iter();
-        let mut machine = None;
-        while let Some(arg) = args.next() {
-            if matches!(arg, "-machine" | "--machine" | "-M")
-                && let Some(value) = args.next()
-            {
-                let mut parts = value.split(',');
-                let first = parts.next().filter(|part| !part.contains('='));
-                machine = first
-                    .or_else(|| value.split(',').find_map(|part| part.strip_prefix("type=")))
-                    .or(machine);
-            }
-        }
-        match machine {
-            Some(name) if name.contains("q35") => QemuX86Machine::Q35,
-            _ => QemuX86Machine::I440fx,
-        }
-    }
-
-    /// Where QEMU ends RAM below 4 GiB (`pc_q35_init`, `pc_init1`): q35
-    /// keeps 2 GiB there once the guest has 2.75 GiB, i440fx 3 GiB once it
-    /// has 3.5 GiB; a smaller guest's RAM all fits below.
-    fn qemu_x86_hole_start(machine: QemuX86Machine, ram_size: u64) -> u64 {
-        let (threshold, low) = match machine {
-            QemuX86Machine::Q35 => (0xB000_0000, 0x8000_0000),
-            QemuX86Machine::I440fx => (0xE000_0000, 0xC000_0000),
-        };
-        if ram_size >= threshold {
-            low
-        } else {
-            threshold
-        }
+            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .collect()
     }
 
     fn find_vm_pid() -> Result<(i32, HvKind)> {
@@ -320,59 +156,23 @@ mod platform {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let regions: Vec<MemoryRegion> = lines
-            .into_iter()
-            .filter_map(|line| {
-                let mut parts = line.as_ref().split_whitespace();
-                let addresses = parts.next()?;
-                let permissions = parts.next()?;
-                if !permissions.starts_with("rw") {
-                    return None;
-                }
-                let (start, end) = addresses.split_once('-')?;
-                let start = u64::from_str_radix(start, 16).ok()?;
-                let end = u64::from_str_radix(end, 16).ok()?;
-                Some(MemoryRegion {
-                    start,
-                    end,
-                    length: end.checked_sub(start)?,
-                })
+        let regions = lines.into_iter().filter_map(|line| {
+            let mut parts = line.as_ref().split_whitespace();
+            let addresses = parts.next()?;
+            let permissions = parts.next()?;
+            if !permissions.starts_with("rw") {
+                return None;
+            }
+            let (start, end) = addresses.split_once('-')?;
+            let start = u64::from_str_radix(start, 16).ok()?;
+            let end = u64::from_str_radix(end, 16).ok()?;
+            Some(MemoryRegion {
+                start,
+                end,
+                length: end.checked_sub(start)?,
             })
-            .collect();
-
-        // The RAM mapping is the one sized like the guest's memory; the
-        // largest read-write mapping can be an ASan shadow reservation that
-        // is orders of magnitude bigger.
-        expected_size
-            .and_then(|size| regions.iter().find(|region| region.length == size).copied())
-            .or_else(|| regions.into_iter().max_by_key(|region| region.length))
-    }
-
-    /// Offset of a guest-physical address into the VM's RAM mapping, or
-    /// `None` where no RAM backs it: the x86 32-bit MMIO hole, or anything
-    /// below an AArch64 guest's RAM base. Mapping either one anywhere would
-    /// alias real pages.
-    fn gpa_to_offset(layout: RamLayout, gpa: PhysAddr) -> Option<u64> {
-        match layout {
-            // Low RAM is identity-mapped up to the hole; RAM above 4 GiB
-            // follows it in the mapping, so the hole's size is subtracted.
-            RamLayout::X86 { hole_start } => {
-                if gpa < hole_start {
-                    Some(gpa)
-                } else if gpa < X86_MMIO_HOLE_END {
-                    None
-                } else {
-                    Some(gpa - (X86_MMIO_HOLE_END - hole_start))
-                }
-            }
-            RamLayout::Aarch64Virt => {
-                if gpa < AARCH64_VIRT_RAM_BASE {
-                    None
-                } else {
-                    Some(gpa - AARCH64_VIRT_RAM_BASE)
-                }
-            }
-        }
+        });
+        guest_ram_region(regions, expected_size)
     }
 
     fn read_ptrace_scope() -> String {
@@ -399,15 +199,19 @@ mod platform {
     impl VmHandle {
         pub fn new() -> Result<Self> {
             let (pid, hv) = find_vm_pid()?;
-            let expected_size = match hv {
-                HvKind::Kvm => qemu_ram_size(pid),
-                HvKind::Vmware => None,
+            // VMware's arguments say nothing about its RAM.
+            let args = match hv {
+                HvKind::Kvm => process_args(pid),
+                HvKind::Vmware => Vec::new(),
             };
-            let memory = primary_memory_region(pid, expected_size)?;
+            let memory = primary_memory_region(pid, qemu_ram_size(&args))?;
             let nix_pid = Pid::from_raw(pid);
             probe_ptrace_access(nix_pid, memory.start)?;
             Ok(Self {
-                layout: ram_layout(pid, hv, memory.length),
+                layout: match hv {
+                    HvKind::Kvm => RamLayout::qemu(is_aarch64_qemu(pid), &args, memory.length),
+                    HvKind::Vmware => RamLayout::VMWARE,
+                },
                 memory,
                 pid: nix_pid,
             })
@@ -428,43 +232,20 @@ mod platform {
         }
 
         pub fn ram_base(&self) -> u64 {
-            match self.layout {
-                RamLayout::X86 { .. } => 0,
-                RamLayout::Aarch64Virt => AARCH64_VIRT_RAM_BASE,
-            }
+            self.layout.ram_base()
         }
 
         pub fn ram_size(&self) -> u64 {
             self.memory.length
         }
 
-        /// Guest-physical RAM as `(base, len)` runs: on x86, low RAM up to
-        /// the hypervisor's 32-bit MMIO hole and the remainder from 4 GiB;
-        /// on AArch64, one run from the RAM base. Inverse of
-        /// `gpa_to_offset`.
+        /// Guest-physical RAM as `(base, len)` runs.
         pub fn ram_runs(&self) -> Vec<(u64, u64)> {
-            let size = self.memory.length;
-            match self.layout {
-                RamLayout::X86 { hole_start } if size > hole_start => {
-                    vec![(0, hole_start), (X86_MMIO_HOLE_END, size - hole_start)]
-                }
-                RamLayout::X86 { .. } => vec![(0, size)],
-                RamLayout::Aarch64Virt => vec![(AARCH64_VIRT_RAM_BASE, size)],
-            }
+            self.layout.ram_runs(self.memory.length)
         }
+
         fn host_address(&self, addr: PhysAddr, len: usize) -> Result<u64> {
-            // The mapping places high RAM right after low RAM, so a range
-            // crossing the MMIO hole would silently continue into high RAM;
-            // both ends must sit in the same RAM run.
-            let last = (len as u64).saturating_sub(1);
-            gpa_to_offset(self.layout, addr)
-                .filter(|&offset| {
-                    addr.checked_add(last)
-                        .and_then(|end| gpa_to_offset(self.layout, end))
-                        == offset.checked_add(last)
-                })
-                .and_then(|offset| self.memory.host_range(offset, len))
-                .ok_or(Error::BadPhysicalAddress(addr))
+            self.layout.host_address(&self.memory, addr, len)
         }
     }
 
@@ -521,152 +302,6 @@ mod platform {
             assert_eq!(region.start, 0x1000);
             assert_eq!(region.end, 0x3000);
             assert_eq!(region.length, 0x2000);
-        }
-
-        /// ASan reserves a ~15 TiB read-write shadow mapping. The guest RAM
-        /// mapping is the one whose size the QEMU arguments report.
-        #[test]
-        fn guest_memory_selection_uses_the_guest_ram_size() {
-            const GIB: u64 = 1 << 30;
-            let maps = concat!(
-                "2008fff7000-10007fff8000 rw-p 00000000 00:00 0\n",
-                "7baa18400000-7bac18400000 rw-p 00000000 00:00 0\n",
-                "7baa00000000-7baa00100000 r--p 00000000 00:00 0\n",
-            );
-
-            let region = primary_memory_region_from_maps(maps.lines(), Some(8 * GIB)).unwrap();
-            assert_eq!(region.start, 0x7baa_1840_0000);
-            assert_eq!(region.length, 8 * GIB);
-            // Without the size, the ASan shadow mapping still wins.
-            let region = primary_memory_region_from_maps(maps.lines(), None).unwrap();
-            assert_eq!(region.start, 0x2008_fff7_000);
-        }
-
-        #[test]
-        fn qemu_ram_size_reads_the_memory_backend_and_m() {
-            const GIB: u64 = 1 << 30;
-            let keyval = [
-                "qemu-system-x86_64",
-                "-machine",
-                "pc-q35-10.2,usb=off,memory-backend=pc.ram",
-                "-m",
-                "size=8388608k",
-                "-object",
-                "memory-backend-ram,id=pc.ram,size=8G",
-            ];
-            assert_eq!(qemu_ram_size_from_args(&keyval), Some(8 * GIB));
-
-            let json = [
-                "qemu-system-x86_64",
-                "-machine",
-                "pc-q35-10.2,memory-backend=pc.ram",
-                "-m",
-                "size=8388608k",
-                "-object",
-                r#"{"qom-type":"memory-backend-memfd","id":"pc.ram","share":true,"size":8589934592}"#,
-            ];
-            assert_eq!(qemu_ram_size_from_args(&json), Some(8 * GIB));
-
-            let m_only = ["qemu-system-x86_64", "-m", "4G"];
-            assert_eq!(qemu_ram_size_from_args(&m_only), Some(4 * GIB));
-            let m_plain = ["qemu-system-x86_64", "-m", "512"];
-            assert_eq!(qemu_ram_size_from_args(&m_plain), Some(512 << 20));
-        }
-
-        #[test]
-        fn qemu_sizes_accept_units() {
-            assert_eq!(qemu_size("8G", 1), Some(8 << 30));
-            assert_eq!(qemu_size("512M", 1), Some(512 << 20));
-            assert_eq!(qemu_size("1024k", 1), Some(1 << 20));
-            // `-m` counts MiB without a suffix; an object's size counts bytes.
-            assert_eq!(qemu_size("512", 1 << 20), Some(512 << 20));
-            assert_eq!(qemu_size("512", 1), Some(512));
-        }
-
-        #[test]
-        fn x86_guest_ram_skips_the_32_bit_mmio_hole() {
-            let layout = RamLayout::X86 {
-                hole_start: 0x8000_0000,
-            };
-
-            assert_eq!(gpa_to_offset(layout, 0), Some(0));
-            assert_eq!(gpa_to_offset(layout, 0x7FFF_FFFF), Some(0x7FFF_FFFF));
-            // No RAM backs the hole; mapping it would alias real pages.
-            assert_eq!(gpa_to_offset(layout, 0x8000_0000), None);
-            assert_eq!(gpa_to_offset(layout, 0xFFFF_FFFF), None);
-            // RAM resumes at 4 GiB, packed against the low RAM before it.
-            assert_eq!(gpa_to_offset(layout, 0x1_0000_0000), Some(0x8000_0000));
-        }
-
-        /// An 8 GiB i440fx guest (libvirt's `pc`) keeps 3 GiB below the
-        /// hole, so its high RAM sits 1 GiB later in the mapping than a q35
-        /// guest's; a q35 guest under 2.75 GiB has no RAM moved above 4 GiB.
-        #[test]
-        fn the_hole_starts_where_the_qemu_machine_ends_low_ram() {
-            const GIB: u64 = 1 << 30;
-            let machine = |args: &str| qemu_x86_machine(args.split(' '));
-            assert_eq!(
-                machine("qemu-system-x86_64 -name guest=winvista -machine pc-i440fx-11.1,usb=off"),
-                QemuX86Machine::I440fx
-            );
-            assert_eq!(
-                machine("qemu-system-x86_64 -machine pc-q35-11.1,usb=off,dump-guest-core=off"),
-                QemuX86Machine::Q35
-            );
-            assert_eq!(
-                machine("qemu-system-x86_64 -M accel=kvm,type=q35"),
-                QemuX86Machine::Q35
-            );
-            // No -machine: QEMU's default, `pc`.
-            assert_eq!(machine("qemu-system-x86_64 -m 4G"), QemuX86Machine::I440fx);
-
-            let hole = qemu_x86_hole_start;
-            assert_eq!(hole(QemuX86Machine::I440fx, 8 * GIB), 3 * GIB);
-            assert_eq!(hole(QemuX86Machine::Q35, 8 * GIB), 2 * GIB);
-            assert_eq!(hole(QemuX86Machine::Q35, 2 * GIB + GIB / 2), 0xB000_0000);
-            assert_eq!(hole(QemuX86Machine::I440fx, 3 * GIB), 0xE000_0000);
-            let layout = RamLayout::X86 {
-                hole_start: hole(QemuX86Machine::I440fx, 8 * GIB),
-            };
-            assert_eq!(gpa_to_offset(layout, 0x1_3d3d_7cf8), Some(0xfd3d_7cf8));
-        }
-
-        #[test]
-        fn aarch64_guest_ram_starts_at_the_virt_machine_base() {
-            let layout = RamLayout::Aarch64Virt;
-
-            // Flash and MMIO live below the base, not RAM.
-            assert_eq!(gpa_to_offset(layout, 0x3FFF_FFFF), None);
-            assert_eq!(gpa_to_offset(layout, 0x4000_0000), Some(0));
-            assert_eq!(gpa_to_offset(layout, 0x4000_1000), Some(0x1000));
-        }
-
-        #[test]
-        fn ram_runs_report_where_each_layout_puts_its_memory() {
-            let handle = |layout, length| VmHandle {
-                memory: MemoryRegion {
-                    start: 0x7F00_0000_0000,
-                    end: 0x7F00_0000_0000 + length,
-                    length,
-                },
-                pid: Pid::from_raw(1),
-                layout,
-            };
-            let x86 = RamLayout::X86 {
-                hole_start: 0x8000_0000,
-            };
-
-            // 1 GiB fits below the hole, so it is one run from 0.
-            assert_eq!(handle(x86, 0x4000_0000).ram_runs(), vec![(0, 0x4000_0000)]);
-            // 4 GiB does not, so the top 2 GiB moves above the hole.
-            assert_eq!(
-                handle(x86, 0x1_0000_0000).ram_runs(),
-                vec![(0, 0x8000_0000), (0x1_0000_0000, 0x8000_0000)]
-            );
-            assert_eq!(
-                handle(RamLayout::Aarch64Virt, 0x1_0000_0000).ram_runs(),
-                vec![(0x4000_0000, 0x1_0000_0000)]
-            );
         }
     }
 }
@@ -1019,6 +654,585 @@ mod platform {
 
         fn write_bytes(&self, addr: PhysAddr, buf: &[u8]) -> Result<()> {
             self.write_bytes_at(addr, buf)
+        }
+    }
+}
+
+/// Windows host backend: guest RAM is one committed `PAGE_READWRITE` region
+/// in the QEMU or VMware Workstation process, read and written through
+/// `ReadProcessMemory`/`WriteProcessMemory`, and laid out by the rules the
+/// Linux backend follows.
+#[cfg(windows)]
+mod platform {
+    use std::ffi::c_void;
+    use std::io;
+
+    use windows_sys::Wdk::System::Threading::{
+        NtQueryInformationProcess, ProcessCommandLineInformation,
+    };
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, HANDLE, INVALID_HANDLE_VALUE, LUID, LocalFree,
+        UNICODE_STRING,
+    };
+    use windows_sys::Win32::Security::{
+        AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
+        TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, PAGE_READWRITE,
+        VirtualQueryEx,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_INFORMATION,
+        PROCESS_VM_READ, PROCESS_VM_WRITE,
+    };
+    use windows_sys::Win32::UI::Shell::CommandLineToArgvW;
+
+    use super::MemoryRegion;
+    use super::layout::{RamLayout, guest_ram_region, qemu_ram_size};
+    use crate::base::error::{Error, Result};
+    use crate::base::memory::MemoryOps;
+    use crate::base::types::PhysAddr;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum HvKind {
+        Qemu,
+        Vmware,
+    }
+
+    /// Guest RAM is at least this large; smaller committed regions belong to
+    /// the emulator's own heap and JIT buffers.
+    const MIN_RAM_REGION: u64 = 16 << 20;
+
+    pub struct VmHandle {
+        handle: HANDLE,
+        memory: MemoryRegion,
+        pid: u32,
+        layout: RamLayout,
+    }
+
+    // SAFETY: a process handle is a kernel object usable from any thread, and
+    // `ReadProcessMemory`/`WriteProcessMemory` are thread safe; the fields
+    // next to it are plain data.
+    unsafe impl Send for VmHandle {}
+    // SAFETY: as above — and `MemoryOps` takes `&self` without mutating it.
+    unsafe impl Sync for VmHandle {}
+
+    /// Whether `name` is an emulator that keeps guest RAM in its own address
+    /// space, and which one it is: QEMU (`qemu-system-<arch>.exe`) or VMware
+    /// Workstation (`vmware-vmx*.exe`).
+    fn hypervisor_of(name: &str) -> Option<HvKind> {
+        let name = name.to_ascii_lowercase();
+        if name.starts_with("qemu-system-") && name.ends_with(".exe") {
+            return Some(HvKind::Qemu);
+        }
+        if name.starts_with("vmware-vmx") && name.ends_with(".exe") {
+            return Some(HvKind::Vmware);
+        }
+        None
+    }
+
+    /// A `szExeFile` image name, which the entry pads with NULs.
+    fn exe_name(wide: &[u16]) -> String {
+        let len = wide
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(wide.len());
+        String::from_utf16_lossy(&wide[..len])
+    }
+
+    /// The running emulator: QEMU before VMware, as on Linux, and the first
+    /// of either that the snapshot lists.
+    fn find_vm_process() -> Option<(u32, HvKind, String)> {
+        // SAFETY: a process snapshot needs no input beyond its flags.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut found = None;
+        let mut entry = PROCESSENTRY32W {
+            dwSize: size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: the snapshot and entry are live for every call below.
+        let mut more = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+        while more {
+            let name = exe_name(&entry.szExeFile);
+            if let Some(kind) = hypervisor_of(&name) {
+                if kind == HvKind::Qemu {
+                    found = Some((entry.th32ProcessID, kind, name));
+                    break;
+                }
+                found.get_or_insert((entry.th32ProcessID, kind, name));
+            }
+            // SAFETY: as above.
+            more = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+        }
+        // SAFETY: the snapshot came from the call above and is closed once.
+        unsafe { CloseHandle(snapshot) };
+        found
+    }
+
+    /// Enable `SeDebugPrivilege` in this process, once.
+    ///
+    /// An elevated token *holds* the privilege but leaves it disabled, and a hypervisor's VM
+    /// process runs at a higher integrity level than an unelevated caller, so neither
+    /// `OpenProcess` nor `ReadProcessMemory` works until the privilege is explicitly enabled.
+    /// A normal (unelevated) token does not hold it at all; the attempt is then a no-op and
+    /// `open_process` reports the access-denied error.
+    fn enable_debug_privilege() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            // SAFETY: the token handle is closed below; `LUID`, `TOKEN_PRIVILEGES` and the
+            // privilege name outlive every call that reads them.
+            unsafe {
+                let mut token: HANDLE = std::ptr::null_mut();
+                if OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                    &mut token,
+                ) == 0
+                {
+                    return;
+                }
+                let name: Vec<u16> = "SeDebugPrivilege\0".encode_utf16().collect();
+                let mut luid = LUID {
+                    LowPart: 0,
+                    HighPart: 0,
+                };
+                if LookupPrivilegeValueW(std::ptr::null(), name.as_ptr(), &mut luid) != 0 {
+                    let privileges = TOKEN_PRIVILEGES {
+                        PrivilegeCount: 1,
+                        Privileges: [LUID_AND_ATTRIBUTES {
+                            Luid: luid,
+                            Attributes: SE_PRIVILEGE_ENABLED,
+                        }],
+                    };
+                    AdjustTokenPrivileges(
+                        token,
+                        0,
+                        &privileges,
+                        0,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    );
+                }
+                CloseHandle(token);
+            }
+        });
+    }
+
+    fn open_process(pid: u32) -> Result<HANDLE> {
+        enable_debug_privilege();
+        // SAFETY: no attributes are needed to open a process by id.
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_QUERY_INFORMATION,
+                0,
+                pid,
+            )
+        };
+        if handle.is_null() {
+            let error = io::Error::last_os_error();
+            return Err(
+                if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
+                    Error::VmProcessDenied {
+                        pid,
+                        detail: error.to_string(),
+                    }
+                } else {
+                    Error::Io(error)
+                },
+            );
+        }
+        Ok(handle)
+    }
+
+    /// The process's arguments, from the command line it was started with,
+    /// split as the C runtime splits it; empty when it cannot be read.
+    fn process_args(handle: HANDLE) -> Vec<String> {
+        // A `UNICODE_STRING` followed by the characters it points at, in
+        // storage aligned for the header, grown to the size a query asks for.
+        let mut buffer = vec![0u64; 512];
+        for _ in 0..4 {
+            let capacity = u32::try_from(buffer.len() * size_of::<u64>()).unwrap_or(u32::MAX);
+            let mut needed = 0u32;
+            // SAFETY: `buffer` holds `capacity` writable bytes.
+            let status = unsafe {
+                NtQueryInformationProcess(
+                    handle,
+                    ProcessCommandLineInformation,
+                    buffer.as_mut_ptr().cast(),
+                    capacity,
+                    &mut needed,
+                )
+            };
+            if status >= 0 {
+                // SAFETY: a successful query starts the buffer with the
+                // header, whose `Buffer` points at `Length` bytes inside
+                // the same allocation.
+                let line = unsafe {
+                    let header = &*buffer.as_ptr().cast::<UNICODE_STRING>();
+                    if header.Buffer.is_null() {
+                        return Vec::new();
+                    }
+                    std::slice::from_raw_parts(header.Buffer, usize::from(header.Length) / 2)
+                };
+                return split_command_line(line);
+            }
+            // Any failure but a buffer too small for the line is final.
+            if needed <= capacity {
+                return Vec::new();
+            }
+            buffer.resize((needed as usize).div_ceil(size_of::<u64>()), 0);
+        }
+        Vec::new()
+    }
+
+    /// A command line's arguments, as `CommandLineToArgvW` splits them.
+    fn split_command_line(line: &[u16]) -> Vec<String> {
+        // An empty line would make the call report this process's own path.
+        if line.is_empty() {
+            return Vec::new();
+        }
+        let line: Vec<u16> = line.iter().copied().chain(std::iter::once(0)).collect();
+        let mut count = 0i32;
+        // SAFETY: `line` is NUL-terminated and outlives the call.
+        let argv = unsafe { CommandLineToArgvW(line.as_ptr(), &mut count) };
+        if argv.is_null() {
+            return Vec::new();
+        }
+        let args = (0..usize::try_from(count).unwrap_or(0))
+            .map(|index| {
+                // SAFETY: `argv` holds `count` NUL-terminated strings, freed
+                // only below.
+                unsafe {
+                    let arg = *argv.add(index);
+                    let len = (0..).take_while(|&at| *arg.add(at) != 0).count();
+                    String::from_utf16_lossy(std::slice::from_raw_parts(arg, len))
+                }
+            })
+            .collect();
+        // SAFETY: `CommandLineToArgvW` allocates the array with `LocalAlloc`.
+        unsafe { LocalFree(argv.cast()) };
+        args
+    }
+
+    /// The process's next memory region, with `address` advanced past it.
+    /// `None` at the end of the address space or at a region the query cannot
+    /// describe, so a caller cannot spin on one address.
+    fn next_region(handle: HANDLE, address: &mut usize) -> Option<MEMORY_BASIC_INFORMATION> {
+        let mut info = MEMORY_BASIC_INFORMATION::default();
+        // SAFETY: `info` is sized for the call and written only by it.
+        let written = unsafe {
+            VirtualQueryEx(
+                handle,
+                *address as *const c_void,
+                &mut info,
+                size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if written == 0 {
+            return None;
+        }
+        let next = (info.BaseAddress as u64).checked_add(info.RegionSize as u64)?;
+        // A zero-sized or wrapped region would leave `address` where it was.
+        if next as usize <= *address {
+            return None;
+        }
+        *address = next as usize;
+        Some(info)
+    }
+
+    /// Whether a region can hold guest RAM: committed, writable, unguarded,
+    /// and large enough not to be the emulator's own allocation. The type is
+    /// not filtered: QEMU uses `MEM_PRIVATE` and VMware may use `MEM_MAPPED`.
+    fn is_ram_region(info: &MEMORY_BASIC_INFORMATION) -> bool {
+        info.State == MEM_COMMIT
+            && info.RegionSize as u64 >= MIN_RAM_REGION
+            && info.Protect & (PAGE_GUARD | PAGE_NOACCESS) == 0
+            && info.Protect & PAGE_READWRITE != 0
+    }
+
+    /// The region that holds guest RAM, among those that can.
+    fn pick_ram_region(
+        regions: impl IntoIterator<Item = MEMORY_BASIC_INFORMATION>,
+        expected_size: Option<u64>,
+    ) -> Option<MemoryRegion> {
+        let candidates = regions.into_iter().filter(is_ram_region).map(|info| {
+            let start = info.BaseAddress as u64;
+            let length = info.RegionSize as u64;
+            MemoryRegion {
+                start,
+                end: start + length,
+                length,
+            }
+        });
+        guest_ram_region(candidates, expected_size)
+    }
+
+    fn read_process(handle: HANDLE, address: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let mut read = 0usize;
+        // SAFETY: `buf` is writable for its length, in this or another
+        // process's address space.
+        let ok = unsafe {
+            ReadProcessMemory(
+                handle,
+                address as *const c_void,
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                &mut read,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(read)
+    }
+
+    fn write_process(handle: HANDLE, address: u64, buf: &[u8]) -> io::Result<usize> {
+        let mut written = 0usize;
+        // SAFETY: `buf` is readable for its length.
+        let ok = unsafe {
+            WriteProcessMemory(
+                handle,
+                address as *const c_void,
+                buf.as_ptr().cast(),
+                buf.len(),
+                &mut written,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(written)
+    }
+
+    fn primary_memory_region(
+        handle: HANDLE,
+        pid: u32,
+        expected_size: Option<u64>,
+    ) -> Result<MemoryRegion> {
+        let mut address = 0usize;
+        let regions = std::iter::from_fn(|| next_region(handle, &mut address));
+        let memory = pick_ram_region(regions, expected_size).ok_or(Error::NoVmMemoryRegion)?;
+        // Probe access: a handle without read rights fails here with a
+        // clearer message than on the first guest read.
+        let mut probe = [0u8; 1];
+        if let Err(error) = read_process(handle, memory.start, &mut probe) {
+            return Err(Error::VmProcessDenied {
+                pid,
+                detail: error.to_string(),
+            });
+        }
+        Ok(memory)
+    }
+
+    impl VmHandle {
+        pub fn new() -> Result<Self> {
+            let (pid, kind, name) = find_vm_process().ok_or(Error::VmNotFound)?;
+            let handle = open_process(pid)?;
+            // Built before the scan so a failure there still closes the
+            // handle; the memory and layout are filled in below.
+            let mut vm = Self {
+                handle,
+                memory: MemoryRegion {
+                    start: 0,
+                    end: 0,
+                    length: 0,
+                },
+                pid,
+                layout: RamLayout::VMWARE,
+            };
+            // VMware's arguments say nothing about its RAM.
+            let args = match kind {
+                HvKind::Qemu => process_args(handle),
+                HvKind::Vmware => Vec::new(),
+            };
+            vm.memory = primary_memory_region(handle, pid, qemu_ram_size(&args))?;
+            if kind == HvKind::Qemu {
+                // The guest architecture is not discoverable from the mapping
+                // itself, so the emulator binary's name decides it, as on
+                // Linux.
+                let aarch64 = name.to_ascii_lowercase().contains("aarch64");
+                vm.layout = RamLayout::qemu(aarch64, &args, vm.memory.length);
+            }
+            Ok(vm)
+        }
+
+        /// Whether the hypervisor aborts the VM when a debugger enables guest
+        /// debugging through its GDB stub; neither QEMU nor VMware does.
+        pub fn guest_debug_aborts_vm(&self) -> bool {
+            false
+        }
+
+        pub fn describe(&self) -> String {
+            format!(
+                "pid {}, host mapping {:#x}-{:#x}",
+                self.pid, self.memory.start, self.memory.end
+            )
+        }
+
+        pub fn ram_base(&self) -> u64 {
+            self.layout.ram_base()
+        }
+
+        pub fn ram_size(&self) -> u64 {
+            self.memory.length
+        }
+
+        pub fn ram_runs(&self) -> Vec<(u64, u64)> {
+            self.layout.ram_runs(self.memory.length)
+        }
+
+        fn host_address(&self, addr: PhysAddr, len: usize) -> Result<u64> {
+            self.layout.host_address(&self.memory, addr, len)
+        }
+    }
+
+    impl Drop for VmHandle {
+        fn drop(&mut self) {
+            // SAFETY: the handle came from `OpenProcess` and is closed once.
+            unsafe { CloseHandle(self.handle) };
+        }
+    }
+
+    impl MemoryOps<PhysAddr> for VmHandle {
+        fn read_bytes(&self, addr: PhysAddr, buf: &mut [u8]) -> Result<()> {
+            let hva = self.host_address(addr, buf.len())?;
+            let read =
+                read_process(self.handle, hva, buf).map_err(|_| Error::BadPhysicalAddress(addr))?;
+            if read != buf.len() {
+                return Err(Error::PartialRead(read));
+            }
+            Ok(())
+        }
+
+        fn write_bytes(&self, addr: PhysAddr, buf: &[u8]) -> Result<()> {
+            let hva = self.host_address(addr, buf.len())?;
+            let written = write_process(self.handle, hva, buf)
+                .map_err(|_| Error::BadPhysicalAddress(addr))?;
+            if written != buf.len() {
+                return Err(Error::PartialWrite(written));
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use windows_sys::Win32::System::Memory::PAGE_READONLY;
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        use super::*;
+
+        /// A region of `size` bytes of `protection` in the given state,
+        /// starting at `start`.
+        fn region(start: u64, size: u64, state: u32, protection: u32) -> MEMORY_BASIC_INFORMATION {
+            MEMORY_BASIC_INFORMATION {
+                BaseAddress: start as *mut c_void,
+                RegionSize: size as usize,
+                State: state,
+                Protect: protection,
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn process_names_select_the_emulator() {
+            assert_eq!(hypervisor_of("qemu-system-x86_64.exe"), Some(HvKind::Qemu));
+            assert_eq!(hypervisor_of("QEMU-SYSTEM-AARCH64.EXE"), Some(HvKind::Qemu));
+            assert_eq!(hypervisor_of("vmware-vmx.exe"), Some(HvKind::Vmware));
+            // Anything else is not a VM we can read.
+            assert_eq!(hypervisor_of("qemu-system.exe"), None);
+            assert_eq!(hypervisor_of("notepad.exe"), None);
+        }
+
+        /// QEMU's JSON `-object` form survives the Windows command line's
+        /// quoting as one argument, so its size reaches the RAM lookup.
+        #[test]
+        fn a_quoted_json_object_is_one_argument() {
+            let line = r#"qemu-system-x86_64.exe -machine q35,memory-backend=pc.ram -object "{\"qom-type\":\"memory-backend-ram\",\"id\":\"pc.ram\",\"size\":4294967296}" -m 4G"#;
+            let wide: Vec<u16> = line.encode_utf16().collect();
+            let args = split_command_line(&wide);
+
+            assert_eq!(
+                args,
+                [
+                    "qemu-system-x86_64.exe",
+                    "-machine",
+                    "q35,memory-backend=pc.ram",
+                    "-object",
+                    r#"{"qom-type":"memory-backend-ram","id":"pc.ram","size":4294967296}"#,
+                    "-m",
+                    "4G",
+                ]
+            );
+            assert_eq!(qemu_ram_size(&args), Some(4 << 30));
+        }
+
+        /// The command line read back from a process is the one it started
+        /// with: this test binary's own arguments.
+        #[test]
+        fn a_process_command_line_reads_back_as_its_arguments() {
+            // SAFETY: the pseudo-handle for this process needs no closing.
+            let handle = unsafe { GetCurrentProcess() };
+            assert_eq!(process_args(handle), std::env::args().collect::<Vec<_>>());
+        }
+
+        #[test]
+        fn the_largest_writable_region_is_the_guest_ram() {
+            const MIB: u64 = 1 << 20;
+            let regions = [
+                // Small and writable: the emulator's own heap.
+                region(0x1000_0000, 4 * MIB, MEM_COMMIT, PAGE_READWRITE),
+                // Large but guarded, so touching it would fault the process.
+                region(
+                    0x2000_0000,
+                    4096 * MIB,
+                    MEM_COMMIT,
+                    PAGE_READWRITE | PAGE_GUARD,
+                ),
+                // Large but not writable: an image, not RAM.
+                region(0x3000_0000, 4096 * MIB, MEM_COMMIT, PAGE_READONLY),
+                // The guest RAM.
+                region(0x7000_0000, 1024 * MIB, MEM_COMMIT, PAGE_READWRITE),
+            ];
+
+            let ram = pick_ram_region(regions, None).unwrap();
+            assert_eq!((ram.start, ram.length), (0x7000_0000, 1024 * MIB));
+            // A size that only a region unfit for RAM has does not pick it.
+            assert_eq!(pick_ram_region(regions, Some(4096 * MIB)), Some(ram));
+        }
+
+        #[test]
+        fn read_and_write_reach_this_process_memory() {
+            // `GetCurrentProcess` is the pseudo-handle for this process, so
+            // this exercises the same calls a VM's memory goes through.
+            let handle = unsafe { GetCurrentProcess() };
+            let mut buffer = vec![0u8; 4096];
+            let address = buffer.as_mut_ptr() as u64;
+            let pattern = |index: usize| (index % 251) as u8;
+            let written: Vec<u8> = (0..buffer.len()).map(pattern).collect();
+
+            assert_eq!(
+                write_process(handle, address, &written).unwrap(),
+                buffer.len()
+            );
+            let mut read = vec![0u8; buffer.len()];
+            assert_eq!(
+                read_process(handle, address, &mut read).unwrap(),
+                read.len()
+            );
+
+            assert_eq!(read, written);
+            assert_eq!(buffer, written);
         }
     }
 }

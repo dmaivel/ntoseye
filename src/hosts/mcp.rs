@@ -326,14 +326,33 @@ enum BackendArg {
     Dump,
 }
 
+/// Where guest memory comes from for a live kd/kdnet session.
+#[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum MemorySourceArg {
+    Auto,
+    Host,
+    Kd,
+}
+
+impl From<MemorySourceArg> for KdMemorySource {
+    fn from(value: MemorySourceArg) -> Self {
+        match value {
+            MemorySourceArg::Auto => Self::Auto,
+            MemorySourceArg::Host => Self::Host,
+            MemorySourceArg::Kd => Self::Kd,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct OpenArgs {
     #[schemars(
-        description = "What to attach to: kd (KD over Unix socket), kdnet (KDNET over encrypted UDP), gdb (GDB remote stub), memory (physical memory only, no debug transport), or dump (a Windows kernel crash dump or user-mode minidump file)"
+        description = "What to attach to: kd (KD over a serial pipe), kdnet (KDNET over encrypted UDP), gdb (GDB remote stub), memory (physical memory only, no debug transport), or dump (a Windows kernel crash dump or user-mode minidump file)"
     )]
     backend: BackendArg,
     #[schemars(
-        description = "Connection target: Unix socket path for kd (default /tmp/ntoseye-kd.sock), listen address for kdnet (default 0.0.0.0:50000), host:port for gdb (default 127.0.0.1:1234), absolute .dmp path for dump (required). Not used by memory."
+        description = "Connection target: KD serial endpoint for kd (a Unix socket path, or a Windows named pipe path; defaults to the platform default), listen address for kdnet (default 0.0.0.0:50000), host:port for gdb (default 127.0.0.1:1234), absolute .dmp path for dump (required). Not used by memory."
     )]
     connect: Option<String>,
     #[schemars(
@@ -345,6 +364,10 @@ struct OpenArgs {
         description = "KD/KDNET handshake timeout in positive integer seconds. Only valid for kd and kdnet; overrides NTOSEYE_KD_TIMEOUT. When omitted, uses NTOSEYE_KD_TIMEOUT or the default of 8 seconds."
     )]
     kd_handshake_timeout: Option<u64>,
+    #[schemars(
+        description = "Guest memory source for kd and kdnet: auto (default; validate host memory, then fall back to KD reads), host (read the hypervisor process, which needs an elevated ntoseye), or kd (read memory over KD; slower, but works while the target is halted and never relies on the hypervisor's process layout). Use kd for VMware/Hyper-V under ULM/WHP, where the VM process holds several unrelated large mappings."
+    )]
+    memory_source: Option<MemorySourceArg>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1047,6 +1070,7 @@ impl NtoseyeMcp {
             connect,
             key,
             kd_handshake_timeout,
+            memory_source,
         } = args;
         let spec = match backend {
             BackendArg::Dump => {
@@ -1055,6 +1079,9 @@ impl NtoseyeMcp {
                 }
                 if key.is_some() {
                     return Err(invalid_params("dump does not use 'key'"));
+                }
+                if memory_source.is_some() {
+                    return Err(invalid_params("dump does not use 'memory_source'"));
                 }
                 let path = connect
                     .ok_or_else(|| invalid_params("dump requires 'connect' (the .dmp path)"))?;
@@ -1069,10 +1096,21 @@ impl NtoseyeMcp {
                     BackendArg::Dump => unreachable!("handled above"),
                 };
                 // Only KD and KDNET read memory either way; the others
-                // refuse a memory source.
+                // refuse a memory source. A call's own source wins over the
+                // server's `--memory-source`, which decides for the sessions
+                // a client opens later.
                 let memory_source = match backend {
-                    Backend::Kd | Backend::KdNet => self.memory_source,
-                    Backend::Gdb | Backend::Memory => KdMemorySource::Auto,
+                    Backend::Kd | Backend::KdNet => memory_source
+                        .map(KdMemorySource::from)
+                        .unwrap_or(self.memory_source),
+                    Backend::Gdb | Backend::Memory => {
+                        if memory_source.is_some() {
+                            return Err(invalid_params(
+                                "'memory_source' is only valid for kd and kdnet",
+                            ));
+                        }
+                        KdMemorySource::Auto
+                    }
                 };
                 TargetSpec::Live {
                     backend,
@@ -1250,6 +1288,7 @@ mod tests {
                 connect: None,
                 key: key.map(str::to_string),
                 kd_handshake_timeout: None,
+                memory_source: None,
             })
         };
         let source = |spec: TargetSpec| match spec {
@@ -1288,6 +1327,7 @@ mod tests {
             connect: Some(connect.into()),
             key: None,
             kd_handshake_timeout: None,
+            memory_source: None,
         }))
     }
 
@@ -1339,6 +1379,7 @@ mod tests {
                 connect: None,
                 key: None,
                 kd_handshake_timeout: None,
+                memory_source: None,
             }))
             .await
             .unwrap_err();
@@ -1350,6 +1391,7 @@ mod tests {
                 connect: Some("127.0.0.1:1234".into()),
                 key: None,
                 kd_handshake_timeout: None,
+                memory_source: None,
             }))
             .await
             .unwrap_err();
@@ -1361,6 +1403,7 @@ mod tests {
                 connect: None,
                 key: None,
                 kd_handshake_timeout: None,
+                memory_source: None,
             }))
             .await
             .unwrap_err();

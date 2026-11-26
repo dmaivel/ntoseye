@@ -37,10 +37,11 @@ impl ReplState<'_> {
 
 /// Run a host command, and optionally send debugger output to it.
 ///
-/// The command runs <host command> with the shell of the host (sh -c) and waits
-/// until it exits. It shows what the host command writes to standard output and
-/// standard error, and then the exit status if the status is not zero. With
-/// -ci, the quoted debugger commands (separated by `;`) run first, and their
+/// The command runs <host command> with the shell of the host (`sh -c`, or
+/// `cmd /C` on Windows) and waits until it exits. It shows what the host
+/// command writes to standard output and standard error, and then the exit
+/// status if the status is not zero. With -ci, the quoted debugger commands
+/// (separated by `;`) run first, and their
 /// output becomes the standard input of the host command. For example, `.shell
 /// -ci "lm" grep nt` filters the module list, and `.shell -ci "!process 0 0"
 /// sort` sorts the process list. ntoseye shows errors from the debugger
@@ -92,12 +93,29 @@ fn shell(
     Ok(Flow::Continue)
 }
 
-/// Run `command` with `sh -c`, `input` on its standard input, and print what
-/// it writes.
+/// Run `command` with the host shell, `input` on its standard input, and
+/// print what it writes.
 fn run_host_command(command: &str, input: Option<String>) {
-    let child = Command::new("sh")
+    #[cfg(unix)]
+    let mut shell = {
+        let mut shell = Command::new("sh");
         // `--` so a command starting with `-` is not read as sh options.
-        .args(["-c", "--", command])
+        shell.args(["-c", "--", command]);
+        shell
+    };
+    #[cfg(windows)]
+    let mut shell = {
+        use std::os::windows::process::CommandExt;
+
+        let mut shell = Command::new("cmd.exe");
+        // `/C` runs the rest of the line and exits. The command line is
+        // appended verbatim: `cmd` does its own quoting, and Rust's argument
+        // escaping would turn the inner `"` of a command into `\"`, which
+        // `cmd` reads literally.
+        shell.raw_arg("/C").raw_arg(command);
+        shell
+    };
+    let child = shell
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
@@ -109,7 +127,10 @@ fn run_host_command(command: &str, input: Option<String>) {
     let mut child = match child {
         Ok(child) => child,
         Err(error) => {
-            error!("{SHELL}: failed to start sh: {error}");
+            error!(
+                "{SHELL}: failed to start {}: {error}",
+                shell.get_program().to_string_lossy()
+            );
             return;
         }
     };
@@ -166,18 +187,40 @@ mod tests {
 
     #[test]
     fn debugger_output_is_piped_through_the_host_filter() {
+        // `sort -r` reverses; Windows' `sort` mangles this machine's input and
+        // is not what the test is about, so Windows uses a pass-through
+        // filter, by absolute path so PATH cannot substitute another one.
+        #[cfg(unix)]
+        let (command, expected) = ("sort -r".to_string(), "c\nb\na\n");
+        #[cfg(windows)]
+        let (command, expected) = (
+            format!(
+                r#""{}/System32/findstr.exe" ."#,
+                std::env::var("SystemRoot").unwrap()
+            ),
+            "b\na\nc\n",
+        );
         let (flow, text) = run(
-            ".shell -ci \".echo b; .echo a; .echo c\" sort -r",
+            &format!(".shell -ci \".echo b; .echo a; .echo c\" {command}"),
             DispatchContext::Interactive,
         );
         assert_eq!(flow, Flow::Continue);
-        assert_eq!(text, "c\nb\na\n");
+        // Windows tools end their lines with CRLF.
+        #[cfg(windows)]
+        let text = text.replace("\r\n", "\n");
+        assert_eq!(text, expected);
     }
 
     #[test]
     fn only_the_interactive_prompt_starts_host_programs() {
         let marker = std::env::temp_dir().join(format!("ntoseye-shell-{}", std::process::id()));
         let _ = std::fs::remove_file(&marker);
+        // A command that creates `path`; quoted, so a path with spaces works
+        // on both hosts.
+        #[cfg(unix)]
+        let create = |path: &std::path::Path| format!("touch \"{}\"", path.display());
+        #[cfg(windows)]
+        let create = |path: &std::path::Path| format!("copy /Y NUL \"{}\" > NUL", path.display());
         for context in [
             DispatchContext::BreakpointAction,
             DispatchContext::ExceptionCommand,
@@ -188,15 +231,15 @@ mod tests {
         ] {
             // Nested in a loop too, which runs its body in the same context.
             let line = format!(
-                ".foreach /s (x \"1\") {{.shell touch {0}}}; .shell touch {0}",
-                marker.display()
+                ".foreach /s (x \"1\") {{.shell {0}}}; .shell {0}",
+                create(&marker)
             );
             let (flow, text) = run(&line, context);
             assert_eq!(flow, Flow::Denied, "{context:?}: {text}");
             assert!(!marker.exists(), "{context:?} started a host program");
         }
         let (flow, _) = run(
-            &format!(".shell touch {}", marker.display()),
+            &format!(".shell {}", create(&marker)),
             DispatchContext::Interactive,
         );
         assert_eq!(flow, Flow::Continue);

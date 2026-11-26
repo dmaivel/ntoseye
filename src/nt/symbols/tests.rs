@@ -779,14 +779,13 @@ fn source_lines_report_whether_the_local_file_is_the_one_compiled() {
 }
 
 #[test]
-fn source_path_remapping_rejects_traversal_and_symlink_escape() {
+fn source_path_remapping_rejects_traversal() {
     let root = temp_root("source-containment");
     let checkout = root.join("checkout");
     let outside = root.join("outside");
     std::fs::create_dir_all(&checkout).unwrap();
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::write(outside.join("secret.c"), "secret\n").unwrap();
-    std::os::unix::fs::symlink(&outside, checkout.join("link")).unwrap();
     let mappings = [SourcePathMapping {
         recorded_prefix: Some(r"C:\agent\src".to_string()),
         local_root: checkout.clone(),
@@ -800,11 +799,30 @@ fn source_path_remapping_rejects_traversal_and_symlink_escape() {
         ),
         None
     );
+    assert_eq!(remap_source_file("/etc/passwd", &[], &mut unverified), None);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn source_path_remapping_rejects_symlink_escape() {
+    let root = temp_root("source-containment-symlink");
+    let checkout = root.join("checkout");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&checkout).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.c"), "secret\n").unwrap();
+    std::os::unix::fs::symlink(&outside, checkout.join("link")).unwrap();
+    let mappings = [SourcePathMapping {
+        recorded_prefix: Some(r"C:\agent\src".to_string()),
+        local_root: checkout.clone(),
+    }];
+
     assert_eq!(
         remap_source_file(r"C:\agent\src\link\secret.c", &mappings, &mut unverified),
         local(checkout.join("link/secret.c"), LocalSourceState::Missing)
     );
-    assert_eq!(remap_source_file("/etc/passwd", &[], &mut unverified), None);
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -850,17 +868,23 @@ fn source_addresses_resolve_cached_file_and_line() {
             },
         ],
     );
+    let root: std::path::PathBuf = if cfg!(windows) {
+        r"C:\checkout".into()
+    } else {
+        "/checkout".into()
+    };
     store.set_source_paths(vec![SourcePathMapping {
         recorded_prefix: Some(r"C:\agent\src".to_string()),
-        local_root: "/checkout".into(),
+        local_root: root.clone(),
     }]);
 
     assert_eq!(
         store.source_addresses(dtb, "private.c", 42),
         vec![VirtAddr(0x140000120), VirtAddr(0x140000180)]
     );
+    let local = root.join("private.c");
     assert_eq!(
-        store.source_addresses(dtb, "/checkout/private.c", 42),
+        store.source_addresses(dtb, &local.to_string_lossy(), 42),
         vec![VirtAddr(0x140000120), VirtAddr(0x140000180)]
     );
 }
