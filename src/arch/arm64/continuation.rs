@@ -101,10 +101,12 @@ pub fn successors(bytes: &[u8], pc: u64, read: impl Fn(&str) -> Option<u64>) -> 
             Successors::either(next, target()?)
         }
         BranchKind::Direct | BranchKind::DirectCall => Successors::one(target()?),
-        // `ret`, and `retaa`/`retab`/`retaasppc`/... which authenticate the
-        // link register.
+        // `ret`, which names its target (x30 unless written), and
+        // `retaa`/`retab`/`retaasppc`/... which authenticate the link
+        // register: the `sppcr` forms' register is the modifier, not the
+        // target.
         BranchKind::Return => match operands.first() {
-            Some(Operand::Reg(reg)) => branch_to(read(&reg.reg.to_string())?),
+            Some(Operand::Reg(reg)) if !authenticated => branch_to(read(&reg.reg.to_string())?),
             _ => branch_to(link()?),
         },
         // `br`, `braa`/`braaz`/..., `blr`, `blraa`/`blraaz`/...
@@ -322,6 +324,8 @@ mod tests {
             Some(vec![USER])
         );
         assert_eq!(successors_of(0xd65f_0fff, &registers), Some(vec![KERNEL]));
+        // retaasppcr x8: x8 is the modifier; the return goes to lr.
+        assert_eq!(successors_of(0xd65f_0be8, &registers), Some(vec![KERNEL]));
         // braa x16, x17; blraaz x8
         assert_eq!(successors_of(0xd71f_0a11, &registers), Some(vec![KERNEL]));
         assert_eq!(successors_of(0xd63f_091f, &registers), Some(vec![USER]));

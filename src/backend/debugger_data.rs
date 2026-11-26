@@ -346,7 +346,9 @@ fn read_counter_from_a64_getter<M: MemoryOps<VirtAddr>>(
     address: VirtAddr,
     expected_system_partition: VirtAddr,
 ) -> Result<MetadataValue<u64>> {
-    use exarmo_aarch64::{Mnemonic, Modifier, ModifierKind, Offset, Operand, decode_word};
+    use exarmo_aarch64::{
+        Mnemonic, Modifier, ModifierKind, Offset, Operand, Writeback, decode_word,
+    };
 
     let mut code = [0u8; MAX_GETTER_BYTES];
     memory.read_bytes(address, &mut code)?;
@@ -374,7 +376,18 @@ fn read_counter_from_a64_getter<M: MemoryOps<VirtAddr>>(
             match operand {
                 Operand::Reg(reg) if reg.arrangement.is_none() => {
                     let (slot, width) = a64_register(reg.reg)?;
-                    Some(registers[slot]? & width_mask(width))
+                    let value = registers[slot]? & width_mask(width);
+                    match reg.modifier {
+                        // `x2, lsl #3`; a plain register in a shifted-register
+                        // form reads as `lsl #0`.
+                        None => Some(value),
+                        Some(Modifier {
+                            kind: ModifierKind::Lsl,
+                            amount,
+                        }) => value.checked_shl(amount.unwrap_or(0)),
+                        // Other shifts and extends are refused, not misread.
+                        Some(_) => None,
+                    }
                 }
                 Operand::Imm { value, modifier } => match *modifier {
                     None => Some(*value as u64),
@@ -421,7 +434,9 @@ fn read_counter_from_a64_getter<M: MemoryOps<VirtAddr>>(
             },
             Mnemonic::Ldr | Mnemonic::Ldar => {
                 let effective = match operands.get(1) {
-                    Some(Operand::Mem(mem)) => {
+                    // A pre- or post-indexed load also moves its base, which
+                    // this does not follow.
+                    Some(Operand::Mem(mem)) if mem.writeback == Writeback::None => {
                         let base = a64_register(mem.base).and_then(|(slot, _)| registers[slot]);
                         match mem.offset {
                             Offset::None => base,
@@ -970,7 +985,7 @@ mod tests {
         const MI_STATE: u64 = 0xffff_f803_3f83_c980;
         const TABLE: u64 = 0xffff_b182_0000_1000;
         const PARTITION: u64 = 0xffff_f803_3f84_2180;
-        let words: [u32; 9] = [
+        let mut words: [u32; 9] = [
             0x9000_4428, // adrp x8, MiState page
             0x9126_0108, // add x8, x8, #0x980
             0xf94f_e509, // ldr x9, [x8, #0x1fc8]
@@ -981,25 +996,45 @@ mod tests {
             0xc8df_fd00, // ldar x0, [x8]
             0xd65f_03c0, // ret
         ];
-        let mut code = vec![0u8; 128];
-        for (index, word) in words.iter().enumerate() {
-            code[4 * index..4 * index + 4].copy_from_slice(&word.to_le_bytes());
-        }
-        let memory = TestMemory::with_regions(&[
-            (GETTER, code),
-            (MI_STATE + 0x1fc8, TABLE.to_le_bytes().to_vec()),
-            (TABLE, PARTITION.to_le_bytes().to_vec()),
-            (PARTITION + 0x4668, 369_837u64.to_le_bytes().to_vec()),
-        ]);
+        let memory = |words: &[u32]| {
+            let mut code = vec![0u8; 128];
+            for (index, word) in words.iter().enumerate() {
+                code[4 * index..4 * index + 4].copy_from_slice(&word.to_le_bytes());
+            }
+            TestMemory::with_regions(&[
+                (GETTER, code),
+                (MI_STATE + 0x1fc8, TABLE.to_le_bytes().to_vec()),
+                (TABLE, PARTITION.to_le_bytes().to_vec()),
+                (PARTITION + 0x4668, 369_837u64.to_le_bytes().to_vec()),
+                (PARTITION + 0x8cd0, 42u64.to_le_bytes().to_vec()),
+            ])
+        };
 
-        let counter =
-            read_counter_from_getter(&memory, Arch::Arm64, VirtAddr(GETTER), VirtAddr(PARTITION))
-                .unwrap();
+        let counter = read_counter_from_getter(
+            &memory(&words),
+            Arch::Arm64,
+            VirtAddr(GETTER),
+            VirtAddr(PARTITION),
+        )
+        .unwrap();
         assert_eq!(counter.value, 369_837);
         // A chain that never reaches the system partition is refused.
         let elsewhere = VirtAddr(0xffff_f803_3f84_0000);
         assert!(
-            read_counter_from_getter(&memory, Arch::Arm64, VirtAddr(GETTER), elsewhere).is_err()
+            read_counter_from_getter(&memory(&words), Arch::Arm64, VirtAddr(GETTER), elsewhere)
+                .is_err()
         );
+
+        // `add x8, x10, x8, lsl #1` doubles the offset; it does not read as
+        // a plain add.
+        words[6] = 0x8b08_0548;
+        let counter = read_counter_from_getter(
+            &memory(&words),
+            Arch::Arm64,
+            VirtAddr(GETTER),
+            VirtAddr(PARTITION),
+        )
+        .unwrap();
+        assert_eq!(counter.value, 42);
     }
 }

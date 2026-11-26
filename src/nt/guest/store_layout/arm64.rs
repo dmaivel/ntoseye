@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use exarmo_aarch64::{
     Cond, Instruction as Decoded, Mnemonic, Modifier, ModifierKind, Offset, Operand, Reg,
-    Writeback, XRegZr, decode_word,
+    RegOperand, Writeback, XRegZr, decode_word,
 };
 
 use super::{KernelCode, layout_error, only, winner};
@@ -281,6 +281,19 @@ fn x0() -> Reg {
     Reg::X(XRegZr::new(0))
 }
 
+/// Whether a register operand reads as the register itself: no shift or
+/// extend, or the `lsl #0` a plain register in a shifted-register form
+/// carries (`add x0, x1, x2`).
+fn unmodified(operand: &RegOperand) -> bool {
+    matches!(
+        operand.modifier,
+        None | Some(Modifier {
+            kind: ModifierKind::Lsl,
+            amount: None | Some(0),
+        })
+    )
+}
+
 /// What a register holds, as far as the derivation follows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Value {
@@ -351,7 +364,11 @@ fn memory(instruction: &Instruction) -> Option<Memory> {
                 };
                 match mem.offset {
                     // The access is at the base; the offset is the writeback.
-                    _ if mem.writeback == Writeback::Post => None,
+                    _ if mem.writeback == Writeback::Post => Some(Memory {
+                        base: mem.base,
+                        offset: 0,
+                        index: None,
+                    }),
                     Offset::None => Some(Memory {
                         base: mem.base,
                         offset: 0,
@@ -466,6 +483,8 @@ impl Tracker {
     /// The source operand as a value: a register's, or an immediate.
     fn operand(&self, operand: &Operand, ip: u64) -> Option<Value> {
         match operand {
+            // A shifted or extended register is not the value it holds.
+            Operand::Reg(reg) if !unmodified(reg) => None,
             Operand::Reg(reg) if is_zero(reg.reg) => Some(Value::Const(0)),
             Operand::Reg(reg) => Some(self.get(reg.reg).cloned().unwrap_or(Value::Opaque)),
             Operand::Imm { value, modifier } => {
