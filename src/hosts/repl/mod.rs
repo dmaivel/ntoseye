@@ -703,6 +703,11 @@ fn install_termination_handler() {
 /// covers a console in raw mode and a closed, logged-off, or shutting-down
 /// console, where the default disposition would kill the process with
 /// breakpoints still installed in the guest.
+///
+/// Windows ends the process as soon as a close, logoff, or shutdown handler
+/// returns, so the handler holds the event instead: the prompt's teardown
+/// runs and the process exits from it, or Windows' timeout for the event
+/// ends the process first.
 #[cfg(all(windows, feature = "cli"))]
 fn install_termination_handler() {
     unsafe extern "system" fn handler(event: u32) -> i32 {
@@ -712,14 +717,17 @@ fn install_termination_handler() {
                 INTERRUPT_REQUESTED.store(true, Ordering::SeqCst);
                 0
             }
-            // Close, logoff, shutdown: claim the event so teardown runs.
+            // Close, logoff, shutdown: start the teardown and wait for it.
             _ => {
                 TERMINATION_REQUESTED.store(true, Ordering::SeqCst);
-                1
+                loop {
+                    std::thread::sleep(Duration::from_secs(1));
+                }
             }
         }
     }
-    // SAFETY: the handler only performs atomic stores.
+    // SAFETY: the handler only stores atomics and sleeps, on the thread the
+    // system creates for each event.
     unsafe { windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(handler), 1) };
 }
 

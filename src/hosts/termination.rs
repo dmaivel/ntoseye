@@ -32,15 +32,27 @@ extern "C" fn note_termination(_signal: c_int) {
 }
 
 /// Raise the shared flags from a console event: Ctrl+C, Ctrl+Break, a closed
-/// console, or a logoff/shutdown. Handler safe, for the same reason
-/// [`note_termination`] is.
+/// console, or a logoff/shutdown. The system runs it on a thread of its own.
+///
+/// Windows ends the process as soon as a close, logoff, or shutdown handler
+/// returns, so the handler holds those events: the server loop detaches and
+/// the process exits from it, or Windows' timeout for the event ends the
+/// process first. Ctrl+C and Ctrl+Break are handled at once and leave the
+/// process to the loop.
 #[cfg(windows)]
-unsafe extern "system" fn console_handler(_event: u32) -> i32 {
+unsafe extern "system" fn console_handler(event: u32) -> i32 {
+    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT};
+
     TERMINATION.store(true, Ordering::SeqCst);
     if let Some(cancel) = RUN_CANCEL.get() {
         cancel.store(true, Ordering::SeqCst);
     }
-    1 // handled: the OS kills the process once no handler asks it to wait
+    if event != CTRL_C_EVENT && event != CTRL_BREAK_EVENT {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+    1
 }
 
 /// Install detach handlers for SIGTERM, SIGHUP, and SIGINT — the console
@@ -59,7 +71,7 @@ pub fn install(cancel: &Arc<AtomicBool>) -> Arc<AtomicBool> {
             install_signal(signal, note_termination as *const () as sighandler_t);
         }
     }
-    // SAFETY: the handler only performs atomic stores.
+    // SAFETY: the handler only stores atomics and sleeps.
     #[cfg(windows)]
     unsafe {
         windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(console_handler), 1);
