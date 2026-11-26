@@ -577,7 +577,7 @@ where
     }
     // Close the complete file before publishing it under the destination name.
     drop(writer.into_inner().map_err(|error| error.into_error())?);
-    crate::base::files::replace(&temporary_path, path)?;
+    fs::rename(&temporary_path, path)?;
     cleanup.keep = true;
     Ok(unreadable_pages)
 }
