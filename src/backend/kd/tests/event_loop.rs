@@ -1038,7 +1038,7 @@ fn fatal_system_error_print_marks_the_next_stop_with_captured_bugcheck() {
 /// stop: held again, it came back without its bugcheck.
 #[test]
 fn a_bugcheck_while_a_request_is_answered_is_the_next_stop() {
-    let (mut kernel, mut host) = serial_pair().unwrap();
+    let (mut kernel, host) = serial_pair().unwrap();
     host.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
     let context: Vec<u8> = (0..64u8).collect();
     let pc = 0xffff_f800_1960_c930;

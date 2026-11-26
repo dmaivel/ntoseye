@@ -215,7 +215,7 @@ impl PipeStream {
 
     /// Set how long a read waits, `None` for no limit. A read that times out
     /// with nothing to show fails with [`ErrorKind::WouldBlock`].
-    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         *self
             .inner
             .read_timeout
@@ -305,6 +305,19 @@ fn transferred(handle: HANDLE, overlapped: &OVERLAPPED) -> io::Result<usize> {
     Ok(count as usize)
 }
 
+/// Cancel a pending transfer and wait until it has ended: until then the
+/// system may still write its buffer and `OVERLAPPED`, which the caller is
+/// about to release.
+fn abandon(handle: HANDLE, overlapped: &OVERLAPPED) {
+    let mut count = 0u32;
+    // SAFETY: `overlapped` names a transfer on `handle` and outlives both
+    // calls; the second waits for the transfer to end.
+    unsafe {
+        CancelIoEx(handle, overlapped);
+        GetOverlappedResult(handle, overlapped, &mut count, 1);
+    }
+}
+
 /// An event handle, closed when it drops.
 struct Event(HANDLE);
 
@@ -373,7 +386,9 @@ impl Read for PipeStream {
             return self.cancel(handle, &overlapped);
         }
         if status == WAIT_FAILED {
-            return Err(io::Error::last_os_error());
+            let error = io::Error::last_os_error();
+            abandon(handle, &overlapped);
+            return Err(error);
         }
         debug_assert_eq!(status, WAIT_OBJECT_0);
         match transferred(handle, &overlapped) {
@@ -422,16 +437,13 @@ impl Write for PipeStream {
             let status = unsafe { WaitForSingleObject(event.0, WRITE_TIMEOUT_MS) };
             if status == WAIT_TIMEOUT {
                 kd_trace!("pipe: write timed out after {WRITE_TIMEOUT_MS} ms");
-                // SAFETY: the overlapped write belongs to this handle.
-                unsafe {
-                    CancelIoEx(handle, &overlapped);
-                    let mut count = 0u32;
-                    GetOverlappedResult(handle, &overlapped, &mut count, 1);
-                }
+                abandon(handle, &overlapped);
                 return Err(io::Error::from(ErrorKind::WouldBlock));
             }
             if status == WAIT_FAILED {
-                return Err(io::Error::last_os_error());
+                let error = io::Error::last_os_error();
+                abandon(handle, &overlapped);
+                return Err(error);
             }
             match transferred(handle, &overlapped) {
                 Ok(count) => return Ok(count),
