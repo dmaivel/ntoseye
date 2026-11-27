@@ -6,16 +6,11 @@ use std::mem::take;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use gdbstub::common::{Signal, Tid};
-use gdbstub::conn::ConnectionExt;
-use gdbstub::stub::MultiThreadStopReason;
-use gdbstub::target::ext::base::multithread::{
-    MultiThreadResume, MultiThreadSchedulerLocking, MultiThreadSchedulerLockingOps,
-    MultiThreadSingleStep, MultiThreadSingleStepOps,
-};
+use gdb_remote::request::{Action, BreakpointType, ThreadAction};
+use gdb_remote::stop::{Reason, Signalled, StopReply};
 
-use crate::backend::dbg_backend::{ContinueDisposition, ModuleEvent};
-use crate::backend::gdb::trace_packet;
+use crate::backend::dbg_backend::{ContinueDisposition, DebugCapability, ModuleEvent};
+use crate::base::notice::NoticeLevel;
 use crate::base::ntstatus::{
     STATUS_ACCESS_VIOLATION, STATUS_BREAKPOINT, STATUS_FLOAT_DIVIDE_BY_ZERO,
     STATUS_FLOAT_INVALID_OPERATION, STATUS_ILLEGAL_INSTRUCTION, STATUS_IN_PAGE_ERROR,
@@ -27,33 +22,49 @@ use crate::session::driver::describe_bugcheck;
 use crate::session::stops::module_event_line;
 use crate::session::{Cancel, Motion, RunOutcome, Stop, StopKind};
 
-use super::connection::Client;
-use super::{GdbTarget, PlantedKind};
+use super::Server;
+use super::connection::Connection;
 
 /// How long each wait for a stop runs before checking the client socket.
 const RUN_POLL: Duration = Duration::from_millis(50);
 
-/// What a wait for the target produced.
+/// The signals stops are reported as, by GDB's numbers.
+const SIGINT: u8 = 2;
+const SIGILL: u8 = 4;
+const SIGTRAP: u8 = 5;
+const SIGABRT: u8 = 6;
+const SIGFPE: u8 = 8;
+const SIGSEGV: u8 = 11;
+
+/// What a wait for the resumed target produced.
 pub(super) enum Wait {
-    Stopped(MultiThreadStopReason<u64>),
-    /// The client sent something (typically the `0x03` interrupt byte).
-    Data(u8),
+    /// The target stopped: the stop reply.
+    Stopped(Vec<u8>),
+    /// The client sent the interrupt byte.
+    Interrupted,
     Terminating,
 }
 
-impl GdbTarget<'_> {
+/// What a resume does: step one thread (by index), or continue them all.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Resume {
+    Step(usize),
+    Continue,
+}
+
+impl Server<'_> {
     pub(super) fn note(&mut self, text: impl Into<String>) {
         self.notes.push(text.into());
     }
 
     /// Send queued notes, guest `DbgPrint` output, and session notices to the
     /// client's console.
-    fn flush_console(&mut self, client: &mut Client) -> io::Result<()> {
+    pub(super) fn flush_console(&mut self, connection: &mut Connection) -> io::Result<()> {
         let mut text = String::new();
         for notice in self.session.take_notices() {
             text.push_str(match notice.level {
-                crate::base::notice::NoticeLevel::Warning => "warning: ",
-                crate::base::notice::NoticeLevel::Info => "note: ",
+                NoticeLevel::Warning => "warning: ",
+                NoticeLevel::Info => "note: ",
             });
             text.push_str(&notice.text);
             text.push('\n');
@@ -75,7 +86,7 @@ impl GdbTarget<'_> {
         if text.is_empty() {
             return Ok(());
         }
-        client.console(&text)
+        connection.console(&text)
     }
 
     /// Run `motion` on the session, queueing what breakpoint actions print
@@ -89,94 +100,219 @@ impl GdbTarget<'_> {
         match outcome {
             Ok(RunOutcome::Stopped(stop)) => Some(stop),
             Ok(RunOutcome::Running) => None,
-            Err(error) => {
-                self.note(format!("the target cannot run: {error}"));
-                self.resume_refused = true;
-                Some(self.session.unreported_stop())
-            }
+            Err(error) => Some(self.refused(&error)),
         }
     }
 
-    /// Wait for the resumed target to stop, for the client to send
-    /// something, or for a termination signal.
-    pub(super) fn wait(&mut self, client: &mut Client) -> io::Result<Wait> {
+    /// The stop to report for a resume that could not run.
+    fn refused(&mut self, error: &dyn std::fmt::Display) -> Stop {
+        self.note(format!("the target cannot run: {error}"));
+        self.resume_refused = true;
+        self.session.unreported_stop()
+    }
+
+    /// What `vCont` with `actions` does. All-stop: a step steps one vCPU
+    /// with the others stopped, and a continue resumes them all, whatever
+    /// threads it names. A step naming no thread (Binary Ninja's) steps
+    /// the thread `Hc` chose, else the stopped vCPU. `None` for an action
+    /// the server does not take (`t`, `r`, which `vCont?` does not offer),
+    /// or a thread that does not exist.
+    pub(super) fn resume_for(&self, actions: &[ThreadAction]) -> Option<Resume> {
+        let mut resume = Resume::Continue;
+        for action in actions {
+            match action.action {
+                Action::Continue | Action::ContinueSignal(_) => {}
+                Action::Step | Action::StepSignal(_) => {
+                    if resume == Resume::Continue {
+                        let thread = match action.thread {
+                            Some(thread) => self.resolve(thread)?,
+                            None => None,
+                        };
+                        resume = Resume::Step(self.resume_index(thread));
+                    }
+                }
+                Action::Stop | Action::RangeStep { .. } => return None,
+            }
+        }
+        Some(resume)
+    }
+
+    /// The thread a step steps: `thread`, else the `Hc` thread, else the
+    /// stopped vCPU.
+    pub(super) fn resume_index(&self, thread: Option<usize>) -> usize {
+        thread
+            .or(self.resume_thread)
+            .unwrap_or_else(|| self.current_index())
+    }
+
+    /// Start `resume`. A failed resume is reported as a stop, so the client
+    /// sees the reason instead of waiting forever.
+    pub(super) fn resume(&mut self, resume: Resume) {
+        self.cancel.store(false, Ordering::SeqCst);
+        self.pending = match resume {
+            Resume::Step(index) => match self.select(index) {
+                Ok(()) => self.drive(Motion::Step, &Cancel::NEVER),
+                Err(error) => Some(self.refused(&error)),
+            },
+            // Resume and take a stop already waiting; the wait takes the rest.
+            Resume::Continue => self.drive(
+                Motion::Continue {
+                    disposition: ContinueDisposition::Handled,
+                },
+                &Cancel::poll(),
+            ),
+        };
+    }
+
+    /// Wait for the resumed target to stop, for the client's interrupt, or
+    /// for a termination signal.
+    pub(super) fn wait(&mut self, connection: &mut Connection) -> io::Result<Wait> {
         loop {
             if let Some(stop) = self.pending.take() {
                 let refused = take(&mut self.resume_refused);
-                let reason = self.stop_reason(stop, refused);
-                self.flush_console(client)?;
-                return Ok(Wait::Stopped(reason));
+                return Ok(Wait::Stopped(self.stop_reply(stop, refused)));
             }
             if self.terminating() {
                 return Ok(Wait::Terminating);
             }
-            if let Some(byte) = client.peek()? {
-                client.next += 1;
-                trace_packet("client", "<-", &[byte]);
-                return Ok(Wait::Data(byte));
+            if connection.interrupted()? {
+                return Ok(Wait::Interrupted);
             }
             self.pending = self.drive(Motion::Wait, &Cancel::within(RUN_POLL));
-            self.flush_console(client)?;
+            self.flush_console(connection)?;
         }
     }
 
-    /// Break in for the client's interrupt.
-    pub(super) fn interrupt(&mut self) -> Option<MultiThreadStopReason<u64>> {
+    /// Break in for the client's interrupt: the stop reply.
+    pub(super) fn interrupt(&mut self) -> Vec<u8> {
         self.cancel.store(false, Ordering::SeqCst);
         let stop = self
             .drive(Motion::Break, &Cancel::NEVER)
             .unwrap_or_else(|| self.session.unreported_stop());
         self.resume_refused = false;
-        Some(self.stop_reason(stop, true))
+        self.stop_reply(stop, true)
     }
 
-    /// Translate a session stop into a stop reply. `interrupted` marks the
-    /// break-in the client asked for, which gdb expects as `SIGINT`, and a
-    /// resume that failed, which must not look like a finished step.
-    fn stop_reason(&mut self, stop: Stop, interrupted: bool) -> MultiThreadStopReason<u64> {
+    /// The stop reply for `stop`, which `?` and `qThreadStopInfo` repeat.
+    /// `interrupted` marks the break-in the client asked for, which gdb
+    /// expects as `SIGINT`, and a resume that failed, which must not look
+    /// like a finished step. The thread it names becomes the one registers
+    /// are read from, as gdb assumes of every stop reply (it sends `Hg`
+    /// only for another thread).
+    fn stop_reply(&mut self, stop: Stop, interrupted: bool) -> Vec<u8> {
+        let mut signalled = self.signalled(stop, interrupted);
+        self.sync_threads();
+        let index = self.current_index();
+        signalled.thread = Some(self.thread_id(index));
+        self.general_thread = Some(index);
+        let mut reply = Vec::new();
+        StopReply::Signal(signalled.clone()).write(&mut reply);
+        self.last_stop = Some((index, signalled));
+        reply
+    }
+
+    /// The `?` reply: the last stop this client saw; on a user-mode
+    /// minidump that records an exception, the exception's signal on the
+    /// thread that raised it; else, on a target that runs, an interrupt on
+    /// the stopped vCPU: the client found it halted (the server broke in
+    /// for it, or for an attach), which IDA expects as a pause, not as a
+    /// trap it did not cause; and a trap on a dump, which never ran.
+    pub(super) fn halt_reply(&mut self) -> Vec<u8> {
+        self.sync_threads();
+        let (index, mut signalled) = self.last_stop.clone().unwrap_or_else(|| {
+            let exception = self.session.target.user_dump_info().and_then(|info| {
+                let exception = info.exception.as_ref()?;
+                Some((
+                    exception_signal(exception.code),
+                    info.backend_thread_id(exception.thread_id),
+                ))
+            });
+            match exception {
+                Some((signal, thread)) => (self.index_of(&thread), signal_only(signal)),
+                None if self
+                    .session
+                    .backend
+                    .supports(DebugCapability::InterruptTarget) =>
+                {
+                    (self.current_index(), signal_only(SIGINT))
+                }
+                None => (self.current_index(), signal_only(SIGTRAP)),
+            }
+        });
+        // The pid may have changed since (an attach).
+        signalled.thread = Some(self.thread_id(index));
+        self.general_thread = Some(index);
+        let mut reply = Vec::new();
+        StopReply::Signal(signalled).write(&mut reply);
+        reply
+    }
+
+    /// lldb's `qThreadStopInfo`: the last stop on the thread that stopped,
+    /// and no signal on the others, which were only halted with it.
+    pub(super) fn thread_stop_reply(&mut self, thread: u64) -> Option<Vec<u8>> {
+        let index = usize::try_from(thread).ok()?.checked_sub(1)?;
+        if index >= self.threads.len() {
+            return None;
+        }
+        let signalled = match &self.last_stop {
+            Some((stopped, signalled)) if *stopped == index => signalled.clone(),
+            _ => signal_only(0),
+        };
+        let mut reply = Vec::new();
+        StopReply::Signal(Signalled {
+            thread: Some(self.thread_id(index)),
+            ..signalled
+        })
+        .write(&mut reply);
+        Some(reply)
+    }
+
+    /// Why `stop` stopped, as a signal and, for the client's own
+    /// breakpoints, the reason; the thread is filled in by the caller.
+    fn signalled(&mut self, stop: Stop, interrupted: bool) -> Signalled<'static> {
         let rip = stop.rip.unwrap_or(0);
         let signal = match stop.kind {
             StopKind::Breakpoint { breakpoint: hit } => {
                 if let Some(error) = &hit.condition_error {
                     self.note(format!("breakpoint {} condition failed: {error}", hit.id));
                 }
-                self.sync_threads();
-                let tid = self.current_tid();
                 if let Some(planted) = self
                     .planted
                     .iter()
                     .find(|planted| planted.id == hit.id && planted.serial == hit.serial)
                 {
-                    return match planted.kind {
-                        PlantedKind::Software => MultiThreadStopReason::SwBreak(tid),
-                        PlantedKind::Hardware => MultiThreadStopReason::HwBreak(tid),
-                        PlantedKind::Watch { kind, .. } => MultiThreadStopReason::Watch {
-                            tid,
-                            kind,
-                            addr: planted.address,
-                        },
+                    let reason = match planted.kind {
+                        BreakpointType::Software => Reason::SoftwareBreak,
+                        BreakpointType::Hardware => Reason::HardwareBreak,
+                        BreakpointType::WriteWatch => Reason::Watch(planted.address),
+                        BreakpointType::ReadWatch => Reason::ReadWatch(planted.address),
+                        BreakpointType::AccessWatch => Reason::AccessWatch(planted.address),
+                    };
+                    return Signalled {
+                        reason: Some(reason),
+                        ..signal_only(SIGTRAP)
                     };
                 }
                 // Set with `monitor bp`: the client has no record of it.
                 let place = hit.symbol.unwrap_or_else(|| format!("{rip:#x}"));
                 self.note(format!("breakpoint {} hit at {place}", hit.id));
-                Signal::SIGTRAP
+                SIGTRAP
             }
-            StopKind::Step => Signal::SIGTRAP,
+            StopKind::Step => SIGTRAP,
             StopKind::ModuleLoad { module } => {
                 self.note(module_event_line(ModuleEvent::Load, &module));
-                Signal::SIGTRAP
+                SIGTRAP
             }
             StopKind::ModuleUnload { module } => {
                 self.note(module_event_line(ModuleEvent::Unload, &module));
-                Signal::SIGTRAP
+                SIGTRAP
             }
-            StopKind::Entry | StopKind::Interrupt if interrupted => Signal::SIGINT,
-            StopKind::Entry | StopKind::Interrupt => Signal::SIGTRAP,
+            StopKind::Entry | StopKind::Interrupt if interrupted => SIGINT,
+            StopKind::Entry | StopKind::Interrupt => SIGTRAP,
             StopKind::Exception { exception }
                 if interrupted && exception.code == STATUS_BREAKPOINT =>
             {
-                Signal::SIGINT
+                SIGINT
             }
             StopKind::Exception { exception } => {
                 self.note(exception.describe(rip));
@@ -189,125 +325,38 @@ impl GdbTarget<'_> {
                     None => self.note(detail),
                 }
                 self.note("run `monitor !analyze -v` for the full triage");
-                Signal::SIGABRT
+                SIGABRT
             }
             StopKind::Reload { reload } => {
                 self.note(reload.describe());
                 // Every breakpoint the client planted belonged to the old boot.
                 self.planted.clear();
-                Signal::SIGTRAP
+                SIGTRAP
             }
         };
-        self.signal(signal)
+        signal_only(signal)
     }
+}
 
-    /// The `?` reply for a user-mode minidump that records an exception:
-    /// the exception's signal on the thread that raised it. gdbstub answers
-    /// `?` with `SIGTRAP` on any thread, which would hide the crash.
-    pub(super) fn halt_reply(&mut self, multiprocess: bool) -> Option<Vec<u8>> {
-        let info = self.session.target.user_dump_info()?;
-        let exception = info.exception.as_ref()?;
-        let signal = exception_signal(exception.code);
-        let thread = info.backend_thread_id(exception.thread_id);
-        self.sync_threads();
-        let tid = self.tid_of(&thread).get();
-        // gdbstub names the one process 1, as the thread list does.
-        let thread = if multiprocess {
-            format!("p1.{tid:x}")
-        } else {
-            format!("{tid:x}")
-        };
-        Some(format!("T{:02x}thread:{thread};", signal.0).into_bytes())
-    }
-
-    /// `signal` on the thread that stopped.
-    fn signal(&mut self, signal: Signal) -> MultiThreadStopReason<u64> {
-        self.sync_threads();
-        MultiThreadStopReason::SignalWithThread {
-            tid: self.current_tid(),
-            signal,
-        }
+/// A stop reply's signal, with nothing more said.
+fn signal_only(signal: u8) -> Signalled<'static> {
+    Signalled {
+        signal,
+        ..Signalled::default()
     }
 }
 
 /// The signal gdb shows for a Windows exception. Anything without a closer
 /// POSIX match is a trap; the console note names the real status.
-fn exception_signal(code: u32) -> Signal {
+fn exception_signal(code: u32) -> u8 {
     match code {
-        STATUS_BREAKPOINT | STATUS_SINGLE_STEP => Signal::SIGTRAP,
-        STATUS_ACCESS_VIOLATION | STATUS_IN_PAGE_ERROR => Signal::SIGSEGV,
-        STATUS_ILLEGAL_INSTRUCTION | STATUS_PRIVILEGED_INSTRUCTION => Signal::SIGILL,
+        STATUS_BREAKPOINT | STATUS_SINGLE_STEP => SIGTRAP,
+        STATUS_ACCESS_VIOLATION | STATUS_IN_PAGE_ERROR => SIGSEGV,
+        STATUS_ILLEGAL_INSTRUCTION | STATUS_PRIVILEGED_INSTRUCTION => SIGILL,
         STATUS_FLOAT_DIVIDE_BY_ZERO
         | STATUS_FLOAT_INVALID_OPERATION
         | STATUS_INTEGER_DIVIDE_BY_ZERO
-        | STATUS_INTEGER_OVERFLOW => Signal::SIGFPE,
-        _ => Signal::SIGTRAP,
-    }
-}
-
-impl MultiThreadResume for GdbTarget<'_> {
-    fn resume(&mut self) -> std::result::Result<(), Self::Error> {
-        self.cancel.store(false, Ordering::SeqCst);
-        // A failed resume is reported as a stop, so the client sees the
-        // reason instead of waiting forever or dropping the connection.
-        self.pending = match self.step_thread.take() {
-            Some(tid) => match self.select(tid) {
-                Ok(()) => self.drive(Motion::Step, &Cancel::NEVER),
-                Err(error) => {
-                    self.note(format!("the target cannot run: {error}"));
-                    self.resume_refused = true;
-                    Some(self.session.unreported_stop())
-                }
-            },
-            // Resume and take a stop already waiting; the wait takes the rest.
-            None => self.drive(
-                Motion::Continue {
-                    disposition: ContinueDisposition::Handled,
-                },
-                &Cancel::poll(),
-            ),
-        };
-        Ok(())
-    }
-
-    fn clear_resume_actions(&mut self) -> std::result::Result<(), Self::Error> {
-        self.step_thread = None;
-        Ok(())
-    }
-
-    /// All-stop: a continue resumes every vCPU, whichever thread it names.
-    fn set_resume_action_continue(
-        &mut self,
-        _tid: Tid,
-        _signal: Option<Signal>,
-    ) -> std::result::Result<(), Self::Error> {
-        Ok(())
-    }
-
-    fn support_single_step(&mut self) -> Option<MultiThreadSingleStepOps<'_, Self>> {
-        Some(self)
-    }
-
-    fn support_scheduler_locking(&mut self) -> Option<MultiThreadSchedulerLockingOps<'_, Self>> {
-        Some(self)
-    }
-}
-
-impl MultiThreadSingleStep for GdbTarget<'_> {
-    fn set_resume_action_step(
-        &mut self,
-        tid: Tid,
-        _signal: Option<Signal>,
-    ) -> std::result::Result<(), Self::Error> {
-        self.step_thread = Some(tid);
-        Ok(())
-    }
-}
-
-/// A step already runs one vCPU with the others frozen, so locking the
-/// scheduler to the stepped thread is what happens anyway.
-impl MultiThreadSchedulerLocking for GdbTarget<'_> {
-    fn set_resume_action_scheduler_lock(&mut self) -> std::result::Result<(), Self::Error> {
-        Ok(())
+        | STATUS_INTEGER_OVERFLOW => SIGFPE,
+        _ => SIGTRAP,
     }
 }

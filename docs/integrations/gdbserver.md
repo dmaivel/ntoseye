@@ -7,7 +7,8 @@
 | Client | Support | Limits |
 | --- | --- | --- |
 | IDA | Supported | IDA keeps the name of each thread from the first time it sees that thread |
-| gdb, lldb | Supported | |
+| gdb | Supported | |
+| lldb | Supported | lldb lists no modules (`image list` is empty), so it shows no symbols; registers, memory, breakpoints, stepping and `monitor` commands work |
 | Ghidra | Best effort | Runs through gdb and needs [`ntoseye_regions.py`](https://github.com/dmaivel/ntoseye/blob/master/examples/ghidra/ntoseye_regions.py), which depends on the internals of Ghidra's gdb agent |
 | Binja | Best effort | No stack view, and can exit on disconnect |
 
@@ -15,7 +16,7 @@ Best-effort clients work as this page describes, but their other limits are in t
 
 ## Quickstart
 
-Configure the VM as [Choosing a backend](../setup/backends.md) describes. Because the protocol has no attach request, you give the target on the command line:
+Configure the VM as [Choosing a backend](../setup/backends.md) describes. You give the target on the command line, because the protocol attaches to processes, not to machines:
 
 ```bash
 ntoseye gdbserver --connect /tmp/ntoseye-kd.sock
@@ -60,6 +61,23 @@ gdb does not need local files. Through the server's [remote file access](#remote
 If an image is not in the cache yet, the server downloads it in the background, and gdb reports it as missing until it arrives. After that, `sharedlibrary` loads it. If you give a kernel file with `file ntoskrnl.exe`, gdb also relocates that file onto the live kernel.
 
 To run ntoseye commands in gdb, use `monitor`, for example `monitor k` or `monitor dt nt!_EPROCESS @$proc`. In lldb, use `process plugin packet monitor k`. `remote get /ntoskrnl.exe ./ntoskrnl.exe` copies the running kernel's file through the connection.
+
+lldb reads memory with expressions, for example `memory read $rsp`, and finds the memory regions of the target with `memory region`. lldb does not list the loaded modules, so `image list` is empty and backtraces show addresses only. To see symbols, use `monitor k` and `monitor ln <address>`.
+
+### Processes in gdb
+
+`info os processes` lists the Windows processes of the target with their PIDs and image names.
+
+In `target extended-remote` mode, `attach <pid>` makes that process the inspection context, as `monitor .process /i` does: memory reads and new breakpoints use the address space of the process, and the library list adds the modules of the process. The threads stay the vCPUs, and gdb names them with the PID, for example `Thread 6212.2`.
+
+```text
+(gdb) target extended-remote 127.0.0.1:2345
+(gdb) info os processes
+(gdb) attach 6212
+(gdb) detach
+```
+
+When you connect, gdb is attached to the kernel, which has PID 1. Because gdb attaches to one process at a time, it asks to kill the kernel before it attaches to another process. Nothing is killed: the server only forgets the breakpoints of the client and returns to the kernel context. To avoid the question, `detach` first. `detach` in extended mode removes the breakpoints of the client and lets the guest run, and gdb stays connected. To return to the kernel context, `attach 1`. An attach halts a running target.
 
 ### Ghidra
 
@@ -106,16 +124,18 @@ Binary Ninja can exit if it disconnects while it reads memory. By then, the serv
 | --- | --- |
 | Threads | Backend execution contexts (vCPUs), as {command}`~` lists them. At each stop, the server names each thread with the process and symbol that it runs. Because IDA keeps the name from the first time it sees the thread, only the vCPU part of the name stays current in IDA |
 | Registers | The AMD64 or AArch64 register file, with GDB's standard names. A register that gdb requires but the transport does not have reads as unavailable, for example x87 over KD. The server does not describe optional registers that the transport does not have, such as segment bases over KD and debug registers over QEMU's stub |
-| Memory | Virtual reads and writes in the current inspection context |
-| Software breakpoints (`Z0`) | `bp <address>` |
+| Memory | Virtual reads and writes in the current inspection context. A read that runs into unreadable memory returns the bytes before it |
+| Software breakpoints (`Z0`) | `bp <address>`. A breakpoint on a page that is paged out is accepted, and the target writes it when the page arrives, but a breakpoint on a page that can hold no code, unmapped or demand-zero, such as a discarded `INIT` section, is refused |
 | Hardware breakpoints (`Z1`) | `ba e1 <address>` |
 | Watchpoints (`Z2`-`Z4`) | `ba w` and `ba r`. A read watch also traps writes because x86 has no read-only watch |
 | Step and continue | Step single-steps the selected vCPU, and continue resumes all vCPUs. Over `kd` and `kdnet`, the other vCPUs run during a step, and on an ARM64 target only the vCPU that stopped can step. A step or continue that cannot run is reported as `SIGINT`, with the reason on the console |
 | Interrupt | Break-in, reported as `SIGINT` |
 | `monitor` | Any ntoseye command that does not resume, step, reboot, or crash the target. `q` and `.shell` are not available |
 | Library list | Kernel modules, plus the modules of the current process after {command}`.process`. On a user-mode minidump, the dump's modules. Each library is named `/` followed by its file name |
+| Processes (`info os processes`, `attach`) | The Windows process list, with PIDs and image names. In extended mode, `attach` selects a process as the inspection context, as {command}`.process` `/i` does |
 | Program | `/ntoskrnl.exe`, or the main image of a user-mode minidump, with its relocation from the preferred base of its file (`qOffsets`) |
 | Memory map | The user and kernel halves of the address space, with each library image as a separate region |
+| Memory regions (lldb) | The regions of the memory map, and the gaps between them, which have no permissions |
 | Console output | Guest `DbgPrint` output and stop details, while the target runs |
 | Remote files (`vFile`) | Read-only. The PE file of the loaded module that has the requested file name, and a generated `/proc/<pid>/maps` |
 
@@ -181,6 +201,9 @@ When a client detaches or disconnects, the server removes that client's breakpoi
 ## Limitations
 
 - If a driver loads while the target runs, the driver appears in the library list the next time that the client reads the list.
+- A register that the transport does not have, such as x87 state over KD or in a kernel dump, reads as unavailable. gdb then prints `Cannot convert st0's value: '<unavailable>'`, and Ghidra reports that it could not read the registers. gdb requires these registers, so the server cannot leave them out.
+- Binary Ninja reads unreadable memory one byte at a time when its database is not rebased onto the target, which can take a long time on `ntoskrnl.exe`.
+- Over `kd` and `kdnet`, a single step can finish on another processor, because Windows can move the stepping thread while the step runs. gdb then reports `received signal SIGTRAP` on that processor's thread and switches to it. That is where the step landed, and stepping continues from there.
 
 ## Troubleshooting
 

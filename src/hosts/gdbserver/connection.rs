@@ -1,120 +1,81 @@
-//! The client socket: RSP framing around gdbstub, the polling reads that
-//! keep the serving thread free, and the packets the server answers itself.
+//! The client socket: framing, acknowledgments and their retransmissions,
+//! the polling reads that keep the serving thread free, and the packet
+//! trace.
 
-use std::fmt::Write as _;
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use gdbstub::conn::{Connection, ConnectionExt};
+use gdb_remote::frame::{self, Corruption, Decoder, Frame, Kind};
+use gdb_remote::stop::StopReply;
 
-use crate::backend::gdb::{append_packet, packet_checksum, trace_packet};
+use crate::backend::gdb::trace_packet;
 use crate::base::error::Error;
 
-use super::{IDLE_POLL, PACKET_SIZE};
+use super::PACKET_SIZE;
 
-/// Console text carried per `O` packet, before hex encoding.
-const CONSOLE_CHUNK: usize = 1024;
-/// Appended to gdbstub's `qSupported` reply so clients ask for it.
-const THREADS_FEATURE: &[u8] = b";qXfer:threads:read+";
+/// Console text carried per `O` packet, before hex encoding: the packet
+/// fits the size the server advertises.
+const CONSOLE_CHUNK: usize = PACKET_SIZE / 2 - 1;
+/// Frames a client may send while the target runs, which wait for the
+/// stop. A client in all-stop mode sends the interrupt byte and little
+/// else (acknowledgments of console output); past this many, it is
+/// dropped rather than held without bound.
+const HELD_WHILE_RUNNING: usize = 256;
 
 pub(super) fn connection_error(error: io::Error) -> Error {
     Error::DebugInfo(format!("connection lost: {error}"))
 }
 
-/// A client socket. Writes are buffered until gdbstub ends a packet, and a
-/// blocking read gives up periodically so the caller can do other work.
-pub(super) struct Client {
+/// What the client sent that the server acts on.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Incoming {
+    /// A request: the packet's body.
+    Packet(Vec<u8>),
+    /// The interrupt byte.
+    Interrupt,
+}
+
+/// A client socket. Reads give up periodically so the caller can do other
+/// work; what they bring is decoded a frame at a time.
+pub(super) struct Connection {
     stream: TcpStream,
-    out: Vec<u8>,
-    inbox: Vec<u8>,
-    pub(super) next: usize,
-    /// The client turned off acknowledgments (`QStartNoAckMode`).
+    decoder: Decoder,
+    /// Frames read and not yet taken, in order.
+    frames: VecDeque<Frame>,
+    /// The client turned acknowledgments off (`QStartNoAckMode`).
     no_ack: bool,
-    /// A `qSupported` went to gdbstub, whose reply must advertise the
-    /// thread-list transfer the server answers itself.
-    advertise_threads: bool,
-    /// The client negotiated `multiprocess+`, so thread ids carry a pid.
-    pub(super) multiprocess: bool,
+    /// The last packet sent, framed, for a `-` to ask for again.
+    last: Vec<u8>,
     terminating: Arc<AtomicBool>,
 }
 
-impl Client {
+impl Connection {
     pub(super) fn new(stream: TcpStream, terminating: Arc<AtomicBool>) -> io::Result<Self> {
         // The listener is non-blocking so accept can poll; the client is not.
         stream.set_nonblocking(false)?;
+        stream.set_nodelay(true)?;
         Ok(Self {
             stream,
-            out: Vec::new(),
-            inbox: Vec::new(),
-            next: 0,
+            decoder: Decoder::new(),
+            frames: VecDeque::new(),
             no_ack: false,
-            advertise_threads: false,
-            multiprocess: false,
+            last: Vec::new(),
             terminating,
         })
     }
 
-    /// The rest of a packet whose `$` was just read: its body, and the whole
-    /// packet as received.
-    pub(super) fn read_packet(&mut self) -> io::Result<(Vec<u8>, Vec<u8>)> {
-        let mut raw = vec![b'$'];
-        loop {
-            let byte = ConnectionExt::read(self)?;
-            raw.push(byte);
-            if byte == b'#' {
-                break;
-            }
-        }
-        for _ in 0..2 {
-            raw.push(ConnectionExt::read(self)?);
-        }
-        let body = raw[1..raw.len() - 3].to_vec();
-        Ok((body, raw))
+    /// From the next packet on, neither side acknowledges.
+    pub(super) fn stop_acknowledging(&mut self) {
+        self.no_ack = true;
     }
 
-    /// Track what a packet headed for gdbstub changes about framing.
-    pub(super) fn observe(&mut self, body: &[u8]) {
-        if body.starts_with(b"qSupported") {
-            self.advertise_threads = true;
-            self.multiprocess = body
-                .split(|byte| matches!(byte, b':' | b';'))
-                .any(|feature| feature == b"multiprocess+");
-        }
-        if body == b"QStartNoAckMode" {
-            self.no_ack = true;
-        }
-    }
-
-    /// Whether `byte`, read between packets, is an acknowledgment the
-    /// server drops rather than handing gdbstub. gdb sends `-` each time a
-    /// reply takes longer than its `remotetimeout` (2 s by default, which a
-    /// `monitor` command loading symbols can exceed), in either mode, and
-    /// keeps waiting. No reply has gone out to retransmit then, so the only
-    /// right answer is the late reply itself; gdbstub, which cannot
-    /// retransmit, would drop the client instead. In no-acknowledgment mode
-    /// neither side may expect `+` or `-` at all.
-    pub(super) fn drops_acknowledgment(&self, byte: u8) -> bool {
-        byte == b'-' || (self.no_ack && byte == b'+')
-    }
-
-    /// Answer a packet the server handled itself.
-    pub(super) fn reply(&mut self, body: &[u8]) -> io::Result<()> {
-        if !self.no_ack {
-            self.out.push(b'+');
-        }
-        append_packet(&mut self.out, body);
-        Connection::flush(self)
-    }
-
-    /// Refill the inbox from the socket, waiting at most `timeout` (`None`:
-    /// not at all). Returns whether a byte is available.
+    /// Read what the socket has, waiting at most `timeout` (`None`: not at
+    /// all), into frames. Returns whether anything arrived.
     fn fill(&mut self, timeout: Option<Duration>) -> io::Result<bool> {
-        if self.next < self.inbox.len() {
-            return Ok(true);
-        }
         match timeout {
             Some(timeout) => {
                 self.stream.set_nonblocking(false)?;
@@ -122,15 +83,9 @@ impl Client {
             }
             None => self.stream.set_nonblocking(true)?,
         }
-        self.inbox.resize(PACKET_SIZE, 0);
-        self.next = 0;
-        // gdbstub implements its own `Connection` for `TcpStream`, so the
-        // socket's `io` methods are named explicitly.
-        let read = match Read::read(&mut self.stream, &mut self.inbox) {
-            Ok(0) => {
-                self.inbox.clear();
-                return Err(io::ErrorKind::UnexpectedEof.into());
-            }
+        let mut buffer = [0u8; PACKET_SIZE];
+        let read = match self.stream.read(&mut buffer) {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
             Ok(read) => read,
             Err(error)
                 if matches!(
@@ -140,220 +95,311 @@ impl Client {
                         | io::ErrorKind::Interrupted
                 ) =>
             {
-                0
+                return Ok(false);
             }
-            Err(error) => {
-                self.inbox.clear();
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
-        self.inbox.truncate(read);
-        Ok(read > 0)
+        for frame in self.decoder.decode(&buffer[..read]) {
+            match &frame {
+                Frame::Packet(body) => {
+                    let mut packet = Vec::with_capacity(body.len() + 4);
+                    frame::write_packet(&mut packet, body);
+                    trace_packet("client", "<-", &packet);
+                }
+                Frame::Interrupt => trace_packet("client", "<-", &[frame::INTERRUPT]),
+                Frame::Corrupt(corruption) => {
+                    trace_packet("client", "<-", format!("{corruption:?}").as_bytes());
+                }
+                Frame::Ack | Frame::Nack | Frame::Notification(_) => {}
+            }
+            self.frames.push_back(frame);
+        }
+        Ok(true)
     }
 
-    /// One byte, or `None` when nothing arrived within `timeout`.
-    pub(super) fn read_byte(&mut self, timeout: Duration) -> io::Result<Option<u8>> {
-        if !self.fill(Some(timeout))? {
-            return Ok(None);
+    /// The next request or interrupt, waiting at most `timeout` for one.
+    /// Acknowledgments are handled here: a packet is acknowledged as it
+    /// arrives, a corrupt one asked for again, and a `-` answered with the
+    /// last packet sent.
+    pub(super) fn next(&mut self, timeout: Duration) -> io::Result<Option<Incoming>> {
+        let mut waited = false;
+        loop {
+            if let Some(frame) = self.frames.pop_front() {
+                if let Some(incoming) = self.take(frame)? {
+                    return Ok(Some(incoming));
+                }
+                continue;
+            }
+            if waited || self.terminating.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
+            self.fill(Some(timeout))?;
+            waited = true;
         }
-        let byte = self.inbox[self.next];
-        self.next += 1;
-        Ok(Some(byte))
+    }
+
+    /// What `frame` asks of the server, after acknowledging it.
+    fn take(&mut self, frame: Frame) -> io::Result<Option<Incoming>> {
+        let body = match frame {
+            Frame::Packet(body) => body,
+            Frame::Interrupt => return Ok(Some(Incoming::Interrupt)),
+            // Only a `-` read after the last packet went out asks for it:
+            // one sent before it (gdb sends `-` whenever a reply outlasts
+            // its timeout, in either mode) was dropped when it went out.
+            Frame::Nack if !self.no_ack && !self.last.is_empty() => {
+                let last = std::mem::take(&mut self.last);
+                let sent = self.write(&last);
+                self.last = last;
+                sent?;
+                return Ok(None);
+            }
+            Frame::Ack | Frame::Nack | Frame::Notification(_) => return Ok(None),
+            // gdbserver's rule: with acknowledgments off nothing can ask
+            // for the packet again, so its body is taken as it came.
+            Frame::Corrupt(Corruption::Checksum {
+                kind: Kind::Packet,
+                body,
+                ..
+            }) if self.no_ack => body,
+            Frame::Corrupt(_) if self.no_ack => return Ok(None),
+            Frame::Corrupt(_) => {
+                self.write(&[frame::NACK])?;
+                return Ok(None);
+            }
+        };
+        if !self.no_ack {
+            self.write(&[frame::ACK])?;
+        }
+        Ok(Some(Incoming::Packet(body)))
+    }
+
+    /// Whether the client sent the interrupt byte; what else it sent waits
+    /// for [`Self::next`], up to [`HELD_WHILE_RUNNING`] frames. Never
+    /// blocks.
+    pub(super) fn interrupted(&mut self) -> io::Result<bool> {
+        self.fill(None)?;
+        match self
+            .frames
+            .iter()
+            .position(|frame| *frame == Frame::Interrupt)
+        {
+            Some(at) => {
+                self.frames.remove(at);
+                Ok(true)
+            }
+            None if self.frames.len() > HELD_WHILE_RUNNING => Err(io::Error::other(format!(
+                "the client sent more than {HELD_WHILE_RUNNING} packets while the target ran"
+            ))),
+            None => Ok(false),
+        }
+    }
+
+    /// Send `body` as a packet. Acknowledgments that arrived before it
+    /// cannot be about it, and are dropped.
+    pub(super) fn send(&mut self, body: &[u8]) -> io::Result<()> {
+        self.fill(None)?;
+        self.frames
+            .retain(|frame| !matches!(frame, Frame::Ack | Frame::Nack));
+        let mut packet = Vec::with_capacity(body.len() + 4);
+        frame::write_packet(&mut packet, body);
+        self.write(&packet)?;
+        self.last = packet;
+        Ok(())
     }
 
     /// Send console text as `O` packets, which a client shows while the
-    /// target runs. The client's acknowledgment (in ack mode) is a bare `+`
-    /// that gdbstub skips as noise.
+    /// target runs and as a `monitor` command's output.
     pub(super) fn console(&mut self, text: &str) -> io::Result<()> {
+        let mut body = Vec::new();
         for chunk in text.as_bytes().chunks(CONSOLE_CHUNK) {
-            let mut body = String::with_capacity(chunk.len() * 2 + 1);
-            body.push('O');
-            for byte in chunk {
-                let _ = write!(body, "{byte:02x}");
-            }
-            append_packet(&mut self.out, body.as_bytes());
+            body.clear();
+            StopReply::Output(chunk.to_vec()).write(&mut body);
+            self.send(&body)?;
         }
-        Connection::flush(self)
-    }
-}
-
-/// Append `feature` to the `qSupported` reply packet in `out`, fixing its
-/// checksum. `None` when `out` holds no such reply.
-fn advertise(out: &[u8], feature: &[u8]) -> Option<Vec<u8>> {
-    let start = out
-        .windows(12)
-        .position(|window| window == b"$PacketSize=")?;
-    let hash = start + out[start..].iter().position(|byte| *byte == b'#')?;
-    let digits = std::str::from_utf8(out.get(hash + 1..hash + 3)?).ok()?;
-    let checksum = u8::from_str_radix(digits, 16).ok()?;
-    let checksum = checksum.wrapping_add(packet_checksum(feature));
-    let mut rewritten = out[..hash].to_vec();
-    rewritten.extend_from_slice(feature);
-    rewritten.extend_from_slice(format!("#{checksum:02x}").as_bytes());
-    rewritten.extend_from_slice(&out[hash + 3..]);
-    Some(rewritten)
-}
-
-/// The `offset,length` (hex) of a `qXfer` read.
-pub(super) fn xfer_window(window: &[u8]) -> Option<(usize, usize)> {
-    let (offset, length) = std::str::from_utf8(window).ok()?.split_once(',')?;
-    Some((
-        usize::from_str_radix(offset, 16).ok()?,
-        usize::from_str_radix(length, 16).ok()?,
-    ))
-}
-
-/// A `qXfer` read reply for `[offset, offset + length)` of `data`: `m` when
-/// more follows, `l` at the end, with the binary escapes the protocol needs.
-pub(super) fn xfer_reply(data: &[u8], offset: usize, length: usize) -> Vec<u8> {
-    let start = offset.min(data.len());
-    let end = start.saturating_add(length).min(data.len());
-    let mut reply = vec![if end < data.len() { b'm' } else { b'l' }];
-    for &byte in &data[start..end] {
-        if matches!(byte, b'#' | b'$' | b'}' | b'*') {
-            reply.extend_from_slice(&[b'}', byte ^ 0x20]);
-        } else {
-            reply.push(byte);
-        }
-    }
-    reply
-}
-
-impl Connection for Client {
-    type Error = io::Error;
-
-    fn write(&mut self, byte: u8) -> io::Result<()> {
-        self.out.push(byte);
         Ok(())
     }
 
-    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.out.extend_from_slice(buf);
-        Ok(())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        if self.advertise_threads
-            && let Some(rewritten) = advertise(&self.out, THREADS_FEATURE)
-        {
-            self.out = rewritten;
-            self.advertise_threads = false;
-        }
-        trace_packet("client", "->", &self.out);
+    fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        trace_packet("client", "->", bytes);
         self.stream.set_nonblocking(false)?;
-        Write::write_all(&mut self.stream, &self.out)?;
-        self.out.clear();
-        Write::flush(&mut self.stream)
-    }
-
-    fn on_session_start(&mut self) -> io::Result<()> {
-        self.stream.set_nodelay(true)
-    }
-}
-
-impl ConnectionExt for Client {
-    fn read(&mut self) -> io::Result<u8> {
-        loop {
-            if self.terminating.load(Ordering::SeqCst) {
-                return Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "termination signal received",
-                ));
-            }
-            if let Some(byte) = self.read_byte(IDLE_POLL)? {
-                return Ok(byte);
-            }
-        }
-    }
-
-    fn peek(&mut self) -> io::Result<Option<u8>> {
-        Ok(self.fill(None)?.then(|| self.inbox[self.next]))
+        self.stream.write_all(bytes)?;
+        self.stream.flush()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
 
-    use super::{Client, advertise, xfer_reply};
-    use crate::backend::gdb::{append_packet, packet_checksum};
+    use gdb_remote::frame::{Decoder, Frame, write_packet};
+    use gdb_remote::stop::StopReply;
 
-    /// gdb sends `-` whenever a reply outlasts its `remotetimeout`, in
-    /// either mode; the server drops it, where gdbstub dropped the client.
-    /// `+` is gdbstub's to skip in acknowledgment mode, and noise once the
-    /// client turned acknowledgments off.
-    #[test]
-    fn a_late_reply_nak_is_dropped_and_acks_only_without_acknowledgments() {
+    use super::{CONSOLE_CHUNK, Connection, HELD_WHILE_RUNNING, Incoming, PACKET_SIZE};
+
+    const WAIT: Duration = Duration::from_millis(200);
+
+    /// A server connection and the client's end of it.
+    fn connected() -> (Connection, TcpStream) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let _peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (stream, _) = listener.accept().unwrap();
-        let mut client = Client::new(stream, Arc::new(AtomicBool::new(false))).unwrap();
-        assert!(client.drops_acknowledgment(b'-'));
-        assert!(!client.drops_acknowledgment(b'+'));
-        assert!(!client.drops_acknowledgment(b'$'));
-        client.observe(b"QStartNoAckMode");
-        assert!(client.drops_acknowledgment(b'-'));
-        assert!(client.drops_acknowledgment(b'+'));
-        assert!(
-            !client.drops_acknowledgment(0x03),
-            "an interrupt is never dropped"
+        client.set_read_timeout(Some(WAIT)).unwrap();
+        let connection = Connection::new(stream, Arc::new(AtomicBool::new(false))).unwrap();
+        (connection, client)
+    }
+
+    fn packet(body: &[u8]) -> Vec<u8> {
+        let mut packet = Vec::new();
+        write_packet(&mut packet, body);
+        packet
+    }
+
+    /// Every frame the client received, until it stops arriving.
+    fn received(client: &mut TcpStream) -> Vec<Frame> {
+        let mut decoder = Decoder::new();
+        let mut frames = Vec::new();
+        let mut buffer = [0u8; 4096];
+        while let Ok(read @ 1..) = client.read(&mut buffer) {
+            frames.extend(decoder.decode(&buffer[..read]));
+        }
+        frames
+    }
+
+    /// In acknowledgment mode a request is acknowledged before it is
+    /// answered (so a slow answer does not make gdb send the request
+    /// again), a corrupt one is asked for again, and a `-` after a reply
+    /// gets that reply again.
+    #[test]
+    fn acknowledgment_mode_acks_naks_and_resends() {
+        let (mut connection, mut client) = connected();
+        let mut corrupt = packet(b"g");
+        *corrupt.last_mut().unwrap() = b'0';
+        client.write_all(&corrupt).unwrap();
+        client.write_all(&packet(b"?")).unwrap();
+        assert_eq!(
+            connection.next(WAIT).unwrap(),
+            Some(Incoming::Packet(b"?".to_vec()))
+        );
+        connection.send(b"S05").unwrap();
+        assert_eq!(
+            received(&mut client),
+            [Frame::Nack, Frame::Ack, Frame::Packet(b"S05".to_vec())]
+        );
+
+        client.write_all(b"-").unwrap();
+        assert_eq!(connection.next(WAIT).unwrap(), None);
+        assert_eq!(received(&mut client), [Frame::Packet(b"S05".to_vec())]);
+    }
+
+    /// gdb sends `-` each time a reply outlasts its timeout, before the
+    /// reply exists. Resending the reply for it would answer the next
+    /// request with this one, and every reply after would be one off.
+    #[test]
+    fn a_nak_sent_before_the_reply_does_not_resend_it() {
+        let (mut connection, mut client) = connected();
+        client.write_all(&packet(b"qRcmd,6c6d")).unwrap();
+        connection.next(WAIT).unwrap();
+        // The client times out while the command runs.
+        client.write_all(b"-").unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        connection.send(b"OK").unwrap();
+        client.write_all(&packet(b"g")).unwrap();
+        assert_eq!(
+            connection.next(WAIT).unwrap(),
+            Some(Incoming::Packet(b"g".to_vec()))
+        );
+        assert_eq!(
+            received(&mut client),
+            [Frame::Ack, Frame::Packet(b"OK".to_vec()), Frame::Ack]
         );
     }
 
-    fn checksum_valid(packet: &[u8]) -> bool {
-        let start = packet.iter().position(|byte| *byte == b'$').unwrap();
-        let hash = packet.iter().rposition(|byte| *byte == b'#').unwrap();
-        let sum = packet_checksum(&packet[start + 1..hash]);
-        let digits = std::str::from_utf8(&packet[hash + 1..hash + 3]).unwrap();
-        u8::from_str_radix(digits, 16).unwrap() == sum
+    /// Without acknowledgments nothing is acknowledged or resent, and a
+    /// packet whose checksum is wrong is taken as it came, as gdbserver
+    /// takes it: nothing could ask for it again.
+    #[test]
+    fn no_ack_mode_takes_packets_as_they_come() {
+        let (mut connection, mut client) = connected();
+        connection.stop_acknowledging();
+        let mut corrupt = packet(b"g");
+        *corrupt.last_mut().unwrap() = b'0';
+        client.write_all(&corrupt).unwrap();
+        assert_eq!(
+            connection.next(WAIT).unwrap(),
+            Some(Incoming::Packet(b"g".to_vec()))
+        );
+        connection.send(b"OK").unwrap();
+        client.write_all(b"-+").unwrap();
+        assert_eq!(connection.next(WAIT).unwrap(), None);
+        assert_eq!(received(&mut client), [Frame::Packet(b"OK".to_vec())]);
     }
 
-    /// The feature is spliced into gdbstub's reply after the fact: a stale
-    /// checksum makes the client reject the whole handshake. A leading ack must
-    /// survive, and a packet that is not the reply must be left alone.
+    /// While the target runs only the interrupt is taken; a request sent
+    /// meanwhile waits its turn instead of being lost.
     #[test]
-    fn advertised_feature_keeps_the_qsupported_reply_valid() {
-        let mut out = vec![b'+'];
-        append_packet(&mut out, b"PacketSize=4000;vContSupported+");
-        let rewritten = advertise(&out, b";qXfer:threads:read+").unwrap();
-
-        assert!(rewritten.starts_with(b"+$PacketSize=4000;vContSupported+;qXfer:threads:read+#"));
-        assert!(checksum_valid(&rewritten));
-
-        let mut other = Vec::new();
-        append_packet(&mut other, b"OK");
-        assert_eq!(advertise(&other, b";qXfer:threads:read+"), None);
+    fn an_interrupt_is_found_behind_a_waiting_request() {
+        let (mut connection, mut client) = connected();
+        connection.stop_acknowledging();
+        client.write_all(&packet(b"qC")).unwrap();
+        client.write_all(&[0x03]).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(connection.interrupted().unwrap());
+        assert!(!connection.interrupted().unwrap());
+        assert_eq!(
+            connection.next(WAIT).unwrap(),
+            Some(Incoming::Packet(b"qC".to_vec()))
+        );
     }
 
-    /// Chunked reads must reassemble to the object exactly: `m` while more
-    /// follows, `l` on the last window, and RSP's reserved bytes escaped.
+    /// What waits for the stop is bounded: a client that keeps sending
+    /// requests while the target runs is dropped, not buffered forever.
     #[test]
-    fn xfer_windows_reassemble_the_escaped_object() {
-        let data = b"<threads name=\"a*b#c$d}e\"/>";
-        let mut reassembled = Vec::new();
-        let mut offset = 0;
-        loop {
-            let reply = xfer_reply(data, offset, 5);
-            let mut unescaped = Vec::new();
-            let mut bytes = reply[1..].iter();
-            while let Some(&byte) = bytes.next() {
-                assert!(!matches!(byte, b'#' | b'$' | b'*'), "unescaped {byte}");
-                unescaped.push(if byte == b'}' {
-                    bytes.next().unwrap() ^ 0x20
-                } else {
-                    byte
-                });
-            }
-            offset += unescaped.len();
-            reassembled.extend(unescaped);
-            match reply[0] {
-                b'm' => continue,
-                b'l' => break,
-                other => panic!("bad reply kind {other}"),
+    fn a_client_flooding_a_running_target_is_dropped() {
+        let (mut connection, mut client) = connected();
+        connection.stop_acknowledging();
+        let flood = packet(b"qC").repeat(HELD_WHILE_RUNNING + 1);
+        client.write_all(&flood).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        let mut outcome = Ok(false);
+        // The socket may hand the flood over in several reads.
+        for _ in 0..10 {
+            outcome = connection.interrupted();
+            if outcome.is_err() {
+                break;
             }
         }
-        assert_eq!(reassembled, data);
+        assert!(outcome.is_err());
+    }
+
+    /// Console text is split into `O` packets that fit the advertised
+    /// packet size and reassemble to the text.
+    #[test]
+    fn console_text_fits_the_packet_size() {
+        let (mut connection, mut client) = connected();
+        connection.stop_acknowledging();
+        let text = "x".repeat(CONSOLE_CHUNK * 2 + 3);
+        connection.console(&text).unwrap();
+        let mut decoder = Decoder::new();
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 65536];
+        while let Ok(read @ 1..) = client.read(&mut chunk) {
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        let mut reassembled = Vec::new();
+        for frame in decoder.decode(&buffer) {
+            let Frame::Packet(body) = frame else {
+                panic!("{frame:?}");
+            };
+            assert!(body.len() <= PACKET_SIZE);
+            let Ok(StopReply::Output(text)) = StopReply::parse(&body) else {
+                panic!("not console output");
+            };
+            reassembled.extend(text);
+        }
+        assert_eq!(reassembled, text.as_bytes());
     }
 }

@@ -7,7 +7,7 @@
 //! state, for instance) is reported unavailable instead of as zero; an
 //! optional one it does not carry is left out of the layout.
 
-use std::fmt::Write as _;
+use gdb_remote::target::{Description, Feature, Part, Register};
 
 use crate::arch::{Arch, RegisterMap};
 use crate::base::error::{Error, Result};
@@ -54,6 +54,18 @@ impl Layout {
         &self.target_xml
     }
 
+    /// Every register unavailable, in `g` order: a context that cannot be
+    /// read.
+    pub fn unavailable(&self) -> Vec<Option<u8>> {
+        vec![None; self.registers.iter().map(|register| register.bytes).sum()]
+    }
+
+    /// One register unavailable, by its position in the target
+    /// description; `None` when there is no such register.
+    pub fn unavailable_one(&self, regnum: usize) -> Option<Vec<Option<u8>>> {
+        Some(vec![None; self.registers.get(regnum)?.bytes])
+    }
+
     /// The register file in `g` order. Bytes of a register the transport does
     /// not carry, or that `known` says this file does not record, are
     /// `None`, which the protocol sends as `xx`.
@@ -71,19 +83,20 @@ impl Layout {
     }
 
     /// One register by its position in the target description, or `None`
-    /// when there is no such register, the transport does not carry it, or
-    /// `known` says this file does not record it.
+    /// when there is no such register. Its bytes are `None` when the
+    /// transport does not carry it or `known` says this file does not
+    /// record it.
     pub fn encode_one(
         &self,
         regnum: usize,
         map: &RegisterMap,
         file: &[u8],
         known: impl Fn(&str) -> bool,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<Vec<Option<u8>>> {
         let register = self.registers.get(regnum)?;
         let mut wire = Vec::with_capacity(register.bytes);
         encode_into(register, map, file, &known, &mut wire);
-        wire.into_iter().collect()
+        Some(wire)
     }
 
     /// Apply a full `G` payload to the register file. Registers the transport
@@ -174,32 +187,34 @@ fn decode_into(register: &WireRegister, map: &RegisterMap, file: &mut [u8], valu
     }
 }
 
+/// The target description: `registers` in order, each in its feature,
+/// numbered by position.
 fn target_xml(architecture: &str, registers: &[WireRegister]) -> String {
-    let mut xml = format!(
-        "<?xml version=\"1.0\"?>\n<!DOCTYPE target SYSTEM \"gdb-target.dtd\">\n\
-         <target version=\"1.0\">\n<architecture>{architecture}</architecture>\n"
-    );
-    let mut open: Option<&str> = None;
+    let mut description = Description {
+        architecture: Some(architecture.to_string()),
+        ..Description::default()
+    };
     for register in registers {
-        if open != Some(register.feature) {
-            if open.is_some() {
-                xml.push_str("</feature>\n");
+        let reg = Register {
+            name: register.name.clone(),
+            bitsize: u32::try_from(register.bytes * 8).unwrap_or(u32::MAX),
+            regnum: None,
+            ty: Some(register.ty.to_string()),
+            group: None,
+            save_restore: true,
+        };
+        match description.parts.last_mut() {
+            Some(Part::Feature(feature)) if feature.name == register.feature => {
+                feature.registers.push(reg);
             }
-            let _ = writeln!(xml, "<feature name=\"{}\">", register.feature);
-            open = Some(register.feature);
+            _ => description.parts.push(Part::Feature(Feature {
+                name: register.feature.to_string(),
+                registers: vec![reg],
+            })),
         }
-        let _ = writeln!(
-            xml,
-            "<reg name=\"{}\" bitsize=\"{}\" type=\"{}\"/>",
-            register.name,
-            register.bytes * 8,
-            register.ty
-        );
     }
-    if open.is_some() {
-        xml.push_str("</feature>\n");
-    }
-    xml.push_str("</target>\n");
+    let mut xml = String::new();
+    description.write(&mut xml);
     xml
 }
 

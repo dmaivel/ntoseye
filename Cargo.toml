@@ -60,6 +60,7 @@ sha1 = "0.10"
 sha2 = "0.10"
 subtle = "2.6"
 indexmap = "2.14.0"
+gdb-remote = "0.1"
 # Published with the same version, before this crate.
 ntoseye-macros = { version = "=0.53.0", path = "macros" }
 
@@ -85,7 +86,6 @@ tokio-util = { version = "0.7", default-features = false, optional = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"], optional = true }
 tower-http = { version = "0.7", default-features = false, features = ["cors"], optional = true }
 anyhow = { version = "1", optional = true }
-gdbstub = { version = "0.7.10", default-features = false, features = ["std"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31.3", features = [ "process", "uio" ] }
@@ -118,7 +118,7 @@ repl = []
 cli = ["repl", "dep:ctrlc", "dep:clap", "dep:dialoguer", "dep:mimalloc", "dep:nu-ansi-term", "dep:reedline", "dep:tern-sdk"]
 mcp = ["repl", "dep:rmcp", "dep:schemars", "dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-util", "dep:axum", "dep:tower-http", "dep:anyhow"]
 dap = ["repl", "dep:serde_json", "dep:base64"]
-gdbserver = ["repl", "dep:gdbstub"]
+gdbserver = ["repl"]
 python = ["repl", "dep:pyo3", "pyo3/multiple-pymethods"]
 python-embed = ["python", "pyo3/auto-initialize", "dep:pyo3-build-config"]
 python-extension = ["python", "pyo3/extension-module"]

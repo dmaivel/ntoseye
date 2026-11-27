@@ -18,10 +18,20 @@ Keeping this file:
 ### Added
 
 - ntoseye builds and runs on Windows on x86-64, installed with `cargo install ntoseye` or built from source (there are no prebuilt binaries or wheels for Windows): the prompt, the `kd`, `kdnet`, `gdb` and `memory` backends, crash-dump analysis, MCP, DAP and gdbserver all work in a build for `x86_64-pc-windows-msvc`. There, `kd` takes a named pipe instead of a Unix socket (`--connect \\.\pipe\ntoseye-kd`, the default; a bare name is taken relative to `\\.\pipe\`), which is the pipe QEMU's `-chardev pipe,id=kd,path=ntoseye-kd` creates and waits on, `--backend memory` reads a running `qemu-system-*.exe` or `vmware-vmx.exe` VM's memory through `ReadProcessMemory`, and `ntoseye configure` prints the guest and QEMU commands instead of editing a hypervisor.
+- With `ntoseye gdbserver`, gdb's `info os processes` lists the target's Windows processes, and in `target extended-remote` mode `attach <pid>` makes a process the inspection context, as `monitor .process /i` does, with its modules added to the library list; `detach` leaves gdb connected, and `attach 1` returns to the kernel.
+- With `ntoseye gdbserver`, lldb learns that the target is Windows on x86-64 or ARM64, finds memory regions (`memory region`), reads memory with binary transfers, and asks which thread stopped and why.
 
 ### Changed
 
 - AArch64 instructions are decoded by [exarmo](https://github.com/Vector35/exarmo), a decoder generated from Arm's machine-readable ISA specification, in place of the bindings to Binary Ninja's C decoder (`bad64`). The text, operands and coloring are the same: the registers the assembler names (`fp`, `lr`), the same `#0x…` numerals, and the same branch targets. A build no longer needs a C toolchain for the decoder, so `cargo install` and `cargo build` on Linux no longer need clang.
+- With the `gdb` backend, the Debug Adapter names a running target's vCPUs `p1.2 (running)` instead of QEMU's `p01.02 (running)`.
+- `ntoseye gdbserver` answers the GDB protocol itself, where it used the `gdbstub` crate: a client's documents (the target description, memory map, module and thread lists) arrive in fewer round trips, a client that asks for a reply again after a corrupt one gets it, and a client's break-in at connect or attach is reported as `SIGINT`.
+
+### Fixed
+
+- With `ntoseye gdbserver`, lldb no longer aborts with an assertion failure in `IRMemoryMap` on an expression that reads memory, such as `memory read $rsp`.
+- With `ntoseye gdbserver`, gdb lists a processor a crash dump saved no context for with its registers unavailable, where reading them failed (`Could not read registers; remote failure reply '79'`).
+- With `ntoseye gdbserver`, a software breakpoint on a page that can hold no code (unmapped, or demand-zero, as a driver's discarded `INIT` section is, where Binary Ninja puts its entry breakpoint) is refused, where it was accepted and could never hit.
 
 ## v0.53.0 (2026-11-06)
 

@@ -863,18 +863,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "gdbstub"
-version = "0.7.10"
+name = "gdb-remote"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5bafc7e33650ab9f05dcc16325f05d56b8d10393114e31a19a353b86fa60cfe7"
-dependencies = [
- "bitflags 2.13.0",
- "cfg-if",
- "log",
- "managed",
- "num-traits",
- "pastey",
-]
+checksum = "4ea50c7d9ae844f4038c5ff56c33b4ab4576568697aff61c58c0d3dd55f8b16a"
 
 [[package]]
 name = "generic-array"
@@ -1450,12 +1442,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
 
 [[package]]
-name = "managed"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ca88d725a0a943b096803bd34e73a4437208b6077654cc4ecb2947a5f91618d"
-
-[[package]]
 name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1590,7 +1576,7 @@ dependencies = [
  "derive_more",
  "dialoguer",
  "exarmo-aarch64",
- "gdbstub",
+ "gdb-remote",
  "getrandom 0.3.4",
  "hex",
  "hmac",

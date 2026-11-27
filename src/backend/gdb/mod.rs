@@ -1,8 +1,20 @@
-use std::io::{self, BufReader, Read, Write};
-use std::mem;
+use std::borrow::Cow;
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
+
+use gdb_remote::Request;
+use gdb_remote::features::{self, Feature, Support};
+use gdb_remote::frame::{self, Corruption, Decoder, Frame, Kind};
+use gdb_remote::hex;
+use gdb_remote::reply::{
+    ErrorCode, ResumeActions, Status, ThreadList, XferChunk, parse_current_thread,
+};
+use gdb_remote::request::{Action, Breakpoint, BreakpointType, ThreadAction, ThreadOp, XferRead};
+use gdb_remote::stop::{Reason, StopReply};
+use gdb_remote::target::{Description, g_layout};
+use gdb_remote::thread::{Id, ThreadId};
 
 use crate::arch::{
     Arch, Family, HwBreakpointAccess, RegisterInfo, RegisterMap, registers::push_synonyms,
@@ -14,8 +26,6 @@ use crate::backend::phys::HaltClock;
 use crate::base::env::Trace;
 use crate::base::error::{Error, Result};
 
-mod target_xml;
-
 /// Bytes of a packet shown per trace line.
 const TRACE_BYTES: usize = 200;
 
@@ -23,42 +33,39 @@ const TRACE_BYTES: usize = 200;
 /// time since.
 static TRACE_START: LazyLock<Instant> = LazyLock::new(Instant::now);
 
-/// The RSP checksum of a packet body: its bytes summed modulo 256.
-pub fn packet_checksum(body: &[u8]) -> u8 {
-    body.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte))
-}
-
-/// Append `body` to `out` as a `$body#checksum` packet.
-pub fn append_packet(out: &mut Vec<u8>, body: &[u8]) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let checksum = packet_checksum(body);
-    out.reserve(body.len() + 4);
-    out.push(b'$');
-    out.extend_from_slice(body);
-    out.extend_from_slice(&[
-        b'#',
-        HEX[usize::from(checksum >> 4)],
-        HEX[usize::from(checksum & 0xf)],
-    ]);
-}
-
-/// Whether `bytes`, the start of what the stub sent, holds a stop reply
-/// (`S`, `T`, `W`, `X` or `N`) after any acks and whole console-output
-/// packets (`O`).
-fn holds_stop_reply(mut bytes: &[u8]) -> bool {
-    loop {
-        while let [b'+', rest @ ..] = bytes {
-            bytes = rest;
-        }
-        match bytes {
-            [b'$', kind, ..] if b"STWXN".contains(kind) => return true,
-            [b'$', b'O', rest @ ..] => match rest.iter().position(|&byte| byte == b'#') {
-                Some(end) if rest.len() >= end + 3 => bytes = &rest[end + 3..],
-                _ => return false,
-            },
-            _ => return false,
+/// What `frames`, the start of what the stub sent, say of a stop reply:
+/// `Some(true)` at a stop reply past acks and console output (`O`),
+/// `Some(false)` at any other packet, `None` when they end before either.
+fn stop_reply_among(frames: impl IntoIterator<Item = Frame>) -> Option<bool> {
+    for frame in frames {
+        let body = match frame {
+            Frame::Packet(body) => body,
+            // A stop reply garbled on the way is still one: the wait that
+            // reads it asks for it again.
+            Frame::Corrupt(Corruption::Checksum {
+                kind: Kind::Packet,
+                body,
+                ..
+            }) => body,
+            Frame::Corrupt(Corruption::Digits | Corruption::RunLength | Corruption::TooLong) => {
+                return Some(false);
+            }
+            Frame::Ack
+            | Frame::Nack
+            | Frame::Interrupt
+            | Frame::Notification(_)
+            | Frame::Corrupt(Corruption::Checksum {
+                kind: Kind::Notification,
+                ..
+            }) => continue,
+        };
+        match StopReply::parse(&body) {
+            Ok(StopReply::Output(_)) => {}
+            Ok(_) => return Some(true),
+            Err(_) => return Some(false),
         }
     }
+    None
 }
 
 /// Trace one packet on stderr, under [`Trace::Gdb`]: every RSP packet on
@@ -71,6 +78,15 @@ pub fn trace_packet(peer: &str, direction: &str, bytes: &[u8]) {
     if !Trace::Gdb.enabled() {
         return;
     }
+    let shown = trace_text(bytes);
+    let elapsed = TRACE_START.elapsed().as_secs_f64();
+    eprintln!("gdb {elapsed:9.3} {peer:<6} {direction} {shown}");
+}
+
+/// `bytes` as a trace line shows them: printable ASCII as is, anything else
+/// as `\xNN`, and a packet past [`TRACE_BYTES`] cut there and its length
+/// given.
+pub fn trace_text(bytes: &[u8]) -> String {
     let mut shown = String::new();
     for &byte in bytes.iter().take(TRACE_BYTES) {
         match byte {
@@ -81,30 +97,16 @@ pub fn trace_packet(peer: &str, direction: &str, bytes: &[u8]) {
     if bytes.len() > TRACE_BYTES {
         shown.push_str(&format!("... ({} bytes)", bytes.len()));
     }
-    let elapsed = TRACE_START.elapsed().as_secs_f64();
-    eprintln!("gdb {elapsed:9.3} {peer:<6} {direction} {shown}");
+    shown
 }
 
 #[derive(Debug, Default, Clone)]
 struct StubFeatures {
     no_ack_mode: bool,
     qxfer_features_read: bool,
-    /// `vCont;s:<thread>` is supported (`vCont?` lists `s`).
-    thread_step: bool,
-    /// `vCont;c:<thread>` is supported (`vCont?` lists `c`).
-    thread_continue: bool,
-}
-
-#[derive(Debug, Default)]
-enum PacketReadState {
-    #[default]
-    SeekingStart,
-    ReadingData(Vec<u8>),
-    ReadingChecksum {
-        data: Vec<u8>,
-        checksum: [u8; 2],
-        len: usize,
-    },
+    /// The `vCont` actions the stub supports (`vCont?`): `s` steps one
+    /// thread, `c` continues the threads named.
+    actions: ResumeActions,
 }
 
 #[derive(Debug)]
@@ -114,13 +116,12 @@ enum AckResult {
     ReplyStarted,
 }
 
-#[derive(Debug)]
-struct RawPacket {
-    data: Vec<u8>,
-    checksum: [u8; 2],
-}
+/// The signal a stub reports for a pause the host asked for: QEMU's for an
+/// interrupt.
+const SIGINT: u8 = 0x02;
 
-/// The fields of an RSP stop reply this client acts on.
+/// The stop event a stop reply describes: the stopped thread, the address
+/// that fired a watchpoint, and whether the host asked for the stop.
 ///
 /// The signal byte is deliberately not turned into an exception code. A stub
 /// reports `SIGTRAP` for a breakpoint, a watchpoint, and a completed step
@@ -129,76 +130,97 @@ struct RawPacket {
 ///
 /// The signal only separates a requested pause (`SIGINT`, 0x02, which QEMU
 /// reports for an interrupt) from a trap the guest took (`SIGTRAP`, 0x05).
-#[derive(Debug, Default, PartialEq, Eq)]
-struct StopReply {
-    thread_id: Option<String>,
-    /// Address from `watch:`/`rwatch:`/`awatch:`: the data address that made
-    /// a hardware watchpoint fire.
-    watch_address: Option<u64>,
-    /// The stub stopped with `SIGINT`: a break-in the host asked for.
-    break_in: bool,
-}
-
-impl StopReply {
-    /// Parse `T<sig>[<name>:<value>;]...`. `S<sig>` carries only the signal,
-    /// and `W`/`X`/`N` do not describe a stopped thread, so they parse empty.
-    fn parse(response: &str) -> Self {
-        let mut reply = StopReply::default();
-        let Some(body) = response
-            .strip_prefix('T')
-            .or_else(|| response.strip_prefix('S'))
-        else {
-            return reply;
-        };
-        reply.break_in = body
-            .get(..2)
-            .and_then(|sig| u8::from_str_radix(sig, 16).ok())
-            == Some(0x02);
-        let Some(fields) = response.strip_prefix('T').and_then(|body| body.get(2..)) else {
-            return reply;
-        };
-
-        for field in fields.split(';') {
-            let Some((name, value)) = field.split_once(':') else {
-                continue;
-            };
-            match name {
-                "thread" => reply.thread_id = Some(value.to_string()),
+///
+/// `S` carries only the signal, and `W`/`X`/`w`/`N` do not describe a
+/// stopped thread, so they describe nothing else.
+fn stop_event(reply: &[u8]) -> StopEvent {
+    let (thread, watchpoint_address, break_in) = match StopReply::parse(reply) {
+        Ok(StopReply::Signal(signalled)) => (
+            signalled.thread,
+            match signalled.reason {
                 // The three watch kinds differ only in which access trapped,
                 // which the breakpoint already records.
-                "watch" | "rwatch" | "awatch" => {
-                    reply.watch_address = u64::from_str_radix(value, 16).ok();
-                }
-                _ => {}
-            }
-        }
-
-        reply
+                Some(
+                    Reason::Watch(address)
+                    | Reason::ReadWatch(address)
+                    | Reason::AccessWatch(address),
+                ) => Some(address),
+                _ => None,
+            },
+            signalled.signal == SIGINT,
+        ),
+        _ => (None, None, false),
+    };
+    StopEvent {
+        thread_id: thread.as_ref().map(thread_name),
+        watchpoint_address,
+        exception_code: None,
+        first_chance: None,
+        exception_address: None,
+        program_counter: None,
+        is_bugcheck: false,
+        bugcheck: None,
+        target_reloaded: false,
+        target_kernel_base_hint: None,
+        modules_changed: false,
+        module_event: None,
+        assisted_breakin: false,
+        break_in,
     }
+}
 
-    fn into_event(self) -> StopEvent {
-        StopEvent {
-            thread_id: self.thread_id,
-            watchpoint_address: self.watch_address,
-            exception_code: None,
-            first_chance: None,
-            exception_address: None,
-            program_counter: None,
-            is_bugcheck: false,
-            bugcheck: None,
-            target_reloaded: false,
-            target_kernel_base_hint: None,
-            modules_changed: false,
-            module_event: None,
-            assisted_breakin: false,
-            break_in: self.break_in,
-        }
+/// The thread a stop reply names.
+fn stopped_thread(reply: &[u8]) -> Option<ThreadId> {
+    match StopReply::parse(reply) {
+        Ok(StopReply::Signal(signalled)) => signalled.thread,
+        _ => None,
     }
+}
+
+/// The name a stub's thread has outside this client: its id as the
+/// protocol writes it (`p1.2`), as the KD backend names its processors.
+fn thread_name(thread: &ThreadId) -> String {
+    let mut name = Vec::new();
+    thread.write(&mut name);
+    String::from_utf8_lossy(&name).into_owned()
+}
+
+/// The thread a name from [`thread_name`] gives.
+fn parse_thread(name: &str) -> Result<ThreadId> {
+    ThreadId::parse(name.as_bytes())
+        .map_err(|_| Error::InvalidArgument(format!("`{name}` is not a GDB stub's thread id")))
+}
+
+/// A reply as text, for an error message.
+fn reply_text(reply: &[u8]) -> Cow<'_, str> {
+    String::from_utf8_lossy(reply)
+}
+
+/// Whether a reply is an error (`E<nn>` or `E.<text>`).
+fn is_error(reply: &[u8]) -> bool {
+    matches!(Status::parse(reply), Some(Status::Error(_)))
+}
+
+/// The bytes of a `g` or `p` reply. A byte the stub cannot read (`xx`) is
+/// an error: nothing here can stand in for it.
+fn register_bytes(reply: &[u8]) -> Result<Vec<u8>> {
+    let mut value = Vec::new();
+    hex::read_register(&mut value, reply)
+        .map_err(|error| Error::Rsp(format!("{error} from stub: {}", reply_text(reply))))?;
+    value
+        .into_iter()
+        .collect::<Option<Vec<u8>>>()
+        .ok_or_else(|| {
+            Error::Rsp(format!(
+                "the stub has no value for part of a register: {}",
+                reply_text(reply)
+            ))
+        })
 }
 
 /// The architecture a target description declares the stub is debugging.
-fn description_arch(xml: &str) -> Result<Arch> {
-    let Some(architecture) = target_xml::target_architecture(xml) else {
+fn description_arch(description: &Description) -> Result<Arch> {
+    let Some(architecture) = description.architecture.as_deref() else {
         return Err(Error::UnsupportedArchitecture(
             "the stub's target description declares no architecture".into(),
         ));
@@ -208,6 +230,38 @@ fn description_arch(xml: &str) -> Result<Arch> {
             "{architecture}; ntoseye debugs AMD64 and ARM64 Windows"
         ))
     })
+}
+
+/// The register map a target description lays out: each register at its
+/// number's place in the `g` packet, which packs registers in ascending
+/// number whatever order the XML lists them in.
+fn description_registers(description: &Description) -> Result<RegisterMap> {
+    let numbered = description.registers().ok_or_else(|| {
+        Error::Rsp("the stub's target description includes a document not read".into())
+    })?;
+    let mut registers = Vec::with_capacity(numbered.len());
+    for slot in g_layout(&numbered) {
+        let register = slot.register.register;
+        if register.bitsize == 0 || !register.bitsize.is_multiple_of(8) {
+            return Err(Error::Rsp(format!(
+                "invalid register bitsize '{}' in target XML",
+                register.bitsize
+            )));
+        }
+        let regnum = usize::try_from(slot.register.number).map_err(|_| {
+            Error::Rsp(format!(
+                "register regnum '{}' overflows in target XML",
+                slot.register.number
+            ))
+        })?;
+        registers.push(RegisterInfo {
+            name: register.name.clone(),
+            offset: slot.offset,
+            size: slot.size,
+            regnum,
+        });
+    }
+    Ok(RegisterMap::from_registers(registers))
 }
 
 /// System registers ntoseye needs, spelled the way it spells them elsewhere.
@@ -233,35 +287,31 @@ struct ExtraRegister {
 /// exactly what installed it.
 #[derive(Debug, Clone, Copy)]
 struct HardwareSite {
-    kind: u8,
+    ty: BreakpointType,
     addr: u64,
     len: u8,
 }
 
-/// The `Z`/`z` packet type for an access mode. `Z3` (read-only watch) is
-/// never used: the x86 debug registers cannot express one, so a read watch is
-/// the read/write `Z4`.
-fn hardware_packet_kind(access: HwBreakpointAccess) -> u8 {
-    match access {
-        HwBreakpointAccess::Execute => 1,
-        HwBreakpointAccess::Write => 2,
-        HwBreakpointAccess::ReadWrite => 4,
+impl HardwareSite {
+    /// The breakpoint as `Z` and `z` name it.
+    fn breakpoint(self) -> Breakpoint<'static> {
+        Breakpoint {
+            ty: self.ty,
+            address: self.addr,
+            kind: u64::from(self.len),
+            rest: &[],
+        }
     }
 }
 
-impl StubFeatures {
-    fn parse(response: &str) -> Self {
-        let mut features = StubFeatures::default();
-
-        for item in response.split(';') {
-            match item {
-                "QStartNoAckMode+" => features.no_ack_mode = true,
-                "qXfer:features:read+" => features.qxfer_features_read = true,
-                _ => {}
-            }
-        }
-
-        features
+/// The `Z`/`z` breakpoint type for an access mode. `Z3` (read-only watch)
+/// is never used: the x86 debug registers cannot express one, so a read
+/// watch is the read/write `Z4`.
+fn hardware_breakpoint_type(access: HwBreakpointAccess) -> BreakpointType {
+    match access {
+        HwBreakpointAccess::Execute => BreakpointType::Hardware,
+        HwBreakpointAccess::Write => BreakpointType::WriteWatch,
+        HwBreakpointAccess::ReadWrite => BreakpointType::AccessWatch,
     }
 }
 
@@ -271,7 +321,12 @@ pub struct GdbClient {
     /// which was most of what a `g` reply (over a kilobyte) took.
     stream: BufReader<TcpStream>,
     features: StubFeatures,
-    rx_state: PacketReadState,
+    /// Frames what the stub sends; a read that times out can leave it
+    /// inside a packet.
+    decoder: Decoder,
+    /// A reply read while waiting for the ack of its request, which the
+    /// stub sent without one.
+    unread: Option<Frame>,
     no_ack_mode: bool,
     arch: Arch,
     register_map: RegisterMap,
@@ -285,13 +340,13 @@ pub struct GdbClient {
     /// is not an option: QEMU treats `?` as a debugger's initial connect and
     /// removes every breakpoint, including ones this client still counts as
     /// installed.
-    last_stop: String,
+    last_stop: Vec<u8>,
     /// `last_stop` is kept for the next wait (see
     /// [`DebugBackend::keep_last_stop`]); resumes until then send nothing.
     kept_stop: bool,
     /// The thread the last `Hc` selected; `None` after a continue reset it
     /// to all threads.
-    control_thread: Option<String>,
+    control_thread: Option<ThreadId>,
     /// The NT kernel's page-table root, for planting breakpoints while the
     /// halted vCPU is in another address space; see
     /// [`GdbClient::software_breakpoint_packet`].
@@ -302,7 +357,7 @@ pub struct GdbClient {
     halt_cache: HaltCache,
     /// The thread [`HaltCache::thread`] held when the target was last
     /// resumed, for the halt that resume ends (see [`Self::note_halt`]).
-    resumed_selected: Option<String>,
+    resumed_selected: Option<ThreadId>,
 }
 
 /// What the stub has answered during one halt, so asking again costs no
@@ -314,7 +369,7 @@ pub struct GdbClient {
 struct HaltCache {
     epoch: Option<u64>,
     /// The thread `Hg` and `Hc` both select, when this client selected it.
-    thread: Option<String>,
+    thread: Option<ThreadId>,
     /// The register file [`GdbClient::read_registers`] returned for
     /// `thread`; dropped by any register write.
     registers: Option<Vec<u8>>,
@@ -324,7 +379,7 @@ struct HaltCache {
 /// which is what the stub's `?` answered before this client stopped asking
 /// (see [`GdbClient::last_stop`]). No fields, so a stop the caller already
 /// handled is not handled again.
-const HALTED_NO_NEW_STOP: &str = "S05";
+const HALTED_NO_NEW_STOP: &[u8] = b"S05";
 
 /// Why a request cannot be served right now, for [`Error::TargetRunning`].
 const GDB_STUB_NEEDS_HALT: &str = "the GDB stub serves no requests while the target runs.";
@@ -367,7 +422,8 @@ impl GdbClient {
         let mut client = GdbClient {
             stream: BufReader::new(stream),
             features: StubFeatures::default(),
-            rx_state: PacketReadState::default(),
+            decoder: Decoder::new(),
+            unread: None,
             no_ack_mode: false,
             // Replaced from the target description below, before anything
             // reads it: the handshake packets before it are the same for
@@ -378,7 +434,7 @@ impl GdbClient {
             halts,
             hardware_sites: Vec::new(),
             extra_registers: Vec::new(),
-            last_stop: String::new(),
+            last_stop: Vec::new(),
             kept_stop: false,
             control_thread: None,
             kernel_dtb: None,
@@ -389,12 +445,20 @@ impl GdbClient {
 
         client.force_stop_and_resync()?;
 
-        let supported =
-            client.send_packet("qSupported:multiprocess+;swbreak+;qRelocInsn+;vContSupported+")?;
-        client.features = StubFeatures::parse(&supported);
-        let actions = client.send_packet("vCont?")?;
-        client.features.thread_step = actions.split(';').any(|action| action == "s");
-        client.features.thread_continue = actions.split(';').any(|action| action == "c");
+        let ours = ["multiprocess", "swbreak", "qRelocInsn", "vContSupported"]
+            .into_iter()
+            .map(|name| Feature {
+                name,
+                support: Support::Yes,
+            })
+            .collect();
+        let reply = client.send_packet(&Request::Supported(ours))?;
+        // A reply that lists no features (empty, an error) offers none.
+        let supported = features::parse_list(&reply).unwrap_or_default();
+        client.features.no_ack_mode = features::supports(&supported, "QStartNoAckMode");
+        client.features.qxfer_features_read = features::supports(&supported, "qXfer:features:read");
+        let actions = client.send_packet(&Request::SupportedActions)?;
+        client.features.actions = ResumeActions::parse(&actions).unwrap_or_default();
 
         if client.features.no_ack_mode {
             let _ = client.enable_no_ack_mode();
@@ -402,12 +466,11 @@ impl GdbClient {
 
         // The one `?` this client sends: nothing is planted yet for QEMU to
         // clear, and the reply is the halt reason until the next stop.
-        client.last_stop = client.send_packet("?")?;
+        client.last_stop = client.send_packet(&Request::HaltReason)?;
 
         let description = client.fetch_target_description()?;
         client.arch = description_arch(&description)?;
-        client.register_map =
-            client.build_register_map(&target_xml::parse_target_xml(&description)?)?;
+        client.register_map = client.build_register_map(&description_registers(&description)?)?;
 
         Ok(client)
     }
@@ -416,15 +479,17 @@ impl GdbClient {
         self.stream
             .get_ref()
             .set_read_timeout(Some(Duration::from_millis(100)))?;
-        self.rx_state = PacketReadState::default();
+        self.decoder = Decoder::new();
+        self.unread = None;
 
-        trace_packet("stub", "->", &[0x03]);
-        self.write_bytes(&[0x03])?;
+        trace_packet("stub", "->", &[frame::INTERRUPT]);
+        self.write_bytes(&[frame::INTERRUPT])?;
 
         while self.read_response_packet().is_ok() {}
 
         self.stream.get_ref().set_read_timeout(None)?;
-        self.rx_state = PacketReadState::default();
+        self.decoder = Decoder::new();
+        self.unread = None;
 
         self.halts.set_running(false);
 
@@ -438,17 +503,17 @@ impl GdbClient {
     /// never coming. Refusing it keeps a running target from wedging the
     /// debugger; `Self::interrupt` is the way through, and it writes the
     /// break byte directly rather than through here.
-    pub fn send_packet(&mut self, data: &str) -> Result<String> {
+    pub fn send_packet(&mut self, request: &Request<'_>) -> Result<Vec<u8>> {
         if self.halts.is_running() {
             return Err(Error::TargetRunning(GDB_STUB_NEEDS_HALT));
         }
-        self.send_raw_command(data)?;
+        self.send_raw_command(request)?;
         self.read_response_packet()
     }
 
     fn enable_no_ack_mode(&mut self) -> Result<()> {
-        let response = self.send_packet("QStartNoAckMode")?;
-        if response == "OK" {
+        let response = self.send_packet(&Request::StartNoAckMode)?;
+        if Status::parse(&response) == Some(Status::Ok) {
             self.no_ack_mode = true;
             Ok(())
         } else {
@@ -456,11 +521,13 @@ impl GdbClient {
         }
     }
 
-    /// Send `data` as one packet, resending it until the stub acknowledges
-    /// it unless no-ack mode is on.
-    fn send_raw_command(&mut self, data: &str) -> Result<()> {
+    /// Send `request` as one packet, resending it until the stub
+    /// acknowledges it unless no-ack mode is on.
+    fn send_raw_command(&mut self, request: &Request<'_>) -> Result<()> {
+        let mut body = Vec::new();
+        request.write(&mut body);
         let mut packet = Vec::new();
-        append_packet(&mut packet, data.as_bytes());
+        frame::write_packet(&mut packet, &body);
         trace_packet("stub", "->", &packet);
         loop {
             self.write_bytes(&packet)?;
@@ -486,176 +553,122 @@ impl GdbClient {
     }
 
     fn wait_for_ack(&mut self) -> Result<AckResult> {
-        let mut buf = [0u8; 1];
-
         loop {
-            self.stream.read_exact(&mut buf)?;
-            match buf[0] {
-                b'+' => return Ok(AckResult::Ack),
-                b'-' => return Ok(AckResult::Nack),
-                b'$' => {
-                    self.rx_state = PacketReadState::ReadingData(Vec::new());
+            match self.read_frame()? {
+                Frame::Ack => return Ok(AckResult::Ack),
+                Frame::Nack => return Ok(AckResult::Nack),
+                reply @ (Frame::Packet(_) | Frame::Corrupt(_)) => {
+                    self.unread = Some(reply);
                     return Ok(AckResult::ReplyStarted);
                 }
-                _ => continue,
+                Frame::Interrupt | Frame::Notification(_) => {}
             }
         }
     }
 
-    fn read_response_packet(&mut self) -> Result<String> {
+    /// The next frame from the stub. Bytes past it stay buffered, for
+    /// [`DebugBackend::has_pending_stop`] to look at.
+    fn read_frame(&mut self) -> Result<Frame> {
+        if let Some(frame) = self.unread.take() {
+            return Ok(frame);
+        }
         loop {
-            let packet = self.read_raw_packet()?;
-            let expected = Self::parse_checksum(packet.checksum)?;
-            let actual = packet_checksum(&packet.data);
+            let buffered = match self.stream.fill_buf() {
+                Ok(buffered) => buffered,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if buffered.is_empty() {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+            }
+            let mut used = 0;
+            let mut frame = None;
+            for &byte in buffered {
+                used += 1;
+                frame = self.decoder.push(byte);
+                if frame.is_some() {
+                    break;
+                }
+            }
+            self.stream.consume(used);
+            if let Some(frame) = frame {
+                return Ok(frame);
+            }
+        }
+    }
 
-            if actual != expected {
-                if self.no_ack_mode {
+    fn read_response_packet(&mut self) -> Result<Vec<u8>> {
+        loop {
+            let body = match self.read_frame()? {
+                Frame::Packet(body) => body,
+                Frame::Corrupt(Corruption::Checksum {
+                    kind: Kind::Packet,
+                    sent,
+                    computed,
+                    ..
+                }) => {
+                    if self.no_ack_mode {
+                        return Err(Error::Rsp(format!(
+                            "bad checksum from stub: expected {sent:02x}, got {computed:02x}"
+                        )));
+                    }
+                    self.write_bytes(&[frame::NACK])?;
+                    continue;
+                }
+                Frame::Corrupt(Corruption::Digits) => {
+                    return Err(Error::Rsp("invalid checksum digits from stub".into()));
+                }
+                Frame::Corrupt(Corruption::RunLength) => {
+                    return Err(Error::Rsp("invalid run-length packet data".into()));
+                }
+                Frame::Corrupt(Corruption::TooLong) => {
                     return Err(Error::Rsp(format!(
-                        "bad checksum from stub: expected {:02x}, got {:02x}",
-                        expected, actual
+                        "packet from stub longer than {} bytes",
+                        frame::DEFAULT_LIMIT
                     )));
                 }
-
-                self.write_bytes(b"-")?;
-                continue;
-            }
+                Frame::Ack
+                | Frame::Nack
+                | Frame::Interrupt
+                | Frame::Notification(_)
+                | Frame::Corrupt(Corruption::Checksum {
+                    kind: Kind::Notification,
+                    ..
+                }) => continue,
+            };
 
             if !self.no_ack_mode {
-                self.write_bytes(b"+")?;
+                self.write_bytes(&[frame::ACK])?;
             }
 
-            let decoded = Self::decode_packet_data(&packet.data)?;
-            trace_packet("stub", "<-", &decoded);
-            let response = String::from_utf8(decoded)
-                .map_err(|e| Error::Rsp(format!("non-utf8 packet payload: {}", e)))?;
-            return Ok(response);
+            trace_packet("stub", "<-", &body);
+            return Ok(body);
         }
-    }
-
-    fn read_raw_packet(&mut self) -> Result<RawPacket> {
-        loop {
-            let mut buf = [0u8; 1];
-            self.stream.read_exact(&mut buf)?;
-            if let Some(packet) = self.consume_packet_byte(buf[0])? {
-                return Ok(packet);
-            }
-        }
-    }
-
-    fn consume_packet_byte(&mut self, byte: u8) -> Result<Option<RawPacket>> {
-        match &mut self.rx_state {
-            PacketReadState::SeekingStart => {
-                if byte == b'$' {
-                    self.rx_state = PacketReadState::ReadingData(Vec::new());
-                }
-                Ok(None)
-            }
-            PacketReadState::ReadingData(data) => {
-                if byte == b'#' {
-                    let raw_data = mem::take(data);
-                    self.rx_state = PacketReadState::ReadingChecksum {
-                        data: raw_data,
-                        checksum: [0u8; 2],
-                        len: 0,
-                    };
-                } else {
-                    data.push(byte);
-                }
-                Ok(None)
-            }
-            PacketReadState::ReadingChecksum {
-                data,
-                checksum,
-                len,
-            } => {
-                checksum[*len] = byte;
-                *len += 1;
-
-                if *len == 2 {
-                    let raw_data = mem::take(data);
-                    let raw_checksum = *checksum;
-                    self.rx_state = PacketReadState::SeekingStart;
-                    return Ok(Some(RawPacket {
-                        data: raw_data,
-                        checksum: raw_checksum,
-                    }));
-                }
-
-                Ok(None)
-            }
-        }
-    }
-
-    fn parse_checksum(checksum: [u8; 2]) -> Result<u8> {
-        let checksum_str = std::str::from_utf8(&checksum)
-            .map_err(|e| Error::Rsp(format!("invalid checksum encoding: {}", e)))?;
-        u8::from_str_radix(checksum_str, 16)
-            .map_err(|e| Error::Rsp(format!("invalid checksum value '{}': {}", checksum_str, e)))
-    }
-
-    fn decode_packet_data(data: &[u8]) -> Result<Vec<u8>> {
-        let mut decoded = Vec::with_capacity(data.len());
-        let mut index = 0;
-
-        while index < data.len() {
-            match data[index] {
-                b'}' => {
-                    index += 1;
-                    if index >= data.len() {
-                        return Err(Error::Rsp("truncated escaped packet data".into()));
-                    }
-                    decoded.push(data[index] ^ 0x20);
-                    index += 1;
-                }
-                b'*' => {
-                    let Some(last) = decoded.last().copied() else {
-                        return Err(Error::Rsp("invalid run-length packet data".into()));
-                    };
-                    index += 1;
-                    if index >= data.len() {
-                        return Err(Error::Rsp("truncated run-length packet data".into()));
-                    }
-                    let repeat_count = data[index]
-                        .checked_sub(29)
-                        .ok_or_else(|| Error::Rsp("invalid run-length repeat count".into()))?;
-                    decoded.extend(std::iter::repeat_n(last, repeat_count as usize));
-                    index += 1;
-                }
-                byte => {
-                    decoded.push(byte);
-                    index += 1;
-                }
-            }
-        }
-
-        Ok(decoded)
     }
 
     fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
-        let response = self.software_breakpoint_packet('Z', addr)?;
-        if response == "OK" {
-            Ok(())
-        } else if response.starts_with('E') {
-            Err(Error::Rsp(format!(
+        let response = self.software_breakpoint_packet(Request::InsertBreakpoint, addr)?;
+        match Status::parse(&response) {
+            Some(Status::Ok) => Ok(()),
+            Some(Status::Unsupported) => Err(Error::NotSupported),
+            Some(Status::Error(_)) | None => Err(Error::Rsp(format!(
                 "failed to set breakpoint at {:#x}: {}",
-                addr, response
-            )))
-        } else {
-            Err(Error::NotSupported)
+                addr,
+                reply_text(&response)
+            ))),
         }
     }
 
     fn remove_breakpoint(&mut self, addr: u64) -> Result<()> {
-        let response = self.software_breakpoint_packet('z', addr)?;
-        if response == "OK" {
-            Ok(())
-        } else if response.starts_with('E') {
-            Err(Error::Rsp(format!(
+        let response = self.software_breakpoint_packet(Request::RemoveBreakpoint, addr)?;
+        match Status::parse(&response) {
+            Some(Status::Ok) => Ok(()),
+            Some(Status::Unsupported) => Err(Error::NotSupported),
+            Some(Status::Error(_)) | None => Err(Error::Rsp(format!(
                 "failed to remove breakpoint at {:#x}: {}",
-                addr, response
-            )))
-        } else {
-            Err(Error::NotSupported)
+                addr,
+                reply_text(&response)
+            ))),
         }
     }
 
@@ -672,11 +685,20 @@ impl GdbClient {
     /// breakpoints are global to the VM. So the packet is first retried
     /// through another vCPU that halted in NT, which writes no register;
     /// only when every vCPU is outside NT does it borrow the kernel root.
-    fn software_breakpoint_packet(&mut self, op: char, addr: u64) -> Result<String> {
-        let packet = format!("{op}0,{addr:x},{}", self.arch.breakpoint_size());
+    fn software_breakpoint_packet(
+        &mut self,
+        op: fn(Breakpoint<'static>) -> Request<'static>,
+        addr: u64,
+    ) -> Result<Vec<u8>> {
+        let packet = op(Breakpoint {
+            ty: BreakpointType::Software,
+            address: addr,
+            kind: u64::from(self.arch.breakpoint_size()),
+            rest: &[],
+        });
         let response = self.send_packet(&packet)?;
         let borrows_kernel_root = self.arch.family() == Family::X86;
-        if !response.starts_with('E')
+        if !is_error(&response)
             || !borrows_kernel_root
             || addr < self.arch.paging().system_range_start()
         {
@@ -694,12 +716,11 @@ impl GdbClient {
     /// Send `packet` with each other vCPU as the control vCPU until one's
     /// page tables serve it, then make the selected vCPU the control vCPU
     /// again (a plain `s` steps the control vCPU). `None` when none did.
-    fn through_another_vcpu(&mut self, packet: &str) -> Result<Option<String>> {
+    fn through_another_vcpu(&mut self, packet: &Request<'_>) -> Result<Option<Vec<u8>>> {
         self.forget_halt_cache();
         let Some(selected) = self
             .control_thread
-            .clone()
-            .or_else(|| StopReply::parse(&self.last_stop).thread_id)
+            .or_else(|| stopped_thread(&self.last_stop))
         else {
             return Ok(None);
         };
@@ -707,21 +728,29 @@ impl GdbClient {
             return Ok(None);
         };
         let mut planted = None;
-        for thread in threads.iter().filter(|thread| **thread != selected) {
-            if self.send_packet(&format!("Hc{thread}"))? != "OK" {
+        for thread in threads.into_iter().filter(|thread| *thread != selected) {
+            let select = Request::SetThread {
+                op: ThreadOp::Resume,
+                thread,
+            };
+            if Status::parse(&self.send_packet(&select)?) != Some(Status::Ok) {
                 continue;
             }
             let response = self.send_packet(packet)?;
-            if !response.starts_with('E') {
+            if !is_error(&response) {
                 planted = Some(response);
                 break;
             }
         }
-        let restored = self.send_packet(&format!("Hc{selected}"))?;
-        if restored != "OK" {
+        let restored = self.send_packet(&Request::SetThread {
+            op: ThreadOp::Resume,
+            thread: selected,
+        })?;
+        if Status::parse(&restored) != Some(Status::Ok) {
             return Err(Error::Rsp(format!(
-                "failed to reselect vCPU {selected} after planting a breakpoint through \
-                 another vCPU: {restored}"
+                "failed to reselect vCPU {} after planting a breakpoint through another vCPU: {}",
+                thread_name(&selected),
+                reply_text(&restored)
             )));
         }
         Ok(planted)
@@ -739,17 +768,19 @@ impl GdbClient {
         // pin both to the vCPU the debugger has selected.
         if let Some(thread) = self
             .control_thread
-            .clone()
-            .or_else(|| StopReply::parse(&self.last_stop).thread_id)
+            .or_else(|| stopped_thread(&self.last_stop))
         {
-            self.set_current_thread(&thread)?;
+            self.set_current_thread(thread)?;
         }
         // `P`/`p` use QEMU's copy of the vCPU as-is; `g` is what pulls it in
         // from the hypervisor and marks it for write-back on resume, so the
         // restored value is the one the vCPU resumes with.
-        let synced = self.send_packet("g")?;
-        if synced.starts_with('E') {
-            return Err(Error::Rsp(format!("failed to read registers: {synced}")));
+        let synced = self.send_packet(&Request::ReadRegisters)?;
+        if is_error(&synced) {
+            return Err(Error::Rsp(format!(
+                "failed to read registers: {}",
+                reply_text(&synced)
+            )));
         }
         let original = self.read_register_bytes(regnum)?;
         let mut borrowed = original.clone();
@@ -795,8 +826,8 @@ impl GdbClient {
 
     /// The thread `Hg` and `Hc` both select in this halt, when this client
     /// selected it (see [`HaltCache::thread`]).
-    fn selected_thread(&mut self) -> Option<String> {
-        self.halt_cache().and_then(|cache| cache.thread.clone())
+    fn selected_thread(&mut self) -> Option<ThreadId> {
+        self.halt_cache().and_then(|cache| cache.thread)
     }
 
     /// The slot's record, or an error naming the slot a caller invented.
@@ -814,29 +845,26 @@ impl GdbClient {
     fn set_hardware_site(&mut self, slot: usize, site: HardwareSite) -> Result<()> {
         self.clear_hardware_site(slot)?;
 
-        let response = self.send_packet(&format!("Z{},{:x},{}", site.kind, site.addr, site.len))?;
-        if response == "OK" {
-            self.hardware_sites
-                .resize(self.hardware_sites.len().max(slot + 1), None);
-            self.hardware_sites[slot] = Some(site);
-            return Ok(());
-        }
-        // An empty reply is RSP for "I do not implement this packet".
-        if response.is_empty() {
-            return Err(Error::NotSupported);
-        }
-        if response.strip_prefix('E').is_some_and(|code| {
-            code.len() == 2 && code.bytes().all(|byte| byte.is_ascii_hexdigit())
-        }) {
-            return Err(Error::HardwareBreakpointRefused {
+        let response = self.send_packet(&Request::InsertBreakpoint(site.breakpoint()))?;
+        match Status::parse(&response) {
+            Some(Status::Ok) => {
+                self.hardware_sites
+                    .resize(self.hardware_sites.len().max(slot + 1), None);
+                self.hardware_sites[slot] = Some(site);
+                Ok(())
+            }
+            // An empty reply is RSP for "I do not implement this packet".
+            Some(Status::Unsupported) => Err(Error::NotSupported),
+            Some(Status::Error(ErrorCode::Number(_))) => Err(Error::HardwareBreakpointRefused {
                 address: site.addr,
-                response,
-            });
+                response: reply_text(&response).into_owned(),
+            }),
+            Some(Status::Error(ErrorCode::Text(_))) | None => Err(Error::Rsp(format!(
+                "unexpected reply to hardware breakpoint at {:#x}: {}",
+                site.addr,
+                reply_text(&response)
+            ))),
         }
-        Err(Error::Rsp(format!(
-            "unexpected reply to hardware breakpoint at {:#x}: {response}",
-            site.addr
-        )))
     }
 
     fn clear_hardware_site(&mut self, slot: usize) -> Result<()> {
@@ -844,13 +872,14 @@ impl GdbClient {
             return Ok(());
         };
 
-        let response = self.send_packet(&format!("z{},{:x},{}", site.kind, site.addr, site.len))?;
-        if response != "OK" {
+        let response = self.send_packet(&Request::RemoveBreakpoint(site.breakpoint()))?;
+        if Status::parse(&response) != Some(Status::Ok) {
             // Leave the slot recorded: the stub still holds it, and naming it
             // again needs the same three values.
             return Err(Error::Rsp(format!(
                 "failed to remove the hardware breakpoint at {:#x}: {}",
-                site.addr, response
+                site.addr,
+                reply_text(&response)
             )));
         }
         self.hardware_sites[slot] = None;
@@ -863,33 +892,43 @@ impl GdbClient {
     /// (the PCI ECAM window) answer as they do to the guest, where the host
     /// mapping holds only RAM.
     fn read_physical_through_stub(&mut self, address: u64, buf: &mut [u8]) -> Result<()> {
-        let reply = self.send_packet("Qqemu.PhyMemMode:1")?;
-        if reply != "OK" {
+        let reply = self.send_packet(&Request::Unknown(b"Qqemu.PhyMemMode:1"))?;
+        if Status::parse(&reply) != Some(Status::Ok) {
             return Err(Error::Rsp(format!(
                 "the GDB stub has no physical-memory mode (QEMU's Qqemu.PhyMemMode answered \
-                 {reply:?}), which device registers are read through"
+                 {:?}), which device registers are read through",
+                reply_text(&reply)
             )));
         }
         let mut read = || -> Result<()> {
             let mut next = address;
             for chunk in buf.chunks_mut(PHYSICAL_READ_CHUNK) {
-                let reply = self.send_packet(&format!("m{next:x},{:x}", chunk.len()))?;
-                if reply.starts_with('E') || reply.len() != chunk.len() * 2 {
+                let reply = self.send_packet(&Request::ReadMemory {
+                    address: next,
+                    length: chunk.len() as u64,
+                })?;
+                let mut bytes = Vec::with_capacity(chunk.len());
+                if Status::parse(&reply).is_some()
+                    || hex::read_bytes(&mut bytes, &reply).is_err()
+                    || bytes.len() != chunk.len()
+                {
                     return Err(Error::Rsp(format!(
-                        "failed to read {:#x} physical bytes at {next:#x}: {reply}",
-                        chunk.len()
+                        "failed to read {:#x} physical bytes at {next:#x}: {}",
+                        chunk.len(),
+                        reply_text(&reply)
                     )));
                 }
-                hex::decode_to_slice(&reply, chunk)?;
+                chunk.copy_from_slice(&bytes);
                 next += chunk.len() as u64;
             }
             Ok(())
         };
         let result = read();
-        let restored = self.send_packet("Qqemu.PhyMemMode:0")?;
-        if restored != "OK" {
+        let restored = self.send_packet(&Request::Unknown(b"Qqemu.PhyMemMode:0"))?;
+        if Status::parse(&restored) != Some(Status::Ok) {
             return Err(Error::Rsp(format!(
-                "failed to leave the GDB stub's physical-memory mode: {restored}"
+                "failed to leave the GDB stub's physical-memory mode: {}",
+                reply_text(&restored)
             )));
         }
         result
@@ -899,16 +938,16 @@ impl GdbClient {
         if let Some(registers) = self.halt_cache().and_then(|cache| cache.registers.clone()) {
             return Ok(registers);
         }
-        let response = self.send_packet("g")?;
+        let response = self.send_packet(&Request::ReadRegisters)?;
 
-        if response.starts_with('E') {
+        if is_error(&response) {
             return Err(Error::Rsp(format!(
                 "failed to read registers: {}",
-                response
+                reply_text(&response)
             )));
         }
 
-        let mut bytes = hex::decode(&response)?;
+        let mut bytes = register_bytes(&response)?;
         for index in 0..self.extra_registers.len() {
             let regnum = self.extra_registers[index].regnum;
             let value = self.read_one_register(regnum)?;
@@ -928,20 +967,20 @@ impl GdbClient {
         // behind it are not part of that reply, and the stub serves them
         // read-only anyway.
         let data = &data[..data.len().saturating_sub(self.extra_registers.len() * 8)];
-        let response = self.send_packet(&format!("G{}", hex::encode(data)))?;
+        let response = self.send_packet(&Request::WriteRegisters(data.to_vec()))?;
 
-        if response == "OK" {
+        if Status::parse(&response) == Some(Status::Ok) {
             Ok(())
         } else {
             Err(Error::Rsp(format!(
                 "failed to write registers: {}",
-                response
+                reply_text(&response)
             )))
         }
     }
 
-    fn send_command_no_reply(&mut self, data: &str) -> Result<()> {
-        self.send_raw_command(data)
+    fn send_command_no_reply(&mut self, request: &Request<'_>) -> Result<()> {
+        self.send_raw_command(request)
     }
 
     fn continue_execution(&mut self) -> Result<()> {
@@ -951,9 +990,12 @@ impl GdbClient {
         }
         self.resumed_selected = None;
         self.forget_halt_cache();
-        let _ = self.send_packet("Hc-1")?;
+        let _ = self.send_packet(&Request::SetThread {
+            op: ThreadOp::Resume,
+            thread: ThreadId::thread(Id::All),
+        })?;
         self.control_thread = None;
-        self.send_command_no_reply("c")?;
+        self.send_command_no_reply(&Request::Continue(None))?;
         self.halts.set_running(true);
         Ok(())
     }
@@ -971,12 +1013,14 @@ impl GdbClient {
         }
         self.resumed_selected = self.selected_thread();
         self.forget_halt_cache();
-        match &self.control_thread {
-            Some(thread) if self.features.thread_step => {
-                let packet = format!("vCont;s:{thread}");
-                self.send_command_no_reply(&packet)?;
+        match self.control_thread {
+            Some(thread) if self.features.actions.supports(Action::Step) => {
+                self.send_command_no_reply(&Request::Resume(vec![ThreadAction {
+                    action: Action::Step,
+                    thread: Some(thread),
+                }]))?;
             }
-            _ => self.send_command_no_reply("s")?,
+            _ => self.send_command_no_reply(&Request::Step(None))?,
         }
         self.halts.set_running(true);
         Ok(())
@@ -984,7 +1028,7 @@ impl GdbClient {
 
     /// Resume the selected thread alone (see [`Self::continue_threads`]).
     fn continue_current_thread(&mut self) -> Result<()> {
-        let Some(thread) = self.control_thread.clone() else {
+        let Some(thread) = self.control_thread else {
             return Err(Error::DebugInfo(
                 "no vCPU is selected to resume on its own".to_string(),
             ));
@@ -994,8 +1038,8 @@ impl GdbClient {
 
     /// Resume `threads` alone; QEMU leaves every vCPU a `vCont` names no
     /// action for stopped.
-    fn continue_threads(&mut self, threads: &[String]) -> Result<()> {
-        if !self.features.thread_continue {
+    fn continue_threads(&mut self, threads: &[ThreadId]) -> Result<()> {
+        if !self.features.actions.supports(Action::Continue) {
             return Err(Error::NotSupported);
         }
         if threads.is_empty() {
@@ -1007,22 +1051,24 @@ impl GdbClient {
         }
         self.resumed_selected = self.selected_thread();
         self.forget_halt_cache();
-        let mut packet = String::from("vCont");
-        for thread in threads {
-            packet.push_str(";c:");
-            packet.push_str(thread);
-        }
-        self.send_command_no_reply(&packet)?;
+        let actions = threads
+            .iter()
+            .map(|&thread| ThreadAction {
+                action: Action::Continue,
+                thread: Some(thread),
+            })
+            .collect();
+        self.send_command_no_reply(&Request::Resume(actions))?;
         self.halts.set_running(true);
         Ok(())
     }
 
-    fn wait_for_stop(&mut self) -> Result<String> {
+    fn wait_for_stop(&mut self) -> Result<Vec<u8>> {
         if self.kept_stop {
             return Ok(self.report_kept_stop());
         }
         if !self.halts.is_running() {
-            return Ok(HALTED_NO_NEW_STOP.to_string());
+            return Ok(HALTED_NO_NEW_STOP.to_vec());
         }
 
         let response = self.read_stop_reply()?;
@@ -1030,12 +1076,12 @@ impl GdbClient {
         Ok(response)
     }
 
-    fn try_wait_for_stop(&mut self) -> Result<Option<String>> {
+    fn try_wait_for_stop(&mut self) -> Result<Option<Vec<u8>>> {
         if self.kept_stop {
             return Ok(Some(self.report_kept_stop()));
         }
         if !self.halts.is_running() {
-            return Ok(Some(HALTED_NO_NEW_STOP.to_string()));
+            return Ok(Some(HALTED_NO_NEW_STOP.to_vec()));
         }
 
         match self.read_stop_reply() {
@@ -1052,46 +1098,48 @@ impl GdbClient {
         }
     }
 
-    fn read_stop_reply(&mut self) -> Result<String> {
+    fn read_stop_reply(&mut self) -> Result<Vec<u8>> {
         loop {
             let response = self.read_response_packet()?;
-            match response.as_bytes().first().copied() {
-                Some(b'S' | b'T' | b'W' | b'X' | b'N') => {
+            let output =
+                StopReply::parse(&response).map(|reply| matches!(reply, StopReply::Output(_)));
+            match output {
+                Ok(false) => {
                     self.last_stop.clone_from(&response);
                     return Ok(response);
                 }
-                Some(b'O') => continue,
-                Some(b'F') => {
+                Ok(true) => continue,
+                Err(_) if response.starts_with(b"F") => {
                     return Err(Error::Rsp(
                         "remote file I/O packets are unsupported while waiting for stop".into(),
                     ));
                 }
-                Some(b'E') => {
+                Err(_) if is_error(&response) => {
                     return Err(Error::Rsp(format!(
                         "run-control command failed: {}",
-                        response
+                        reply_text(&response)
                     )));
                 }
-                _ => {
+                Err(_) => {
                     return Err(Error::Rsp(format!(
                         "unexpected packet while waiting for stop: {}",
-                        response
+                        reply_text(&response)
                     )));
                 }
             }
         }
     }
 
-    fn interrupt(&mut self) -> Result<String> {
+    fn interrupt(&mut self) -> Result<Vec<u8>> {
         if self.kept_stop {
             return Ok(self.report_kept_stop());
         }
         if !self.halts.is_running() {
-            return Ok(String::new());
+            return Ok(Vec::new());
         }
 
-        trace_packet("stub", "->", &[0x03]);
-        self.write_bytes(&[0x03])?;
+        trace_packet("stub", "->", &[frame::INTERRUPT]);
+        self.write_bytes(&[frame::INTERRUPT])?;
 
         let stop = self.read_stop_reply()?;
 
@@ -1108,11 +1156,10 @@ impl GdbClient {
     /// thread leaves both selecting it, whatever the stub does with the
     /// control thread, so the halt starts with it selected, and the next
     /// selection of it, after each instruction run past, costs nothing.
-    fn note_halt(&mut self, reply: &str) {
+    fn note_halt(&mut self, reply: &[u8]) {
         self.halts.set_running(false);
         let resumed = self.resumed_selected.take();
-        if let Some(thread) =
-            resumed.filter(|thread| StopReply::parse(reply).thread_id.as_ref() == Some(thread))
+        if let Some(thread) = resumed.filter(|thread| stopped_thread(reply) == Some(*thread))
             && let Some(cache) = self.halt_cache()
         {
             cache.thread = Some(thread);
@@ -1121,49 +1168,44 @@ impl GdbClient {
 
     /// The stop kept for this wait (see [`DebugBackend::keep_last_stop`]),
     /// at which the target was left halted.
-    fn report_kept_stop(&mut self) -> String {
+    fn report_kept_stop(&mut self) -> Vec<u8> {
         self.kept_stop = false;
         self.halts.set_running(false);
         self.last_stop.clone()
     }
 
-    fn thread_list(&mut self) -> Result<Vec<String>> {
+    fn thread_list(&mut self) -> Result<Vec<ThreadId>> {
         let mut threads = Vec::new();
-        let mut response = self.send_packet("qfThreadInfo")?;
+        let mut response = self.send_packet(&Request::FirstThreads)?;
 
         loop {
-            if response == "l" {
+            if is_error(&response) {
+                return Err(Error::Rsp(format!(
+                    "failed to enumerate threads: {}",
+                    reply_text(&response)
+                )));
+            }
+            let list = ThreadList::parse(&response).map_err(|_| {
+                Error::Rsp(format!(
+                    "unexpected qThreadInfo response: {}",
+                    reply_text(&response)
+                ))
+            })?;
+            threads.extend(list.threads);
+            if !list.more {
                 break;
             }
 
-            if let Some(list) = response.strip_prefix('m') {
-                for id in list.split(',') {
-                    if !id.is_empty() {
-                        threads.push(id.to_string());
-                    }
-                }
-            } else if response.starts_with('E') {
-                return Err(Error::Rsp(format!(
-                    "failed to enumerate threads: {}",
-                    response
-                )));
-            } else {
-                return Err(Error::Rsp(format!(
-                    "unexpected qThreadInfo response: {}",
-                    response
-                )));
-            }
-
-            response = self.send_packet("qsThreadInfo")?;
+            response = self.send_packet(&Request::NextThreads)?;
         }
 
         Ok(threads)
     }
 
-    fn set_current_thread(&mut self, thread_id: &str) -> Result<()> {
+    fn set_current_thread(&mut self, thread: ThreadId) -> Result<()> {
         if self
             .halt_cache()
-            .is_some_and(|cache| cache.thread.as_deref() == Some(thread_id))
+            .is_some_and(|cache| cache.thread == Some(thread))
         {
             return Ok(());
         }
@@ -1171,38 +1213,44 @@ impl GdbClient {
             cache.thread = None;
             cache.registers = None;
         }
-        let resp_g = self.send_packet(&format!("Hg{}", thread_id))?;
-        if resp_g != "OK" {
+        let resp_g = self.send_packet(&Request::SetThread {
+            op: ThreadOp::General,
+            thread,
+        })?;
+        if Status::parse(&resp_g) != Some(Status::Ok) {
             return Err(Error::Rsp(format!(
                 "failed to set general thread: {}",
-                resp_g
+                reply_text(&resp_g)
             )));
         }
 
-        let resp_c = self.send_packet(&format!("Hc{}", thread_id))?;
-        if resp_c != "OK" {
+        let resp_c = self.send_packet(&Request::SetThread {
+            op: ThreadOp::Resume,
+            thread,
+        })?;
+        if Status::parse(&resp_c) != Some(Status::Ok) {
             return Err(Error::Rsp(format!(
                 "failed to set control thread: {}",
-                resp_c
+                reply_text(&resp_c)
             )));
         }
-        self.control_thread = Some(thread_id.to_string());
+        self.control_thread = Some(thread);
         if let Some(cache) = self.halt_cache() {
-            cache.thread = Some(thread_id.to_string());
+            cache.thread = Some(thread);
         }
 
         Ok(())
     }
 
-    fn stopped_thread_id(&mut self) -> Result<String> {
-        if let Some(thread_id) = StopReply::parse(&self.last_stop).thread_id {
-            return Ok(thread_id);
+    fn stopped_thread_id(&mut self) -> Result<ThreadId> {
+        if let Some(thread) = stopped_thread(&self.last_stop) {
+            return Ok(thread);
         }
 
         // QEMU's initial stop reply names a core, not a thread.
-        let response = self.send_packet("qC")?;
-        if let Some(thread_id) = response.strip_prefix("QC") {
-            return Ok(thread_id.to_string());
+        let response = self.send_packet(&Request::CurrentThread)?;
+        if let Ok(thread) = parse_current_thread(&response) {
+            return Ok(thread);
         }
 
         Err(Error::Rsp(
@@ -1212,39 +1260,20 @@ impl GdbClient {
 
     /// The stub's full target description, with every `<xi:include>`
     /// resolved.
-    fn fetch_target_description(&mut self) -> Result<String> {
+    fn fetch_target_description(&mut self) -> Result<Description> {
         if !self.features.qxfer_features_read {
             return Err(Error::NotSupported);
         }
 
-        let mut xml = String::new();
-        let mut offset = 0;
-
+        let mut description = self.fetch_feature_file("target.xml")?;
         loop {
-            let query = format!("qXfer:features:read:target.xml:{:x},fff", offset);
-            let response = self.send_packet(&query)?;
-
-            if response.is_empty() {
-                return Err(Error::NotSupported);
-            }
-
-            let (marker, data) = response.split_at(1);
-            xml.push_str(data);
-            offset += data.len();
-
-            match marker {
-                "l" => break,    // last chunk
-                "m" => continue, // more data
-                _ => {
-                    return Err(Error::Rsp(format!(
-                        "unexpected qXfer response: {}",
-                        response
-                    )));
-                }
-            }
+            let Some(href) = description.includes().next().map(str::to_string) else {
+                break;
+            };
+            let included = self.fetch_feature_file(&href)?;
+            description.include(&href, included);
         }
-
-        self.resolve_xml_includes(&xml)
+        Ok(description)
     }
 
     /// Turn a target description into the register map the debugger reads.
@@ -1311,81 +1340,67 @@ impl GdbClient {
 
     /// One register's bytes at the width the stub reports it.
     fn read_register_bytes(&mut self, regnum: usize) -> Result<Vec<u8>> {
-        let response = self.send_packet(&format!("p{regnum:x}"))?;
-        if response.is_empty() || response.starts_with('E') {
+        let response = self.send_packet(&Request::ReadRegister(regnum as u64))?;
+        if Status::parse(&response).is_some() {
             return Err(Error::Rsp(format!(
-                "failed to read register {regnum}: {response}"
+                "failed to read register {regnum}: {}",
+                reply_text(&response)
             )));
         }
-        Ok(hex::decode(&response)?)
+        register_bytes(&response)
     }
 
     fn write_register_bytes(&mut self, regnum: usize, bytes: &[u8]) -> Result<()> {
         if let Some(cache) = self.halt_cache() {
             cache.registers = None;
         }
-        let response = self.send_packet(&format!("P{regnum:x}={}", hex::encode(bytes)))?;
-        if response == "OK" {
+        let response = self.send_packet(&Request::WriteRegister {
+            number: regnum as u64,
+            value: bytes.to_vec(),
+        })?;
+        if Status::parse(&response) == Some(Status::Ok) {
             Ok(())
         } else {
             Err(Error::Rsp(format!(
-                "failed to write register {regnum}: {response}"
+                "failed to write register {regnum}: {}",
+                reply_text(&response)
             )))
         }
     }
 
-    fn resolve_xml_includes(&mut self, xml: &str) -> Result<String> {
-        let mut result = xml.to_string();
-
-        while let Some(start) = result.find("<xi:include") {
-            let end = match result[start..].find("/>") {
-                Some(e) => start + e + 2,
-                None => break,
-            };
-
-            let element = &result[start..end];
-            let href = target_xml::extract_attr(element, "href");
-
-            if let Some(filename) = href {
-                let included_xml = self.fetch_feature_file(filename)?;
-                result = format!("{}{}{}", &result[..start], included_xml, &result[end..]);
-            } else {
-                result = format!("{}{}", &result[..start], &result[end..]);
-            }
-        }
-
-        Ok(result)
-    }
-
-    fn fetch_feature_file(&mut self, filename: &str) -> Result<String> {
-        let mut xml = String::new();
-        let mut offset = 0;
-
+    /// One document of the stub's target description (`target.xml` or one
+    /// it includes), read a chunk at a time.
+    fn fetch_feature_file(&mut self, annex: &str) -> Result<Description> {
+        let mut xml = Vec::new();
         loop {
-            let query = format!("qXfer:features:read:{}:{:x},fff", filename, offset);
-            let response = self.send_packet(&query)?;
+            let read = XferRead {
+                object: "features",
+                annex,
+                offset: xml.len() as u64,
+                length: 0xfff,
+            };
+            let response = self.send_packet(&Request::XferRead(read))?;
 
-            if response.is_empty() {
+            if Status::parse(&response) == Some(Status::Unsupported) {
                 return Err(Error::NotSupported);
             }
 
-            let (marker, data) = response.split_at(1);
-            xml.push_str(data);
-            offset += data.len();
-
-            match marker {
-                "l" => break,
-                "m" => continue,
-                _ => {
-                    return Err(Error::Rsp(format!(
-                        "unexpected qXfer response for {}: {}",
-                        filename, response
-                    )));
-                }
+            let chunk = XferChunk::parse(&response).map_err(|_| {
+                Error::Rsp(format!(
+                    "unexpected qXfer response for {annex}: {}",
+                    reply_text(&response)
+                ))
+            })?;
+            xml.extend_from_slice(&chunk.data);
+            if !chunk.more {
+                break;
             }
         }
 
-        Ok(xml)
+        let xml = String::from_utf8(xml)
+            .map_err(|error| Error::Rsp(format!("the stub's {annex} is not UTF-8: {error}")))?;
+        Description::parse(&xml)
+            .map_err(|error| Error::Rsp(format!("{error} in the stub's {annex}")))
     }
 }
 
@@ -1418,7 +1433,11 @@ impl DebugBackend for GdbClient {
     }
 
     fn continue_threads(&mut self, threads: &[String]) -> Result<()> {
-        GdbClient::continue_threads(self, threads)
+        let threads = threads
+            .iter()
+            .map(|thread| parse_thread(thread))
+            .collect::<Result<Vec<_>>>()?;
+        GdbClient::continue_threads(self, &threads)
     }
 
     fn keep_last_stop(&mut self) -> Result<()> {
@@ -1494,7 +1513,7 @@ impl DebugBackend for GdbClient {
         len: u8,
     ) -> Result<()> {
         let site = HardwareSite {
-            kind: hardware_packet_kind(access),
+            ty: hardware_breakpoint_type(access),
             addr,
             len,
         };
@@ -1515,12 +1534,12 @@ impl DebugBackend for GdbClient {
 
     fn interrupt(&mut self) -> Result<StopEvent> {
         let response = GdbClient::interrupt(self)?;
-        Ok(StopReply::parse(&response).into_event())
+        Ok(stop_event(&response))
     }
 
     fn wait_for_stop(&mut self) -> Result<StopEvent> {
         let response = GdbClient::wait_for_stop(self)?;
-        Ok(StopReply::parse(&response).into_event())
+        Ok(stop_event(&response))
     }
 
     fn try_wait_for_stop(&mut self, timeout: Duration) -> Result<Option<StopEvent>> {
@@ -1531,19 +1550,22 @@ impl DebugBackend for GdbClient {
         self.stream.get_ref().set_read_timeout(Some(timeout))?;
         let result = GdbClient::try_wait_for_stop(self);
         let _ = self.stream.get_ref().set_read_timeout(None);
-        Ok(result?.map(|response| StopReply::parse(&response).into_event()))
+        Ok(result?.map(|response| stop_event(&response)))
     }
 
     fn thread_list(&mut self) -> Result<Vec<String>> {
-        GdbClient::thread_list(self)
+        Ok(GdbClient::thread_list(self)?
+            .iter()
+            .map(thread_name)
+            .collect())
     }
 
     fn set_current_thread(&mut self, thread_id: &str) -> Result<()> {
-        GdbClient::set_current_thread(self, thread_id)
+        GdbClient::set_current_thread(self, parse_thread(thread_id)?)
     }
 
     fn stopped_thread_id(&mut self) -> Result<String> {
-        GdbClient::stopped_thread_id(self)
+        GdbClient::stopped_thread_id(self).map(|thread| thread_name(&thread))
     }
 
     fn is_running(&self) -> bool {
@@ -1555,15 +1577,24 @@ impl DebugBackend for GdbClient {
     /// this check a target that hit a breakpoint between waits reads as
     /// running, and a hit that should be absorbed (another process's, a pass
     /// count, a false condition) leaves it frozen until a host waits. Only a
-    /// stop packet counts, past any console output (`O`) before it: that is no
-    /// stop, and draining it with a blocking wait would hang until a real one.
+    /// whole stop packet counts, past any console output (`O`) before it: that
+    /// is no stop, and draining it with a blocking wait would hang until a
+    /// real one.
     fn has_pending_stop(&self) -> bool {
         if !self.halts.is_running() {
             return false;
         }
-        let buffered = self.stream.buffer();
-        if !buffered.is_empty() {
-            return holds_stop_reply(buffered);
+        // Read on from where the client's own reads stopped, without moving
+        // them: the frame they are inside continues in the buffer, and the
+        // buffer on the socket.
+        let mut decoder = self.decoder.clone();
+        let read = self
+            .unread
+            .iter()
+            .cloned()
+            .chain(decoder.decode(self.stream.buffer()));
+        if let Some(stop) = stop_reply_among(read) {
+            return stop;
         }
         let socket = self.stream.get_ref();
         if socket.set_nonblocking(true).is_err() {
@@ -1572,7 +1603,7 @@ impl DebugBackend for GdbClient {
         let mut head = [0u8; 512];
         let peeked = socket.peek(&mut head);
         let _ = socket.set_nonblocking(false);
-        matches!(peeked, Ok(len) if holds_stop_reply(&head[..len]))
+        matches!(peeked, Ok(len) if stop_reply_among(decoder.decode(&head[..len])) == Some(true))
     }
 
     fn supports_pci_config(&self) -> bool {
@@ -1606,11 +1637,16 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use gdb_remote::frame::{self, Decoder, Frame};
+    use gdb_remote::reply::ResumeActions;
+    use gdb_remote::request::ActionKind;
+    use gdb_remote::target::Description;
+    use gdb_remote::thread::ThreadId;
     use parking_lot::Mutex;
 
     use super::{
-        GdbClient, HaltCache, PacketReadState, RegisterMap, StopReply, StubFeatures, append_packet,
-        description_arch, holds_stop_reply,
+        GdbClient, HaltCache, RegisterMap, StubFeatures, description_arch, description_registers,
+        stop_event, stop_reply_among,
     };
     use crate::arch::{Arch, HwBreakpointAccess, RegisterInfo};
     use crate::backend::dbg_backend::DebugBackend;
@@ -1632,28 +1668,27 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let reply = |stream: &mut TcpStream, body: &str| {
                 let mut packet = Vec::new();
-                append_packet(&mut packet, body.as_bytes());
+                frame::write_packet(&mut packet, body.as_bytes());
                 stream.write_all(&packet).unwrap();
             };
-            let mut packet = Vec::new();
-            let mut byte = [0u8];
-            while stream.read_exact(&mut byte).is_ok() {
-                match byte[0] {
-                    0x03 => reply(&mut stream, "T02thread:p01.02;"),
-                    b'$' => packet.clear(),
-                    b'#' => {
-                        let mut checksum = [0u8; 2];
-                        stream.read_exact(&mut checksum).unwrap();
-                        let body = String::from_utf8(packet.clone()).unwrap();
-                        let seen = {
-                            let mut log = log.lock();
-                            let seen = log.iter().filter(|previous| **previous == body).count();
-                            log.push(body.clone());
-                            seen
-                        };
-                        reply(&mut stream, &answer(&body, seen));
+            let mut decoder = Decoder::new();
+            let mut bytes = [0u8; 4096];
+            while let Ok(len @ 1..) = stream.read(&mut bytes) {
+                for frame in decoder.decode(&bytes[..len]) {
+                    match frame {
+                        Frame::Interrupt => reply(&mut stream, "T02thread:p01.02;"),
+                        Frame::Packet(body) => {
+                            let body = String::from_utf8(body).unwrap();
+                            let seen = {
+                                let mut log = log.lock();
+                                let seen = log.iter().filter(|previous| **previous == body).count();
+                                log.push(body.clone());
+                                seen
+                            };
+                            reply(&mut stream, &answer(&body, seen));
+                        }
+                        _ => {}
                     }
-                    other => packet.push(other),
                 }
             }
         });
@@ -1662,14 +1697,15 @@ mod tests {
         let client = GdbClient {
             stream: BufReader::new(TcpStream::connect(addr).unwrap()),
             features: StubFeatures::default(),
-            rx_state: PacketReadState::default(),
+            decoder: Decoder::new(),
+            unread: None,
             no_ack_mode: true,
             arch: Arch::Amd64,
             register_map: RegisterMap::default(),
             halts,
             hardware_sites: Vec::new(),
             extra_registers: Vec::new(),
-            last_stop: String::new(),
+            last_stop: Vec::new(),
             kept_stop: false,
             control_thread: None,
             kernel_dtb: None,
@@ -1698,7 +1734,7 @@ mod tests {
     ) -> (GdbClient, Arc<Mutex<Vec<String>>>) {
         let (mut client, received) = client_over_stub(answer);
         client.halts.set_running(false);
-        client.last_stop = "T05thread:p01.02;".to_string();
+        client.last_stop = b"T05thread:p01.02;".to_vec();
         client.kernel_dtb = Some(0x1ae000);
         client.register_map = RegisterMap::from_registers(vec![RegisterInfo {
             name: "cr3".to_string(),
@@ -1707,6 +1743,15 @@ mod tests {
             regnum: 0x43,
         }]);
         (client, received)
+    }
+
+    fn thread(name: &str) -> ThreadId {
+        ThreadId::parse(name.as_bytes()).unwrap()
+    }
+
+    /// The stub runs the threads `vCont` names to continue.
+    fn continues_threads(client: &mut GdbClient) {
+        client.features.actions = ResumeActions::of(&[ActionKind::Continue]);
     }
 
     #[test]
@@ -1740,7 +1785,7 @@ mod tests {
                 id
             );
         }
-        let mut event = StopReply::parse("S05").into_event();
+        let mut event = stop_event(b"S05");
         event.program_counter = Some(0x112b);
         let map = RegisterMap::default();
         let hit = hardware_breakpoint_hit(&mut client, &map, &manager, &event, Arch::Amd64)
@@ -1854,7 +1899,7 @@ mod tests {
         assert_eq!(manager.hardware_breakpoint_for_slot(300).unwrap().id, id);
         manager.enable(&mut client, &session.target, 299).unwrap();
         assert_eq!(client.hardware_sites[299].unwrap().addr, 0x112b);
-        let event = StopReply::parse("T05watch:2002;").into_event();
+        let event = stop_event(b"T05watch:2002;");
         let hit = hardware_breakpoint_hit(
             &mut client,
             &RegisterMap::default(),
@@ -1947,7 +1992,7 @@ mod tests {
         });
         let prompt = |client: &mut GdbClient, body: &str| {
             let mut packet = Vec::new();
-            append_packet(&mut packet, body.as_bytes());
+            frame::write_packet(&mut packet, body.as_bytes());
             client.stream.get_mut().write_all(&packet).unwrap();
             thread::sleep(Duration::from_millis(100));
         };
@@ -1962,13 +2007,25 @@ mod tests {
 
     #[test]
     fn a_stop_reply_is_found_past_acks_and_whole_console_packets_only() {
-        assert!(holds_stop_reply(b"+$T05thread:p01.02;#00"));
-        assert!(holds_stop_reply(b"$O6869#9a$S05#b8"));
-        assert!(!holds_stop_reply(b"$O6869#9a"));
+        let packets = |bodies: &[&str]| {
+            let mut bytes = Vec::new();
+            for body in bodies {
+                frame::write_packet(&mut bytes, body.as_bytes());
+            }
+            bytes
+        };
+        let holds_stop_reply =
+            |bytes: &[u8]| stop_reply_among(Decoder::new().decode(bytes)) == Some(true);
+        let mut acked = b"+".to_vec();
+        acked.extend(packets(&["T05thread:p01.02;"]));
+        assert!(holds_stop_reply(&acked));
+        assert!(holds_stop_reply(&packets(&["O6869", "S05"])));
+        assert!(!holds_stop_reply(&packets(&["O6869"])));
         // A console packet still arriving hides what follows it.
         assert!(!holds_stop_reply(b"$O6869"));
-        assert!(!holds_stop_reply(b"$"));
-        assert!(!holds_stop_reply(b"$E01#a6"));
+        // So does a stop reply still arriving.
+        assert!(!holds_stop_reply(b"$T05thread:p01.02;"));
+        assert!(!holds_stop_reply(&packets(&["E01", "S05"])));
         assert!(!holds_stop_reply(b""));
     }
 
@@ -1985,25 +2042,25 @@ mod tests {
             .to_string()
         });
         for _ in 0..2 {
-            client.set_current_thread("p01.02").unwrap();
+            DebugBackend::set_current_thread(&mut client, "p01.02").unwrap();
             client.read_registers().unwrap();
         }
         client.write_register_bytes(0x43, &[0; 8]).unwrap();
         client.read_registers().unwrap();
         client.halts.set_running(true);
         client.halts.set_running(false);
-        client.set_current_thread("p01.02").unwrap();
+        DebugBackend::set_current_thread(&mut client, "p01.02").unwrap();
         client.read_registers().unwrap();
         assert_eq!(
             *received.lock(),
             [
-                "Hgp01.02",
-                "Hcp01.02",
+                "Hgp1.2",
+                "Hcp1.2",
                 "g",
                 "P43=0000000000000000",
                 "g",
-                "Hgp01.02",
-                "Hcp01.02",
+                "Hgp1.2",
+                "Hcp1.2",
                 "g",
             ]
         );
@@ -2019,15 +2076,15 @@ mod tests {
         let (mut client, received) = halted_client_over_stub(|packet, seen| {
             match packet {
                 "g" => "0100000000000000",
-                "vCont;c:p01.02" if seen == 1 => "T05thread:p01.01;",
-                "vCont;c:p01.02" | "c" => "T05thread:p01.02;",
+                "vCont;c:p1.2" if seen == 1 => "T05thread:p01.01;",
+                "vCont;c:p1.2" | "c" => "T05thread:p01.02;",
                 _ => "OK",
             }
             .to_string()
         });
-        client.features.thread_continue = true;
+        continues_threads(&mut client);
         let select = |client: &mut GdbClient| {
-            client.set_current_thread("p01.02").unwrap();
+            DebugBackend::set_current_thread(client, "p01.02").unwrap();
             client.read_registers().unwrap();
         };
         select(&mut client);
@@ -2042,19 +2099,19 @@ mod tests {
         assert_eq!(
             *received.lock(),
             [
-                "Hgp01.02",
-                "Hcp01.02",
+                "Hgp1.2",
+                "Hcp1.2",
                 "g",
-                "vCont;c:p01.02",
+                "vCont;c:p1.2",
                 "g",
-                "vCont;c:p01.02",
-                "Hgp01.02",
-                "Hcp01.02",
+                "vCont;c:p1.2",
+                "Hgp1.2",
+                "Hcp1.2",
                 "g",
                 "Hc-1",
                 "c",
-                "Hgp01.02",
-                "Hcp01.02",
+                "Hgp1.2",
+                "Hcp1.2",
                 "g",
             ]
         );
@@ -2082,9 +2139,9 @@ mod tests {
                 "Z0,fffff800e1a5d130,1",
                 "qfThreadInfo",
                 "qsThreadInfo",
-                "Hcp01.01",
+                "Hcp1.1",
                 "Z0,fffff800e1a5d130,1",
-                "Hcp01.02",
+                "Hcp1.2",
             ]
         );
     }
@@ -2111,11 +2168,11 @@ mod tests {
                 "Z0,fffff800e1a5d130,1",
                 "qfThreadInfo",
                 "qsThreadInfo",
-                "Hcp01.01",
+                "Hcp1.1",
                 "Z0,fffff800e1a5d130,1",
-                "Hcp01.02",
-                "Hgp01.02",
-                "Hcp01.02",
+                "Hcp1.2",
+                "Hgp1.2",
+                "Hcp1.2",
                 "g",
                 "p43",
                 "P43=00e01a0000000000",
@@ -2148,15 +2205,15 @@ mod tests {
     #[test]
     fn under_the_windows_hypervisor_steps_are_refused_and_one_vcpu_resumes_alone() {
         let (mut client, received) = halted_client_over_stub(|_, _| "OK".to_string());
-        client.features.thread_continue = true;
-        client.control_thread = Some("p01.02".to_string());
+        continues_threads(&mut client);
+        client.control_thread = Some(thread("p01.02"));
         client.set_windows_hypervisor(true);
         assert!(DebugBackend::single_step_unsafe(&client));
         assert!(DebugBackend::step(&mut client).is_err());
         DebugBackend::continue_current_thread(&mut client).unwrap();
         // The continue is fire-and-forget; give the stub a moment to log it.
         thread::sleep(Duration::from_millis(50));
-        assert_eq!(*received.lock(), ["vCont;c:p01.02"]);
+        assert_eq!(*received.lock(), ["vCont;c:p1.2"]);
     }
 
     /// A run that holds some vCPUs resumes each of the others by name in one
@@ -2164,11 +2221,11 @@ mod tests {
     #[test]
     fn a_run_of_some_vcpus_names_each_one_it_resumes() {
         let (mut client, received) = halted_client_over_stub(|_, _| "OK".to_string());
-        client.features.thread_continue = true;
+        continues_threads(&mut client);
         let threads = ["p01.01".to_string(), "p01.03".to_string()];
         DebugBackend::continue_threads(&mut client, &threads).unwrap();
         thread::sleep(Duration::from_millis(50));
-        assert_eq!(*received.lock(), ["vCont;c:p01.01;c:p01.03"]);
+        assert_eq!(*received.lock(), ["vCont;c:p1.1;c:p1.3"]);
         assert!(DebugBackend::is_running(&client));
     }
 
@@ -2179,22 +2236,22 @@ mod tests {
     #[test]
     fn a_kept_stop_comes_back_without_the_target_resuming() {
         let (mut client, received) = halted_client_over_stub(|_, _| "OK".to_string());
-        client.features.thread_continue = true;
-        client.control_thread = Some("p01.02".to_string());
-        client.last_stop = "T05watch:ffffcc0c31caf204;thread:p01.03;".to_string();
+        continues_threads(&mut client);
+        client.control_thread = Some(thread("p01.02"));
+        client.last_stop = b"T05watch:ffffcc0c31caf204;thread:p01.03;".to_vec();
 
         DebugBackend::keep_last_stop(&mut client).unwrap();
         DebugBackend::continue_execution(&mut client).unwrap();
         assert!(DebugBackend::stop_kept(&client));
         let event = DebugBackend::wait_for_stop(&mut client).unwrap();
-        assert_eq!(event.thread_id.as_deref(), Some("p01.03"));
+        assert_eq!(event.thread_id.as_deref(), Some("p1.3"));
         assert_eq!(event.watchpoint_address, Some(0xffff_cc0c_31ca_f204));
         assert!(!DebugBackend::is_running(&client));
         assert!(!DebugBackend::stop_kept(&client));
 
         DebugBackend::continue_current_thread(&mut client).unwrap();
         thread::sleep(Duration::from_millis(50));
-        assert_eq!(*received.lock(), ["vCont;c:p01.02"]);
+        assert_eq!(*received.lock(), ["vCont;c:p1.2"]);
     }
 
     /// An exit that leaves the target running resumes it even when a stop
@@ -2234,7 +2291,7 @@ mod tests {
         DebugBackend::interrupt(&mut client).unwrap();
         assert_eq!(
             DebugBackend::stopped_thread_id(&mut client).unwrap(),
-            "p01.02"
+            "p1.2"
         );
         let halted = DebugBackend::try_wait_for_stop(&mut client, Duration::from_millis(10))
             .unwrap()
@@ -2261,56 +2318,104 @@ mod tests {
     #[test]
     fn accepts_the_architectures_ntoseye_debugs() {
         let describe = |arch: &str| {
-            description_arch(&format!(
-                "<target><architecture>{arch}</architecture></target>"
-            ))
+            description_arch(
+                &Description::parse(&format!(
+                    "<target><architecture>{arch}</architecture></target>"
+                ))
+                .unwrap(),
+            )
         };
         assert_eq!(describe("i386:x86-64").unwrap(), Arch::Amd64);
         assert_eq!(describe("aarch64").unwrap(), Arch::Arm64);
         // A 32-bit stub has no Windows kernel ntoseye can read.
         assert!(describe("i386").is_err());
-        assert!(description_arch("<target></target>").is_err());
+        assert!(description_arch(&Description::parse("<target></target>").unwrap()).is_err());
     }
 
+    /// Registers are packed in regnum order, so a register listed first
+    /// with a later regnum still lands behind the ones numbered before it,
+    /// and one without a regnum takes the number after the one listed
+    /// before it.
     #[test]
-    fn decodes_escaped_and_run_length_packet_data() {
-        let decoded = GdbClient::decode_packet_data(b"A* }\x03").unwrap();
-        assert_eq!(decoded, b"AAAA#");
-    }
+    fn registers_are_packed_in_regnum_order() {
+        let description = Description::parse(
+            r#"<target><feature name="core">
+            <reg name="rip" bitsize="64" regnum="1"/>
+            <reg name="eflags" bitsize="32"/>
+            <reg name="rax" bitsize="64" regnum="0"/>
+        </feature></target>"#,
+        )
+        .unwrap();
+        let map = description_registers(&description).unwrap();
 
-    #[test]
-    fn rejects_truncated_escape_sequences() {
-        assert!(matches!(
-            GdbClient::decode_packet_data(b"}"),
-            Err(Error::Rsp(_))
-        ));
-    }
-
-    #[test]
-    fn parses_stub_features_from_qsupported() {
-        let features = StubFeatures::parse(
-            "PacketSize=1000;QStartNoAckMode+;multiprocess+;qXfer:features:read+",
+        let offsets: Vec<_> = map
+            .registers()
+            .iter()
+            .map(|reg| (reg.name.as_str(), reg.offset, reg.size, reg.regnum))
+            .collect();
+        assert_eq!(
+            offsets,
+            [("rax", 0, 8, 0), ("rip", 8, 8, 1), ("eflags", 16, 4, 2)]
         );
-        assert!(features.no_ack_mode);
-        assert!(features.qxfer_features_read);
+    }
+
+    /// The description is read a chunk at a time, each from where the data
+    /// so far ends, with its includes read the same way in their place.
+    #[test]
+    fn a_target_description_is_read_in_chunks_with_its_includes() {
+        let (mut client, received) = halted_client_over_stub(|packet, _| {
+            match packet {
+                "qXfer:features:read:target.xml:0,fff" => {
+                    "m<target><architecture>aarch64</architecture>"
+                }
+                "qXfer:features:read:target.xml:2c,fff" => {
+                    "l<xi:include href=\"core.xml\"/></target>"
+                }
+                "qXfer:features:read:core.xml:0,fff" => {
+                    "l<feature name=\"core\"><reg name=\"x0\" bitsize=\"64\"/>\
+                     <reg name=\"x1\" bitsize=\"64\"/></feature>"
+                }
+                _ => "",
+            }
+            .to_string()
+        });
+        client.features.qxfer_features_read = true;
+
+        let description = client.fetch_target_description().unwrap();
+
+        assert_eq!(description_arch(&description).unwrap(), Arch::Arm64);
+        let map = description_registers(&description).unwrap();
+        assert_eq!(
+            map.read_u64("x1", &[0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0])
+                .unwrap(),
+            7
+        );
+        assert_eq!(
+            *received.lock(),
+            [
+                "qXfer:features:read:target.xml:0,fff",
+                "qXfer:features:read:target.xml:2c,fff",
+                "qXfer:features:read:core.xml:0,fff",
+            ]
+        );
     }
 
     #[test]
-    fn parses_thread_and_watch_fields_from_a_stop_reply() {
+    fn a_stop_event_takes_the_thread_and_watch_address_of_a_stop_reply() {
         // QEMU's own shape: padded thread id, then the trapping address.
-        let reply = StopReply::parse("T05thread:p01.02;watch:fffff80012345678;");
-        assert_eq!(reply.thread_id.as_deref(), Some("p01.02"));
-        assert_eq!(reply.watch_address, Some(0xffff_f800_1234_5678));
+        let event = stop_event(b"T05thread:p01.02;watch:fffff80012345678;");
+        assert_eq!(event.thread_id.as_deref(), Some("p1.2"));
+        assert_eq!(event.watchpoint_address, Some(0xffff_f800_1234_5678));
     }
 
     #[test]
     fn parses_read_and_access_watch_fields() {
         assert_eq!(
-            StopReply::parse("T05thread:p01.01;rwatch:1000;").watch_address,
+            stop_event(b"T05thread:p01.01;rwatch:1000;").watchpoint_address,
             Some(0x1000)
         );
         assert_eq!(
-            StopReply::parse("T05thread:p01.01;awatch:1000;").watch_address,
+            stop_event(b"T05thread:p01.01;awatch:1000;").watchpoint_address,
             Some(0x1000)
         );
     }
@@ -2319,22 +2424,27 @@ mod tests {
     fn ignores_fields_that_are_not_a_thread_or_a_watch() {
         // The initial `?` reply names a core and no thread; register fields
         // are `<hex regnum>:<value>` and must not be mistaken for either.
-        let reply = StopReply::parse("T05core:01;10:0000000000000000;");
-        assert_eq!(reply, StopReply::default());
+        let event = stop_event(b"T05core:01;10:0000000000000000;");
+        assert_eq!(event.thread_id, None);
+        assert_eq!(event.watchpoint_address, None);
     }
 
     #[test]
     fn parses_stop_replies_that_describe_no_stopped_thread_as_empty() {
         // `S` carries no fields at all, and `W`/`X` report an exit.
-        assert_eq!(StopReply::parse("S05"), StopReply::default());
-        assert_eq!(StopReply::parse("W00"), StopReply::default());
+        for reply in [&b"S05"[..], b"W00", b"X09"] {
+            let event = stop_event(reply);
+            assert_eq!(event.thread_id, None);
+            assert_eq!(event.watchpoint_address, None);
+            assert!(!event.break_in);
+        }
     }
 
     #[test]
     fn only_a_sigint_stop_reply_is_a_break_in() {
-        assert!(StopReply::parse("T02thread:p1.1;").break_in);
-        assert!(!StopReply::parse("T05thread:p1.1;").break_in);
-        assert!(StopReply::parse("S02").break_in);
-        assert!(!StopReply::parse("W02").break_in);
+        assert!(stop_event(b"T02thread:p1.1;").break_in);
+        assert!(!stop_event(b"T05thread:p1.1;").break_in);
+        assert!(stop_event(b"S02").break_in);
+        assert!(!stop_event(b"W02").break_in);
     }
 }
