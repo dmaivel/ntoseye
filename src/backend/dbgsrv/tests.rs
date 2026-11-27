@@ -858,7 +858,7 @@ impl ProcessServer for MockServer {
         _size: u32,
     ) -> Result<(Vec<u8>, u32)> {
         Ok((
-            vec![0; super::service::MEMORY_BASIC_INFORMATION_SIZE as usize],
+            vec![0; crate::backend::userlive::MemoryBasicInformation::SIZE],
             48,
         ))
     }

@@ -2,56 +2,51 @@
 //! a process server, read and written by virtual address through the server's
 //! own debug-memory calls.
 
-use crate::base::{
-    bytes::{read_u32, read_u64},
-    error::{Error, Result},
-};
+use crate::base::error::{Error, Result};
+use zerocopy::{FromBytes, Immutable, KnownLayout};
 
-/// `MEMORY_BASIC_INFORMATION` as `VirtualQuery` reports it for an address.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct VirtualQuery {
-    pub base: u64,
-    pub size: u64,
+/// Windows `MEMORY_BASIC_INFORMATION` on a 64-bit target, as `VirtualQuery`
+/// fills it: `{ PVOID BaseAddress; PVOID AllocationBase; DWORD
+/// AllocationProtect; WORD PartitionId; SIZE_T RegionSize; DWORD State; DWORD
+/// Protect; DWORD Type; }`. The two named holes are the structure's own
+/// padding, which `#[repr(C)]` otherwise leaves unnamed; naming them is what
+/// lets the bytes be read back as the structure itself.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FromBytes, Immutable, KnownLayout)]
+pub struct MemoryBasicInformation {
+    pub base_address: u64,
     pub allocation_base: u64,
     pub allocation_protect: u32,
+    pub partition_id: u16,
+    /// The hole before the eight-byte-aligned `RegionSize`.
+    pub reserved0: [u8; 2],
+    pub region_size: u64,
     pub state: u32,
     pub protect: u32,
     /// `MEM_*` (`MEM_IMAGE`, `MEM_MAPPED`, `MEM_PRIVATE`).
     pub kind: u32,
+    /// The structure's tail padding.
+    pub reserved1: [u8; 4],
 }
 
-impl VirtualQuery {
-    /// Bytes in the 64-bit `MEMORY_BASIC_INFORMATION` this decodes.
+const _: () =
+    assert!(core::mem::size_of::<MemoryBasicInformation>() == MemoryBasicInformation::SIZE);
+
+impl MemoryBasicInformation {
+    /// Bytes of the 64-bit structure.
     pub const SIZE: usize = 48;
 
-    /// Decode the first [`Self::SIZE`] bytes of what `VirtualQuery` filled.
-    ///
-    /// The offsets are the x64 `MEMORY_BASIC_INFORMATION`: `BaseAddress`,
-    /// `AllocationBase`, `AllocationProtect`, a `WORD` partition id and two
-    /// bytes of padding, `RegionSize`, `State`, `Protect`, `Type`. There is no
-    /// serialization on either side: the server writes the structure itself.
+    /// Read the bytes `VirtualQuery` filled. The bytes come from another
+    /// process, so they are copied out rather than viewed in place: a
+    /// `Vec<u8>` carries no alignment promise.
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        let bytes = bytes.get(..Self::SIZE).ok_or_else(|| {
+        Self::read_from_bytes(bytes).map_err(|_| {
             Error::DebugInfo(format!(
                 "VirtualQuery filled {} bytes, {} expected",
                 bytes.len(),
                 Self::SIZE
             ))
-        })?;
-        Ok(Self {
-            base: read_u64(bytes, 0),
-            allocation_base: read_u64(bytes, 8),
-            allocation_protect: read_u32(bytes, 16),
-            size: read_u64(bytes, 24),
-            state: read_u32(bytes, 32),
-            protect: read_u32(bytes, 36),
-            kind: read_u32(bytes, 40),
         })
-    }
-
-    /// The end of the region (exclusive).
-    pub fn end(&self) -> u64 {
-        self.base.saturating_add(self.size)
     }
 }
 
@@ -65,36 +60,44 @@ pub trait UserLiveMemory: Send + Sync {
     fn write(&self, process: u64, address: u64, buf: &[u8]) -> Result<()>;
 
     /// What `VirtualQuery` reports for `address` in `process`.
-    fn query(&self, process: u64, address: u64) -> Result<VirtualQuery>;
+    fn query(&self, process: u64, address: u64) -> Result<MemoryBasicInformation>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The bytes are the x64 `MEMORY_BASIC_INFORMATION`, read at the offsets
+    /// the structure defines: `PartitionId` at 0x14, then `RegionSize` at
+    /// 0x18 because of its eight-byte alignment.
     #[test]
-    fn a_memory_basic_information_decodes_its_region_and_protection() {
-        let mut bytes = [0u8; VirtualQuery::SIZE];
+    fn a_memory_basic_information_is_read_at_its_windows_offsets() {
+        let mut bytes = [0u8; MemoryBasicInformation::SIZE];
         bytes[0..8].copy_from_slice(&0x1000_0000u64.to_le_bytes());
         bytes[8..16].copy_from_slice(&0x0fff_0000u64.to_le_bytes());
         bytes[16..20].copy_from_slice(&0x04u32.to_le_bytes());
+        bytes[20..22].copy_from_slice(&7u16.to_le_bytes());
         bytes[24..32].copy_from_slice(&0x4200u64.to_le_bytes());
         bytes[32..36].copy_from_slice(&0x1000u32.to_le_bytes());
         bytes[36..40].copy_from_slice(&0x20u32.to_le_bytes());
         bytes[40..44].copy_from_slice(&0x100_0000u32.to_le_bytes());
-        assert_eq!(
-            VirtualQuery::decode(&bytes).unwrap(),
-            VirtualQuery {
-                base: 0x1000_0000,
-                size: 0x4200,
-                allocation_base: 0x0fff_0000,
-                allocation_protect: 4,
-                state: 0x1000,
-                protect: 0x20,
-                kind: 0x100_0000,
-            }
-        );
-        assert_eq!(VirtualQuery::decode(&bytes).unwrap().end(), 0x1000_4200);
-        assert!(VirtualQuery::decode(&bytes[..24]).is_err());
+
+        let info = MemoryBasicInformation::decode(&bytes).expect("48 bytes");
+        assert_eq!(info.base_address, 0x1000_0000);
+        assert_eq!(info.allocation_base, 0x0fff_0000);
+        assert_eq!(info.allocation_protect, 4);
+        assert_eq!(info.partition_id, 7);
+        assert_eq!(info.region_size, 0x4200);
+        assert_eq!(info.state, 0x1000);
+        assert_eq!(info.protect, 0x20);
+        assert_eq!(info.kind, 0x100_0000);
+    }
+
+    /// A 32-bit server fills `MEMORY_BASIC_INFORMATION32` (28 bytes), which
+    /// this client refuses rather than misreading at the 64-bit offsets.
+    #[test]
+    fn a_short_query_answer_is_refused() {
+        assert!(MemoryBasicInformation::decode(&[0u8; 28]).is_err());
+        assert!(MemoryBasicInformation::decode(&[]).is_err());
     }
 }

@@ -8,8 +8,8 @@ use crate::base::error::{Error, Result};
 
 use super::service::{
     CLOSE_PROC_THREAD_HANDLES, GENERIC_CODE_BREAKPOINTS, GENERIC_DATA_BREAKPOINTS,
-    IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64, IMAGE_FILE_MACHINE_I386,
-    MEMORY_BASIC_INFORMATION_SIZE, ProcessServer, RpcService, TargetInfo,
+    IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64, IMAGE_FILE_MACHINE_I386, ProcessServer,
+    RpcService, TargetInfo,
 };
 
 /// A DbgRpc process server connection.
@@ -152,8 +152,11 @@ impl DbgSrvClient {
     /// `VirtualQuery` at `address`: the `MEMORY_BASIC_INFORMATION` bytes and
     /// how many of them the query filled.
     pub fn query_virtual(&self, process: u64, address: u64) -> Result<(Vec<u8>, u32)> {
-        self.server()
-            .query_virtual(process, address, MEMORY_BASIC_INFORMATION_SIZE)
+        self.server().query_virtual(
+            process,
+            address,
+            crate::backend::userlive::MemoryBasicInformation::SIZE as u32,
+        )
     }
 }
 

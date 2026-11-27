@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use crate::arch::Arch;
 use crate::backend::host::VmHandle;
 use crate::backend::kd::KdMemory;
-use crate::backend::userlive::{UserLiveMemory, VirtualQuery};
+use crate::backend::userlive::{MemoryBasicInformation, UserLiveMemory};
 use crate::base::error::{Error, Result};
 use crate::base::memory::{
     CompressedPages, MemoryOps, PAGE_FILE_LOW, PAGE_SIZE, SectionViews, TranslationCache,
@@ -432,7 +432,7 @@ impl PhysMem {
 
     /// What `VirtualQuery` reports for `address` in a live user-mode
     /// process, `None` for every other source.
-    pub fn user_live_query(&self, address: u64) -> Option<Result<VirtualQuery>> {
+    pub fn user_live_query(&self, address: u64) -> Option<Result<MemoryBasicInformation>> {
         match &self.source {
             Source::UserLive {
                 memory, process, ..

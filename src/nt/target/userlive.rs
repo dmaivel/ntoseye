@@ -9,6 +9,7 @@
 //! stopped, which is what the backend above it provides.
 
 use crate::backend::phys::PhysMem;
+use crate::backend::userlive::MemoryBasicInformation;
 use crate::base::error::{Error, Result};
 use crate::base::memory::{AddressSpace, DTB_IDENTITY, MemoryOps};
 use crate::base::notice::Notice;
@@ -100,6 +101,22 @@ struct LoaderEntry {
     base: u64,
     entry_point: u64,
     size_of_image: u32,
+}
+
+/// A live `VirtualQuery` answer as the dump model records a region: the same
+/// seven fields, under the names `!address` reports.
+impl From<MemoryBasicInformation> for MemoryRegion {
+    fn from(info: MemoryBasicInformation) -> Self {
+        Self {
+            base: info.base_address,
+            allocation_base: info.allocation_base,
+            allocation_protect: info.allocation_protect,
+            size: info.region_size,
+            state: info.state,
+            protect: info.protect,
+            kind: info.kind,
+        }
+    }
 }
 
 impl Target {
@@ -327,6 +344,7 @@ impl Target {
     }
 
     /// The live process's address space, one region per `VirtualQuery`:
+    /// The live process's address space, one region per `VirtualQuery`:
     /// the query's own answer, walked from the bottom of user space up.
     pub fn live_memory_regions(&self) -> Result<Vec<MemoryRegion>> {
         /// How many regions one walk may list: a process mapping every
@@ -361,19 +379,12 @@ impl Target {
                     continue;
                 }
             };
-            if query.size == 0 {
+            let region = MemoryRegion::from(query);
+            if region.size == 0 {
                 break;
             }
-            regions.push(MemoryRegion {
-                base: query.base,
-                allocation_base: query.allocation_base,
-                allocation_protect: query.allocation_protect,
-                size: query.size,
-                state: query.state,
-                protect: query.protect,
-                kind: query.kind,
-            });
-            let next = query.end();
+            let next = region.base.saturating_add(region.size);
+            regions.push(region);
             if next <= address {
                 // A region that does not advance the walk would repeat it.
                 break;
@@ -431,7 +442,7 @@ mod tests {
     use super::*;
     use crate::arch::Arch;
     use crate::backend::phys::PhysMem;
-    use crate::backend::userlive::{UserLiveMemory, VirtualQuery};
+    use crate::backend::userlive::UserLiveMemory;
 
     /// A process address space as a sparse map of bytes: reads inside a
     /// mapped page succeed, anything else faults like an unmapped address.
@@ -489,15 +500,18 @@ mod tests {
             Ok(())
         }
 
-        fn query(&self, _process: u64, address: u64) -> Result<VirtualQuery> {
-            Ok(VirtualQuery {
-                base: address & !0xfff,
-                size: 0x1000,
+        fn query(&self, _process: u64, address: u64) -> Result<MemoryBasicInformation> {
+            Ok(MemoryBasicInformation {
+                base_address: address & !0xfff,
                 allocation_base: address & !0xffff,
                 allocation_protect: 0x04,
+                partition_id: 0,
+                reserved0: [0; 2],
+                region_size: 0x1000,
                 state: 0x1000,
                 protect: 0x04,
                 kind: 0x2_0000,
+                reserved1: [0; 4],
             })
         }
     }

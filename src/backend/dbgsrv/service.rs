@@ -54,9 +54,6 @@ pub const IMAGE_FILE_MACHINE_ARM64: u32 = 0xaa64;
 /// `IMAGE_FILE_MACHINE_I386`.
 pub const IMAGE_FILE_MACHINE_I386: u32 = 0x014c;
 
-/// The `MEMORY_BASIC_INFORMATION` bytes a `VirtualQuery` fills.
-pub const MEMORY_BASIC_INFORMATION_SIZE: u32 = 48;
-
 /// The largest reply body this client accepts. Every reply it asks for is
 /// smaller (a `CONTEXT` is about 1.2 KiB, a page an event), so a header naming
 /// more is corrupt rather than a large answer.

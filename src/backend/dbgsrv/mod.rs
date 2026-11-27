@@ -48,10 +48,10 @@ impl crate::backend::userlive::UserLiveMemory for DbgSrvUserMemory {
         &self,
         process: u64,
         address: u64,
-    ) -> crate::base::error::Result<crate::backend::userlive::VirtualQuery> {
+    ) -> crate::base::error::Result<crate::backend::userlive::MemoryBasicInformation> {
         let process = if process == 0 { self.process } else { process };
         let (bytes, used) = self.client.query_virtual(process, address)?;
         let used = (used as usize).min(bytes.len());
-        crate::backend::userlive::VirtualQuery::decode(&bytes[..used])
+        crate::backend::userlive::MemoryBasicInformation::decode(&bytes[..used])
     }
 }
