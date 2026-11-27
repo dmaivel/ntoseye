@@ -110,16 +110,19 @@ impl Server {
 
     /// Install the thread list, announcing additions and removals.
     fn set_threads(&mut self, ids: Vec<String>) {
-        let threads = match self
-            .session
-            .as_ref()
-            .and_then(|session| session.target.user_dump_info())
-        {
-            Some(info) => dap_threads(ids, |id| {
-                info.thread_for_backend_id(id).map(|thread| thread.tid)
-            }),
-            None => dap_threads(ids, |_| None),
+        let tids = |id: &str| -> Option<u32> {
+            let target = &self.session.as_ref()?.target;
+            target
+                .user_dump_info()
+                .and_then(|info| info.thread_for_backend_id(id).map(|thread| thread.tid))
+                .or_else(|| {
+                    target
+                        .live_user_process()?
+                        .thread_by_backend_id(id)
+                        .map(|thread| thread.tid)
+                })
         };
+        let threads = dap_threads(ids, tids);
         if threads == self.threads {
             return;
         }

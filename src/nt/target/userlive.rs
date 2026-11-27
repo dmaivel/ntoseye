@@ -66,6 +66,20 @@ impl LiveUserProcess {
     pub fn thread_by_id(&self, tid: u32) -> Option<&LiveUserThread> {
         self.threads.iter().find(|thread| thread.tid == tid)
     }
+
+    /// The thread a backend id names: its thread id in hex, as
+    /// [`Target::user_live_backend_thread_id`] writes it.
+    pub fn thread_by_backend_id(&self, backend_id: &str) -> Option<&LiveUserThread> {
+        let tid = u32::from_str_radix(backend_id, 16).ok()?;
+        self.thread_by_id(tid)
+    }
+
+    /// The place the thread a backend id names holds in the process's thread
+    /// list, which is the number `~` selects it by.
+    pub fn thread_index_by_backend_id(&self, backend_id: &str) -> Option<usize> {
+        let tid = u32::from_str_radix(backend_id, 16).ok()?;
+        self.threads.iter().position(|thread| thread.tid == tid)
+    }
 }
 
 /// The `_PEB` fields the loader walk needs, at the offsets every 64-bit
@@ -159,9 +173,10 @@ impl Target {
     /// [`Self::user_live_backend_thread_id`] writes it. An id no thread has
     /// clears the selection.
     pub fn select_live_user_thread(&mut self, backend_id: &str) -> Option<u32> {
-        let tid = u32::from_str_radix(backend_id, 16).ok();
         let process = self.user_live.as_mut()?;
-        process.selected_tid = tid.filter(|tid| process.thread_by_id(*tid).is_some());
+        process.selected_tid = process
+            .thread_by_backend_id(backend_id)
+            .map(|thread| thread.tid);
         process.selected_tid
     }
 

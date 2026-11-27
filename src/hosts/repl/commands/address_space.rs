@@ -14,7 +14,6 @@ use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::expr::Expr;
 use crate::nt::guest::{ModuleInfo, ProcessInfo};
-use crate::nt::target::MemoryKind;
 use crate::nt::target::mm::{
     AddressDescription, MEM_FREE, MemoryBasicInformation, MemoryRegionInfo, VadProtection, VadType,
     memory_state_name, memory_type_name, page_protection_name,
@@ -23,6 +22,7 @@ use crate::nt::target::usermode::address::{
     AddressSummary, CapturedRange, SummaryRow, UserAddressReport, UserRegion, human_size,
     state_label, type_label,
 };
+use crate::nt::target::{MemoryKind, TargetKind};
 use crate::session::Session;
 
 pub const PAGE_SHIFT: u32 = PAGE_SIZE.trailing_zeros();
@@ -368,7 +368,9 @@ impl Render<bool> for AddressReport {
 /// page-table steps. On a user-mode minidump the command reads the region
 /// from the dump's memory-info list, which records what VirtualQuery
 /// returned when the dump was written; RegionSize runs from the page of the
-/// address to the end of that region.
+/// address to the end of that region. On a live process it asks the process
+/// server's VirtualQuery, whose answer is the region holding the address
+/// from the region's start.
 #[command(
     names = ["!vprot", "vprot"],
     category = "memory manager",
@@ -379,20 +381,30 @@ impl Render<bool> for AddressReport {
 )]
 fn vprot(session: &Session, address: VirtAddr) -> Result<MemoryBasicInformation> {
     let target = &session.target;
-    if let Some(info) = target.user_dump_info() {
-        if info.regions.is_none() {
-            return Err(Error::DebugInfo(format!(
-                "the minidump records no memory-info list, so it has no region state or \
-                 protection; `!address {:#x}` shows the captured range that holds the address",
-                address.0
-            )));
+    match target.kind() {
+        // A live process answers VirtualQuery itself; the server's call is
+        // the one this command describes.
+        TargetKind::UserLive => target.live_user_virtual_query(address),
+        TargetKind::UserDump => {
+            if target
+                .user_dump_info()
+                .is_none_or(|info| info.regions.is_none())
+            {
+                return Err(Error::DebugInfo(format!(
+                    "the minidump records no memory-info list, so it has no region state or \
+                     protection; `!address {:#x}` shows the captured range that holds the address",
+                    address.0
+                )));
+            }
+            target.user_virtual_query(address)
         }
-        return target.user_virtual_query(address);
+        TargetKind::Kernel => {
+            let process = target.current_process().ok_or_else(|| {
+                Error::DebugInfo("!vprot needs a process context (.process /p <pid>)".to_string())
+            })?;
+            target.virtual_query(&process, address)
+        }
     }
-    let process = target.current_process().ok_or_else(|| {
-        Error::DebugInfo("!vprot needs a process context (.process /p <pid>)".to_string())
-    })?;
-    target.virtual_query(&process, address)
 }
 
 impl Render for MemoryBasicInformation {

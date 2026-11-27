@@ -689,27 +689,40 @@ impl Target {
     /// The TEB of the thread selected for inspection: a live thread's, or the
     /// captured one a minidump records.
     fn user_teb(&self) -> Result<VirtAddr> {
-        if let Some(process) = self.live_user_process() {
-            let thread = process.thread().ok_or_else(|| {
-                Error::DebugInfo("no live thread is selected; select one with ~<n>s".to_string())
-            })?;
-            return match thread.teb.filter(|teb| *teb != 0) {
-                Some(teb) => Ok(VirtAddr(teb)),
-                None => Err(Error::DebugInfo(format!(
-                    "the process server names no TEB for thread {:x}",
-                    thread.tid
-                ))),
-            };
-        }
-        let thread = self.user_thread().ok_or_else(|| {
-            Error::DebugInfo("no captured thread is selected; select one with ~<n>s".into())
-        })?;
-        match thread.teb {
-            0 => Err(Error::DebugInfo(format!(
-                "the minidump records no TEB for thread {:x}",
-                thread.tid
-            ))),
-            teb => Ok(VirtAddr(teb)),
+        match self.kind() {
+            TargetKind::UserLive => {
+                let process = self.live_user_process().ok_or_else(|| {
+                    Error::DebugInfo("this live target holds no process".to_string())
+                })?;
+                let thread = process.thread().ok_or_else(|| {
+                    Error::DebugInfo(
+                        "no live thread is selected; select one with ~<n>s".to_string(),
+                    )
+                })?;
+                match thread.teb.filter(|teb| *teb != 0) {
+                    Some(teb) => Ok(VirtAddr(teb)),
+                    None => Err(Error::DebugInfo(format!(
+                        "the process server names no TEB for thread {:x}",
+                        thread.tid
+                    ))),
+                }
+            }
+            TargetKind::UserDump => {
+                let thread = self.user_thread().ok_or_else(|| {
+                    Error::DebugInfo("no captured thread is selected; select one with ~<n>s".into())
+                })?;
+                match thread.teb {
+                    0 => Err(Error::DebugInfo(format!(
+                        "the minidump records no TEB for thread {:x}",
+                        thread.tid
+                    ))),
+                    teb => Ok(VirtAddr(teb)),
+                }
+            }
+            TargetKind::Kernel => Err(Error::DebugInfo(
+                "a kernel target reads no user-mode TEB; select a process with .process"
+                    .to_string(),
+            )),
         }
     }
 
@@ -746,51 +759,61 @@ impl Target {
     /// The root, the default PEB (`address` when given), and the WOW64 PEB
     /// of the process `!peb` and `!dlls` decode: on a kernel target the
     /// current process's (`EPROCESS.Peb`), on a user-mode minidump its one
-    /// process's, through the selected thread's TEB.
+    /// process's, through the selected thread's TEB, and on a live process
+    /// the PEB its process server names, else its selected thread's.
     fn peb_scope(&self, address: Option<VirtAddr>) -> Result<(Dtb, VirtAddr, Option<VirtAddr>)> {
-        if self.kind() == TargetKind::UserDump {
-            let dtb = self.current_dtb();
-            let view = self.user_mode_types(dtb)?;
-            return match address {
-                Some(address) => Ok((dtb, address, None)),
-                None => {
-                    let teb = self.user_teb()?;
-                    let peb = self.user_peb(view, teb)?;
-                    Ok((dtb, peb, self.user_wow64_peb(view, teb)))
+        match self.kind() {
+            // The PEB a minidump recorded is the one its selected thread's
+            // TEB names; there is no process server to ask.
+            TargetKind::UserDump => {
+                let dtb = self.current_dtb();
+                let view = self.user_mode_types(dtb)?;
+                match address {
+                    Some(address) => Ok((dtb, address, None)),
+                    None => {
+                        let teb = self.user_teb()?;
+                        let peb = self.user_peb(view, teb)?;
+                        Ok((dtb, peb, self.user_wow64_peb(view, teb)))
+                    }
                 }
-            };
-        }
-        if let Some(process) = self.live_user_process() {
-            let dtb = self.current_dtb();
-            return match address.or_else(|| process.peb.map(VirtAddr)) {
-                Some(peb) => Ok((dtb, peb, None)),
-                // The process server names no PEB; the selected thread's TEB
-                // does, once its symbols are loaded.
-                None => {
-                    let view = self.user_mode_types(dtb)?;
-                    let teb = self.user_teb()?;
-                    let peb = self.user_peb(view, teb)?;
-                    Ok((dtb, peb, self.user_wow64_peb(view, teb)))
-                }
-            };
-        }
-        let process = current_process(self)?;
-        let dtb = process.dtb;
-        let peb_address = if let Some(address) = address {
-            address
-        } else {
-            let eprocess = self
-                .guest()?
-                .ntoskrnl
-                .types_in(dtb)
-                .struct_at("_EPROCESS", process.eprocess)?;
-            let peb = eprocess.follow("Peb")?;
-            if peb.addr().is_zero() {
-                return Err(Error::MissingPEB);
             }
-            peb.addr()
-        };
-        Ok((dtb, peb_address, process.wow64_peb))
+            TargetKind::UserLive => {
+                let process = self.live_user_process().ok_or_else(|| {
+                    Error::DebugInfo("this live target holds no process".to_string())
+                })?;
+                let dtb = self.current_dtb();
+                match address.or_else(|| process.peb.map(VirtAddr)) {
+                    Some(peb) => Ok((dtb, peb, None)),
+                    // The process server names no PEB; the selected thread's
+                    // TEB does, once its symbols are loaded.
+                    None => {
+                        let view = self.user_mode_types(dtb)?;
+                        let teb = self.user_teb()?;
+                        let peb = self.user_peb(view, teb)?;
+                        Ok((dtb, peb, self.user_wow64_peb(view, teb)))
+                    }
+                }
+            }
+            TargetKind::Kernel => {
+                let process = current_process(self)?;
+                let dtb = process.dtb;
+                let peb_address = if let Some(address) = address {
+                    address
+                } else {
+                    let eprocess = self
+                        .guest()?
+                        .ntoskrnl
+                        .types_in(dtb)
+                        .struct_at("_EPROCESS", process.eprocess)?;
+                    let peb = eprocess.follow("Peb")?;
+                    if peb.addr().is_zero() {
+                        return Err(Error::MissingPEB);
+                    }
+                    peb.addr()
+                };
+                Ok((dtb, peb_address, process.wow64_peb))
+            }
+        }
     }
 
     /// Decode the native `_PEB`, its process-parameter strings/pointers, and

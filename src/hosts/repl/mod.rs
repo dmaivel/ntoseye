@@ -595,14 +595,19 @@ impl<'a> ReplState<'a> {
     }
 
     /// What the prompt names the current thread by: the number `~` selects
-    /// it by, the processor's (`3`) or, in a user-mode dump, the thread's
-    /// place in the dump's list (`17`), as WinDbg's `0:017>` does.
+    /// it by, the processor's (`3`) or, in a user-mode target, the thread's
+    /// place in the process's list (`17`), as WinDbg's `0:017>` does.
     pub fn prompt_thread(&self) -> String {
         let thread = &self.ctx.current_thread;
-        self.ctx
-            .target
+        let target = &self.ctx.target;
+        target
             .user_dump_info()
             .and_then(|info| info.thread_index(info.tid_for_backend_id(thread)?))
+            .or_else(|| {
+                target
+                    .live_user_process()?
+                    .thread_index_by_backend_id(thread)
+            })
             .map_or_else(|| thread_label(thread), |index| index.to_string())
     }
 

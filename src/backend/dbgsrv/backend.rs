@@ -723,18 +723,27 @@ impl DebugBackend for DbgsrvBackend {
         ]
         .into_iter()
         .map(|capability| {
-            let supported = matches!(
-                capability,
+            let supported = match capability {
                 MemoryIntrospection
-                    | ExecutionControl
-                    | InterruptTarget
-                    | SingleStep
-                    | ReadRegisters
-                    | WriteRegisters
-                    | ThreadList
-                    | ThreadSelection
-                    | UserModeBreakpoints
-            );
+                | ExecutionControl
+                | InterruptTarget
+                | SingleStep
+                | ReadRegisters
+                | WriteRegisters
+                | ThreadList
+                | ThreadSelection
+                | UserModeBreakpoints
+                // The service's `LoadDll`/`UnloadDll` events mark the module
+                // list stale, and an `OUTPUT_DEBUG_STRING_EVENT` is kept in
+                // the debug log. Both are a live process's own, not a
+                // kernel's.
+                | ModuleLoadEvents
+                | DebugOutput => true,
+                // `CONTEXT` carries the thread's debug registers, unless the
+                // architecture's record has none.
+                Watchpoints => self.supports_watchpoints(),
+                _ => false,
+            };
             BackendCapability {
                 capability,
                 supported,
