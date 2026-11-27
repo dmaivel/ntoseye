@@ -7,7 +7,7 @@ use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gdb_remote::frame::{self, Corruption, Decoder, Frame, Kind};
 use gdb_remote::stop::StopReply;
@@ -120,21 +120,22 @@ impl Connection {
     /// The next request or interrupt, waiting at most `timeout` for one.
     /// Acknowledgments are handled here: a packet is acknowledged as it
     /// arrives, a corrupt one asked for again, and a `-` answered with the
-    /// last packet sent.
+    /// last packet sent. Reads go on until the timeout: what one read
+    /// brings (an ack, a corrupt packet, part of a packet) may not hold a
+    /// request yet.
     pub(super) fn next(&mut self, timeout: Duration) -> io::Result<Option<Incoming>> {
-        let mut waited = false;
+        let deadline = Instant::now() + timeout;
         loop {
-            if let Some(frame) = self.frames.pop_front() {
+            while let Some(frame) = self.frames.pop_front() {
                 if let Some(incoming) = self.take(frame)? {
                     return Ok(Some(incoming));
                 }
-                continue;
             }
-            if waited || self.terminating.load(Ordering::SeqCst) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() || self.terminating.load(Ordering::SeqCst) {
                 return Ok(None);
             }
-            self.fill(Some(timeout))?;
-            waited = true;
+            self.fill(Some(left))?;
         }
     }
 
@@ -272,18 +273,24 @@ mod tests {
     /// In acknowledgment mode a request is acknowledged before it is
     /// answered (so a slow answer does not make gdb send the request
     /// again), a corrupt one is asked for again, and a `-` after a reply
-    /// gets that reply again.
+    /// gets that reply again. A request that comes in a later read than the
+    /// corrupt one, within the wait, is still the one returned.
     #[test]
     fn acknowledgment_mode_acks_naks_and_resends() {
         let (mut connection, mut client) = connected();
         let mut corrupt = packet(b"g");
         *corrupt.last_mut().unwrap() = b'0';
         client.write_all(&corrupt).unwrap();
-        client.write_all(&packet(b"?")).unwrap();
+        let mut late = client.try_clone().unwrap();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            late.write_all(&packet(b"?")).unwrap();
+        });
         assert_eq!(
             connection.next(WAIT).unwrap(),
             Some(Incoming::Packet(b"?".to_vec()))
         );
+        writer.join().unwrap();
         connection.send(b"S05").unwrap();
         assert_eq!(
             received(&mut client),
