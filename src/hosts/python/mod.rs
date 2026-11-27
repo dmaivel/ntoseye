@@ -197,21 +197,26 @@ pub fn plain_dict<'py, T: ToValue>(py: Python<'py>, value: &T) -> PyResult<Plain
 
 /// Attach to a guest and return a `Debugger`.
 ///
-/// `backend` is one of `"kd"` (default), `"kdnet"`, `"gdb"`, `"memory"`, or
-/// `"dmp"`. `connect` is the backend target: a socket path or address for
-/// kd/kdnet/gdb, or the dump file path for dmp: a kernel crash dump, or a
-/// Windows user-mode minidump, whose process and threads `Debugger.user_dump`
-/// holds. Without `connect`, the function uses the default of the backend,
-/// but dmp has no default and needs a path. kdnet needs `key`.
+/// `backend` is one of `"kd"` (default), `"kdnet"`, `"gdb"`, `"dbgsrv"`,
+/// `"memory"`, or `"dmp"`. `connect` is the backend target: a socket path or
+/// address for kd/kdnet/gdb, a `tcp:server=<host>,port=<port>` process-server
+/// endpoint for dbgsrv, or the dump file path for dmp: a kernel crash dump, or
+/// a Windows user-mode minidump, whose process and threads
+/// `Debugger.user_dump` holds. Without `connect`, the function uses the
+/// default of the backend, but dmp has no default and needs a path, and so
+/// does dbgsrv. kdnet needs `key`.
 /// `memory_source` is `auto`, `host`, or `kd` for KD/KDNET.
 /// `kd_handshake_timeout` is keyword-only: positive integer seconds for the
 /// initial KD/KDNET handshake. It overrides `NTOSEYE_KD_TIMEOUT`; `None` uses
 /// the environment variable or the 8-second default. Other backends reject it.
+/// `process` and `create` are the dbgsrv backend's target: the process id to
+/// attach to, or the command line to start under the debugger, exactly one of
+/// them, and neither for any other backend.
 ///
-/// For kd/kdnet/gdb, the function takes an instance lock for the target before
-/// it makes the backend, so a second live attach to the same target fails
-/// immediately without interfering with the handshake that the first session
-/// owns. The memory and dmp backends are passive.
+/// For kd/kdnet/gdb/dbgsrv, the function takes an instance lock for the target
+/// before it makes the backend, so a second live attach to the same target
+/// fails immediately without interfering with the handshake that the first
+/// session owns. The memory and dmp backends are passive.
 #[pyfunction]
 #[pyo3(signature = (
     backend=AttachBackend(Some(Backend::Kd)),
@@ -220,6 +225,8 @@ pub fn plain_dict<'py, T: ToValue>(py: Python<'py>, value: &T) -> PyResult<Plain
     memory_source=KdMemorySource::Auto,
     *,
     kd_handshake_timeout: "int | None" = None,
+    process: "int | None" = None,
+    create: "str | None" = None,
 ))]
 fn attach(
     py: Python<'_>,
@@ -228,19 +235,78 @@ fn attach(
     key: Option<&str>,
     memory_source: KdMemorySource,
     #[pyo3(from_py_with = handshake_timeout_arg)] kd_handshake_timeout: Option<u64>,
+    process: Option<u32>,
+    create: Option<&str>,
 ) -> PyResult<Debugger> {
     let spec = match backend.0 {
-        Some(backend) => TargetSpec::Live {
-            backend,
-            connect: connect.map(str::to_string),
-            kdnet_key: key.map(str::to_string),
-            memory_source,
-            kd_handshake_timeout,
-        },
+        Some(Backend::DbgSrv) => {
+            for (name, given) in [
+                ("key", key.is_some()),
+                ("memory_source", memory_source != KdMemorySource::Auto),
+                ("kd_handshake_timeout", kd_handshake_timeout.is_some()),
+            ] {
+                if given {
+                    return Err(PyValueError::new_err(format!(
+                        "the dbgsrv backend does not use {name}"
+                    )));
+                }
+            }
+            let connect = connect.ok_or_else(|| {
+                PyValueError::new_err(
+                    "the dbgsrv backend needs its process server's endpoint: \
+                     connect=\"tcp:server=<host>,port=<port>\"",
+                )
+            })?;
+            let target = match (process, create) {
+                (Some(pid), None) => crate::DbgsrvTarget::Attach { pid },
+                (None, Some(command_line)) => crate::DbgsrvTarget::Create {
+                    command_line: command_line.to_string(),
+                },
+                (None, None) => {
+                    return Err(PyValueError::new_err(
+                        "the dbgsrv backend needs exactly one of process=<pid> and \
+                         create=<command line>",
+                    ));
+                }
+                (Some(_), Some(_)) => {
+                    return Err(PyValueError::new_err(
+                        "process and create are mutually exclusive",
+                    ));
+                }
+            };
+            TargetSpec::Dbgsrv {
+                connect: connect.to_string(),
+                target,
+            }
+        }
+        Some(backend) => {
+            if process.is_some() {
+                return Err(PyValueError::new_err(
+                    "process is only valid for the dbgsrv backend",
+                ));
+            }
+            if create.is_some() {
+                return Err(PyValueError::new_err(
+                    "create is only valid for the dbgsrv backend",
+                ));
+            }
+            TargetSpec::Live {
+                backend,
+                connect: connect.map(str::to_string),
+                kdnet_key: key.map(str::to_string),
+                memory_source,
+                kd_handshake_timeout,
+            }
+        }
         None => {
             if kd_handshake_timeout.is_some() {
                 return Err(PyValueError::new_err(
                     "kd_handshake_timeout is only valid for kd and kdnet backends",
+                ));
+            }
+            if process.is_some() || create.is_some() {
+                return Err(PyValueError::new_err(
+                    "process and create are only valid for the dbgsrv backend",
                 ));
             }
             let path = connect.ok_or_else(|| {
@@ -249,6 +315,8 @@ fn attach(
             TargetSpec::Dump(path.into())
         }
     };
+    spec.validate()
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
     // Opening can take seconds (symbol downloads); other Python threads run.
     let actor = py
         .detach(|| Actor::spawn(move || open_session(&spec, &mut |line| eprintln!("{line}"))))

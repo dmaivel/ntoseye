@@ -5093,3 +5093,60 @@ fn resuming_replants_the_module_traps_a_stop_dropped() {
 
     assert_eq!(*sites.lock(), [(LOAD_TRAP, true)]);
 }
+
+/// A live user-mode process behind a process server opens as a user-mode
+/// session: its threads are `~`'s, its registers are `r`'s, and the target is
+/// held at the server's first debug event until a run command.
+#[test]
+fn a_process_server_target_opens_as_a_live_user_session() {
+    use crate::backend::dbgsrv::DbgsrvTarget;
+    use crate::backend::dbgsrv::tests::{FakeServer, PID, RIP, TID, endpoint, serve};
+    use crate::nt::target::TargetKind;
+    use std::net::TcpListener;
+
+    let server = Arc::new(FakeServer::new(Arch::Amd64));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a listener");
+    let connect = endpoint(&listener);
+    let handle = serve(listener, Arc::clone(&server));
+    let spec = TargetSpec::Dbgsrv {
+        connect,
+        target: DbgsrvTarget::Attach { pid: PID },
+    };
+    let mut session = Session::open(&spec).expect("a live user session");
+    assert_eq!(session.target.kind(), TargetKind::UserLive);
+    assert!(session.target.is_user_target());
+    assert!(!session.backend.is_running());
+
+    // `~`: one thread, selected, at the pc the server's CONTEXT names.
+    let threads = session.user_threads().expect("user threads");
+    assert_eq!(threads.len(), 1);
+    assert_eq!(threads[0].tid, TID);
+    assert_eq!(threads[0].rip, Some(RIP));
+    assert!(threads[0].current, "{threads:?}");
+    assert_eq!(
+        threads[0].id,
+        crate::nt::target::Target::user_live_backend_thread_id(TID)
+    );
+
+    // `r`: the register file is the process's own CONTEXT.
+    assert_eq!(session.current_rip(), RIP);
+
+    // The process's loader list reads as empty here (the fake server answers
+    // unmapped pages with zeroes), and its image's headers are zeroes too, so
+    // `lm` lists that one image at its base and nothing invented beyond it.
+    let modules = session.target.modules().expect("modules");
+    assert_eq!(modules.len(), 1, "{modules:?}");
+    assert_eq!(modules[0].base_address.0, 0x0040_0000, "the creation image");
+    assert_eq!(modules[0].name, "<unknown>", "no headers to name it by");
+    assert!(session.target.live_user_process().is_some());
+
+    session.cleanup_for_exit().expect("a clean exit");
+    drop(session);
+    handle.join().expect("the server thread");
+    // Leaving detaches: the process is the operator's again.
+    let calls = server.calls.lock().unwrap();
+    assert!(
+        calls.iter().any(|(stub, _)| *stub & 0xff == 15),
+        "DetachProcess"
+    );
+}

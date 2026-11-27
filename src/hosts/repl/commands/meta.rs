@@ -10,11 +10,11 @@ use crate::base::types::{CodeMachine, VirtAddr};
 #[cfg(feature = "python")]
 use crate::hosts::python::embed;
 use crate::nt::expr::{Expr, NumberRadix};
+use crate::nt::target::Target;
 use crate::nt::target::meta::{
     ErrorCode, ErrorCodeKind, TargetDump, TargetTime, TargetUserDump, TargetVersion, UserDumpTime,
     decode_error_code, decode_error_code_as_ntstatus,
 };
-use crate::nt::target::{Target, TargetKind};
 
 use ntoseye_macros::{command, grammar};
 
@@ -322,13 +322,13 @@ fn help(state: &mut ReplState<'_>, command: Option<String>) -> Result<()> {
 
     let mut groups: BTreeMap<&'static str, BTreeMap<&'static str, &'static CommandSpec>> =
         BTreeMap::new();
-    // A user-mode minidump refuses every kernel command, so the listing
-    // leaves them out; `help <command>` still describes each.
-    let user_dump = state.ctx.target.kind() == TargetKind::UserDump;
+    // A user-mode target refuses every kernel command, so the listing leaves
+    // them out; `help <command>` still describes each.
+    let user_mode = state.ctx.target.is_user_target();
     let mut hidden = BTreeSet::new();
     for (_, spec) in command_registry().command_names() {
         let canonical = spec.names[0];
-        if user_dump && spec.effects.target.needs_kernel() {
+        if user_mode && spec.effects.target.needs_kernel() {
             hidden.insert(canonical);
             continue;
         }

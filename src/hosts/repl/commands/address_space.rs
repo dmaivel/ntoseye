@@ -14,6 +14,7 @@ use crate::hosts::repl::*;
 use crate::hosts::ui;
 use crate::nt::expr::Expr;
 use crate::nt::guest::{ModuleInfo, ProcessInfo};
+use crate::nt::target::MemoryKind;
 use crate::nt::target::mm::{
     AddressDescription, MEM_FREE, MemoryBasicInformation, MemoryRegionInfo, VadProtection, VadType,
     memory_state_name, memory_type_name, page_protection_name,
@@ -22,7 +23,6 @@ use crate::nt::target::usermode::address::{
     AddressSummary, CapturedRange, SummaryRow, UserAddressReport, UserRegion, human_size,
     state_label, type_label,
 };
-use crate::nt::target::{MemoryKind, TargetKind};
 use crate::session::Session;
 
 pub const PAGE_SHIFT: u32 = PAGE_SIZE.trailing_zeros();
@@ -236,14 +236,13 @@ fn summary_switch(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<bool, ArgError> {
-    if cx.state.ctx.target.kind() != TargetKind::UserDump {
+    if !cx.state.ctx.target.is_user_target() {
         if cursor
             .words()
             .any(|word| word.eq_ignore_ascii_case("-summary"))
         {
             return Err(ArgError::Message(
-                "!address -summary needs a user-mode minidump; give an address on a kernel \
-                 target"
+                "!address -summary needs a user-mode target; give an address on a kernel target"
                     .into(),
             ));
         }
@@ -265,7 +264,7 @@ fn address_arg(
 ) -> std::result::Result<Option<VirtAddr>, ArgError> {
     match cursor.word() {
         Some(text) => cx.eval(&text).map(Some),
-        None if cx.state.ctx.target.kind() == TargetKind::UserDump => Ok(None),
+        None if cx.state.ctx.target.is_user_target() => Ok(None),
         None => Err(ArgError::Missing),
     }
 }
@@ -295,7 +294,7 @@ fn address(
     #[arg(render, parse = summary_switch)] summary: bool,
     #[arg(parse = address_arg)] addr: Option<VirtAddr>,
 ) -> Result<AddressReport> {
-    if session.target.kind() == TargetKind::UserDump {
+    if session.target.is_user_target() {
         return address_report(session, addr).map(AddressReport::UserDump);
     }
     let addr = addr.ok_or_else(|| {
@@ -316,9 +315,9 @@ fn describe(
     address: VirtAddr,
 ) -> Result<AddressDescription> {
     memory.require_virtual()?;
-    if session.target.kind() == TargetKind::UserDump {
+    if session.target.is_user_target() {
         return Err(Error::InvalidArgument(
-            "a user-mode minidump describes an address with \
+            "a user-mode target describes an address with \
              Debugger.user_dump.address_report(address)"
                 .to_string(),
         ));
@@ -891,7 +890,7 @@ mod tests {
         let (result, text) = capture(|| state.dispatch_line("!address -SUMMARY"));
         result.unwrap();
         assert!(
-            text.contains("!address -summary needs a user-mode minidump"),
+            text.contains("!address -summary needs a user-mode target"),
             "{text}"
         );
         let spec = command_registry().get("!address").unwrap();

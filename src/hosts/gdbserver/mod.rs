@@ -266,7 +266,7 @@ impl<'a> Server<'a> {
         terminating: Arc<AtomicBool>,
     ) -> Self {
         let arch = session.target.arch();
-        let held = if session.target.user_dump().is_some() {
+        let held = if session.target.is_user_target() {
             arch.context_size()
         } else {
             arch.register_buffer_size()

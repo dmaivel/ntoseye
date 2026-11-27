@@ -15,7 +15,7 @@ use crate::nt::target::{
 };
 use crate::nt::unwind::{
     UNKNOWN_CONTEXT, guest_vp_running, halted_in_windows_hypervisor, resolve_thread_trace_context,
-    resolve_thread_trace_context_at, saved_vtls, try_format_symbol,
+    resolve_thread_trace_context_at, saved_vtls, try_format_symbol, try_format_symbol_at,
 };
 use crate::session::{Selection, Session, ThreadContext, UserThreadSummary, VcpuInfo};
 
@@ -57,6 +57,11 @@ impl Session {
         self.backend.set_current_thread(id)?;
         self.target.selected_frame = None;
         self.current_thread = id.to_string();
+        // A live process's selection is the target's too: `!teb`, `k`, and
+        // the `$teb` pseudo-register read it.
+        if self.target.phys.is_user_live() {
+            self.target.select_live_user_thread(id);
+        }
         self.refresh_context_for_current_thread();
         Ok(())
     }
@@ -523,9 +528,15 @@ impl Session {
         Ok(())
     }
 
-    /// The threads a user-mode minidump captured, each with where its
-    /// context stopped. `None` on a kernel target.
-    pub fn user_threads(&self) -> Option<Vec<UserThreadSummary>> {
+    /// The threads a user-mode target has, each with where its context
+    /// stopped: a minidump's captured threads, or a live process's. `None` on
+    /// a kernel target. A live process's registers are read for each thread,
+    /// so the script the caller's selection was on is restored before it
+    /// returns.
+    pub fn user_threads(&mut self) -> Option<Vec<UserThreadSummary>> {
+        if self.target.phys.is_user_live() {
+            return self.live_user_threads();
+        }
         let info = self.target.user_dump_info()?;
         let exception_thread = info.exception.as_ref().map(|exception| exception.thread_id);
         let trace = resolve_thread_trace_context(&self.target, 0);
@@ -554,6 +565,57 @@ impl Session {
                 })
                 .collect(),
         )
+    }
+
+    /// The live process's threads, with the PC each would run at. Every
+    /// thread's `CONTEXT` is read through the backend in turn, which is why
+    /// the original selection is put back before returning.
+    fn live_user_threads(&mut self) -> Option<Vec<UserThreadSummary>> {
+        let threads = self.target.live_user_process()?.threads.clone();
+        let selected = self.backend.stopped_thread_id().ok();
+        let mut summaries = Vec::with_capacity(threads.len());
+        for (index, thread) in threads.iter().enumerate() {
+            let id = crate::nt::target::Target::user_live_backend_thread_id(thread.tid);
+            let mut summary = UserThreadSummary {
+                index,
+                current: id.eq_ignore_ascii_case(&self.current_thread),
+                id: id.clone(),
+                tid: thread.tid,
+                suspend_count: 0,
+                teb: thread.teb.unwrap_or(0),
+                name: thread.name.clone(),
+                symbol: None,
+                rip: None,
+                error: None,
+                exception: false,
+            };
+            match self
+                .backend
+                .set_current_thread(&id)
+                .and_then(|()| self.backend.read_registers())
+            {
+                Ok(registers) => {
+                    summary.rip = Some(
+                        RegisterFile::from_context(self.target.arch(), &registers)
+                            .instruction_pointer(),
+                    );
+                }
+                Err(error) => summary.error = Some(error.to_string()),
+            }
+            summaries.push(summary);
+        }
+        if let Some(selected) = selected {
+            let _ = self.backend.set_current_thread(&selected);
+        }
+        // Names are formatted once the selection is back where it was: the
+        // lookup reads memory in the current scope.
+        let dtb = self.target.current_dtb();
+        for summary in &mut summaries {
+            if let Some(rip) = summary.rip {
+                summary.symbol = try_format_symbol_at(&self.target, dtb, rip);
+            }
+        }
+        Some(summaries)
     }
 
     /// Inspect every backend execution context (vCPU): its RIP, the address space
@@ -878,10 +940,15 @@ pub fn refresh_windows_thread_context_for_backend_thread(
     debugger: &mut Target,
     thread_id: &str,
 ) -> Option<ThreadInfo> {
-    // A user dump's backend threads are its captured threads, which have no
-    // kernel thread object to walk.
-    if debugger.user_dump().is_some() {
-        debugger.select_user_thread(thread_id);
+    // A user-mode target's backend threads are its threads, which have no
+    // kernel thread object to walk: a dump's captured ones, or a live
+    // process's.
+    if debugger.is_user_target() {
+        if debugger.phys.is_user_live() {
+            debugger.select_live_user_thread(thread_id);
+        } else {
+            debugger.select_user_thread(thread_id);
+        }
         debugger.clear_current_windows_thread_context();
         return None;
     }

@@ -880,6 +880,31 @@ fn target_spec(
         Some(name) => name.parse::<Backend>().map_err(|error| error.to_string())?,
         None => Backend::Kd,
     };
+    if backend == Backend::DbgSrv {
+        // A process server debugs one user-mode process, which the request
+        // names: attaching to a kernel over it is not a thing.
+        let connect = arg_str(args, "connect")
+            .ok_or_else(|| "dbgsrv requires 'connect' (the endpoint)".to_string())?;
+        let target = match (args.get("process"), arg_str(args, "create")) {
+            (Some(pid), None) => crate::DbgsrvTarget::Attach {
+                pid: pid
+                    .as_u64()
+                    .and_then(|pid| u32::try_from(pid).ok())
+                    .ok_or_else(|| "'process' must be a process id".to_string())?,
+            },
+            (None, Some(command_line)) => crate::DbgsrvTarget::Create {
+                command_line: command_line.to_string(),
+            },
+            _ => {
+                return Err("dbgsrv requires exactly one of 'process' and 'create'".to_string());
+            }
+        };
+        let spec = TargetSpec::Dbgsrv { connect, target };
+        return spec.validate().map(|()| spec).map_err(|error| match error {
+            Error::InvalidArgument(message) => message,
+            other => other.to_string(),
+        });
+    }
     let memory_source = match arg_str(args, "memorySource") {
         Some(source) => source.parse::<KdMemorySource>()?,
         None if matches!(backend, Backend::Kd | Backend::KdNet) => default_memory_source,

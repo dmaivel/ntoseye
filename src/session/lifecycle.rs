@@ -9,6 +9,7 @@ use single_instance::SingleInstance;
 
 use crate::arch::Arch;
 use crate::backend::dbg_backend::{BugcheckInfo, DebugBackend, DebugCapability};
+use crate::backend::dbgsrv::{DbgSrvClient, DbgSrvUserMemory, DbgsrvBackend, DbgsrvTarget};
 use crate::backend::gdb::GdbClient;
 use crate::backend::kd::{KdBackend, KdMemorySource};
 use crate::backend::memory_backend::MemoryBackend;
@@ -137,10 +138,13 @@ impl Session {
                             let key = kdnet_key.as_deref().expect("validated above");
                             KdBackend::connect_net(endpoint, key, *kd_handshake_timeout, progress)
                         }
-                        Backend::Gdb | Backend::Memory => unreachable!("matched KD above"),
+                        Backend::Gdb | Backend::Memory | Backend::DbgSrv => {
+                            unreachable!("matched KD above")
+                        }
                     },
                 )
             }
+            TargetSpec::Dbgsrv { connect, target } => Self::open_dbgsrv(connect, target, progress),
             TargetSpec::Live { backend, .. } => {
                 // The GDB stub halts and resumes the VM; the passive memory
                 // backend never does, so its memory stays unmemoized.
@@ -166,7 +170,9 @@ impl Session {
                             halts,
                         )?),
                         Backend::Memory => Box::new(MemoryBackend::new()),
-                        Backend::Kd | Backend::KdNet => unreachable!("matched above"),
+                        Backend::Kd | Backend::KdNet | Backend::DbgSrv => {
+                            unreachable!("matched above")
+                        }
                     })
                 })
             }
@@ -195,6 +201,65 @@ impl Session {
         let backend = UserDumpBackend::new(dump.info());
         let target = Target::with_user_dump(Arc::new(PhysMem::minidump(dump)))?;
         Self::new_with_target(target, Box::new(backend), None)
+    }
+
+    /// Attach to (or create) a live user-mode process behind `connect`, a
+    /// DbgRpc process server: the server supplies the process's memory,
+    /// threads, registers, and run control, and the module list comes from the
+    /// process's own loader lists. The target holds the process at its first
+    /// debug event until a run command.
+    fn open_dbgsrv(
+        connect: &str,
+        target: &DbgsrvTarget,
+        progress: &mut dyn FnMut(&str),
+    ) -> Result<Self> {
+        // A process server is one connection: two sessions on the same server
+        // would interleave their calls, and the second would attach the same
+        // process twice. The lock is taken before the server is touched, as
+        // KD's is, so a second attach fails fast without disturbing the first.
+        let guard = Some(acquire_instance_guard(connect)?);
+        let client = Arc::new(DbgSrvClient::connect(connect, progress)?);
+        let backend = DbgsrvBackend::connect(Arc::clone(&client), target, progress)?;
+        let (pid, arch, process) = (backend.pid(), backend.arch(), backend.process_handle());
+        let memory = Arc::new(DbgSrvUserMemory::new(Arc::clone(&client), process));
+        let phys = Arc::new(PhysMem::user_live(memory, process, arch));
+        let live = backend.live_process();
+        let mut debugger = Target::with_live_user_process(
+            phys,
+            crate::nt::target::LiveUserProcess {
+                pid,
+                process_handle: live.process,
+                peb: (live.peb != 0).then_some(live.peb),
+                modules: Vec::new(),
+                image_base: live.image_base,
+                image_hint: live.image_hint.clone(),
+                threads: live
+                    .threads
+                    .into_iter()
+                    .map(|thread| crate::nt::target::LiveUserThread {
+                        tid: thread.tid,
+                        handle: thread.handle,
+                        teb: (thread.teb != 0).then_some(thread.teb),
+                        start_address: thread.start_address,
+                        name: None,
+                    })
+                    .collect(),
+                selected_tid: live.selected_tid,
+            },
+        )?;
+        // Ctrl+C raises the target's flag; the backend's stop wait polls it,
+        // so one thread services a break-in.
+        debugger.set_interrupt(backend.interrupt_flag());
+        // A process whose loader lists cannot be read still attaches: it has
+        // no `lm` until they can be, which is what a notice says.
+        if let Err(error) = debugger.refresh_live_user_modules() {
+            debugger.notices.push(Notice::warning(format!(
+                "the process's module list could not be read: {error}"
+            )));
+        }
+        let mut session = Self::new_with_target(debugger, Box::new(backend), None)?;
+        session._instance_guard = guard;
+        Ok(session)
     }
 
     /// Open a kernel crash or triage dump. Each processor's context is read

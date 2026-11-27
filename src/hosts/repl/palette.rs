@@ -8,7 +8,6 @@ use super::native::palette::{self, Catalog, CommandEntry, Tab};
 use super::{
     CaretContext, CompletionStrategy, ReplCaches, ReplState, caret_context, command_registry,
 };
-use crate::nt::target::TargetKind;
 
 /// The host command Alt+P sends the REPL loop.
 pub const PALETTE_COMMAND: &str = "palette";
@@ -44,10 +43,10 @@ impl ReplState<'_> {
     fn palette_commands(&self) -> Vec<CommandEntry> {
         let mut commands: Vec<CommandEntry> = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        // A user-mode minidump refuses the kernel commands (see `help`).
-        let user_dump = self.ctx.target.kind() == TargetKind::UserDump;
+        // A user-mode target refuses the kernel commands (see `help`).
+        let user_mode = self.ctx.target.is_user_target();
         for (_, spec) in command_registry().command_names() {
-            if !seen.insert(spec.names[0]) || (user_dump && spec.effects.target.needs_kernel()) {
+            if !seen.insert(spec.names[0]) || (user_mode && spec.effects.target.needs_kernel()) {
                 continue;
             }
             commands.push(CommandEntry {

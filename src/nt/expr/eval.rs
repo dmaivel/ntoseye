@@ -282,21 +282,19 @@ impl Expr {
         }
         match context.builtin_variable(name) {
             Some(Some(value)) => {
-                return Ok(
-                    match pseudo_register_type(name, context.user_dump().is_some()) {
-                        Some(type_name) => ExprValue::Immediate {
-                            value: VirtAddr(value),
-                            type_data: ParsedType::Pointer(Box::new(ParsedType::Struct(
-                                type_name.into(),
-                            ))),
-                            byte_size: Some(8),
-                        },
-                        None => ExprValue::Raw {
-                            value: VirtAddr(value),
-                            address: None,
-                        },
+                return Ok(match pseudo_register_type(name, context.is_user_target()) {
+                    Some(type_name) => ExprValue::Immediate {
+                        value: VirtAddr(value),
+                        type_data: ParsedType::Pointer(Box::new(ParsedType::Struct(
+                            type_name.into(),
+                        ))),
+                        byte_size: Some(8),
                     },
-                );
+                    None => ExprValue::Raw {
+                        value: VirtAddr(value),
+                        address: None,
+                    },
+                });
             }
             // Distinguish unavailable state from an unknown register name.
             Some(None) => {

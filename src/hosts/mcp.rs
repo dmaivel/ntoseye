@@ -323,6 +323,8 @@ enum BackendArg {
     KdNet,
     Gdb,
     Memory,
+    #[serde(rename = "dbgsrv")]
+    DbgSrv,
     Dump,
 }
 
@@ -348,11 +350,11 @@ impl From<MemorySourceArg> for KdMemorySource {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct OpenArgs {
     #[schemars(
-        description = "What to attach to: kd (KD over a serial pipe), kdnet (KDNET over encrypted UDP), gdb (GDB remote stub), memory (physical memory only, no debug transport), or dump (a Windows kernel crash dump or user-mode minidump file)"
+        description = "What to attach to: kd (KD over a serial pipe), kdnet (KDNET over encrypted UDP), gdb (GDB remote stub), memory (physical memory only, no debug transport), dbgsrv (a live user-mode process behind a DbgRpc process server), or dump (a Windows kernel crash dump or user-mode minidump file)"
     )]
     backend: BackendArg,
     #[schemars(
-        description = "Connection target: KD serial endpoint for kd (a Unix socket path, or a Windows named pipe path; defaults to the platform default), listen address for kdnet (default 0.0.0.0:50000), host:port for gdb (default 127.0.0.1:1234), absolute .dmp path for dump (required). Not used by memory."
+        description = "Connection target: KD serial endpoint for kd (a Unix socket path, or a Windows named pipe path; defaults to the platform default), listen address for kdnet (default 0.0.0.0:50000), host:port for gdb (default 127.0.0.1:1234), tcp:server=<host>,port=<port> for dbgsrv (required), absolute .dmp path for dump (required). Not used by memory."
     )]
     connect: Option<String>,
     #[schemars(
@@ -368,6 +370,15 @@ struct OpenArgs {
         description = "Guest memory source for kd and kdnet: auto (default; validate host memory, then fall back to KD reads), host (read the hypervisor process, which needs an elevated ntoseye), or kd (read memory over KD; slower, but works while the target is halted and never relies on the hypervisor's process layout). Use kd for VMware/Hyper-V under ULM/WHP, where the VM process holds several unrelated large mappings."
     )]
     memory_source: Option<MemorySourceArg>,
+    #[schemars(
+        range(min = 1),
+        description = "The process to debug over dbgsrv, by process id. Exactly one of 'process' and 'create' is required for dbgsrv, and neither is valid for any other backend."
+    )]
+    process: Option<u32>,
+    #[schemars(
+        description = "A command line to start under the debugger over dbgsrv. Exactly one of 'process' and 'create' is required for dbgsrv, and neither is valid for any other backend."
+    )]
+    create: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1054,6 +1065,7 @@ fn spec_label(spec: &TargetSpec) -> String {
     match spec {
         TargetSpec::Dump(_) => "dump".to_string(),
         TargetSpec::Live { backend, .. } => backend.to_string(),
+        TargetSpec::Dbgsrv { .. } => Backend::DbgSrv.to_string(),
     }
 }
 
@@ -1071,6 +1083,8 @@ impl NtoseyeMcp {
             key,
             kd_handshake_timeout,
             memory_source,
+            process,
+            create,
         } = args;
         let spec = match backend {
             BackendArg::Dump => {
@@ -1083,17 +1097,57 @@ impl NtoseyeMcp {
                 if memory_source.is_some() {
                     return Err(invalid_params("dump does not use 'memory_source'"));
                 }
+                if process.is_some() {
+                    return Err(invalid_params("dump does not use 'process'"));
+                }
+                if create.is_some() {
+                    return Err(invalid_params("dump does not use 'create'"));
+                }
                 let path = connect
                     .ok_or_else(|| invalid_params("dump requires 'connect' (the .dmp path)"))?;
                 TargetSpec::Dump(PathBuf::from(path))
             }
+            BackendArg::DbgSrv => {
+                for (name, given) in [
+                    ("key", key.is_some()),
+                    ("kd_handshake_timeout", kd_handshake_timeout.is_some()),
+                    ("memory_source", memory_source.is_some()),
+                ] {
+                    if given {
+                        return Err(invalid_params(format!("dbgsrv does not use '{name}'")));
+                    }
+                }
+                let connect = connect
+                    .ok_or_else(|| invalid_params("dbgsrv requires 'connect' (the endpoint)"))?;
+                let target = match (process, create) {
+                    (Some(pid), None) => crate::DbgsrvTarget::Attach { pid },
+                    (None, Some(command_line)) => crate::DbgsrvTarget::Create { command_line },
+                    (None, None) => {
+                        return Err(invalid_params(
+                            "dbgsrv requires exactly one of 'process' and 'create'",
+                        ));
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(invalid_params(
+                            "'process' and 'create' are mutually exclusive",
+                        ));
+                    }
+                };
+                TargetSpec::Dbgsrv { connect, target }
+            }
             live => {
+                if process.is_some() {
+                    return Err(invalid_params("'process' is only valid for dbgsrv"));
+                }
+                if create.is_some() {
+                    return Err(invalid_params("'create' is only valid for dbgsrv"));
+                }
                 let backend = match live {
                     BackendArg::Kd => Backend::Kd,
                     BackendArg::KdNet => Backend::KdNet,
                     BackendArg::Gdb => Backend::Gdb,
                     BackendArg::Memory => Backend::Memory,
-                    BackendArg::Dump => unreachable!("handled above"),
+                    BackendArg::DbgSrv | BackendArg::Dump => unreachable!("handled above"),
                 };
                 // Only KD and KDNET read memory either way; the others
                 // refuse a memory source. A call's own source wins over the
@@ -1103,7 +1157,7 @@ impl NtoseyeMcp {
                     Backend::Kd | Backend::KdNet => memory_source
                         .map(KdMemorySource::from)
                         .unwrap_or(self.memory_source),
-                    Backend::Gdb | Backend::Memory => {
+                    Backend::Gdb | Backend::Memory | Backend::DbgSrv => {
                         if memory_source.is_some() {
                             return Err(invalid_params(
                                 "'memory_source' is only valid for kd and kdnet",
@@ -1289,11 +1343,14 @@ mod tests {
                 key: key.map(str::to_string),
                 kd_handshake_timeout: None,
                 memory_source: None,
+                process: None,
+                create: None,
             })
         };
         let source = |spec: TargetSpec| match spec {
             TargetSpec::Live { memory_source, .. } => memory_source,
             TargetSpec::Dump(_) => panic!("a live target"),
+            TargetSpec::Dbgsrv { .. } => panic!("a process-server target"),
         };
 
         assert_eq!(
@@ -1328,6 +1385,8 @@ mod tests {
             key: None,
             kd_handshake_timeout: None,
             memory_source: None,
+            process: None,
+            create: None,
         }))
     }
 
@@ -1380,6 +1439,8 @@ mod tests {
                 key: None,
                 kd_handshake_timeout: None,
                 memory_source: None,
+                process: None,
+                create: None,
             }))
             .await
             .unwrap_err();
@@ -1392,10 +1453,57 @@ mod tests {
                 key: None,
                 kd_handshake_timeout: None,
                 memory_source: None,
+                process: None,
+                create: None,
             }))
             .await
             .unwrap_err();
         assert!(err.message.contains("does not use"), "{err:?}");
+
+        // A process is what the process server debugs: one of --process and
+        // --create, never both and never neither.
+        for (process, create, expected) in [
+            (Some(42), None, None),
+            (None, Some("notepad.exe".to_string()), None),
+            (None, None, Some("exactly one")),
+            (
+                Some(42),
+                Some("notepad.exe".to_string()),
+                Some("mutually exclusive"),
+            ),
+        ] {
+            let result = mcp.open_spec(OpenArgs {
+                backend: BackendArg::DbgSrv,
+                connect: Some("tcp:server=127.0.0.1,port=5005".into()),
+                key: None,
+                kd_handshake_timeout: None,
+                memory_source: None,
+                process,
+                create,
+            });
+            match expected {
+                None => assert!(result.is_ok(), "{result:?}"),
+                Some(text) => {
+                    let error = result.expect_err("a refused dbgsrv open");
+                    assert!(error.message.contains(text), "{error:?}");
+                }
+            }
+        }
+        // A process is not a kernel backend's argument.
+        for backend in [BackendArg::Kd, BackendArg::Gdb, BackendArg::Memory] {
+            let error = mcp
+                .open_spec(OpenArgs {
+                    backend,
+                    connect: None,
+                    key: None,
+                    kd_handshake_timeout: None,
+                    memory_source: None,
+                    process: Some(42),
+                    create: None,
+                })
+                .expect_err("a refused process argument");
+            assert!(error.message.contains("only valid for dbgsrv"), "{error:?}");
+        }
 
         let err = mcp
             .open(Parameters(OpenArgs {
@@ -1404,6 +1512,8 @@ mod tests {
                 key: None,
                 kd_handshake_timeout: None,
                 memory_source: None,
+                process: None,
+                create: None,
             }))
             .await
             .unwrap_err();

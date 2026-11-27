@@ -175,11 +175,11 @@ fn check_read_len(n: usize) -> PyResult<()> {
     Ok(())
 }
 
-/// Refuse a page-table operation on a user-mode minidump, whose memory is
+/// Refuse a page-table operation on a user-mode target, whose memory is
 /// keyed by virtual address with no physical address behind it: its
 /// translation would name the virtual address itself.
 fn require_page_tables(session: &Session) -> PyResult<()> {
-    if session.target.user_dump().is_some() {
+    if session.target.is_user_target() {
         return Err(err(Error::NoPhysicalMemory));
     }
     Ok(())

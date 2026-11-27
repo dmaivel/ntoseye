@@ -64,9 +64,9 @@ impl Modules {
     fn enumerate(&self, py: Python<'_>) -> PyResult<Vec<Module>> {
         let kernel = matches!(self.space, Space::Kernel);
         let modules = self.owner.with_in(py, &self.space.context(), |session| {
-            // A user-mode minidump's one address space lists the dump's
+            // A user-mode target's one address space lists the process's
             // modules, as `lm` does.
-            if kernel && session.target.user_dump().is_none() {
+            if kernel && !session.target.is_user_target() {
                 session.target.kernel_modules_with_versions()
             } else {
                 // The scope's own list: the process's loader lists, or the

@@ -49,6 +49,8 @@ pub enum TargetKind {
     Kernel,
     /// One process captured by a user-mode minidump.
     UserDump,
+    /// One live process debugged through a process server.
+    UserLive,
 }
 
 /// The captured process a user-dump target inspects.
@@ -61,11 +63,20 @@ pub struct UserProcess {
 
 impl Target {
     pub fn kind(&self) -> TargetKind {
-        if self.phys.is_user_dump() {
+        if self.phys.is_user_live() {
+            TargetKind::UserLive
+        } else if self.phys.is_user_dump() {
             TargetKind::UserDump
         } else {
             TargetKind::Kernel
         }
+    }
+
+    /// Whether this target inspects a user-mode process, captured or live:
+    /// what the user-mode commands and memory paths answer, and what the
+    /// kernel-only ones refuse.
+    pub fn is_user_target(&self) -> bool {
+        self.kind() != TargetKind::Kernel
     }
 
     /// The user-mode minidump this target inspects, `None` for a kernel
@@ -79,11 +90,11 @@ impl Target {
         self.phys.user_dump().map(UserDump::info)
     }
 
-    /// Refuse a kernel operation on a user-mode minidump.
+    /// Refuse a kernel operation on a user-mode target.
     pub fn require_kernel(&self) -> Result<()> {
         match self.kind() {
             TargetKind::Kernel => Ok(()),
-            TargetKind::UserDump => Err(Error::KernelRequired),
+            TargetKind::UserDump | TargetKind::UserLive => Err(Error::KernelRequired),
         }
     }
 
@@ -159,8 +170,12 @@ impl Target {
         })
     }
 
-    /// The user-dump module list, `None` for a kernel target.
+    /// The user-mode target's module list: the dump's captured list, or the
+    /// live process's loader lists; `None` for a kernel target.
     pub fn user_modules(&self) -> Option<&[ModuleInfo]> {
+        if let Some(modules) = self.live_modules() {
+            return Some(modules);
+        }
         self.user_process
             .as_ref()
             .map(|process| process.modules.as_slice())
@@ -173,8 +188,8 @@ impl Target {
 }
 
 impl Target {
-    /// The named values of a register buffer: on a user-mode minidump only
-    /// the registers its CONTEXT records (see [`context_registers`]), so the
+    /// The named values of a register buffer: on a user-mode target only the
+    /// registers its CONTEXT records (see [`Arch::context_registers`]), so the
     /// empty control-register slots past it are not shown as zeroes;
     /// elsewhere every register the map names.
     pub fn register_values(
@@ -182,9 +197,12 @@ impl Target {
         register_map: &RegisterMap,
         registers: &[u8],
     ) -> HashMap<String, u64> {
-        match self.user_dump_info() {
-            Some(info) => info.arch.context_registers(registers),
-            None => register_map.to_hashmap(registers),
+        if let Some(info) = self.user_dump_info() {
+            return info.arch.context_registers(registers);
         }
+        if let Some(arch) = self.phys.user_live_arch() {
+            return arch.context_registers(registers);
+        }
+        register_map.to_hashmap(registers)
     }
 }

@@ -662,7 +662,7 @@ impl Target {
                 types: self.guest()?.ntoskrnl.types_in(dtb),
                 module: None,
             },
-            TargetKind::UserDump => UserModeTypes {
+            TargetKind::UserDump | TargetKind::UserLive => UserModeTypes {
                 types: self.types_in(dtb),
                 module: Some("ntdll"),
             },
@@ -670,9 +670,10 @@ impl Target {
     }
 
     /// Fail unless a user-mode minidump captured `what` at `address`; a
-    /// kernel target's memory is not checked up front.
+    /// kernel target's memory is not checked up front, and a live process's
+    /// reads fail by themselves.
     fn require_captured(&self, address: VirtAddr, what: &str) -> Result<()> {
-        if self.kind() == TargetKind::Kernel {
+        if !self.phys.is_user_dump() {
             return Ok(());
         }
         match self.context_memory().read::<u8>(address) {
@@ -685,8 +686,21 @@ impl Target {
         }
     }
 
-    /// The TEB of the captured thread selected for inspection.
+    /// The TEB of the thread selected for inspection: a live thread's, or the
+    /// captured one a minidump records.
     fn user_teb(&self) -> Result<VirtAddr> {
+        if let Some(process) = self.live_user_process() {
+            let thread = process.thread().ok_or_else(|| {
+                Error::DebugInfo("no live thread is selected; select one with ~<n>s".to_string())
+            })?;
+            return match thread.teb.filter(|teb| *teb != 0) {
+                Some(teb) => Ok(VirtAddr(teb)),
+                None => Err(Error::DebugInfo(format!(
+                    "the process server names no TEB for thread {:x}",
+                    thread.tid
+                ))),
+            };
+        }
         let thread = self.user_thread().ok_or_else(|| {
             Error::DebugInfo("no captured thread is selected; select one with ~<n>s".into())
         })?;
@@ -740,6 +754,20 @@ impl Target {
             return match address {
                 Some(address) => Ok((dtb, address, None)),
                 None => {
+                    let teb = self.user_teb()?;
+                    let peb = self.user_peb(view, teb)?;
+                    Ok((dtb, peb, self.user_wow64_peb(view, teb)))
+                }
+            };
+        }
+        if let Some(process) = self.live_user_process() {
+            let dtb = self.current_dtb();
+            return match address.or_else(|| process.peb.map(VirtAddr)) {
+                Some(peb) => Ok((dtb, peb, None)),
+                // The process server names no PEB; the selected thread's TEB
+                // does, once its symbols are loaded.
+                None => {
+                    let view = self.user_mode_types(dtb)?;
                     let teb = self.user_teb()?;
                     let peb = self.user_peb(view, teb)?;
                     Ok((dtb, peb, self.user_wow64_peb(view, teb)))
@@ -953,7 +981,7 @@ impl Target {
     /// independently unreadable field carries its own diagnostic error.
     pub fn inspect_teb(&self, address: Option<VirtAddr>) -> Result<Teb> {
         let (dtb, teb_address) = match (self.kind(), address) {
-            (TargetKind::UserDump, address) => (
+            (TargetKind::UserDump | TargetKind::UserLive, address) => (
                 self.current_dtb(),
                 address.map_or_else(|| self.user_teb(), Ok)?,
             ),
@@ -1125,7 +1153,7 @@ impl Target {
                 let process = current_process(self)?;
                 self.guest()?.process_modules_detail(&process)?
             }
-            TargetKind::UserDump => self.user_loader_modules()?,
+            TargetKind::UserDump | TargetKind::UserLive => self.user_loader_modules()?,
         };
         let modules = detail
             .modules
@@ -1140,16 +1168,20 @@ impl Target {
         })
     }
 
-    /// A user-mode minidump's loader lists. An entry whose name is not
-    /// captured is named after the module the dump's module list records at
-    /// its base.
+    /// A user-mode target's loader lists: a minidump's captured ones, or a
+    /// live process's, read from its `_PEB`. An entry whose name cannot be
+    /// read is named after the module the target's module list records at its
+    /// base.
     fn user_loader_modules(&self) -> Result<ProcessModulesDetail> {
-        // Without the loader's lists, the dump's own module list still names
+        // Without the loader's lists, the module list already read still names
         // every module.
+        let source = if self.phys.is_user_live() {
+            "lm lists the modules the process's loader entry list holds"
+        } else {
+            "lm lists the modules the dump's module list records"
+        };
         let point_to_lm = |error: Error| match error {
-            Error::DebugInfo(text) => Error::DebugInfo(format!(
-                "{text}; lm lists the modules the dump's module list records"
-            )),
+            Error::DebugInfo(text) => Error::DebugInfo(format!("{text}; {source}")),
             error => error,
         };
         let (dtb, peb, wow64_peb) = self.peb_scope(None).map_err(point_to_lm)?;

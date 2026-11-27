@@ -548,6 +548,11 @@ impl BreakpointManager {
             {
                 None
             }
+            // A user-mode target has no physical address behind its memory:
+            // its pages are the process server's to write, and it is the
+            // server's refusal (not a missing translation) that refuses the
+            // site.
+            Err(Error::NoPhysicalMemory) => None,
             Ok(None) | Err(Error::BadVirtualAddress(_)) => {
                 return Err(Self::non_resident_site_error(debugger, dtb, address, scope));
             }

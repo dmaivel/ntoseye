@@ -77,7 +77,7 @@ impl Target {
     fn critical_section_view(&self) -> Result<(Dtb, UserModeTypes<'_>)> {
         let dtb = match self.kind() {
             TargetKind::Kernel => current_process(self)?.dtb,
-            TargetKind::UserDump => self.current_dtb(),
+            TargetKind::UserDump | TargetKind::UserLive => self.current_dtb(),
         };
         Ok((dtb, self.user_mode_types(dtb)?))
     }

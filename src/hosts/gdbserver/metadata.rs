@@ -223,11 +223,11 @@ impl Server<'_> {
     }
 
     /// The program's file name. A kernel whose module list is unreadable is
-    /// still `ntoskrnl.exe`; a user-mode minidump with no modules has none.
+    /// still `ntoskrnl.exe`; a user-mode target with no modules has none.
     fn program_name(&self) -> Option<String> {
         match self.program() {
             Some(module) => Some(module.name),
-            None if self.session.target.user_dump().is_some() => None,
+            None if self.session.target.is_user_target() => None,
             None => Some("ntoskrnl.exe".to_string()),
         }
     }

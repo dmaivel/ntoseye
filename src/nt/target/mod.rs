@@ -43,6 +43,7 @@ pub mod srb;
 pub mod storport;
 mod symbols;
 pub mod userdump;
+pub mod userlive;
 pub mod usermode;
 mod variables;
 pub mod virtio;
@@ -61,6 +62,7 @@ pub use memory::{
 };
 pub use symbols::ReloadScope;
 pub use userdump::{TargetKind, UserProcess};
+pub use userlive::{LiveUserProcess, LiveUserThread};
 pub use vtl::{
     BreakpointStop, CodeExtent, ForeignCode, ForeignModules, GuestCode, HYPERVISOR_CONTEXT,
     SavedVtlContext, ServedVp, VP_STATE_REGISTERS, exit_registers,
@@ -128,6 +130,9 @@ pub struct Target {
     /// The captured process of a user-mode minidump; `None` for a kernel
     /// target.
     user_process: Option<UserProcess>,
+    /// The live process a user-mode debugger is attached to; `None` for every
+    /// other target. Kept apart from `user_process`, which is the minidump's.
+    user_live: Option<LiveUserProcess>,
     context_dtb_override: Option<Dtb>,
     pub registers: Option<HashMap<String, u64>>,
     /// Whose memory expressions read, which a hypercall breakpoint's
@@ -884,7 +889,7 @@ impl Target {
     pub fn guest(&self) -> Result<&Guest> {
         self.guest.as_ref().ok_or_else(|| match self.kind() {
             TargetKind::Kernel => Error::NtoskrnlNotFound,
-            TargetKind::UserDump => Error::KernelRequired,
+            TargetKind::UserDump | TargetKind::UserLive => Error::KernelRequired,
         })
     }
 
@@ -928,16 +933,16 @@ impl Target {
         self.interrupt_requests.load(Ordering::SeqCst)
     }
 
-    /// Guest architecture: the discovered kernel's, else a dump's declared
-    /// machine type (a kernel dump's header, a user dump's system info),
-    /// else AMD64.
+    /// Guest architecture: the discovered kernel's, else the target's own
+    /// declared machine type (a kernel dump's header, a user dump's system
+    /// info, a live process's server), else AMD64.
     pub fn arch(&self) -> Arch {
         match &self.guest {
             Some(guest) => guest.ntoskrnl.arch(),
             None => self
                 .phys
-                .dmp_info()
-                .and_then(DmpInfo::arch)
+                .user_live_arch()
+                .or_else(|| self.phys.dmp_info().and_then(DmpInfo::arch))
                 .or_else(|| self.user_dump_arch())
                 .unwrap_or(Arch::Amd64),
         }
