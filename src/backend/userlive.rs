@@ -2,7 +2,10 @@
 //! a process server, read and written by virtual address through the server's
 //! own debug-memory calls.
 
-use crate::base::error::{Error, Result};
+use crate::base::{
+    bytes::{read_u32, read_u64},
+    error::{Error, Result},
+};
 
 /// `MEMORY_BASIC_INFORMATION` as `VirtualQuery` reports it for an address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,30 +25,27 @@ impl VirtualQuery {
     pub const SIZE: usize = 48;
 
     /// Decode the first [`Self::SIZE`] bytes of what `VirtualQuery` filled.
+    ///
+    /// The offsets are the x64 `MEMORY_BASIC_INFORMATION`: `BaseAddress`,
+    /// `AllocationBase`, `AllocationProtect`, a `WORD` partition id and two
+    /// bytes of padding, `RegionSize`, `State`, `Protect`, `Type`. There is no
+    /// serialization on either side: the server writes the structure itself.
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < Self::SIZE {
-            return Err(Error::DebugInfo(format!(
+        let bytes = bytes.get(..Self::SIZE).ok_or_else(|| {
+            Error::DebugInfo(format!(
                 "VirtualQuery filled {} bytes, {} expected",
                 bytes.len(),
                 Self::SIZE
-            )));
-        }
-        let u32_at = |at: usize| {
-            u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
-        };
-        let u64_at = |at: usize| {
-            let mut value = [0u8; 8];
-            value.copy_from_slice(&bytes[at..at + 8]);
-            u64::from_le_bytes(value)
-        };
+            ))
+        })?;
         Ok(Self {
-            base: u64_at(0),
-            allocation_base: u64_at(8),
-            allocation_protect: u32_at(16),
-            size: u64_at(24),
-            state: u32_at(32),
-            protect: u32_at(36),
-            kind: u32_at(40),
+            base: read_u64(bytes, 0),
+            allocation_base: read_u64(bytes, 8),
+            allocation_protect: read_u32(bytes, 16),
+            size: read_u64(bytes, 24),
+            state: read_u32(bytes, 32),
+            protect: read_u32(bytes, 36),
+            kind: read_u32(bytes, 40),
         })
     }
 
