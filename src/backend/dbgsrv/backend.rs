@@ -567,7 +567,22 @@ impl DbgsrvBackend {
         let event_pid = event.process_id();
         if event_pid != self.pid && event_pid != 0 {
             // Another process the server also debugs: continue it so its
-            // threads are not left frozen.
+            // threads are not left frozen. This client does not track it, but
+            // the handles its creation events carry are still its to close --
+            // WinDbg would close them when the process object it made for the
+            // event dies.
+            match &event {
+                DebugEvent::CreateProcess {
+                    process_handle,
+                    thread_handle,
+                    ..
+                } => {
+                    self.discard(*process_handle, 0);
+                    self.discard(*thread_handle, 0);
+                }
+                DebugEvent::CreateThread { handle, .. } => self.discard(*handle, 0),
+                _ => {}
+            }
             let status = match event {
                 DebugEvent::Exception { .. } => DBG_EXCEPTION_NOT_HANDLED,
                 _ => DBG_CONTINUE,

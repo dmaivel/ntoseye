@@ -653,6 +653,77 @@ fn absorbed_events_continue_the_debuggee_and_sync_live_threads() {
 }
 
 #[test]
+fn another_processes_creation_handles_are_closed() {
+    const OTHER_PID: u32 = 0x999;
+    const OTHER_PROCESS: u64 = 0x7000;
+    const OTHER_THREAD: u64 = 0x7001;
+
+    let server = Arc::new(FakeServer::new(Arch::Amd64));
+    {
+        let mut events = server.events.lock().unwrap();
+        events.truncate(1); // keep the CreateProcess stop
+        // The server also debugs another process (another session's): its
+        // creation events are continued, and the handles it hands out are
+        // closed because this client does not track that process.
+        events.push(debug_event(
+            CREATE_PROCESS_DEBUG_EVENT,
+            OTHER_PID,
+            OTHER_THREAD as u32,
+            CreateProcessDebugInfo {
+                file: 0,
+                process_handle: OTHER_PROCESS,
+                thread_handle: OTHER_THREAD,
+                image_base: 0x0040_0000,
+                debug_info_offset: 0,
+                debug_info_size: 0,
+                teb: 0,
+                start_address: 0,
+                image_name: 0,
+                image_name_wide: 0,
+                alignment: [0; 6],
+            }
+            .as_bytes(),
+        ));
+        events.push(debug_event(
+            CREATE_THREAD_DEBUG_EVENT,
+            OTHER_PID,
+            OTHER_THREAD as u32 + 1,
+            CreateThreadDebugInfo {
+                handle: OTHER_THREAD + 1,
+                teb: 0,
+                start_address: 0,
+            }
+            .as_bytes(),
+        ));
+        events.push(breakpoint_event());
+    }
+    let (client, handle) = connect(Arc::clone(&server));
+    let mut backend = DbgsrvBackend::connect(
+        Arc::new(client),
+        &DbgsrvTarget::Attach { pid: PID },
+        &mut |_| {},
+    )
+    .expect("an attach");
+    backend.continue_execution().expect("resume");
+    let stop = backend.wait_for_stop().expect("the breakpoint after them");
+    assert_eq!(stop.exception_code, Some(STATUS_BREAKPOINT));
+    backend.prepare_for_exit(false).expect("detach");
+    drop(backend);
+    handle.join().expect("the server thread");
+    let handles: Vec<u64> = server
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(stub, _)| *stub == stub_index(Method::CloseHandle))
+        .map(|(_, body)| read_u64(body, 0))
+        .collect();
+    for handle in [OTHER_PROCESS, OTHER_THREAD, OTHER_THREAD + 1] {
+        assert!(handles.contains(&handle), "{handle:#x} in {handles:?}");
+    }
+}
+
+#[test]
 fn interrupting_a_running_process_asks_the_server_to_break_in() {
     let server = Arc::new(FakeServer::new(Arch::Amd64));
     server.events.lock().unwrap().pop();
