@@ -215,7 +215,7 @@ pub(super) struct ProcessHandle {
 
 impl ProcessHandle {
     pub(super) fn new(client: Arc<DbgsrvClient>, handle: u64) -> Self {
-        let closer = (handle != 0 && client.closes_handles()).then_some(client);
+        let closer = client.closes_handles().then_some(client);
         Self {
             handle: AtomicU64::new(handle),
             exit: AtomicU64::new(0),

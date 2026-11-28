@@ -1181,6 +1181,25 @@ fn handles_are_closed_on_replacement_duplicate_and_drop() {
 }
 
 #[test]
+fn process_handle_adopted_from_zero_closes_on_drop() {
+    use super::client::ProcessHandle;
+
+    const ADOPTED: u64 = 0x7777;
+    let info = TargetInfo {
+        machine_type: u32::from(IMAGE_FILE_MACHINE_AMD64),
+        processors: 1,
+        ..TargetInfo::default()
+    };
+    let server = MockServer::new(info, Vec::new());
+    let closed = Arc::clone(&server.closed);
+    let client = Arc::new(DbgsrvClient::with_server(Box::new(server), info).expect("a client"));
+    let handle = ProcessHandle::new(client, 0);
+    handle.adopt(ADOPTED);
+    drop(handle);
+    assert_eq!(*closed.lock().unwrap(), vec![ADOPTED]);
+}
+
+#[test]
 fn machine_types_map_to_architectures_and_i386_is_refused() {
     for (machine, expected) in [
         (u32::from(IMAGE_FILE_MACHINE_AMD64), Some(Arch::Amd64)),
