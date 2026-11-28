@@ -166,18 +166,60 @@ impl DbgsrvClient {
 /// distinguishing exit code 0 from a live process.
 const EXIT_RECORDED: u64 = 1 << 32;
 
+/// A server handle this client owns.
+///
+/// `dbgsvc` uses `NtWaitForDebugEvent`/`NtContinue`, which do not manage
+/// process and thread handles, so a server that reports
+/// `DBGSVC_CLOSE_PROC_THREAD_HANDLES` leaves every handle it hands out to the
+/// caller. Ownership lives in this type: the handle closes when the object
+/// holding it goes away, the way WinDbg's `ThreadInfo`/`ProcessInfo`
+/// destructors close theirs. One owner per handle, one close site, and
+/// nothing to keep in step by hand.
+pub(super) struct OwnedHandle {
+    value: u64,
+    /// The client to close through; `None` when the server manages the
+    /// handles itself, or when there is no handle to close.
+    closer: Option<Arc<DbgsrvClient>>,
+}
+
+impl OwnedHandle {
+    pub(super) fn new(client: Arc<DbgsrvClient>, value: u64) -> Self {
+        Self {
+            value,
+            closer: (value != 0 && client.closes_handles()).then_some(client),
+        }
+    }
+
+    pub(super) fn value(&self) -> u64 {
+        self.value
+    }
+}
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        if let Some(closer) = self.closer.take() {
+            let _ = closer.server().close_handle(self.value);
+        }
+    }
+}
+
 /// Shared process handle and exit status between [`super::DbgsrvBackend`] and
-/// [`DbgsrvUserMemory`].
+/// [`DbgsrvUserMemory`]: the memory adapter reads the handle, the backend
+/// updates it when `CreateProcess` reports one, and both see the exit.
 pub(super) struct ProcessHandle {
     handle: AtomicU64,
     exit: AtomicU64,
+    /// See [`OwnedHandle`]: the process handle is the caller's to close.
+    closer: Option<Arc<DbgsrvClient>>,
 }
 
 impl ProcessHandle {
-    pub(super) fn new(handle: u64) -> Self {
+    pub(super) fn new(client: Arc<DbgsrvClient>, handle: u64) -> Self {
+        let closer = (handle != 0 && client.closes_handles()).then_some(client);
         Self {
             handle: AtomicU64::new(handle),
             exit: AtomicU64::new(0),
+            closer,
         }
     }
 
@@ -185,8 +227,33 @@ impl ProcessHandle {
         self.handle.load(Ordering::Acquire)
     }
 
-    pub(super) fn swap_handle(&self, handle: u64) -> u64 {
-        self.handle.swap(handle, Ordering::AcqRel)
+    /// Take the process handle a `CreateProcess` event reports, closing the
+    /// one the attach or create call returned: it names the same process, and
+    /// the server handed the new one to this client. WinDbg's pending process
+    /// does the same when the first event hands over the handle.
+    pub(super) fn adopt(&self, handle: u64) {
+        if handle == 0 {
+            return;
+        }
+        let previous = self.handle.swap(handle, Ordering::AcqRel);
+        if previous != 0 && previous != handle {
+            self.close_value(previous);
+        }
+    }
+
+    /// Close the process handle now, keeping the exit status readable.
+    /// Idempotent, so the exit, `prepare_for_exit` and drop can each ask.
+    pub(super) fn close(&self) {
+        let value = self.handle.swap(0, Ordering::AcqRel);
+        if value != 0 {
+            self.close_value(value);
+        }
+    }
+
+    fn close_value(&self, value: u64) {
+        if let Some(closer) = &self.closer {
+            let _ = closer.server().close_handle(value);
+        }
     }
 
     pub(super) fn exit_code(&self) -> Option<u32> {
@@ -203,7 +270,19 @@ impl ProcessHandle {
         if let Some(code) = self.exit_code() {
             return Err(Error::ProcessExited(code));
         }
-        Ok(self.handle())
+        let handle = self.handle();
+        if handle == 0 {
+            return Err(Error::Dbgsrv(
+                "the process is no longer attached".to_string(),
+            ));
+        }
+        Ok(handle)
+    }
+}
+
+impl Drop for ProcessHandle {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
