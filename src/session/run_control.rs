@@ -70,6 +70,7 @@ impl Session {
                 | StopResolution::ModuleLoad { event, .. }
                 | StopResolution::ModuleUnload { event, .. }
                 | StopResolution::TargetReloaded { event, .. }
+                | StopResolution::ProcessExited { event, .. }
                 | StopResolution::Stopped { event, .. } => event,
                 StopResolution::Resumed | StopResolution::ModulesChanged => {
                     unreachable!("absorbed stop cannot be returned")

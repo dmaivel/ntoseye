@@ -200,6 +200,16 @@ impl Server<'_> {
     /// are read from, as gdb assumes of every stop reply (it sends `Hg`
     /// only for another thread).
     fn stop_reply(&mut self, stop: Stop, interrupted: bool) -> Vec<u8> {
+        if let StopKind::ProcessExited { exit_code } = stop.kind {
+            self.note(format!("process exited ({exit_code:#x})"));
+            let mut reply = Vec::new();
+            StopReply::Exited {
+                status: (exit_code & 0xff) as u8,
+                process: None,
+            }
+            .write(&mut reply);
+            return reply;
+        }
         let mut signalled = self.signalled(stop, interrupted);
         self.sync_threads();
         let index = self.current_index();
@@ -332,6 +342,9 @@ impl Server<'_> {
                 // Every breakpoint the client planted belonged to the old boot.
                 self.planted.clear();
                 SIGTRAP
+            }
+            StopKind::ProcessExited { .. } => {
+                unreachable!("process exit is answered with StopReply::Exited")
             }
         };
         signal_only(signal)

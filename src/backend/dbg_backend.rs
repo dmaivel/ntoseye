@@ -258,6 +258,9 @@ pub struct StopEvent {
     /// The stop is a break-in the host requested (a GDB stub's `SIGINT` stop
     /// reply), not a trap the guest took. Unrelated to `assisted_breakin`.
     pub break_in: bool,
+    /// Exit status of a live user-mode process that terminated
+    /// (`EXIT_PROCESS_DEBUG_EVENT`).
+    pub process_exit: Option<u32>,
 }
 
 /// The exception record a stop reported (`EXCEPTION_RECORD64`).

@@ -154,6 +154,9 @@ fn print_stop(session: &mut Session, caches: &ReplCaches, stop: &Stop) {
             let cause = stop_exception_cause(Some(exception.code), stop.rip);
             print_break_context_at(session, None, cause);
         }
+        StopKind::ProcessExited { exit_code } => {
+            outln!("process exited ({exit_code:#x})");
+        }
         StopKind::Interrupt | StopKind::Step | StopKind::Entry => print_break_context(session),
     }
 }
@@ -771,6 +774,7 @@ fn stop_notice(kind: &StopKind) -> Option<String> {
         StopKind::ModuleLoad { module } => format!("{} loaded", module.name),
         StopKind::ModuleUnload { module } => format!("{} unloaded", module.name),
         StopKind::Reload { .. } => "the target restarted".to_string(),
+        StopKind::ProcessExited { exit_code } => format!("process exited ({exit_code:#x})"),
         StopKind::Step | StopKind::Entry => "the target stopped".to_string(),
     })
 }

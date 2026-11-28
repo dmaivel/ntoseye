@@ -29,15 +29,15 @@ use super::client::DbgsrvClient;
 use super::events::{
     CREATE_PROCESS_DEBUG_EVENT, CREATE_THREAD_DEBUG_EVENT, CreateProcessDebugInfo,
     CreateThreadDebugInfo, DEBUG_EVENT_HEADER_SIZE, DEBUG_EVENT_SIZE, DebugEventName,
-    EXCEPTION_DEBUG_EVENT, EXCEPTION_MAXIMUM_PARAMETERS, EXIT_THREAD_DEBUG_EVENT,
-    ExceptionDebugInfo, ExceptionRecord64, ExitDebugInfo, OUTPUT_DEBUG_STRING_EVENT,
-    OutputDebugStringInfo,
+    EXCEPTION_DEBUG_EVENT, EXCEPTION_MAXIMUM_PARAMETERS, EXIT_PROCESS_DEBUG_EVENT,
+    EXIT_THREAD_DEBUG_EVENT, ExceptionDebugInfo, ExceptionRecord64, ExitDebugInfo,
+    OUTPUT_DEBUG_STRING_EVENT, OutputDebugStringInfo,
 };
 use super::layout;
 use super::service::{
     AttachedProcess, CLOSE_PROC_THREAD_HANDLES, ConnectionInfo, CreatedProcess,
-    DEBUG_PROCESS_ONLY_THIS_PROCESS, GENERIC_CODE_BREAKPOINTS, GENERIC_DATA_BREAKPOINTS,
-    MAX_PROCESS_THREADS, ProcessServer, TargetInfo, ThreadRecord,
+    DEBUG_PROCESS_ONLY_THIS_PROCESS, E_ACCESSDENIED, E_INVALIDARG, GENERIC_CODE_BREAKPOINTS,
+    GENERIC_DATA_BREAKPOINTS, MAX_PROCESS_THREADS, ProcessServer, TargetInfo, ThreadRecord,
 };
 use super::wire::{
     CALL_LOCKED, CALL_NO_RETURN, CALL_RETURN, Call, Guid, Handshake, IID_USER_DEBUG_SERVICES,
@@ -306,10 +306,6 @@ impl FakeServer {
                 for (index, byte) in out.iter_mut().enumerate() {
                     *byte = index as u8;
                 }
-            }
-            s if s == stub_index(Method::GetLastDataBreakpointHit) => {
-                write_u64(&mut out, 0, RIP);
-                write_u32(&mut out, 8, 1);
             }
             _ => {
                 assert_eq!(
@@ -768,11 +764,26 @@ fn a_server_that_refuses_the_handshake_is_reported_by_name() {
 struct MockServer {
     info: TargetInfo,
     threads: Vec<ThreadRecord>,
+    flags: u32,
+    attach_status: Option<u32>,
+    events: Vec<Vec<u8>>,
+}
+
+impl MockServer {
+    fn new(info: TargetInfo, threads: Vec<ThreadRecord>) -> Self {
+        Self {
+            info,
+            threads,
+            flags: GENERIC_CODE_BREAKPOINTS | GENERIC_DATA_BREAKPOINTS,
+            attach_status: None,
+            events: Vec::new(),
+        }
+    }
 }
 
 impl ProcessServer for MockServer {
     fn initialize(&mut self) -> Result<u32> {
-        Ok(GENERIC_CODE_BREAKPOINTS | GENERIC_DATA_BREAKPOINTS)
+        Ok(self.flags)
     }
     fn connection_info(&mut self) -> Result<ConnectionInfo> {
         Ok(ConnectionInfo {
@@ -794,6 +805,13 @@ impl ProcessServer for MockServer {
         Ok((PROCESS, threads, total))
     }
     fn attach_process(&mut self, _pid: u32, _flags: u32) -> Result<AttachedProcess> {
+        if let Some(status) = self.attach_status {
+            return Err(Error::DbgsrvStatus {
+                method: Method::AttachProcess.name(),
+                stub: Method::AttachProcess.stub_index(),
+                status,
+            });
+        }
         Ok(AttachedProcess {
             handle: PROCESS,
             options: 0,
@@ -864,7 +882,11 @@ impl ProcessServer for MockServer {
         Ok(())
     }
     fn wait_for_event(&mut self, _timeout_ms: u32) -> Result<Option<Vec<u8>>> {
-        Ok(None)
+        Ok(if self.events.is_empty() {
+            None
+        } else {
+            Some(self.events.remove(0))
+        })
     }
     fn continue_event(&mut self, _status: u32) -> Result<()> {
         Ok(())
@@ -886,9 +908,6 @@ impl ProcessServer for MockServer {
     ) -> Result<()> {
         Ok(())
     }
-    fn last_data_breakpoint_hit(&mut self, _process: u64, _thread: u64) -> Result<(u64, u32)> {
-        Ok((RIP, 1))
-    }
 }
 
 #[test]
@@ -898,13 +917,13 @@ fn a_mock_server_drives_the_backend_without_a_socket() {
         processors: 1,
         ..TargetInfo::default()
     };
-    let server = Box::new(MockServer {
+    let server = Box::new(MockServer::new(
         info,
-        threads: vec![ThreadRecord {
+        vec![ThreadRecord {
             handle: THREAD,
             tid: TID,
         }],
-    });
+    ));
     let client = Arc::new(DbgsrvClient::with_server(server, info).expect("a client"));
     assert_eq!(client.arch(), Arch::Amd64);
     let error = DbgsrvBackend::connect(client, &DbgsrvTarget::Attach { pid: PID }, &mut |_| {})
@@ -914,6 +933,92 @@ fn a_mock_server_drives_the_backend_without_a_socket() {
         error.to_string().contains("no initial debug event"),
         "{error}"
     );
+}
+
+#[test]
+fn watchpoints_require_generic_data_breakpoints_flag() {
+    use crate::arch::HwBreakpointAccess;
+
+    let info = TargetInfo {
+        machine_type: u32::from(IMAGE_FILE_MACHINE_AMD64),
+        processors: 1,
+        ..TargetInfo::default()
+    };
+    let mut server = MockServer::new(
+        info,
+        vec![ThreadRecord {
+            handle: THREAD,
+            tid: TID,
+        }],
+    );
+    server.flags = GENERIC_CODE_BREAKPOINTS;
+    server.events.push(breakpoint_event());
+    let client = Arc::new(DbgsrvClient::with_server(Box::new(server), info).expect("a client"));
+    let mut backend =
+        DbgsrvBackend::connect(client, &DbgsrvTarget::Attach { pid: PID }, &mut |_| {})
+            .expect("attach");
+    assert!(!backend.supports_watchpoints());
+    assert!(matches!(
+        backend.set_hardware_breakpoint(0, RIP, HwBreakpointAccess::Write, 8),
+        Err(Error::NotSupported)
+    ));
+}
+
+#[test]
+fn attach_errors_distinguish_missing_process_and_access_denied() {
+    let info = TargetInfo {
+        machine_type: u32::from(IMAGE_FILE_MACHINE_AMD64),
+        processors: 1,
+        ..TargetInfo::default()
+    };
+    for (status, expected) in [
+        (E_INVALIDARG, "not found"),
+        (E_ACCESSDENIED, "access denied"),
+        (0x8000_4005, "AttachProcess"),
+    ] {
+        let mut server = MockServer::new(info, Vec::new());
+        server.attach_status = Some(status);
+        let client = Arc::new(DbgsrvClient::with_server(Box::new(server), info).expect("a client"));
+        let error = DbgsrvBackend::connect(client, &DbgsrvTarget::Attach { pid: PID }, &mut |_| {})
+            .err()
+            .expect("attach error");
+        assert!(
+            error.to_string().contains(expected),
+            "status {status:#010x}: {error}"
+        );
+    }
+}
+
+#[test]
+fn exit_process_reports_process_exit_instead_of_exception() {
+    let info = TargetInfo {
+        machine_type: u32::from(IMAGE_FILE_MACHINE_AMD64),
+        processors: 1,
+        ..TargetInfo::default()
+    };
+    let mut server = MockServer::new(
+        info,
+        vec![ThreadRecord {
+            handle: THREAD,
+            tid: TID,
+        }],
+    );
+    server.events.push(breakpoint_event());
+    server.events.push(debug_event(
+        EXIT_PROCESS_DEBUG_EVENT,
+        PID,
+        TID,
+        ExitDebugInfo { exit_code: 0x2a }.as_bytes(),
+    ));
+    let client = Arc::new(DbgsrvClient::with_server(Box::new(server), info).expect("a client"));
+    let mut backend =
+        DbgsrvBackend::connect(client, &DbgsrvTarget::Attach { pid: PID }, &mut |_| {})
+            .expect("attach");
+    backend.continue_execution().expect("resume");
+    let stop = backend.wait_for_stop().expect("exit stop");
+    assert_eq!(stop.process_exit, Some(0x2a));
+    assert_eq!(stop.exception_code, None);
+    assert!(backend.read_registers().is_err());
 }
 
 #[test]
@@ -927,27 +1032,15 @@ fn machine_types_map_to_architectures_and_i386_is_refused() {
             processors: 4,
             ..TargetInfo::default()
         };
-        let client = DbgsrvClient::with_server(
-            Box::new(MockServer {
-                info,
-                threads: Vec::new(),
-            }),
-            info,
-        );
+        let client = DbgsrvClient::with_server(Box::new(MockServer::new(info, Vec::new())), info);
         assert_eq!(client.ok().map(|client| client.arch()), expected);
     }
     let info = TargetInfo {
         machine_type: u32::from(IMAGE_FILE_MACHINE_I386),
         ..TargetInfo::default()
     };
-    let error = DbgsrvClient::with_server(
-        Box::new(MockServer {
-            info,
-            threads: Vec::new(),
-        }),
-        info,
-    )
-    .expect_err("i386 is refused");
+    let error = DbgsrvClient::with_server(Box::new(MockServer::new(info, Vec::new())), info)
+        .expect_err("i386 is refused");
     assert!(
         matches!(error, Error::Dbgsrv(ref message) if message.contains("x86/WOW64")),
         "{error}"

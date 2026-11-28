@@ -721,58 +721,26 @@ impl DebugBackend for MockBackend {
 
 fn single_step_event() -> StopEvent {
     StopEvent {
-        thread_id: None,
         exception_code: Some(STATUS_SINGLE_STEP),
         first_chance: Some(true),
-        exception_address: None,
-        program_counter: None,
-        watchpoint_address: None,
-        is_bugcheck: false,
-        bugcheck: None,
-        target_reloaded: false,
-        target_kernel_base_hint: None,
-        modules_changed: false,
-        module_event: None,
-        assisted_breakin: false,
-        break_in: false,
+        ..StopEvent::default()
     }
 }
 
 pub fn breakpoint_event(pc: u64) -> StopEvent {
     StopEvent {
-        thread_id: None,
         exception_code: Some(STATUS_BREAKPOINT),
         first_chance: Some(true),
         exception_address: Some(pc),
         program_counter: Some(pc),
-        watchpoint_address: None,
-        is_bugcheck: false,
-        bugcheck: None,
-        target_reloaded: false,
-        target_kernel_base_hint: None,
-        modules_changed: false,
-        module_event: None,
-        assisted_breakin: false,
-        break_in: false,
+        ..StopEvent::default()
     }
 }
 
 fn module_change_event() -> StopEvent {
     StopEvent {
-        thread_id: None,
-        exception_code: None,
-        first_chance: None,
-        exception_address: None,
-        program_counter: None,
-        watchpoint_address: None,
-        is_bugcheck: false,
-        bugcheck: None,
-        target_reloaded: false,
-        target_kernel_base_hint: None,
         modules_changed: true,
-        module_event: None,
-        assisted_breakin: false,
-        break_in: false,
+        ..StopEvent::default()
     }
 }
 
@@ -5152,4 +5120,24 @@ fn a_process_server_target_opens_as_a_live_user_session() {
         }),
         "DetachProcess"
     );
+}
+
+#[test]
+fn process_exit_stop_surfaces_as_process_exited() {
+    let mut backend = MockBackend::default().running();
+    backend.queue_interrupt(StopEvent {
+        process_exit: Some(0x2a),
+        ..StopEvent::default()
+    });
+    let mut session = session_with_mock(backend);
+
+    let RunOutcome::Stopped(stop) = session.run(Motion::Wait, &Cancel::poll()).unwrap() else {
+        panic!("expected process exit stop");
+    };
+    assert_eq!(stop.exit_code(), Some(0x2a));
+    assert!(matches!(
+        stop.kind,
+        StopKind::ProcessExited { exit_code: 0x2a }
+    ));
+    assert!(stop.exception().is_none());
 }

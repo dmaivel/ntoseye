@@ -23,12 +23,15 @@ use crate::backend::userlive::{
 };
 use crate::base::bytes::utf16le_nul_terminated;
 use crate::base::error::{Error, Result};
-use crate::base::ntstatus::{DBG_CONTINUE, DBG_EXCEPTION_NOT_HANDLED, STATUS_SINGLE_STEP};
+use crate::base::ntstatus::{DBG_CONTINUE, DBG_EXCEPTION_NOT_HANDLED};
 use crate::base::types::VirtAddr;
 
 use super::client::{DbgsrvClient, DbgsrvUserMemory};
 use super::events::{self, DebugEvent};
-use super::service::{DEBUG_PROCESS_ONLY_THIS_PROCESS, MAX_PROCESS_THREADS, PROC_INFO_NO_SUSPEND};
+use super::service::{
+    DEBUG_PROCESS_ONLY_THIS_PROCESS, E_ACCESSDENIED, E_INVALIDARG, MAX_PROCESS_THREADS,
+    PROC_INFO_NO_SUSPEND,
+};
 
 /// How long one `WaitForEvent` may take, so a Ctrl+C seen between polls can
 /// break the process in without a second thread.
@@ -139,10 +142,25 @@ impl DbgsrvBackend {
                 // separate privilege, and the attach itself says whether the
                 // process is there.
                 progress(&format!("dbgsrv: attaching to process {pid}"));
-                let attached = client
-                    .server()
-                    .attach_process(*pid, 0)
-                    .map_err(|error| Error::Dbgsrv(format!("process {pid} not found: {error}")))?;
+                let attached =
+                    client
+                        .server()
+                        .attach_process(*pid, 0)
+                        .map_err(|error| match error {
+                            Error::DbgsrvStatus {
+                                status: E_INVALIDARG,
+                                ..
+                            } => Error::Dbgsrv(format!(
+                                "process {pid} not found (HRESULT {E_INVALIDARG:#010x})"
+                            )),
+                            Error::DbgsrvStatus {
+                                status: E_ACCESSDENIED,
+                                ..
+                            } => Error::Dbgsrv(format!(
+                                "access denied attaching to process {pid} (HRESULT {E_ACCESSDENIED:#010x})"
+                            )),
+                            other => other,
+                        })?;
                 (*pid, attached.handle, None)
             }
             DbgsrvTarget::Create { command_line } => {
@@ -526,14 +544,12 @@ impl DbgsrvBackend {
                 first_chance,
                 ..
             } => {
-                let watchpoint_address = self.watchpoint_address(thread_id, record.code);
                 let stop = StopEvent {
                     thread_id: Some(backend_thread_id(thread_id)),
                     exception_code: Some(record.code),
                     first_chance: Some(first_chance),
                     exception_address: Some(record.address),
                     program_counter: Some(record.address),
-                    watchpoint_address,
                     ..StopEvent::default()
                 };
                 self.last_exception = Some(record);
@@ -578,7 +594,7 @@ impl DbgsrvBackend {
             DebugEvent::ExitProcess { exit_code, .. } => {
                 self.exit = Some(exit_code);
                 Some(StopEvent {
-                    exception_code: Some(exit_code),
+                    process_exit: Some(exit_code),
                     ..StopEvent::default()
                 })
             }
@@ -616,21 +632,6 @@ impl DbgsrvBackend {
             }),
             ..StopEvent::default()
         }
-    }
-
-    /// The data address a hardware data breakpoint trapped on, when the server
-    /// manages data breakpoints itself.
-    fn watchpoint_address(&mut self, tid: u32, code: u32) -> Option<u64> {
-        if code != STATUS_SINGLE_STEP || self.client.generic_data_breakpoints() {
-            return None;
-        }
-        let thread = self.threads.iter().find(|thread| thread.info.tid == tid)?;
-        let (address, _access) = self
-            .client
-            .server()
-            .last_data_breakpoint_hit(self.process_handle(), thread.handle)
-            .ok()?;
-        Some(address)
     }
 
     /// Read a debug string the process printed (`OUTPUT_DEBUG_STRING_EVENT`).
@@ -742,7 +743,8 @@ impl DebugBackend for DbgsrvBackend {
     }
 
     fn supports_watchpoints(&self) -> bool {
-        self.arch.debug_registers().exposed_in(&self.register_map)
+        self.client.generic_data_breakpoints()
+            && self.arch.debug_registers().exposed_in(&self.register_map)
     }
 
     fn hardware_breakpoint_slots(&self) -> usize {

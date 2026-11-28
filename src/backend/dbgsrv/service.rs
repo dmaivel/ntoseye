@@ -37,6 +37,13 @@ pub const DEBUG_CREATE_PROCESS_INHERIT_HANDLES: u32 = 0x0000_0002;
 /// `S_FALSE`: the server's "nothing yet" for a timed-out wait.
 const S_FALSE: u32 = 0x0000_0001;
 
+/// `HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED)`.
+pub const E_ACCESSDENIED: u32 = 0x8007_0005;
+
+/// `HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER)`: what `AttachProcess` returns
+/// when no process has the requested PID.
+pub const E_INVALIDARG: u32 = 0x8007_0057;
+
 /// Bytes of a 64-bit Windows `DEBUG_EVENT`: what the server requires the
 /// caller's buffer to hold.
 pub const DEBUG_EVENT_SIZE: u32 = super::events::DEBUG_EVENT_SIZE as u32;
@@ -166,8 +173,6 @@ pub trait ProcessServer: Send {
         machine_type: u32,
         storage: &[u8],
     ) -> Result<()>;
-    /// The data address and access type of the last data breakpoint hit.
-    fn last_data_breakpoint_hit(&mut self, process: u64, thread: u64) -> Result<(u64, u32)>;
 }
 
 /// The identity a connection announces: `MACHINE\user`, as UTF-16 like
@@ -368,11 +373,11 @@ impl RpcService {
     }
 
     fn failure(&self, method: Method, status: u32) -> Error {
-        Error::Dbgsrv(format!(
-            "{}(stub {:#x}) failed: HRESULT {status:#010x}",
-            method.name(),
-            method.stub_index()
-        ))
+        Error::DbgsrvStatus {
+            method: method.name(),
+            stub: method.stub_index(),
+            status,
+        }
     }
 
     /// Issue a call taking one 64-bit handle and returning one 64-bit value.
@@ -744,17 +749,6 @@ impl ProcessServer for RpcService {
         .sized_buffer(storage, size);
         self.call_ok(Method::RemoveCodeBreakpoint, body, 0)
             .map(drop)
-    }
-
-    fn last_data_breakpoint_hit(&mut self, process: u64, thread: u64) -> Result<(u64, u32)> {
-        let mut body = Writer::new();
-        body.write_u64(process).write_u64(thread);
-        let out_size = size_of_wire::<u64>() + size_of_wire::<u32>();
-        let data = self.call_ok(Method::GetLastDataBreakpointHit, body, out_size)?;
-        let mut reader = Reader::new(&data, Method::GetLastDataBreakpointHit);
-        let address = reader.read_u64()?;
-        let access = reader.read_u32()?;
-        Ok((address, access))
     }
 }
 

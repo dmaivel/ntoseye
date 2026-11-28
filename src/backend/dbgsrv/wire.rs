@@ -140,7 +140,6 @@ define_methods! {
     ContinueEvent = 49 => "ContinueEvent",
     InsertCodeBreakpoint = 50 => "InsertCodeBreakpoint",
     RemoveCodeBreakpoint = 51 => "RemoveCodeBreakpoint",
-    GetLastDataBreakpointHit = 54 => "GetLastDataBreakpointHit",
 }
 
 /// `DBGRPC_RETURN`: the call header carries a reply.

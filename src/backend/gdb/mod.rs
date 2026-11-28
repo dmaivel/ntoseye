@@ -166,6 +166,7 @@ fn stop_event(reply: &[u8]) -> StopEvent {
         module_event: None,
         assisted_breakin: false,
         break_in,
+        process_exit: None,
     }
 }
 

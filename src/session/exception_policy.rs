@@ -480,6 +480,7 @@ mod tests {
             module_event: None,
             assisted_breakin: false,
             break_in: false,
+            process_exit: None,
         }
     }
 

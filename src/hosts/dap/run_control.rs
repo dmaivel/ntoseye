@@ -583,6 +583,12 @@ impl Server {
                     breakpoint_id: None,
                 }
             }
+            StopKind::ProcessExited { exit_code } => {
+                self.emit_output("console", format!("process exited ({exit_code:#x})\n"));
+                self.send_event("exited", json!({ "exitCode": exit_code }));
+                self.send_event("terminated", json!({}));
+                return;
+            }
         };
         self.publish_stop(info);
     }

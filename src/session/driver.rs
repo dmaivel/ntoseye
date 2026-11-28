@@ -321,6 +321,14 @@ impl Stop {
             _ => None,
         }
     }
+
+    /// The exit code, for a live user-mode process that terminated.
+    pub fn exit_code(&self) -> Option<u32> {
+        match &self.kind {
+            StopKind::ProcessExited { exit_code } => Some(*exit_code),
+            _ => None,
+        }
+    }
 }
 
 /// Why a [`Stop`] stopped: its kind (in Python, its subclass of `Stop`) and
@@ -351,6 +359,11 @@ pub enum StopKind {
     /// The guest rebooted and the debugger rebuilt its state; earlier
     /// handles are stale.
     Reload { reload: ReloadStop },
+    /// A live user-mode process terminated (`EXIT_PROCESS_DEBUG_EVENT`).
+    ProcessExited {
+        #[record(hex)]
+        exit_code: u32,
+    },
     /// Nothing stopped the target since the debugger attached: it was found
     /// halted (a dump, a target attached halted).
     Entry,
@@ -1094,6 +1107,10 @@ impl Session {
                     },
                 };
                 rip
+            }
+            ContinueOutcome::ProcessExited { exit_code } => {
+                stop.kind = StopKind::ProcessExited { exit_code };
+                None
             }
             ContinueOutcome::Halted { rip } => Some(rip),
             ContinueOutcome::Running => unreachable!("a running target has no stop"),

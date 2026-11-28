@@ -54,6 +54,12 @@ pub enum Error {
 
     #[error("dbgsrv protocol failure: {0}")]
     Dbgsrv(String),
+    #[error("dbgsrv protocol failure: {method}(stub {stub:#x}) failed: HRESULT {status:#010x}")]
+    DbgsrvStatus {
+        method: &'static str,
+        stub: u16,
+        status: u32,
+    },
 
     #[error("breakpoint: {0}")]
     Breakpoint(String),
