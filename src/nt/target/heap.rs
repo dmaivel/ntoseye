@@ -2186,7 +2186,7 @@ impl Target {
     fn heap_context(&self) -> Result<(Dtb, VirtAddr, bool)> {
         // A user-mode minidump is its one process: the selected thread's TEB
         // names the PEB, and the captured memory serves every root.
-        if let Some(peb) = self.user_dump_pseudo_register("peb") {
+        if let Some(peb) = self.user_pseudo_register("peb") {
             let peb = peb.ok_or_else(|| {
                 Error::DebugInfo(
                     "the PEB's address is unknown: the minidump does not hold the selected thread's TEB"

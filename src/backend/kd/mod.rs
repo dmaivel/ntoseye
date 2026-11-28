@@ -69,6 +69,10 @@ use halt::HaltRegisters;
 use machine::machine;
 use memory::LineCache;
 use transport::KdTransport;
+#[cfg(windows)]
+pub(crate) use transport::PipeStream;
+#[cfg(all(windows, test))]
+pub(crate) use transport::{create_test_server, wait_for_client};
 
 mod debug_io;
 pub use debug_io::*;

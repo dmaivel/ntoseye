@@ -219,7 +219,7 @@ impl UserProcess {
     fn peb(&self, py: Python<'_>) -> PyResult<Option<Struct>> {
         let address = self.owner.with(py, |session| {
             info(session)?;
-            Ok(session.target.user_dump_pseudo_register("peb").flatten())
+            Ok(session.target.user_pseudo_register("peb").flatten())
         })?;
         address
             .map(|address| Struct::new(py, &self.owner, Space::Kernel, "ntdll!_PEB", address))

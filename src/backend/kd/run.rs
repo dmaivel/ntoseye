@@ -68,6 +68,7 @@ pub(super) fn stop_event(stop: StateChange) -> StopEvent {
         module_event,
         assisted_breakin: stop.assisted_breakin,
         break_in: false,
+        process_exit: None,
     }
 }
 

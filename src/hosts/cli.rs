@@ -81,15 +81,27 @@ struct Cli {
 #[derive(Args)]
 struct TargetOptions {
     /// The debugger backend: 'kd' (Windows KD over a serial pipe, the
-    /// default), 'kdnet' (Windows KD over UDP), 'gdb' (QEMU GDB stub), or
+    /// default), 'kdnet' (Windows KD over UDP), 'gdb' (QEMU GDB stub),
+    /// 'dbgsrv' (a live user-mode process behind a DbgRpc process server), or
     /// 'memory' (passive inspection of a live VM)
     #[arg(short = 'b', long, global = true)]
     backend: Option<Backend>,
 
-    /// The backend target: a GDB address, a KD pipe path, or a KDNET listen
-    /// address. The memory backend does not use it
+    /// The backend target: a GDB address, a KD pipe path, a KDNET listen
+    /// address, or a dbgsrv endpoint (tcp:server=<host>,port=<port> or
+    /// npipe:[server=<host>,]pipe=<name>, with optional password=<secret>).
+    /// The memory backend does not use it
     #[arg(long, global = true)]
     connect: Option<String>,
+
+    /// The process to debug over the dbgsrv backend, by process id
+    #[arg(long, global = true, value_name = "PID")]
+    process: Option<u32>,
+
+    /// The command line of a process to start under the debugger over the
+    /// dbgsrv backend
+    #[arg(long, global = true, value_name = "COMMAND")]
+    create: Option<String>,
 
     /// The KDNET encryption key (four base-36 components), which the kdnet
     /// backend requires
@@ -472,6 +484,24 @@ fn run(cli: Cli) -> Result<i32> {
             "--kdnet-key is only valid with --backend kdnet".to_string(),
         ));
     }
+    if backend != Backend::DbgSrv && (args.process.is_some() || args.create.is_some()) {
+        return Err(Error::DebugInfo(
+            "--process and --create are only valid with --backend dbgsrv".to_string(),
+        ));
+    }
+    if backend == Backend::DbgSrv {
+        if args.process.is_some() == args.create.is_some() {
+            return Err(Error::DebugInfo(
+                "--backend dbgsrv needs exactly one of --process <pid> and --create <command>"
+                    .to_string(),
+            ));
+        }
+        if args.dump.is_some() && args.connect.is_none() {
+            return Err(Error::DebugInfo(
+                "--dump opens a crash dump, which the dbgsrv backend does not".to_string(),
+            ));
+        }
+    }
     if !matches!(backend, Backend::Kd | Backend::KdNet) && args.memory_source.is_some() {
         return Err(Error::DebugInfo(
             "--memory-source is only valid with --backend kd or --backend kdnet".to_string(),
@@ -624,6 +654,15 @@ fn run(cli: Cli) -> Result<i32> {
 }
 
 fn live_spec(args: &TargetOptions, backend: Backend) -> TargetSpec {
+    if backend == Backend::DbgSrv {
+        // Exactly one of --process and --create was validated above.
+        let target = crate::DbgsrvTarget::from_options(args.process, args.create.clone())
+            .expect("dbgsrv target validated above");
+        return TargetSpec::Dbgsrv {
+            connect: args.connect.clone().unwrap_or_default(),
+            target,
+        };
+    }
     TargetSpec::Live {
         backend,
         connect: args.connect.clone(),

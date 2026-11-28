@@ -76,6 +76,7 @@ literal_arg! {
         "kd" => Some(Backend::Kd),
         "kdnet" => Some(Backend::KdNet),
         "gdb" => Some(Backend::Gdb),
+        "dbgsrv" => Some(Backend::DbgSrv),
         "memory" => Some(Backend::Memory),
         "dmp" => None,
     }

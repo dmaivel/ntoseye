@@ -52,6 +52,15 @@ pub enum Error {
     #[error("KD protocol failure: kernel returned NTSTATUS {ntstatus:#x} for api {api:#x}")]
     KdStatus { ntstatus: u32, api: u32 },
 
+    #[error("dbgsrv protocol failure: {0}")]
+    Dbgsrv(String),
+    #[error("dbgsrv protocol failure: {method}(stub {stub:#x}) failed: HRESULT {status:#010x}")]
+    DbgsrvStatus {
+        method: &'static str,
+        stub: u16,
+        status: u32,
+    },
+
     #[error("breakpoint: {0}")]
     Breakpoint(String),
 
@@ -89,6 +98,10 @@ pub enum Error {
     /// The payload says what the halted target is needed for.
     #[error("target is running; `break` first, or wait for the next stop. {0}")]
     TargetRunning(&'static str),
+
+    /// A live user-mode process has already terminated.
+    #[error("the process exited ({0:#x})")]
+    ProcessExited(u32),
 
     #[error("the current backend does not support register writes")]
     RegisterWriteUnsupported,

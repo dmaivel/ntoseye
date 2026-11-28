@@ -518,16 +518,28 @@ fn handle_query(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<HandleQuery, ArgError> {
-    if cx.state.ctx.target.kind() != TargetKind::UserDump {
-        if cursor.remaining() > 1 {
+    match cx.state.ctx.target.kind() {
+        // A process's handle table lives in kernel memory, and a process
+        // server does not serve it: only a minidump records the table.
+        TargetKind::UserLive => {
             return Err(ArgError::Message(
-                "!handle: flags and a type apply to a user-mode minidump's handle data".into(),
+                "!handle: a live process's handle table is kernel data, which a process server \
+                 does not serve; only a user-mode minidump records it"
+                    .into(),
             ));
         }
-        return match cursor.word() {
-            Some(text) => Ok(HandleQuery::Kernel(Some(cx.eval(&text)?.0))),
-            None => Ok(HandleQuery::Kernel(None)),
-        };
+        TargetKind::Kernel => {
+            if cursor.remaining() > 1 {
+                return Err(ArgError::Message(
+                    "!handle: flags and a type apply to a user-mode minidump's handle data".into(),
+                ));
+            }
+            return match cursor.word() {
+                Some(text) => Ok(HandleQuery::Kernel(Some(cx.eval(&text)?.0))),
+                None => Ok(HandleQuery::Kernel(None)),
+            };
+        }
+        TargetKind::UserDump => {}
     }
     if cursor.remaining() > 3 {
         return Err(ArgError::Missing);

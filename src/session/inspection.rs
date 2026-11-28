@@ -32,8 +32,8 @@ use crate::nt::unwind::{
 };
 use crate::session::context::windows_thread_on_backend_thread;
 use crate::session::{
-    Cancel, ExceptionRecord, InstructionBoundary, Motion, PageInReport, RunOutcome, Session,
-    VpRegisters,
+    Cancel, ContinueOutcome, ExceptionRecord, InstructionBoundary, Motion, PageInReport,
+    RunOutcome, Session, VpRegisters,
 };
 
 /// `DBG_STATUS_WORKER`, the status the kernel's debugger worker passes to
@@ -137,6 +137,28 @@ impl Session {
     /// was raised on and select the exception's CONTEXT, which the dump
     /// stores beside the record. Returns the selection and the thread's id.
     pub fn select_user_exception_context(&mut self) -> Result<(SelectedFrame, String)> {
+        if self.target.phys.is_user_live() {
+            // A live process's exception context is the context it stopped
+            // in: the current thread's own registers, not a stream a dump
+            // stored.
+            let exception = matches!(
+                &self.current_stop,
+                Some(ContinueOutcome::Stopped {
+                    exception_code: Some(_),
+                    ..
+                })
+            );
+            if !exception {
+                return Err(Error::DebugInfo(
+                    "no exception context is selected".to_string(),
+                ));
+            }
+            let registers = self.backend.read_registers()?;
+            let values = self.target.register_values(&self.register_map, &registers);
+            let selected = SelectedFrame::from_registers(self.target.arch(), 0, values);
+            self.select_frame(selected.clone());
+            return Ok((selected, self.current_thread.clone()));
+        }
         let info = self
             .target
             .user_dump_info()

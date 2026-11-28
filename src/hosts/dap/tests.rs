@@ -295,6 +295,7 @@ fn a_request_without_a_memory_source_takes_the_command_lines() {
     let source = |args: Value| match target_spec(KdMemorySource::Kd, &args).unwrap() {
         TargetSpec::Live { memory_source, .. } => memory_source,
         TargetSpec::Dump(_) => panic!("a live target"),
+        TargetSpec::Dbgsrv { .. } => panic!("a process-server target"),
     };
 
     assert_eq!(source(json!({"backend": "kd"})), KdMemorySource::Kd);

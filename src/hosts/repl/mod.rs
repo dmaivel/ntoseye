@@ -595,14 +595,13 @@ impl<'a> ReplState<'a> {
     }
 
     /// What the prompt names the current thread by: the number `~` selects
-    /// it by, the processor's (`3`) or, in a user-mode dump, the thread's
-    /// place in the dump's list (`17`), as WinDbg's `0:017>` does.
+    /// it by, the processor's (`3`) or, in a user-mode target, the thread's
+    /// place in the process's list (`17`), as WinDbg's `0:017>` does.
     pub fn prompt_thread(&self) -> String {
         let thread = &self.ctx.current_thread;
         self.ctx
             .target
-            .user_dump_info()
-            .and_then(|info| info.thread_index(info.tid_for_backend_id(thread)?))
+            .user_thread_index_for_backend_id(thread)
             .map_or_else(|| thread_label(thread), |index| index.to_string())
     }
 
@@ -1019,6 +1018,49 @@ fn print_user_dump_target(dump: &UserDumpSummary) {
     outln!();
 }
 
+/// What a live user-mode target is, as the session opens with it.
+#[cfg(feature = "cli")]
+struct LiveUserSummary {
+    /// The process id, as hex.
+    process: String,
+    threads: usize,
+    modules: usize,
+    /// The module the loader lists first, which is the process's image.
+    image: Option<String>,
+}
+
+/// The live process's details, `None` for every other target.
+#[cfg(feature = "cli")]
+fn live_user_summary(target: &Target) -> Option<LiveUserSummary> {
+    let process = target.live_user_process()?;
+    let image = process
+        .modules
+        .first()
+        .map(|module| format!("{} {:#x}", module.name, module.base_address.0));
+    Some(LiveUserSummary {
+        process: format!("{:#x}", process.pid()),
+        threads: process.thread_count(),
+        modules: process.modules.len(),
+        image,
+    })
+}
+
+#[cfg(feature = "cli")]
+fn print_live_user_target(live: &LiveUserSummary) {
+    outln!("\n{}", ui::label("live user-mode process"));
+    outln!("  {} {}", ui::muted("process  "), live.process);
+    if let Some(image) = &live.image {
+        outln!("  {} {}", ui::muted("image    "), image);
+    }
+    outln!(
+        "  {} {} threads, {} modules",
+        ui::muted("loaded   "),
+        live.threads,
+        live.modules
+    );
+    outln!();
+}
+
 #[cfg(feature = "cli")]
 fn start_repl_with_mode(ctx: &mut Session, plain: bool, startup: &Startup) -> Result<()> {
     if startup.batch {
@@ -1078,6 +1120,8 @@ fn start_repl_with_mode(ctx: &mut Session, plain: bool, startup: &Startup) -> Re
         // A batch run's output is its commands'.
     } else if let Some(dump) = user_dump_summary(debugger) {
         print_user_dump_target(&dump);
+    } else if let Some(live) = live_user_summary(debugger) {
+        print_live_user_target(&live);
     } else {
         // Triage dumps may lack the ntoskrnl PE header needed for full kernel
         // discovery; a missing kernel is non-fatal and commands that need it

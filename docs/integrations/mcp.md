@@ -10,7 +10,7 @@ If the agent's harness keeps a Python kernel alive between calls, such as oh-my-
 | --- | --- |
 | `command` | Runs one REPL line and returns its text with a `[target ...]` trailer. A `;` separates commands, and {command}`help` lists them. The arguments are `line` and `timeout_ms` (default 10 s, maximum 5 min). |
 | `output` | Reads more of a long `command` result: the lines from `offset`, or only the lines that contain `filter`, at most `limit` of them (at least 1) and a page's worth. The arguments are `id`, `offset`, `limit`, and `filter`. |
-| `open` / `close` | `open` attaches to a target using `backend`, `connect`, and, for `kdnet`, `key`. For `kd` and `kdnet`, it also accepts `kd_handshake_timeout` in seconds. For a crash dump or a [user-mode minidump](#user-mode-minidumps), use `backend: dump` with the dump path as `connect`. `close` releases the target. The server holds one session at a time. |
+| `open` / `close` | `open` attaches to a target using `backend`, `connect`, and, for `kdnet`, `key`. For `kd` and `kdnet`, it also accepts `kd_handshake_timeout` in seconds. For a live user-mode process, use `backend: dbgsrv` with a `tcp:server=<host>,port=<port>` or `npipe:[server=<host>,]pipe=<name>` endpoint (optional `,password=<secret>`) as `connect` and exactly one of `process` (a pid) and `create` (a command line). For a crash dump or a [user-mode minidump](#user-mode-minidumps), use `backend: dump` with the dump path as `connect`. `close` releases the target. The server holds one session at a time. |
 
 ## Run control
 
@@ -139,7 +139,13 @@ Put the target options after the subcommand, for example to set the backend and 
 
 For KDNET, use `["mcp", "--backend", "kdnet", "--kdnet-key", "1.2.3.4"]`. To force target-mediated memory, add `["--memory-source", "kd"]`, and add `--connect` only to change the default `0.0.0.0:50000` listener. Which memory to trust is the operator's choice, so `open` has no memory-source argument: a `kd` or `kdnet` target it opens uses the server's `--memory-source`, `auto` without one.
 
-The `open` tool accepts the same backend, connect, and key values. Its optional `kd_handshake_timeout` is a positive integer number of seconds for the initial KD/KDNET handshake, for example `{"backend": "kd", "kd_handshake_timeout": 30}`. It is only valid for `kd` and `kdnet`; `gdb`, `memory`, and `dump` reject it. An explicit value overrides `NTOSEYE_KD_TIMEOUT`; when omitted, the environment variable still applies, with a default of 8 seconds. This is separate from the `command` tool's `timeout_ms`.
+The `open` tool accepts the same backend, connect, and key values. Its optional `kd_handshake_timeout` is a positive integer number of seconds for the initial KD/KDNET handshake, for example `{"backend": "kd", "kd_handshake_timeout": 30}`. It is only valid for `kd` and `kdnet`; `gdb`, `memory`, `dbgsrv`, and `dump` reject it. An explicit value overrides `NTOSEYE_KD_TIMEOUT`; when omitted, the environment variable still applies, with a default of 8 seconds. This is separate from the `command` tool's `timeout_ms`.
+
+`dbgsrv` opens a live user-mode process, so it takes `process` (the pid to attach to) or `create` (the command line to start under the debugger), exactly one of them, and rejects `key`, `kd_handshake_timeout`, and `memory_source`. The other backends reject `process` and `create`.
+
+```json
+{"backend": "dbgsrv", "connect": "tcp:server=devbox,port=5005", "process": 4321}
+```
 
 For a startup attach, use `--kd-handshake-timeout 30` with the CLI target options. If the server starts without a target, set `kd_handshake_timeout` in `open` instead. The server tells the agent to ask the user how the VM is exposed instead of guessing.
 

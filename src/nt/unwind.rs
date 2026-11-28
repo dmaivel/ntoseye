@@ -311,11 +311,16 @@ pub fn resolve_thread_trace_context(debugger: &Target, cr3: u64) -> ThreadTraceC
 /// [`resolve_thread_trace_context`], walking a process root's own module
 /// list (its PEB loader list) only when `process_modules` asks for it.
 fn thread_trace_context(debugger: &Target, cr3: u64, process_modules: bool) -> ThreadTraceContext {
-    // A user dump's threads all run in its one process, whose modules the
-    // dump lists; a captured register file holds no page-table root.
-    if let (Some(info), Some(modules)) = (debugger.user_dump_info(), debugger.user_modules()) {
+    // A user-mode target's threads all run in its one process, whose modules
+    // the target lists; its registers hold no page-table root.
+    if debugger.is_user_target()
+        && let Some(modules) = debugger.user_modules()
+    {
+        let description = debugger
+            .user_process_label()
+            .unwrap_or_else(|| "user process".to_string());
         return ThreadTraceContext {
-            description: info.process_label(),
+            description,
             active_dtb: DTB_IDENTITY,
             kernel_dtb: DTB_IDENTITY,
             process_dtb: Some(DTB_IDENTITY),

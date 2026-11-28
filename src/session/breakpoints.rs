@@ -1127,19 +1127,34 @@ impl Session {
     pub fn refresh_modules_on_stop(&mut self) -> bool {
         let event_changed = self.backend.take_modules_changed()
             | std::mem::take(&mut self.unreported_module_change);
-        let symbols_changed = match self.target.refresh_kernel_module_symbols() {
-            Ok(report) => {
-                let changed = report.loaded != 0 || report.unloaded != 0;
-                if changed {
-                    self.module_refresh_report = Some(report);
-                }
-                changed
-            }
-            Err(error) => {
+        // A user-mode target's modules are its process's: a live one re-walks
+        // its loader lists, and a dump's captured list never moves. Neither
+        // has a kernel module list to reload.
+        let symbols_changed = if self.target.is_user_target() {
+            if event_changed
+                && self.target.phys.is_user_live()
+                && let Err(error) = self.target.refresh_live_user_modules()
+            {
                 self.notices.push(Notice::warning(format!(
-                    "failed to refresh module symbols after module change: {error}"
+                    "failed to refresh the process's module list: {error}"
                 )));
-                false
+            }
+            false
+        } else {
+            match self.target.refresh_kernel_module_symbols() {
+                Ok(report) => {
+                    let changed = report.loaded != 0 || report.unloaded != 0;
+                    if changed {
+                        self.module_refresh_report = Some(report);
+                    }
+                    changed
+                }
+                Err(error) => {
+                    self.notices.push(Notice::warning(format!(
+                        "failed to refresh module symbols after module change: {error}"
+                    )));
+                    false
+                }
             }
         };
         let modules_changed = event_changed || symbols_changed;

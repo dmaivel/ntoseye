@@ -15327,7 +15327,9 @@ class Process:
         page-table steps. On a user-mode minidump the command reads the region
         from the dump's memory-info list, which records what VirtualQuery
         returned when the dump was written; RegionSize runs from the page of the
-        address to the end of that region.
+        address to the end of that region. On a live process it asks the process
+        server's VirtualQuery, whose answer is the region holding the address
+        from the region's start.
         """
     @property
     def regions(self, /) -> Regions:
@@ -17794,7 +17796,7 @@ class Stop(BaseRecord):
         `process`.
         """
     @property
-    def kind(self, /) -> Literal["breakpoint", "exception", "interrupt", "step", "module_load", "module_unload", "bugcheck", "reload", "entry"]:
+    def kind(self, /) -> Literal["breakpoint", "exception", "interrupt", "step", "module_load", "module_unload", "bugcheck", "reload", "process_exited", "entry"]:
         """
         The kind of stop, in snake case.
         """
@@ -17926,6 +17928,19 @@ class Stop(BaseRecord):
             """
         @property
         def module(self, /) -> ModuleInfo: ...
+    @final
+    class ProcessExited(Stop):
+        """
+        A live user-mode process terminated (`EXIT_PROCESS_DEBUG_EVENT`).
+        """
+        __match_args__: Final[tuple[Literal["exit_code"]]]
+        @property
+        def exit_code(self, /) -> int: ...
+        @property
+        def kind(self, /) -> Literal["process_exited"]:
+            """
+            `process_exited`.
+            """
     @final
     class Reload(Stop):
         """
@@ -23693,25 +23708,30 @@ def _cli_main() -> int:
     the full session, and custom commands get the GIL again while they run.
     """
 
-def attach(backend: Literal["kd", "kdnet", "gdb", "memory", "dmp"] = ..., connect: str | None = None, key: str | None = None, memory_source: Literal["auto", "host", "kd"] = ..., *, kd_handshake_timeout: "int | None" = None) -> Debugger:
+def attach(backend: Literal["kd", "kdnet", "gdb", "dbgsrv", "memory", "dmp"] = ..., connect: str | None = None, key: str | None = None, memory_source: Literal["auto", "host", "kd"] = ..., *, kd_handshake_timeout: "int | None" = None, process: "int | None" = None, create: "str | None" = None) -> Debugger:
     """
     Attach to a guest and return a `Debugger`.
 
-    `backend` is one of `"kd"` (default), `"kdnet"`, `"gdb"`, `"memory"`, or
-    `"dmp"`. `connect` is the backend target: a socket path or address for
-    kd/kdnet/gdb, or the dump file path for dmp: a kernel crash dump, or a
-    Windows user-mode minidump, whose process and threads `Debugger.user_dump`
-    holds. Without `connect`, the function uses the default of the backend,
-    but dmp has no default and needs a path. kdnet needs `key`.
+    `backend` is one of `"kd"` (default), `"kdnet"`, `"gdb"`, `"dbgsrv"`,
+    `"memory"`, or `"dmp"`. `connect` is the backend target: a socket path or
+    address for kd/kdnet/gdb, a `tcp:server=<host>,port=<port>` process-server
+    endpoint for dbgsrv, or the dump file path for dmp: a kernel crash dump, or
+    a Windows user-mode minidump, whose process and threads
+    `Debugger.user_dump` holds. Without `connect`, the function uses the
+    default of the backend, but dmp has no default and needs a path, and so
+    does dbgsrv. kdnet needs `key`.
     `memory_source` is `auto`, `host`, or `kd` for KD/KDNET.
     `kd_handshake_timeout` is keyword-only: positive integer seconds for the
     initial KD/KDNET handshake. It overrides `NTOSEYE_KD_TIMEOUT`; `None` uses
     the environment variable or the 8-second default. Other backends reject it.
+    `process` and `create` are the dbgsrv backend's target: the process id to
+    attach to, or the command line to start under the debugger, exactly one of
+    them, and neither for any other backend.
 
-    For kd/kdnet/gdb, the function takes an instance lock for the target before
-    it makes the backend, so a second live attach to the same target fails
-    immediately without interfering with the handshake that the first session
-    owns. The memory and dmp backends are passive.
+    For kd/kdnet/gdb/dbgsrv, the function takes an instance lock for the target
+    before it makes the backend, so a second live attach to the same target
+    fails immediately without interfering with the handshake that the first
+    session owns. The memory and dmp backends are passive.
     """
 
 def decode_error(code: int) -> ErrorCode:

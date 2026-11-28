@@ -1070,7 +1070,7 @@ fn vcpu(
 impl ReplState<'_> {
     pub fn cmd_tilde(&mut self, line: &str) -> Result<Flow> {
         let body = line.trim().strip_prefix('~').unwrap_or_default();
-        if self.ctx.target.user_dump().is_some() {
+        if self.ctx.target.is_user_target() {
             self.cmd_tilde_user_dump(body, line);
             return Ok(Flow::Continue);
         }

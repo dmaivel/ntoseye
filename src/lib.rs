@@ -4,6 +4,8 @@
 // itself is an rlib that never links.
 #![cfg_attr(test, allow(linker_messages))]
 
+pub use backend::dbgsrv::DbgsrvTarget;
+
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 compile_error!("This application only runs on Linux, macOS, and Windows hosts.");
 
@@ -27,6 +29,8 @@ pub enum Backend {
     KdNet,
     /// QEMU GDB stub.
     Gdb,
+    /// A DbgRpc process server: a live user-mode process.
+    DbgSrv,
     /// Passive host-memory introspection, no debug transport.
     Memory,
 }
@@ -37,18 +41,20 @@ impl Backend {
             Self::Kd => "kd",
             Self::KdNet => "kdnet",
             Self::Gdb => "gdb",
+            Self::DbgSrv => "dbgsrv",
             Self::Memory => "memory",
         }
     }
 
     /// The transport endpoint used when the host passes no `connect`; `None`
-    /// for the passive memory backend, which has no endpoint at all.
+    /// for the passive memory backend, which has no endpoint at all, and for
+    /// the process server, which has no default address to find.
     pub const fn default_endpoint(self) -> Option<&'static str> {
         match self {
             Self::Kd => Some(DEFAULT_KD_SOCKET),
             Self::KdNet => Some(DEFAULT_KDNET_ADDR),
             Self::Gdb => Some(DEFAULT_GDB_ADDR),
-            Self::Memory => None,
+            Self::DbgSrv | Self::Memory => None,
         }
     }
 }
@@ -61,9 +67,10 @@ impl std::str::FromStr for Backend {
             "kd" => Ok(Self::Kd),
             "kdnet" => Ok(Self::KdNet),
             "gdb" => Ok(Self::Gdb),
+            "dbgsrv" => Ok(Self::DbgSrv),
             "memory" => Ok(Self::Memory),
             other => Err(format!(
-                "unknown backend '{other}': expected 'kd', 'kdnet', 'gdb', or 'memory'"
+                "unknown backend '{other}': expected 'kd', 'kdnet', 'gdb', 'dbgsrv', or 'memory'"
             )),
         }
     }
@@ -75,7 +82,8 @@ impl std::fmt::Display for Backend {
     }
 }
 
-/// What to attach to: a crash dump, or a live VM over one [`Backend`].
+/// What to attach to: a crash dump, a live VM over one [`Backend`], or a live
+/// user-mode process behind a process server.
 #[derive(Clone, Debug)]
 pub enum TargetSpec {
     Dump(std::path::PathBuf),
@@ -89,6 +97,13 @@ pub enum TargetSpec {
         /// `None` uses `NTOSEYE_KD_TIMEOUT`, or 8 seconds when it is unset.
         kd_handshake_timeout: Option<u64>,
         memory_source: KdMemorySource,
+    },
+    /// A live user-mode process over a DbgRpc process server (`dbgsrv`).
+    Dbgsrv {
+        /// The server's endpoint, `tcp:server=<host>,port=<port>`.
+        connect: String,
+        /// The process to attach to, or to create under the debugger.
+        target: DbgsrvTarget,
     },
 }
 
@@ -105,6 +120,23 @@ impl TargetSpec {
             memory_source,
         } = self
         else {
+            if let Self::Dbgsrv { connect, target } = self {
+                if connect.trim().is_empty() {
+                    return Err(invalid("dbgsrv backend requires a connect endpoint"));
+                }
+                // The endpoint shape is checked before connecting, so a typo
+                // fails here rather than after the server is touched.
+                crate::backend::dbgsrv::parse_endpoint(connect)?;
+                match target {
+                    DbgsrvTarget::Attach { pid } if *pid == 0 => {
+                        return Err(invalid("dbgsrv --process needs a nonzero process id"));
+                    }
+                    DbgsrvTarget::Create { command_line } if command_line.trim().is_empty() => {
+                        return Err(invalid("dbgsrv --create needs a command line"));
+                    }
+                    DbgsrvTarget::Attach { .. } | DbgsrvTarget::Create { .. } => {}
+                }
+            }
             return Ok(());
         };
         match backend {
@@ -145,6 +177,7 @@ impl TargetSpec {
             Self::Live {
                 backend, connect, ..
             } => connect.as_deref().or(backend.default_endpoint()),
+            Self::Dbgsrv { connect, .. } => Some(connect),
         }
     }
 }

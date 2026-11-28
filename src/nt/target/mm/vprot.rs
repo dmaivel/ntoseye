@@ -562,6 +562,29 @@ impl Target {
         }
     }
 
+    /// `!vprot` on a live process: the answer the process server's
+    /// `VirtualQuery` gives, which is the call's own semantics -- the region
+    /// holding `address`, from the region's start.
+    pub fn live_user_virtual_query(&self, address: VirtAddr) -> Result<MemoryBasicInformation> {
+        let query = self
+            .phys
+            .user_live_query(address.0)
+            .ok_or(Error::NotSupported)??;
+        Ok(MemoryBasicInformation {
+            process: None,
+            address,
+            base_address: VirtAddr(query.base_address),
+            allocation_base: VirtAddr(query.allocation_base),
+            allocation_protect: query.allocation_protect,
+            region_size: query.region_size,
+            state: query.state,
+            protect: query.protect,
+            kind: query.kind,
+            vad: None,
+            truncated: false,
+        })
+    }
+
     /// `!vprot` on a user-mode minidump: the region of its memory-info list
     /// that holds `address`, which records what `VirtualQuery` returned when
     /// the dump was written, from the page of `address` on.

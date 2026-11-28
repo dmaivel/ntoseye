@@ -4,8 +4,10 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use crate::arch::Arch;
 use crate::backend::host::VmHandle;
 use crate::backend::kd::KdMemory;
+use crate::backend::userlive::{MemoryBasicInformation, UserLiveMemory};
 use crate::base::error::{Error, Result};
 use crate::base::memory::{
     CompressedPages, MemoryOps, PAGE_FILE_LOW, PAGE_SIZE, SectionViews, TranslationCache,
@@ -217,6 +219,13 @@ enum Source {
     /// served directly, whatever the root, and physical reads and page-table
     /// reads fail with [`Error::NoPhysicalMemory`].
     UserDump(Box<UserDump>),
+    /// A live user-mode process's memory, served by a process server by
+    /// virtual address. Like a minidump it has no physical side and one
+    /// address space, but it can be written while the process is halted.
+    UserLive {
+        memory: Arc<dyn UserLiveMemory>,
+        arch: Arch,
+    },
     Remote(KdMemory),
     /// The guest physical memory of a partition of the Windows hypervisor
     /// that runs inside the target (a Windows Sandbox, a Hyper-V VM), read
@@ -335,6 +344,12 @@ impl PhysMem {
         Self::from_source(Source::UserDump(Box::new(dump)))
     }
 
+    /// A live user-mode process's memory, served by `memory`, whose registers
+    /// and pointers are `arch`'s.
+    pub fn user_live(memory: Arc<dyn UserLiveMemory>, arch: Arch) -> Self {
+        Self::from_source(Source::UserLive { memory, arch })
+    }
+
     pub fn remote(memory: KdMemory) -> Self {
         Self::from_source(Source::Remote(memory))
     }
@@ -385,15 +400,41 @@ impl PhysMem {
         matches!(self.source, Source::UserDump(_))
     }
 
+    /// Whether this reads a live user-mode process's memory through a
+    /// process server.
+    pub fn is_user_live(&self) -> bool {
+        matches!(self.source, Source::UserLive { .. })
+    }
+
+    /// The architecture a live user-mode process's registers and pointers
+    /// follow, `None` for every other source.
+    pub fn user_live_arch(&self) -> Option<Arch> {
+        match &self.source {
+            Source::UserLive { arch, .. } => Some(*arch),
+            _ => None,
+        }
+    }
+
+    /// What `VirtualQuery` reports for `address` in a live user-mode
+    /// process, `None` for every other source.
+    pub fn user_live_query(&self, address: u64) -> Option<Result<MemoryBasicInformation>> {
+        match &self.source {
+            Source::UserLive { memory, .. } => Some(memory.query(address)),
+            _ => None,
+        }
+    }
+
     /// Whether this reads a live VM's RAM from the host.
     /// Whether the hypervisor aborts this live VM when a debugger enables
     /// guest debugging (QEMU under HVF); see `VmHandle::guest_debug_aborts_vm`.
     pub fn guest_debug_aborts_vm(&self) -> bool {
         match &self.source {
             Source::Live { host, .. } => host.guest_debug_aborts_vm(),
-            Source::Dmp(_) | Source::UserDump(_) | Source::Remote(_) | Source::Partition { .. } => {
-                false
-            }
+            Source::Dmp(_)
+            | Source::UserDump(_)
+            | Source::UserLive { .. }
+            | Source::Remote(_)
+            | Source::Partition { .. } => false,
         }
     }
 
@@ -475,9 +516,11 @@ impl PhysMem {
     pub fn ram_base(&self) -> u64 {
         match &self.source {
             Source::Live { host, .. } => host.ram_base(),
-            Source::Dmp(_) | Source::UserDump(_) | Source::Remote(_) | Source::Partition { .. } => {
-                0
-            }
+            Source::Dmp(_)
+            | Source::UserDump(_)
+            | Source::UserLive { .. }
+            | Source::Remote(_)
+            | Source::Partition { .. } => 0,
         }
     }
 
@@ -486,9 +529,11 @@ impl PhysMem {
     pub fn host_mapping(&self) -> Option<String> {
         match &self.source {
             Source::Live { host, .. } => Some(host.describe()),
-            Source::Dmp(_) | Source::UserDump(_) | Source::Remote(_) | Source::Partition { .. } => {
-                None
-            }
+            Source::Dmp(_)
+            | Source::UserDump(_)
+            | Source::UserLive { .. }
+            | Source::Remote(_)
+            | Source::Partition { .. } => None,
         }
     }
 
@@ -497,7 +542,7 @@ impl PhysMem {
         match &self.source {
             Source::Live { host, .. } => host.ram_size(),
             Source::Partition { runs, .. } => runs.iter().map(|(_, length)| length).sum(),
-            Source::Dmp(_) | Source::UserDump(_) | Source::Remote(_) => 0,
+            Source::Dmp(_) | Source::UserDump(_) | Source::UserLive { .. } | Source::Remote(_) => 0,
         }
     }
 
@@ -508,7 +553,9 @@ impl PhysMem {
         match &self.source {
             Source::Live { host, .. } => host.ram_runs(),
             Source::Partition { runs, .. } => runs.clone(),
-            Source::Dmp(_) | Source::UserDump(_) | Source::Remote(_) => Vec::new(),
+            Source::Dmp(_) | Source::UserDump(_) | Source::UserLive { .. } | Source::Remote(_) => {
+                Vec::new()
+            }
         }
     }
 
@@ -535,6 +582,9 @@ impl PhysMem {
             Source::Dmp(_) | Source::UserDump(_) => Some(0),
             // The partition changes only while the target runs.
             Source::Partition { host, .. } => host.halt_epoch(),
+            // A live process's memory changes while it runs, and the process
+            // server reports no halt epoch: nothing is memoized across a stop.
+            Source::UserLive { .. } => None,
             Source::Live { .. } => None,
         }
     }
@@ -546,6 +596,7 @@ impl MemoryOps<PhysAddr> for PhysMem {
             Source::Live { host, .. } => host.read_bytes(addr, buf),
             Source::Dmp(d) => d.read_bytes(addr, buf),
             Source::UserDump(_) => Err(Error::NoPhysicalMemory),
+            Source::UserLive { .. } => Err(Error::NoPhysicalMemory),
             Source::Remote(kd) => kd.read_bytes(addr, buf),
             Source::Partition {
                 host,
@@ -568,6 +619,7 @@ impl MemoryOps<PhysAddr> for PhysMem {
             Source::Live { host, .. } => host.write_bytes(addr, buf),
             Source::Dmp(d) => d.write_bytes(addr, buf),
             Source::UserDump(_) => Err(Error::NoPhysicalMemory),
+            Source::UserLive { .. } => Err(Error::NoPhysicalMemory),
             Source::Remote(kd) => kd.write_bytes(addr, buf),
             Source::Partition {
                 host,
@@ -591,6 +643,8 @@ impl MemoryOps<PhysAddr> for PhysMem {
             },
             // One process, one address space: the root names nothing here.
             Source::UserDump(dump) => Some(dump.read_virtual(addr, buf)),
+            // The same, served by the process server instead of a file.
+            Source::UserLive { memory, .. } => Some(memory.read(addr.0, buf)),
             // A host mapping is there to be read directly; that is the whole
             // point of selecting it.
             Source::Live { .. } | Source::Dmp(_) | Source::Partition { .. } => None,
@@ -600,6 +654,9 @@ impl MemoryOps<PhysAddr> for PhysMem {
     fn write_virtual_direct(&self, addr: VirtAddr, root: Dtb, buf: &[u8]) -> Option<Result<()>> {
         match &self.source {
             Source::UserDump(_) => Some(Err(Error::ReadOnlyDump)),
+            // A live process is halted at its stop, so the server can write
+            // the bytes into it.
+            Source::UserLive { memory, .. } => Some(memory.write(addr.0, buf)),
             _ if self.in_pte_self_map(addr) => None,
             Source::Live {
                 mediated: Some(kd), ..
@@ -618,6 +675,7 @@ impl MemoryOps<PhysAddr> for PhysMem {
             Source::Live { .. }
             | Source::Dmp(_)
             | Source::UserDump(_)
+            | Source::UserLive { .. }
             | Source::Partition { .. } => false,
         }
     }
@@ -630,6 +688,7 @@ impl MemoryOps<PhysAddr> for PhysMem {
             Source::Live { .. }
             | Source::Dmp(_)
             | Source::UserDump(_)
+            | Source::UserLive { .. }
             | Source::Partition { .. } => None,
         }
     }
@@ -644,6 +703,7 @@ impl MemoryOps<PhysAddr> for PhysMem {
             Source::Live { .. }
             | Source::Dmp(_)
             | Source::UserDump(_)
+            | Source::UserLive { .. }
             | Source::Partition { .. } => self.read_bytes(addr, buf),
         }
     }

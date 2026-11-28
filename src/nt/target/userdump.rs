@@ -49,6 +49,8 @@ pub enum TargetKind {
     Kernel,
     /// One process captured by a user-mode minidump.
     UserDump,
+    /// One live process debugged through a process server.
+    UserLive,
 }
 
 /// The captured process a user-dump target inspects.
@@ -61,11 +63,20 @@ pub struct UserProcess {
 
 impl Target {
     pub fn kind(&self) -> TargetKind {
-        if self.phys.is_user_dump() {
+        if self.phys.is_user_live() {
+            TargetKind::UserLive
+        } else if self.phys.is_user_dump() {
             TargetKind::UserDump
         } else {
             TargetKind::Kernel
         }
+    }
+
+    /// Whether this target inspects a user-mode process, captured or live:
+    /// what the user-mode commands and memory paths answer, and what the
+    /// kernel-only ones refuse.
+    pub fn is_user_target(&self) -> bool {
+        self.kind() != TargetKind::Kernel
     }
 
     /// The user-mode minidump this target inspects, `None` for a kernel
@@ -79,11 +90,11 @@ impl Target {
         self.phys.user_dump().map(UserDump::info)
     }
 
-    /// Refuse a kernel operation on a user-mode minidump.
+    /// Refuse a kernel operation on a user-mode target.
     pub fn require_kernel(&self) -> Result<()> {
         match self.kind() {
             TargetKind::Kernel => Ok(()),
-            TargetKind::UserDump => Err(Error::KernelRequired),
+            TargetKind::UserDump | TargetKind::UserLive => Err(Error::KernelRequired),
         }
     }
 
@@ -144,23 +155,95 @@ impl Target {
         Ok(info.arch.context_registers(raw))
     }
 
-    /// A user-dump pseudo-register: the selected thread's `$teb`, `$tid`, and
-    /// the process's `$peb`, `$pid`/`$tpid`. `None` for any other name or on
-    /// a kernel target; `Some(None)` when the dump lacks the value.
-    pub fn user_dump_pseudo_register(&self, name: &str) -> Option<Option<u64>> {
-        let info = self.user_dump_info()?;
-        let thread = self.user_thread();
-        Some(match name {
-            "teb" => thread.map(|thread| thread.teb).filter(|teb| *teb != 0),
-            "tid" => thread.map(|thread| u64::from(thread.tid)),
-            "pid" | "tpid" => info.process_id.map(u64::from),
-            "peb" => self.user_process_peb(),
-            _ => return None,
-        })
+    /// A user-mode pseudo-register: the selected thread's `$teb`, `$tid`, and
+    /// the process's `$peb`, `$pid`/`$tpid`, for both a minidump and a live
+    /// user-mode process. `None` for any other name or on a kernel target;
+    /// `Some(None)` when the target lacks the value.
+    pub fn user_pseudo_register(&self, name: &str) -> Option<Option<u64>> {
+        match self.kind() {
+            TargetKind::UserDump => {
+                let info = self.user_dump_info()?;
+                let thread = self.user_thread();
+                Some(match name {
+                    "teb" => thread.map(|thread| thread.teb).filter(|teb| *teb != 0),
+                    "tid" => thread.map(|thread| u64::from(thread.tid)),
+                    "pid" | "tpid" => info.process_id.map(u64::from),
+                    "peb" => self.user_process_peb(),
+                    _ => return None,
+                })
+            }
+            TargetKind::UserLive => {
+                let process = self.live_user_process()?;
+                let thread = process.thread();
+                Some(match name {
+                    "teb" => thread.and_then(|thread| thread.teb).filter(|teb| *teb != 0),
+                    "tid" => thread.map(|thread| u64::from(thread.tid)),
+                    "pid" | "tpid" => Some(u64::from(process.pid())),
+                    "peb" => self.user_process_peb(),
+                    _ => return None,
+                })
+            }
+            TargetKind::Kernel => None,
+        }
     }
 
-    /// The user-dump module list, `None` for a kernel target.
+    /// The Windows thread id a backend thread id names on a user-mode target
+    /// (dump or live), `None` for a kernel target or unknown id.
+    pub fn user_thread_tid_for_backend_id(&self, backend_id: &str) -> Option<u32> {
+        match self.kind() {
+            TargetKind::UserDump => self
+                .user_dump_info()?
+                .thread_for_backend_id(backend_id)
+                .map(|thread| thread.tid),
+            TargetKind::UserLive => self
+                .live_user_process()?
+                .thread_by_backend_id(backend_id)
+                .map(|thread| thread.tid),
+            TargetKind::Kernel => None,
+        }
+    }
+
+    /// The zero-based thread index (`~N`) a backend thread id holds on a
+    /// user-mode target (dump or live).
+    pub fn user_thread_index_for_backend_id(&self, backend_id: &str) -> Option<usize> {
+        match self.kind() {
+            TargetKind::UserDump => {
+                let info = self.user_dump_info()?;
+                info.thread_index(info.tid_for_backend_id(backend_id)?)
+            }
+            TargetKind::UserLive => self
+                .live_user_process()?
+                .thread_index_by_backend_id(backend_id),
+            TargetKind::Kernel => None,
+        }
+    }
+
+    /// Select the thread `backend_id` names on either user-mode target kind.
+    pub fn select_user_mode_thread(&mut self, backend_id: &str) {
+        match self.kind() {
+            TargetKind::UserDump => self.select_user_thread(backend_id),
+            TargetKind::UserLive => {
+                self.select_live_user_thread(backend_id);
+            }
+            TargetKind::Kernel => {}
+        }
+    }
+
+    /// Human-readable label for a user-mode target's process.
+    pub fn user_process_label(&self) -> Option<String> {
+        match self.kind() {
+            TargetKind::UserDump => Some(self.user_dump_info()?.process_label()),
+            TargetKind::UserLive => Some(format!("process {:#x}", self.live_user_process()?.pid())),
+            TargetKind::Kernel => None,
+        }
+    }
+
+    /// The user-mode target's module list: the dump's captured list, or the
+    /// live process's loader lists; `None` for a kernel target.
     pub fn user_modules(&self) -> Option<&[ModuleInfo]> {
+        if let Some(modules) = self.live_modules() {
+            return Some(modules);
+        }
         self.user_process
             .as_ref()
             .map(|process| process.modules.as_slice())
@@ -173,8 +256,8 @@ impl Target {
 }
 
 impl Target {
-    /// The named values of a register buffer: on a user-mode minidump only
-    /// the registers its CONTEXT records (see [`context_registers`]), so the
+    /// The named values of a register buffer: on a user-mode target only the
+    /// registers its CONTEXT records (see [`Arch::context_registers`]), so the
     /// empty control-register slots past it are not shown as zeroes;
     /// elsewhere every register the map names.
     pub fn register_values(
@@ -182,9 +265,9 @@ impl Target {
         register_map: &RegisterMap,
         registers: &[u8],
     ) -> HashMap<String, u64> {
-        match self.user_dump_info() {
-            Some(info) => info.arch.context_registers(registers),
-            None => register_map.to_hashmap(registers),
+        if self.is_user_target() {
+            return self.arch().context_registers(registers);
         }
+        register_map.to_hashmap(registers)
     }
 }

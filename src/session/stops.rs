@@ -63,6 +63,7 @@ impl Session {
             module_event: None,
             assisted_breakin: false,
             break_in: false,
+            process_exit: None,
         });
     }
 
@@ -73,6 +74,7 @@ impl Session {
             | StopResolution::ModuleLoad { event, .. }
             | StopResolution::ModuleUnload { event, .. }
             | StopResolution::TargetReloaded { event, .. }
+            | StopResolution::ProcessExited { event, .. }
             | StopResolution::Stopped { event, .. } => event,
             StopResolution::Resumed | StopResolution::ModulesChanged => return,
         };
@@ -164,6 +166,9 @@ impl Session {
                 kernel_base: self.target.kernel_base().map(|address| address.0),
                 coherent,
             },
+            StopResolution::ProcessExited { exit_code, .. } => {
+                ContinueOutcome::ProcessExited { exit_code }
+            }
             StopResolution::Stopped { event, rip } => ContinueOutcome::Stopped {
                 rip,
                 exception_code: event.exception_code,
@@ -371,7 +376,7 @@ impl Session {
         let stepping = self.current_thread.clone();
         let mut event = self.backend.wait_for_stop()?;
         set_current_thread_from_stop(self.backend.as_mut(), &event, &mut self.current_thread);
-        if event.program_counter.is_none() {
+        if event.program_counter.is_none() && event.process_exit.is_none() {
             event.program_counter = self.backend.read_registers().ok().and_then(|regs| {
                 self.register_map
                     .read_u64(self.target.arch().pc_register(), &regs)
@@ -379,6 +384,14 @@ impl Session {
             });
         }
         self.record_stop_event(&event);
+
+        if let Some(exit_code) = event.process_exit {
+            self.target.registers = None;
+            self.current_thread.clear();
+            let resolution = StopResolution::ProcessExited { event, exit_code };
+            self.record_visible_stop(&resolution);
+            return Ok(Some(self.continue_outcome_from_resolution(resolution)));
+        }
         let action = resolve_watchpoint_stop(
             self.backend.as_mut(),
             &self.register_map,
@@ -430,7 +443,7 @@ impl Session {
         // A GDB stop reply names the thread but not its PC. Without one the
         // reboot heuristic cannot tell a stop in a relocated kernel from an
         // ordinary one, so read it from the thread the stop selected.
-        if event.program_counter.is_none() {
+        if event.program_counter.is_none() && event.process_exit.is_none() {
             event.program_counter = self.backend.read_registers().ok().and_then(|regs| {
                 self.register_map
                     .read_u64(self.target.arch().pc_register(), &regs)
@@ -438,6 +451,14 @@ impl Session {
             });
         }
         self.record_stop_event(&event);
+
+        if let Some(exit_code) = event.process_exit {
+            self.target.registers = None;
+            self.current_thread.clear();
+            let resolution = StopResolution::ProcessExited { event, exit_code };
+            self.record_visible_stop(&resolution);
+            return Ok(resolution);
+        }
 
         if event.is_bugcheck && !event.target_reloaded {
             self.target.registers = None;

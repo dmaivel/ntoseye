@@ -1,22 +1,67 @@
 # Choosing a backend
 
-`ntoseye` can connect to a live target in four ways, which you select with `--backend kd` (default), `--backend kdnet`, `--backend gdb`, or `--backend memory`. Crash-dump mode is a separate offline attach mode that you select with `--dump <file>`.
+`ntoseye` can connect to a live target in five ways, which you select with `--backend kd` (default), `--backend kdnet`, `--backend gdb`, `--backend dbgsrv`, or `--backend memory`. Crash-dump mode is a separate offline attach mode that you select with `--dump <file>`.
 
-| Capability | `kd` (default) | `kdnet` | `gdb` | `memory` | `--dump` |
-| --- | --- | --- | --- | --- | --- |
-| Transport | Windows KD over a serial pipe (KDCOM) | Windows KD over encrypted UDP | Hypervisor GDB stub | Direct VM-process memory | Offline crash-dump file |
-| Guest configuration | Kernel debugging enabled | Kernel network debugging enabled | None | None | None |
-| Host VM configuration | Serial socket | Reachable virtual NIC | Listening GDB stub | None | None |
-| Execution control | Yes | Yes | Yes | No | No |
-| Registers | Yes | Yes | Yes | No | Yes (crash context) |
-| Memory reads | Yes | Yes | Yes | Yes | Yes |
-| Kernel breakpoints | Yes | Yes | Yes | No | No |
-| Usermode breakpoints | Yes | Yes | No | No | No |
-| Hardware watchpoints | Yes | Yes | Yes | No | No |
-| Model-specific registers | Yes | Yes | No | No | No |
-| Reboot / forced crash | Yes | Yes | No | No | No |
-| Bugcheck stops | Reported by the target | Reported by the target | Trapped at `nt!KeBugCheckEx` | No | Read from the dump |
-| [VTL1 inspection](../vbs/secure-kernel.md) (AMD64) | Host memory source only | Host memory source only | Yes | Yes | No |
+| Capability | `kd` (default) | `kdnet` | `gdb` | `dbgsrv` | `memory` | `--dump` |
+| --- | --- | --- | --- | --- | --- | --- |
+| Transport | Windows KD over a serial pipe (KDCOM) | Windows KD over encrypted UDP | Hypervisor GDB stub | DbgRpc process server (`dbgsrv -t tcp:port=...`) | Direct VM-process memory | Offline crash-dump file |
+| Guest configuration | Kernel debugging enabled | Kernel network debugging enabled | None | A running `dbgsrv.exe` and a debuggable process | None | None |
+| Host VM configuration | Serial socket | Reachable virtual NIC | Listening GDB stub | None | None | None |
+| Execution control | Yes | Yes | Yes | Yes | No | No |
+| Registers | Yes | Yes | Yes | Yes | No | Yes (crash context) |
+| Memory reads | Yes | Yes | Yes | Yes | Yes | Yes |
+| Kernel breakpoints | Yes | Yes | Yes | No | No | No |
+| Usermode breakpoints | Yes | Yes | No | Yes | No | No |
+| Hardware watchpoints | Yes | Yes | Yes | Yes (per thread) | No | No |
+| Model-specific registers | Yes | Yes | No | No | No | No |
+| Reboot / forced crash | Yes | Yes | No | No | No | No |
+| Bugcheck stops | Reported by the target | Reported by the target | Trapped at `nt!KeBugCheckEx` | No | No | Read from the dump |
+| [VTL1 inspection](../vbs/secure-kernel.md) (AMD64) | Host memory source only | Host memory source only | Yes | No | Yes | No |
+
+## Debugging a user-mode process over a process server
+
+`dbgsrv` attaches to one live user-mode process on a Windows machine instead
+of a kernel, the way `cdb -premote` does. Start the process server on that
+machine, then connect to it from any host ntoseye runs on:
+
+```text
+dbgsrv -t tcp:port=5005
+ntoseye --backend dbgsrv --connect tcp:server=WINDOWS-HOST,port=5005 --process 1234
+```
+
+To start the process under the debugger instead of attaching, replace
+`--process 1234` with `--create "notepad.exe"`. The server is a 64-bit
+`dbgsrv.exe`; AMD64 and ARM64 targets are supported over `tcp`
+(`tcp:server=<host>,port=<port>`) and Windows named pipes
+(`npipe:server=<host>,pipe=<name>`, or `npipe:pipe=<name>` for the local
+machine), each with optional `password=<secret>` authentication (up to 12
+UTF-16 characters, matching `dbgeng.dll`). x86/WOW64 processes and `ssl`,
+`spipe`, `1394`, and `com` transports are refused with an explicit error.
+
+Once attached, the session is the user-mode one a minidump session has — `lm`,
+`~`, `r`, `bp`, `g`, `k`, `!peb`, `!teb`, `!dlls`, `!address` — with live
+memory and live threads, while the kernel-only commands (`!process`, `!pcr`,
+kernel `lm`) stay refused as `KernelRequired`. When the target process exits,
+the REPL reports `process exited (0x...)`, DAP emits `exited` and `terminated`
+events, and `ntoseye gdbserver` replies with `W<code>`.
+
+The server checks which revision of its `IUserDebugServices` interface a client
+speaks (`QueryInterface` with a code the interface generator derives) and
+refuses a different one with `RPC_E_VERSION_MISMATCH`; ntoseye speaks the
+revision `dbgeng.dll` 10.0.26100 implements (`IUserDebugServicesN`, code
+654136), which is the one current `dbgsrv.exe` builds serve. Against a server
+built from an older or newer interface it stops at that check with
+
+```text
+dbgsrv: the process server speaks a different IUserDebugServices revision than this build of
+ntoseye: it refused revision 654136 with HRESULT 0x80010110. ...
+```
+
+Two operational notes, both measured against the SDK's own `dbgsrv.exe`:
+`dbgsrv` must be allowed to open the process it debugs, and `cdb` from the same
+SDK is the way to tell a server problem from a client one — if `cdb -premote
+tcp:port=<port>,server=<host> -p <pid>` fails the same way, the server, not
+ntoseye, is refusing the attach.
 
 ## Hypervisor setup
 

@@ -22,11 +22,12 @@ maturin develop --release
 
 ## Attach and inspect
 
-By default, `attach()` uses the `kd` backend. To use a different one, set `backend` to `kdnet`, `gdb`, `memory`, or `dmp`, whichever applies to your target.
+By default, `attach()` uses the `kd` backend. To use a different one, set `backend` to `kdnet`, `gdb`, `dbgsrv`, `memory`, or `dmp`, whichever applies to your target.
 
 - `connect` gives the transport endpoint, or the dump path.
 - The `kdnet` backend needs `key`.
-- The `memory` backend is passive and cannot stop or resume the guest. For run control, use `kd` or `gdb`.
+- The `dbgsrv` backend debugs one live user-mode process through a DbgRpc process server: `connect` is `tcp:server=<host>,port=<port>` or `npipe:[server=<host>,]pipe=<name>` (with optional `,password=<secret>`), and exactly one of `process=<pid>` and `create="<command line>"` names what to debug. Its session is the user-mode one a minidump session is, with live memory and threads, and the kernel-only commands stay refused.
+- The `memory` backend is passive and cannot stop or resume the guest. For run control, use `kd`, `gdb`, or `dbgsrv`.
 - The `dmp` backend reads an offline dump.
 - `kd_handshake_timeout` sets the initial KD/KDNET handshake wait in positive integer seconds, for example `ntoseye.attach("kd", kd_handshake_timeout=30)`. It is keyword-only and applies only to `kd` and `kdnet`. An explicit value overrides `NTOSEYE_KD_TIMEOUT`; `None` uses the environment variable or the 8-second default.
 
@@ -37,6 +38,17 @@ with ntoseye.attach(backend="kd") as dbg:
     proc = dbg.processes[1234]             # Process, keyed by PID
     print(proc.name, hex(proc.eprocess))
     print(proc.memory.read(proc.peb.addr, 16).hex() if proc.peb else "no PEB")
+```
+
+A live user-mode process, over a process server:
+
+```python
+with ntoseye.attach(
+    backend="dbgsrv",
+    connect="tcp:server=devbox,port=5005",
+    process=4321,
+) as dbg:
+    print(dbg.modules)                      # the process's own loader list
 ```
 
 When the `with` block ends, or when you call `dbg.close()`, the debugger removes its breakpoints, resumes the guest, and ends the session, which releases the connection and the target's single-instance lock. You can then attach to the target again, but the old debugger and its handles raise `NtoseyeError` if you use them.

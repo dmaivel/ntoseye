@@ -115,6 +115,12 @@ impl Render for Stop {
 
 fn print_stop(session: &mut Session, caches: &ReplCaches, stop: &Stop) {
     session.target.selected_frame = None;
+    if let Some(exit_code) = stop.exit_code() {
+        caches.clear_threads();
+        print_stop_separator();
+        outln!("process exited ({exit_code:#x})");
+        return;
+    }
     refresh_stop_caches_pre(session, caches);
     refresh_stop_caches_post(&session.target, caches);
     refresh_windows_thread_context_for_backend_thread(&mut session.target, &session.current_thread);
@@ -153,6 +159,9 @@ fn print_stop(session: &mut Session, caches: &ReplCaches, stop: &Stop) {
         StopKind::Exception { exception } => {
             let cause = stop_exception_cause(Some(exception.code), stop.rip);
             print_break_context_at(session, None, cause);
+        }
+        StopKind::ProcessExited { exit_code } => {
+            outln!("process exited ({exit_code:#x})");
         }
         StopKind::Interrupt | StopKind::Step | StopKind::Entry => print_break_context(session),
     }
@@ -771,6 +780,7 @@ fn stop_notice(kind: &StopKind) -> Option<String> {
         StopKind::ModuleLoad { module } => format!("{} loaded", module.name),
         StopKind::ModuleUnload { module } => format!("{} unloaded", module.name),
         StopKind::Reload { .. } => "the target restarted".to_string(),
+        StopKind::ProcessExited { exit_code } => format!("process exited ({exit_code:#x})"),
         StopKind::Step | StopKind::Entry => "the target stopped".to_string(),
     })
 }

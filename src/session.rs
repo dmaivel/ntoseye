@@ -143,6 +143,8 @@ pub enum ContinueOutcome {
         kernel_base: Option<u64>,
         coherent: bool,
     },
+    /// A live user-mode process exited (`EXIT_PROCESS_DEBUG_EVENT`).
+    ProcessExited { exit_code: u32 },
     /// The timeout elapsed and the VM is still running; call again to keep
     /// waiting.
     Running,
@@ -541,6 +543,8 @@ pub enum StopResolution {
     },
     /// The guest rebooted and target state was rebuilt.
     TargetReloaded { event: StopEvent, coherent: bool },
+    /// A live user-mode process exited (`EXIT_PROCESS_DEBUG_EVENT`).
+    ProcessExited { event: StopEvent, exit_code: u32 },
     /// A genuine non-breakpoint stop, including a user interrupt.
     Stopped { event: StopEvent, rip: u64 },
 }

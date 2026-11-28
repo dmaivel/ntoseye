@@ -236,14 +236,13 @@ fn summary_switch(
     cx: &mut ArgCx<'_, '_>,
     cursor: &mut ArgCursor<'_>,
 ) -> std::result::Result<bool, ArgError> {
-    if cx.state.ctx.target.kind() != TargetKind::UserDump {
+    if !cx.state.ctx.target.is_user_target() {
         if cursor
             .words()
             .any(|word| word.eq_ignore_ascii_case("-summary"))
         {
             return Err(ArgError::Message(
-                "!address -summary needs a user-mode minidump; give an address on a kernel \
-                 target"
+                "!address -summary needs a user-mode target; give an address on a kernel target"
                     .into(),
             ));
         }
@@ -265,7 +264,7 @@ fn address_arg(
 ) -> std::result::Result<Option<VirtAddr>, ArgError> {
     match cursor.word() {
         Some(text) => cx.eval(&text).map(Some),
-        None if cx.state.ctx.target.kind() == TargetKind::UserDump => Ok(None),
+        None if cx.state.ctx.target.is_user_target() => Ok(None),
         None => Err(ArgError::Missing),
     }
 }
@@ -295,7 +294,7 @@ fn address(
     #[arg(render, parse = summary_switch)] summary: bool,
     #[arg(parse = address_arg)] addr: Option<VirtAddr>,
 ) -> Result<AddressReport> {
-    if session.target.kind() == TargetKind::UserDump {
+    if session.target.is_user_target() {
         return address_report(session, addr).map(AddressReport::UserDump);
     }
     let addr = addr.ok_or_else(|| {
@@ -316,9 +315,9 @@ fn describe(
     address: VirtAddr,
 ) -> Result<AddressDescription> {
     memory.require_virtual()?;
-    if session.target.kind() == TargetKind::UserDump {
+    if session.target.is_user_target() {
         return Err(Error::InvalidArgument(
-            "a user-mode minidump describes an address with \
+            "a user-mode target describes an address with \
              Debugger.user_dump.address_report(address)"
                 .to_string(),
         ));
@@ -369,7 +368,9 @@ impl Render<bool> for AddressReport {
 /// page-table steps. On a user-mode minidump the command reads the region
 /// from the dump's memory-info list, which records what VirtualQuery
 /// returned when the dump was written; RegionSize runs from the page of the
-/// address to the end of that region.
+/// address to the end of that region. On a live process it asks the process
+/// server's VirtualQuery, whose answer is the region holding the address
+/// from the region's start.
 #[command(
     names = ["!vprot", "vprot"],
     category = "memory manager",
@@ -380,20 +381,30 @@ impl Render<bool> for AddressReport {
 )]
 fn vprot(session: &Session, address: VirtAddr) -> Result<MemoryBasicInformation> {
     let target = &session.target;
-    if let Some(info) = target.user_dump_info() {
-        if info.regions.is_none() {
-            return Err(Error::DebugInfo(format!(
-                "the minidump records no memory-info list, so it has no region state or \
-                 protection; `!address {:#x}` shows the captured range that holds the address",
-                address.0
-            )));
+    match target.kind() {
+        // A live process answers VirtualQuery itself; the server's call is
+        // the one this command describes.
+        TargetKind::UserLive => target.live_user_virtual_query(address),
+        TargetKind::UserDump => {
+            if target
+                .user_dump_info()
+                .is_none_or(|info| info.regions.is_none())
+            {
+                return Err(Error::DebugInfo(format!(
+                    "the minidump records no memory-info list, so it has no region state or \
+                     protection; `!address {:#x}` shows the captured range that holds the address",
+                    address.0
+                )));
+            }
+            target.user_virtual_query(address)
         }
-        return target.user_virtual_query(address);
+        TargetKind::Kernel => {
+            let process = target.current_process().ok_or_else(|| {
+                Error::DebugInfo("!vprot needs a process context (.process /p <pid>)".to_string())
+            })?;
+            target.virtual_query(&process, address)
+        }
     }
-    let process = target.current_process().ok_or_else(|| {
-        Error::DebugInfo("!vprot needs a process context (.process /p <pid>)".to_string())
-    })?;
-    target.virtual_query(&process, address)
 }
 
 impl Render for MemoryBasicInformation {
@@ -891,7 +902,7 @@ mod tests {
         let (result, text) = capture(|| state.dispatch_line("!address -SUMMARY"));
         result.unwrap();
         assert!(
-            text.contains("!address -summary needs a user-mode minidump"),
+            text.contains("!address -summary needs a user-mode target"),
             "{text}"
         );
         let spec = command_registry().get("!address").unwrap();

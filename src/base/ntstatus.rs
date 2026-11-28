@@ -1,5 +1,6 @@
 //! Windows error names from the Windows SDK `ntstatus.h` and `winerror.h`.
 
+pub const DBG_CONTINUE: u32 = 0x0001_0002;
 pub const STATUS_WX86_SINGLE_STEP: u32 = 0x4000_001E;
 pub const STATUS_WX86_BREAKPOINT: u32 = 0x4000_001F;
 pub const DBG_PRINTEXCEPTION_C: u32 = 0x4001_0006;
@@ -7,6 +8,7 @@ pub const DBG_PRINTEXCEPTION_WIDE_C: u32 = 0x4001_000A;
 pub const STATUS_GUARD_PAGE_VIOLATION: u32 = 0x8000_0001;
 pub const STATUS_BREAKPOINT: u32 = 0x8000_0003;
 pub const STATUS_SINGLE_STEP: u32 = 0x8000_0004;
+pub const DBG_EXCEPTION_NOT_HANDLED: u32 = 0x8001_0001;
 pub const STATUS_UNSUCCESSFUL: u32 = 0xC000_0001;
 pub const STATUS_ACCESS_VIOLATION: u32 = 0xC000_0005;
 pub const STATUS_IN_PAGE_ERROR: u32 = 0xC000_0006;

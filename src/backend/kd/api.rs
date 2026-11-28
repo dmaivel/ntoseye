@@ -111,14 +111,10 @@ const CONTEXT_EX_MAX_SIZE: u32 = 0x3000;
 /// Per-API union offset in `DBGKD_MANIPULATE_STATE64`
 const UNION_OFFSET: usize = 16;
 
-pub const DBG_CONTINUE: u32 = 0x0001_0002;
-pub const DBG_EXCEPTION_NOT_HANDLED: u32 = 0x8001_0001;
+pub use crate::base::ntstatus::{DBG_CONTINUE, DBG_EXCEPTION_NOT_HANDLED};
 
 pub fn status_for_disposition(disposition: ContinueDisposition) -> u32 {
-    match disposition {
-        ContinueDisposition::Handled => DBG_CONTINUE,
-        ContinueDisposition::NotHandled => DBG_EXCEPTION_NOT_HANDLED,
-    }
+    disposition.ntstatus()
 }
 #[cfg(test)]
 pub const STATUS_SUCCESS: u32 = 0x0000_0000;

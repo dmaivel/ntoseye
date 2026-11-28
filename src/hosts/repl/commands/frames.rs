@@ -300,8 +300,9 @@ fn lone_address(
     python = none,
 )]
 fn ecxr(state: &mut ReplState<'_>) -> Result<()> {
-    // A user dump stores the exception's CONTEXT in its ExceptionStream.
-    if state.ctx.target.user_dump().is_some() {
+    // A user-mode target's exception context: a dump's stored
+    // ExceptionStream, or a live process's own stopped context.
+    if state.ctx.target.is_user_target() {
         match state.ctx.select_user_exception_context() {
             Ok((selected, thread)) => {
                 state.caches.refresh_symbol_context(&state.ctx.target);
@@ -772,8 +773,11 @@ fn registers(
 
     let register_map = &state.ctx.register_map;
     let arch = state.ctx.target.arch();
-    // A user dump's contexts record no control registers.
-    let control = state.ctx.target.user_dump().is_none();
+    // A user-mode target's context record carries no control registers: the
+    // dump's CONTEXT has none, and a live process's come from
+    // `GetThreadContext`, which reports the thread's own and not the
+    // process's (only a kernel stop has those).
+    let control = !state.ctx.target.is_user_target();
     print_register_grid(register_map, &regs, arch, control);
 
     Ok(())

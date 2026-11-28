@@ -71,6 +71,10 @@ impl Architecture for Arm64 {
         "cpsr"
     }
 
+    fn single_step_flag_mask(&self) -> u64 {
+        1 << 21
+    }
+
     fn general_registers(&self) -> &'static [&'static str] {
         &GENERAL_REGISTERS
     }

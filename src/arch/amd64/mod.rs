@@ -66,6 +66,10 @@ impl Architecture for Amd64 {
         "eflags"
     }
 
+    fn single_step_flag_mask(&self) -> u64 {
+        1 << 8
+    }
+
     fn general_registers(&self) -> &'static [&'static str] {
         &GENERAL_REGISTERS
     }

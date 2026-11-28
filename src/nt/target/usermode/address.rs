@@ -75,6 +75,14 @@ pub struct UsageSources {
     pub heaps: Vec<HeapSource>,
 }
 
+/// A thread the address map attributes usage for: its TEB, how `!address`
+/// labels it, and the stack a dump captured when it recorded no TEB.
+struct UsageThread {
+    teb: u64,
+    label: String,
+    captured: Option<(u64, u64)>,
+}
+
 /// A heap of the process and the ranges it reserved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeapSource {
@@ -478,10 +486,9 @@ pub fn human_size(bytes: u64) -> String {
 }
 
 impl Target {
-    /// What the dump shows of the address space's users: modules, thread
+    /// What the target shows of the address space's users: modules, thread
     /// stacks and TEBs, the PEB, and the heaps `!heap` lists.
     pub fn user_usage_sources(&self) -> Result<UsageSources> {
-        let info = self.user_dump_info().ok_or_else(not_a_user_dump)?;
         let memory = self.context_memory();
         let mut sources = UsageSources {
             modules: self
@@ -498,17 +505,49 @@ impl Target {
                 .collect(),
             ..UsageSources::default()
         };
-        for (index, thread) in info.threads.iter().enumerate() {
-            let label = format!("~{index}; {}", info.backend_thread_id(thread.tid));
-            if thread.teb != 0 {
-                sources.tebs.push((thread.teb, label.clone()));
+        // A dump's captured threads, or a live process's: the id, the TEB,
+        // the label, and the stack a dump captured when it recorded no TEB.
+        let threads: Vec<UsageThread> = match self.live_user_process() {
+            Some(process) => process
+                .threads()
+                .into_iter()
+                .enumerate()
+                .map(|(index, thread)| UsageThread {
+                    teb: thread.teb.unwrap_or(0),
+                    label: format!(
+                        "~{index}; {}",
+                        Self::user_live_backend_thread_id(thread.tid)
+                    ),
+                    captured: None,
+                })
+                .collect(),
+            None => {
+                let info = self.user_dump_info().ok_or_else(not_a_user_dump)?;
+                info.threads
+                    .iter()
+                    .enumerate()
+                    .map(|(index, thread)| UsageThread {
+                        teb: thread.teb,
+                        label: format!("~{index}; {}", info.backend_thread_id(thread.tid)),
+                        captured: thread
+                            .stack
+                            .map(|stack| (stack.start, stack.start.saturating_add(stack.size))),
+                    })
+                    .collect()
             }
-            let tib = (thread.teb != 0)
+        };
+        for thread in threads {
+            let teb = thread.teb;
+            let label = thread.label;
+            if teb != 0 {
+                sources.tebs.push((teb, label.clone()));
+            }
+            let tib = (teb != 0)
                 .then(|| {
                     let pointer = memory.arch().pointer_size();
                     let slot = |slot: u64| {
                         memory
-                            .read_pointer(VirtAddr(thread.teb + slot * pointer))
+                            .read_pointer(VirtAddr(teb + slot * pointer))
                             .ok()
                             .map(|value| value.0)
                     };
@@ -517,11 +556,7 @@ impl Target {
                     (limit < base).then_some((limit, base))
                 })
                 .flatten();
-            let bounds = tib.or_else(|| {
-                thread
-                    .stack
-                    .map(|stack| (stack.start, stack.start.saturating_add(stack.size)))
-            });
+            let bounds = tib.or(thread.captured);
             if let Some((low, high)) = bounds {
                 sources.stacks.push(StackSource {
                     low,
@@ -551,16 +586,23 @@ impl Target {
         Ok(sources)
     }
 
-    /// The process's PEB, through the selected thread's TEB, else the first
-    /// TEB the dump captured.
+    /// The process's PEB: a live process's, as the server names it, else
+    /// through the selected thread's TEB, else the first TEB the dump
+    /// captured.
     pub fn user_process_peb(&self) -> Option<u64> {
+        if let Some(peb) = self.live_user_process().and_then(|process| process.peb()) {
+            return Some(peb);
+        }
         let types = self.user_mode_types(self.current_dtb()).ok()?;
         let selected = self.user_teb().ok();
-        let info = self.user_dump_info()?;
+        let captured = self
+            .user_dump_info()
+            .map(|info| info.threads.clone())
+            .unwrap_or_default();
         selected
             .into_iter()
             .chain(
-                info.threads
+                captured
                     .iter()
                     .filter(|thread| thread.teb != 0)
                     .map(|thread| VirtAddr(thread.teb)),
@@ -569,18 +611,33 @@ impl Target {
             .map(|peb| peb.0)
     }
 
-    /// The regions the dump's memory-info list records, attributed to their
-    /// use. Fails, naming the missing stream, when the dump has none.
+    /// The regions the target's address space holds, attributed to their
+    /// use: a minidump's memory-info list, or a live process's `VirtualQuery`
+    /// answers. Fails, naming the missing stream, when a dump has none.
     pub fn user_address_map(&self) -> Result<UserAddressMap> {
-        let dump = self.user_dump().ok_or_else(not_a_user_dump)?;
-        let regions = dump.info().regions.as_deref().ok_or_else(|| {
-            Error::DebugInfo(
-                "the minidump records no memory-info list (MemoryInfoListStream)".into(),
-            )
-        })?;
+        let (regions, ranges) = if self.phys.is_user_live() {
+            let regions = self.live_memory_regions()?;
+            let ranges: Vec<MemoryRange> = regions
+                .iter()
+                .map(|region| MemoryRange {
+                    start: region.base,
+                    length: region.size,
+                    offset: 0,
+                })
+                .collect();
+            (regions, ranges)
+        } else {
+            let dump = self.user_dump().ok_or_else(not_a_user_dump)?;
+            let regions = dump.info().regions.clone().ok_or_else(|| {
+                Error::DebugInfo(
+                    "the minidump records no memory-info list (MemoryInfoListStream)".into(),
+                )
+            })?;
+            (regions, dump.memory_ranges().to_vec())
+        };
         let sources = self.user_usage_sources()?;
         Ok(UserAddressMap {
-            regions: attribute_regions(regions, &sources, dump.memory_ranges()),
+            regions: attribute_regions(&regions, &sources, &ranges),
         })
     }
 
@@ -588,6 +645,28 @@ impl Target {
     /// every region and their summary; for a dump without a memory-info
     /// list, the captured range holding `address`, or every one.
     pub fn user_address_report(&self, address: Option<VirtAddr>) -> Result<UserAddressReport> {
+        if self.phys.is_user_live() {
+            let map = self.user_address_map()?;
+            return Ok(match address {
+                Some(address) => {
+                    let region = map.region_at(address.0).cloned();
+                    // Live memory is readable where it is committed: what a
+                    // dump would report as captured.
+                    let committed = region
+                        .as_ref()
+                        .is_some_and(|region| region.region.state == MEM_COMMIT);
+                    UserAddressReport::Region {
+                        address,
+                        region,
+                        address_captured: committed,
+                    }
+                }
+                None => UserAddressReport::Map {
+                    summary: summarize(&map.regions),
+                    regions: map.regions,
+                },
+            });
+        }
         let dump = self.user_dump().ok_or_else(not_a_user_dump)?;
         if dump.info().regions.is_none() {
             let ranges = self.user_captured_ranges()?;

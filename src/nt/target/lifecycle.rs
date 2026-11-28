@@ -210,7 +210,7 @@ impl Target {
 
     /// A target over `phys` and `guest`, with every view and selection at
     /// its default.
-    fn from_parts(
+    pub(super) fn from_parts(
         phys: Arc<PhysMem>,
         symbols: Arc<SymbolStore>,
         guest: Option<Guest>,
@@ -229,6 +229,7 @@ impl Target {
             effmach: None,
             triage_modules_cache,
             user_process: None,
+            user_live: None,
             context_dtb_override: None,
             registers: None,
             expression_scope: ExpressionScope::Context,
@@ -403,6 +404,11 @@ impl Target {
         // Triage dumps often lack the ntoskrnl base page, so the MZ check
         // below would fail on a perfectly coherent snapshot.
         if self.phys.dmp_info().is_some_and(|i| i.is_triage) {
+            return true;
+        }
+        // A live user-mode target has no kernel mapping to invalidate: its
+        // stops are the process's, and a kernel reboot is not a thing it has.
+        if self.phys.is_user_live() {
             return true;
         }
         let Some(ref guest) = self.guest else {
