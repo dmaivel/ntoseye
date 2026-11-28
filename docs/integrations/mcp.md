@@ -10,7 +10,7 @@ If the agent's harness keeps a Python kernel alive between calls, such as oh-my-
 | --- | --- |
 | `command` | Runs one REPL line and returns its text with a `[target ...]` trailer. A `;` separates commands, and {command}`help` lists them. The arguments are `line` and `timeout_ms` (default 10 s, maximum 5 min). |
 | `output` | Reads more of a long `command` result: the lines from `offset`, or only the lines that contain `filter`, at most `limit` of them (at least 1) and a page's worth. The arguments are `id`, `offset`, `limit`, and `filter`. |
-| `open` / `close` | `open` attaches to a target using `backend`, `connect`, and, for `kdnet`, `key`. For `kd` and `kdnet`, it also accepts `kd_handshake_timeout` in seconds. For a live user-mode process, use `backend: dbgsrv` with a `tcp:server=<host>,port=<port>` endpoint as `connect` and exactly one of `process` (a pid) and `create` (a command line). For a crash dump or a [user-mode minidump](#user-mode-minidumps), use `backend: dump` with the dump path as `connect`. `close` releases the target. The server holds one session at a time. |
+| `open` / `close` | `open` attaches to a target using `backend`, `connect`, and, for `kdnet`, `key`. For `kd` and `kdnet`, it also accepts `kd_handshake_timeout` in seconds. For a live user-mode process, use `backend: dbgsrv` with a `tcp:server=<host>,port=<port>` or `npipe:[server=<host>,]pipe=<name>` endpoint (optional `,password=<secret>`) as `connect` and exactly one of `process` (a pid) and `create` (a command line). For a crash dump or a [user-mode minidump](#user-mode-minidumps), use `backend: dump` with the dump path as `connect`. `close` releases the target. The server holds one session at a time. |
 
 ## Run control
 

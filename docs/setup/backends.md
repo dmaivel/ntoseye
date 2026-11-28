@@ -31,9 +31,12 @@ ntoseye --backend dbgsrv --connect tcp:server=WINDOWS-HOST,port=5005 --process 1
 
 To start the process under the debugger instead of attaching, replace
 `--process 1234` with `--create "notepad.exe"`. The server is a 64-bit
-`dbgsrv.exe`; AMD64 and ARM64 targets are supported, x86/WOW64 processes are
-not, and `tcp` is the only transport (named pipes, `ssl`, `spipe`, and
-connection passwords are refused with an explicit error).
+`dbgsrv.exe`; AMD64 and ARM64 targets are supported over `tcp`
+(`tcp:server=<host>,port=<port>`) and Windows named pipes
+(`npipe:server=<host>,pipe=<name>`, or `npipe:pipe=<name>` for the local
+machine), each with optional `password=<secret>` authentication (up to 12
+UTF-16 characters, matching `dbgeng.dll`). x86/WOW64 processes and `ssl`,
+`spipe`, `1394`, and `com` transports are refused with an explicit error.
 
 Once attached, the session is the user-mode one a minidump session has — `lm`,
 `~`, `r`, `bp`, `g`, `k`, `!peb`, `!teb`, `!dlls`, `!address` — with live

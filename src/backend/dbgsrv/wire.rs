@@ -154,6 +154,64 @@ pub const CALL_LOCKED: u16 = 0x0004;
 /// handshake announces and then sends.
 pub const IDENTITY_LENGTH: usize = 128;
 
+/// `MAX_PASSWORD_BUFFER`: the fixed length of the Base64-encoded UTF-16LE
+/// password buffer sent after the client identity when a connection password
+/// is set.
+pub const PASSWORD_LENGTH: usize = 32;
+
+/// Maximum UTF-16 code units `dbgeng.dll`'s `Base64HashPassword(PCWSTR, PUCHAR)`
+/// accepts: 24 UTF-16LE bytes encode to 32 Base64 bytes (`4 * len + 2 < 0x63`).
+pub const MAX_PASSWORD_UTF16_UNITS: usize = 12;
+
+/// Encode a DbgRpc connection password the way `dbgeng.dll` 10.0.26100's
+/// `Base64HashPassword(PCWSTR, PUCHAR)` does: standard RFC 4648 Base64 over the
+/// password's raw UTF-16LE bytes (without a trailing NUL), zero-padded to
+/// [`PASSWORD_LENGTH`] bytes.
+pub fn hash_password(password: &str) -> Result<[u8; PASSWORD_LENGTH]> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    if password.is_empty() {
+        return Err(Error::InvalidArgument(
+            "dbgsrv endpoint password must not be empty".to_string(),
+        ));
+    }
+    let utf16: Vec<u8> = password.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    if utf16.len() > MAX_PASSWORD_UTF16_UNITS * 2 {
+        return Err(Error::InvalidArgument(format!(
+            "dbgsrv password is too long (at most {MAX_PASSWORD_UTF16_UNITS} UTF-16 characters)"
+        )));
+    }
+    let mut out = [0u8; PASSWORD_LENGTH];
+    let mut cursor = 0;
+    let (chunks, remainder) = utf16.as_chunks::<3>();
+    for &[b0, b1, b2] in chunks {
+        let bits = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+        out[cursor] = TABLE[((bits >> 18) & 0x3f) as usize];
+        out[cursor + 1] = TABLE[((bits >> 12) & 0x3f) as usize];
+        out[cursor + 2] = TABLE[((bits >> 6) & 0x3f) as usize];
+        out[cursor + 3] = TABLE[(bits & 0x3f) as usize];
+        cursor += 4;
+    }
+    match remainder {
+        [b0, b1] => {
+            let bits = (u32::from(*b0) << 16) | (u32::from(*b1) << 8);
+            out[cursor] = TABLE[((bits >> 18) & 0x3f) as usize];
+            out[cursor + 1] = TABLE[((bits >> 12) & 0x3f) as usize];
+            out[cursor + 2] = TABLE[((bits >> 6) & 0x3f) as usize];
+            out[cursor + 3] = b'=';
+        }
+        [b0] => {
+            let bits = u32::from(*b0) << 16;
+            out[cursor] = TABLE[((bits >> 18) & 0x3f) as usize];
+            out[cursor + 1] = TABLE[((bits >> 12) & 0x3f) as usize];
+            out[cursor + 2] = b'=';
+            out[cursor + 3] = b'=';
+        }
+        _ => {}
+    }
+    Ok(out)
+}
+
 /// `DBGRPC_SHAKE_FULL_REMOTE_UNKNOWN`.
 pub const SHAKE_FULL_REMOTE_UNKNOWN: u32 = 0x0000_0001;
 /// Extended client handshake flag observed from current Windows debuggers
@@ -200,15 +258,19 @@ wire_struct! {
 
 impl Handshake {
     /// The handshake a client sends for `object`: the full identity buffer,
-    /// no password, and the remote object unknown.
-    pub fn client(object: Guid) -> Self {
+    /// an optional 32-byte hashed password, and the remote object unknown.
+    pub fn client(object: Guid, has_password: bool) -> Self {
         Self {
             signature: SIGNATURE,
             protocol_version: PROTOCOL_VERSION,
             desired_object: object,
             remote_object: 0,
             identity_length: IDENTITY_LENGTH as u32,
-            password_length: 0,
+            password_length: if has_password {
+                PASSWORD_LENGTH as u32
+            } else {
+                0
+            },
             flags: SHAKE_CLIENT_FLAGS,
             reserved1: 0,
             reserved2: [0; 10],

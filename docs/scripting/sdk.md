@@ -26,7 +26,7 @@ By default, `attach()` uses the `kd` backend. To use a different one, set `backe
 
 - `connect` gives the transport endpoint, or the dump path.
 - The `kdnet` backend needs `key`.
-- The `dbgsrv` backend debugs one live user-mode process through a DbgRpc process server: `connect` is `tcp:server=<host>,port=<port>`, and exactly one of `process=<pid>` and `create="<command line>"` names what to debug. Its session is the user-mode one a minidump session is, with live memory and threads, and the kernel-only commands stay refused.
+- The `dbgsrv` backend debugs one live user-mode process through a DbgRpc process server: `connect` is `tcp:server=<host>,port=<port>` or `npipe:[server=<host>,]pipe=<name>` (with optional `,password=<secret>`), and exactly one of `process=<pid>` and `create="<command line>"` names what to debug. Its session is the user-mode one a minidump session is, with live memory and threads, and the kernel-only commands stay refused.
 - The `memory` backend is passive and cannot stop or resume the guest. For run control, use `kd`, `gdb`, or `dbgsrv`.
 - The `dmp` backend reads an offline dump.
 - `kd_handshake_timeout` sets the initial KD/KDNET handshake wait in positive integer seconds, for example `ntoseye.attach("kd", kd_handshake_timeout=30)`. It is keyword-only and applies only to `kd` and `kdnet`. An explicit value overrides `NTOSEYE_KD_TIMEOUT`; `None` uses the environment variable or the 8-second default.

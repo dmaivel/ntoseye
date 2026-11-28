@@ -88,8 +88,9 @@ struct TargetOptions {
     backend: Option<Backend>,
 
     /// The backend target: a GDB address, a KD pipe path, a KDNET listen
-    /// address, or a dbgsrv endpoint (tcp:server=<host>,port=<port>). The
-    /// memory backend does not use it
+    /// address, or a dbgsrv endpoint (tcp:server=<host>,port=<port> or
+    /// npipe:[server=<host>,]pipe=<name>, with optional password=<secret>).
+    /// The memory backend does not use it
     #[arg(long, global = true)]
     connect: Option<String>,
 

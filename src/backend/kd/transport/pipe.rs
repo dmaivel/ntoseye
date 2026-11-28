@@ -24,10 +24,15 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_OVERLAPPED, OPEN_EXISTING, ReadFile, WriteFile,
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
 use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
 
 /// No share mode: a KD pipe belongs to the one debugger QEMU let in.
 const EXCLUSIVE: u32 = 0;
+
+/// Largest single `WriteFile` chunk on a named pipe (`0xFFFF`, matching
+/// WinDbg's `DbgRpcNamedPipeTransport::Write` for SMB named-pipe safety).
+const MAX_PIPE_WRITE: usize = 0xFFFF;
 
 /// How long a write may wait for room in the pipe before it is abandoned.
 const WRITE_TIMEOUT_MS: u32 = 5_000;
@@ -122,6 +127,33 @@ impl PipeStream {
         let path = pipe_path(endpoint);
         let handle = connect(&path)?;
         Ok(Self::from_parts(handle, Some(path), true))
+    }
+
+    /// Open a stateful client pipe without auto-reconnect (e.g. a DbgRpc
+    /// `npipe:` server): waits for a busy instance up to `busy_timeout`, and
+    /// surfaces disconnect as EOF / `BrokenPipe` rather than reconnecting
+    /// mid-stream.
+    pub fn open_once(endpoint: &str, busy_timeout: Duration) -> io::Result<Self> {
+        let path = pipe_path(endpoint);
+        let wide_path = wide(&path);
+        let deadline = Instant::now() + busy_timeout;
+        loop {
+            match connect(&path) {
+                Ok(handle) => return Ok(Self::from_parts(handle, None, false)),
+                Err(error) if raw_code(&error) == Some(ERROR_PIPE_BUSY) => {
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        return Err(error);
+                    };
+                    let wait_ms =
+                        (remaining.as_millis().min(u128::from(u32::MAX - 1)) as u32).max(1);
+                    // SAFETY: `wide_path` is NUL-terminated and outlives the call.
+                    if unsafe { WaitNamedPipeW(wide_path.as_ptr(), wait_ms) } == 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     #[cfg(test)]
@@ -401,7 +433,7 @@ impl Read for PipeStream {
 
 impl Write for PipeStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let Some(request) = byte_count(buf.len()) else {
+        let Some(request) = byte_count(buf.len().min(MAX_PIPE_WRITE)) else {
             return Ok(0);
         };
         let mut retried = false;
@@ -493,7 +525,7 @@ fn new_test_name() -> String {
 }
 
 #[cfg(test)]
-fn create_test_server(name: &str) -> io::Result<PipeStream> {
+pub(crate) fn create_test_server(name: &str) -> io::Result<PipeStream> {
     use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
     use windows_sys::Win32::System::Pipes::{
         CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
@@ -522,7 +554,7 @@ fn create_test_server(name: &str) -> io::Result<PipeStream> {
 
 /// Complete the server side of the connection a client just made.
 #[cfg(test)]
-fn wait_for_client(server: &PipeStream) -> io::Result<()> {
+pub(crate) fn wait_for_client(server: &PipeStream) -> io::Result<()> {
     use windows_sys::Win32::Foundation::ERROR_PIPE_CONNECTED;
     use windows_sys::Win32::System::Pipes::ConnectNamedPipe;
 

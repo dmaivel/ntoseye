@@ -133,7 +133,7 @@ Kernel debugging does not start a process, so `launch` and `attach` do the same 
 | Argument | Meaning |
 | --- | --- |
 | `backend` | `kd` (default), `kdnet`, `gdb`, `dbgsrv`, or `memory`. |
-| `connect` | KD socket path, KDNET listen address, GDB address, or a dbgsrv endpoint (`tcp:server=<host>,port=<port>`). |
+| `connect` | KD socket path, KDNET listen address, GDB address, or a dbgsrv endpoint (`tcp:server=<host>,port=<port>` or `npipe:[server=<host>,]pipe=<name>`, with optional `,password=<secret>`). |
 | `process` | For `dbgsrv` only: the process id to debug. Exactly one of `process` and `create` is required. |
 | `create` | For `dbgsrv` only: the command line of a process to start under the debugger. Exactly one of `process` and `create` is required. |
 | `kdnetKey` | KDNET encryption key (four base-36 components). |

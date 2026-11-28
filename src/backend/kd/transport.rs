@@ -8,6 +8,11 @@ use super::kdnet::KdNetStream;
 #[cfg(windows)]
 mod pipe;
 
+#[cfg(windows)]
+pub(crate) use pipe::PipeStream;
+#[cfg(all(windows, test))]
+pub(crate) use pipe::{create_test_server, wait_for_client};
+
 /// The KDCOM stream: a Unix socket, or the Windows named pipe QEMU creates.
 #[cfg(unix)]
 pub type SerialStream = std::os::unix::net::UnixStream;

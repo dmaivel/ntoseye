@@ -41,7 +41,8 @@ use super::service::{
 };
 use super::wire::{
     CALL_LOCKED, CALL_NO_RETURN, CALL_RETURN, Call, Guid, Handshake, IID_USER_DEBUG_SERVICES,
-    Method, PROTOCOL_VERSION, SIGNATURE, UNIQUE_USER_DEBUG_SERVICES, stub_index,
+    Method, PASSWORD_LENGTH, PROTOCOL_VERSION, SIGNATURE, UNIQUE_USER_DEBUG_SERVICES,
+    hash_password, stub_index,
 };
 
 /// The object id the fake server hands out in its handshake.
@@ -126,6 +127,8 @@ pub(crate) struct FakeServer {
     inserted: Arc<AtomicBool>,
     /// Every `CONTEXT` the client wrote, by the thread handle it named.
     contexts: ContextLog,
+    /// Optional expected 32-byte hashed connection password.
+    expected_password: Option<[u8; PASSWORD_LENGTH]>,
 }
 
 impl FakeServer {
@@ -165,7 +168,13 @@ impl FakeServer {
             flags: CLOSE_PROC_THREAD_HANDLES | GENERIC_DATA_BREAKPOINTS | GENERIC_CODE_BREAKPOINTS,
             inserted: Arc::new(AtomicBool::new(false)),
             contexts: Arc::new(Mutex::new(Vec::new())),
+            expected_password: None,
         }
+    }
+
+    pub(crate) fn with_password(mut self, password: &str) -> Self {
+        self.expected_password = Some(hash_password(password).expect("valid password"));
+        self
     }
 
     pub(crate) fn with_generic_code_breakpoints(mut self, generic: bool) -> Self {
@@ -318,67 +327,89 @@ impl FakeServer {
     }
 }
 
+/// Serve one connected DbgRpc stream (TCP socket or Windows named pipe).
+fn serve_stream<S: Read + Write>(mut stream: S, server: Arc<FakeServer>) {
+    let mut handshake = [0u8; core::mem::size_of::<Handshake>()];
+    stream.read_exact(&mut handshake).expect("a handshake");
+    let handshake = Handshake::read_from_bytes(&handshake).expect("a handshake decodes");
+    assert_eq!(handshake.signature, SIGNATURE);
+    assert_eq!(handshake.protocol_version, PROTOCOL_VERSION);
+    assert_eq!(handshake.desired_object, IID_USER_DEBUG_SERVICES);
+    let mut identity = vec![0u8; handshake.identity_length as usize];
+    stream.read_exact(&mut identity).expect("an identity");
+    // Mirror `DbgRpcCreateClientObject`: mismatch closes the stream with no reply.
+    match (handshake.password_length, server.expected_password) {
+        (0, None) => {}
+        (len, Some(expected)) if len == PASSWORD_LENGTH as u32 => {
+            let mut got = [0u8; PASSWORD_LENGTH];
+            stream.read_exact(&mut got).expect("a password");
+            if got != expected {
+                return;
+            }
+        }
+        (len, None) if len == PASSWORD_LENGTH as u32 => {
+            let mut got = [0u8; PASSWORD_LENGTH];
+            let _ = stream.read_exact(&mut got);
+            return;
+        }
+        _ => return,
+    }
+    let reply = Handshake {
+        remote_object: OBJECT,
+        ..handshake
+    };
+    stream
+        .write_all(reply.as_bytes())
+        .expect("the handshake reply");
+    loop {
+        let mut header = [0u8; core::mem::size_of::<Call>()];
+        if stream.read_exact(&mut header).is_err() {
+            return;
+        }
+        let call = Call::read_from_bytes(&header).expect("a call header decodes");
+        let mut body = vec![0u8; call.in_size as usize];
+        if !body.is_empty() {
+            stream.read_exact(&mut body).expect("a call body");
+        }
+        server
+            .calls
+            .lock()
+            .unwrap()
+            .push((call.stub_index, body.clone()));
+        if call.stub_index == stub_index(Method::RequestBreakIn) {
+            server.break_in.store(true, Ordering::SeqCst);
+        }
+        if call.flags & CALL_NO_RETURN != 0 {
+            continue;
+        }
+        let out = server.reply(call.stub_index, &body, call.out_size as usize);
+        let status = if call.stub_index == stub_index(Method::WaitForEvent) && out.is_empty() {
+            1 // S_FALSE
+        } else {
+            0
+        };
+        let reply = Call {
+            object_id: call.object_id,
+            stub_index: call.stub_index,
+            flags: CALL_RETURN,
+            in_size: 0,
+            out_size: out.len() as u32,
+            status,
+            sequence: call.sequence,
+            reserved1: 0,
+        };
+        stream.write_all(reply.as_bytes()).expect("a reply header");
+        if !out.is_empty() {
+            stream.write_all(&out).expect("a reply body");
+        }
+    }
+}
+
 /// Serve one client connection of `server`.
 pub(crate) fn serve(listener: TcpListener, server: Arc<FakeServer>) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("a client connects");
-        let mut handshake = [0u8; core::mem::size_of::<Handshake>()];
-        stream.read_exact(&mut handshake).expect("a handshake");
-        let handshake = Handshake::read_from_bytes(&handshake).expect("a handshake decodes");
-        assert_eq!(handshake.signature, SIGNATURE);
-        assert_eq!(handshake.protocol_version, PROTOCOL_VERSION);
-        assert_eq!(handshake.desired_object, IID_USER_DEBUG_SERVICES);
-        let mut identity = vec![0u8; handshake.identity_length as usize];
-        stream.read_exact(&mut identity).expect("an identity");
-        let reply = Handshake {
-            remote_object: OBJECT,
-            ..handshake
-        };
-        stream
-            .write_all(reply.as_bytes())
-            .expect("the handshake reply");
-        loop {
-            let mut header = [0u8; core::mem::size_of::<Call>()];
-            if stream.read_exact(&mut header).is_err() {
-                return;
-            }
-            let call = Call::read_from_bytes(&header).expect("a call header decodes");
-            let mut body = vec![0u8; call.in_size as usize];
-            if !body.is_empty() {
-                stream.read_exact(&mut body).expect("a call body");
-            }
-            server
-                .calls
-                .lock()
-                .unwrap()
-                .push((call.stub_index, body.clone()));
-            if call.stub_index == stub_index(Method::RequestBreakIn) {
-                server.break_in.store(true, Ordering::SeqCst);
-            }
-            if call.flags & CALL_NO_RETURN != 0 {
-                continue;
-            }
-            let out = server.reply(call.stub_index, &body, call.out_size as usize);
-            let status = if call.stub_index == stub_index(Method::WaitForEvent) && out.is_empty() {
-                1 // S_FALSE
-            } else {
-                0
-            };
-            let reply = Call {
-                object_id: call.object_id,
-                stub_index: call.stub_index,
-                flags: CALL_RETURN,
-                in_size: 0,
-                out_size: out.len() as u32,
-                status,
-                sequence: call.sequence,
-                reserved1: 0,
-            };
-            stream.write_all(reply.as_bytes()).expect("a reply header");
-            if !out.is_empty() {
-                stream.write_all(&out).expect("a reply body");
-            }
-        }
+        let (stream, _) = listener.accept().expect("a client connects");
+        serve_stream(stream, server);
     })
 }
 
@@ -399,7 +430,7 @@ fn connect(server: Arc<FakeServer>) -> (DbgsrvClient, JoinHandle<()>) {
 
 #[test]
 fn the_handshake_and_call_header_are_the_proxys_bytes() {
-    let handshake = Handshake::client(IID_USER_DEBUG_SERVICES);
+    let handshake = Handshake::client(IID_USER_DEBUG_SERVICES, false);
     let bytes = handshake.as_bytes();
     assert_eq!(bytes.len(), 128, "sizeof(DbgRpcHandshake)");
     assert_eq!(&bytes[0..4], b"DRPC");
@@ -415,6 +446,9 @@ fn the_handshake_and_call_header_are_the_proxys_bytes() {
     assert_eq!(&bytes[32..36], &128u32.to_le_bytes(), "identity length");
     assert_eq!(&bytes[36..40], &0u32.to_le_bytes(), "no password");
     assert_eq!(&bytes[40..44], &3u32.to_le_bytes(), "client flags");
+
+    let with_pwd = Handshake::client(IID_USER_DEBUG_SERVICES, true);
+    assert_eq!(&with_pwd.as_bytes()[36..40], &32u32.to_le_bytes());
 
     let call = Call {
         object_id: 0x1122_3344_5566_7788,
@@ -1197,6 +1231,97 @@ fn process_handle_adopted_from_zero_closes_on_drop() {
     handle.adopt(ADOPTED);
     drop(handle);
     assert_eq!(*closed.lock().unwrap(), vec![ADOPTED]);
+}
+
+#[test]
+fn password_hash_matches_dbgeng_utf16_base64() {
+    // "a" -> UTF-16LE [0x61, 0x00] -> Base64 "YQA=", zero-padded to 32 bytes.
+    let hashed_a = hash_password("a").unwrap();
+    assert_eq!(&hashed_a[..4], b"YQA=");
+    assert!(hashed_a[4..].iter().all(|b| *b == 0));
+
+    // "abc" -> UTF-16LE [0x61, 0x00, 0x62, 0x00, 0x63, 0x00] -> Base64 "YQBiAGMA".
+    let hashed_abc = hash_password("abc").unwrap();
+    assert_eq!(&hashed_abc[..8], b"YQBiAGMA");
+    assert!(hashed_abc[8..].iter().all(|b| *b == 0));
+
+    // 12 UTF-16 code units = 24 bytes -> exactly 32 Base64 bytes (max accepted).
+    let max_pwd = hash_password("123456789012").unwrap();
+    assert!(max_pwd.iter().all(|b| *b != 0));
+
+    // 13 UTF-16 code units or empty password must be refused.
+    assert!(hash_password("1234567890123").is_err());
+    assert!(hash_password("").is_err());
+}
+
+#[test]
+fn tcp_password_handshake_accepts_matching_and_rejects_mismatches() {
+    // Matching password connects cleanly and never logs plaintext.
+    let server = Arc::new(FakeServer::new(Arch::Amd64).with_password("Secret12"));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a listener");
+    let ep = format!("{},password=Secret12", endpoint(&listener));
+    let handle = serve(listener, Arc::clone(&server));
+    let mut progress_log = Vec::new();
+    let client = DbgsrvClient::connect(&ep, &mut |msg| progress_log.push(msg.to_string()))
+        .expect("matching password connects");
+    assert!(
+        progress_log.iter().all(|msg| !msg.contains("Secret12")),
+        "password leaked in progress: {progress_log:?}"
+    );
+    drop(client);
+    handle.join().expect("server thread");
+
+    // Wrong password, missing password, and unexpected password are all refused.
+    for (server_pwd, client_pwd) in [
+        (Some("Secret12"), Some("WrongPwd")),
+        (Some("Secret12"), None),
+        (None, Some("Secret12")),
+    ] {
+        let server = Arc::new(match server_pwd {
+            Some(pwd) => FakeServer::new(Arch::Amd64).with_password(pwd),
+            None => FakeServer::new(Arch::Amd64),
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a listener");
+        let ep = match client_pwd {
+            Some(pwd) => format!("{},password={pwd}", endpoint(&listener)),
+            None => endpoint(&listener),
+        };
+        let handle = serve(listener, Arc::clone(&server));
+        let err = DbgsrvClient::connect(&ep, &mut |_| {}).expect_err("password mismatch refused");
+        assert!(err.to_string().contains("password"), "{err}");
+        handle.join().expect("server thread");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn named_pipe_endpoint_connects_with_password_and_reads_memory() {
+    use crate::backend::kd::{create_test_server, wait_for_client};
+
+    let pipe_name = format!("ntoseye-dbgsrv-test-{}", std::process::id());
+    let full_path = format!(r"\\.\pipe\{pipe_name}");
+    let pipe_server = create_test_server(&full_path).expect("test named pipe");
+    let server = Arc::new(FakeServer::new(Arch::Amd64).with_password("PipePwd1"));
+    let server_clone = Arc::clone(&server);
+    let handle = std::thread::spawn(move || {
+        wait_for_client(&pipe_server).expect("client connects to named pipe");
+        serve_stream(pipe_server, server_clone);
+    });
+
+    let ep = format!("npipe:server=.,pipe={pipe_name},password=PipePwd1");
+    let client = Arc::new(DbgsrvClient::connect(&ep, &mut |_| {}).expect("npipe connect"));
+    let mut backend =
+        DbgsrvBackend::connect(client, &DbgsrvTarget::Attach { pid: PID }, &mut |_| {})
+            .expect("attach over npipe");
+    let mut buf = [0u8; 5];
+    backend
+        .client()
+        .read_virtual(backend.process_handle(), RIP, &mut buf)
+        .expect("read memory over npipe");
+    assert_eq!(&buf, b"hello");
+    backend.prepare_for_exit(false).expect("detach");
+    drop(backend);
+    handle.join().expect("npipe server thread");
 }
 
 #[test]

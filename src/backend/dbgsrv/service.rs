@@ -9,11 +9,11 @@ use zerocopy::{FromBytes, IntoBytes};
 use crate::base::error::{Error, Result};
 
 use super::layout;
-use super::transport::{DbgsrvEndpoint, TcpTransport, parse_endpoint};
+use super::transport::{DbgsrvEndpoint, Transport, parse_endpoint};
 use super::wire::{
     CALL_LOCKED, CALL_NO_RETURN, Call, Handshake, IDENTITY_LENGTH, IID_USER_DEBUG_SERVICES, Method,
-    Reader, UNIQUE_USER_DEBUG_SERVICES, Writer, align_up_u32, size_of_wire,
-    sized_buffer_reply_size, succeeded,
+    PASSWORD_LENGTH, Reader, UNIQUE_USER_DEBUG_SERVICES, Writer, align_up_u32, hash_password,
+    size_of_wire, sized_buffer_reply_size, succeeded,
 };
 
 /// `DBGSVC_GENERIC_CODE_BREAKPOINTS`: the server has no code-breakpoint
@@ -219,7 +219,7 @@ fn decode_connection_name(bytes: &[u8]) -> String {
 /// A live DbgRpc connection: the transport, the process server object the
 /// handshake returned, and the call sequence.
 pub struct RpcService {
-    transport: TcpTransport,
+    transport: Transport,
     /// The `IUserDebugServices` object sitting on the server.
     object: u64,
     sequence: u32,
@@ -229,20 +229,37 @@ impl RpcService {
     /// Connect `endpoint` and hand it to the `IUserDebugServices` server it
     /// names.
     pub fn connect(endpoint: &str, progress: &mut dyn FnMut(&str)) -> Result<Self> {
-        let endpoint = parse_endpoint(endpoint)?;
-        let DbgsrvEndpoint::Tcp { server, port } = &endpoint;
-        progress(&format!("dbgsrv: connecting to {server}:{port}"));
+        let endpoint: DbgsrvEndpoint = parse_endpoint(endpoint)?;
+        let password_hash = endpoint.password().map(hash_password).transpose()?;
+        progress(&format!(
+            "dbgsrv: connecting to {}",
+            endpoint.target_label()
+        ));
         let transport = endpoint.connect()?;
-        Self::handshake(transport, progress)
+        Self::handshake(transport, password_hash, progress)
     }
 
-    fn handshake(mut transport: TcpTransport, progress: &mut dyn FnMut(&str)) -> Result<Self> {
+    fn handshake(
+        mut transport: Transport,
+        password_hash: Option<[u8; PASSWORD_LENGTH]>,
+        progress: &mut dyn FnMut(&str),
+    ) -> Result<Self> {
         let identity = identity();
-        let request = Handshake::client(IID_USER_DEBUG_SERVICES);
+        let request = Handshake::client(IID_USER_DEBUG_SERVICES, password_hash.is_some());
         transport.write_all(request.as_bytes())?;
         transport.write_all(&identity)?;
+        if let Some(hash) = &password_hash {
+            transport.write_all(hash)?;
+        }
         let mut reply = [0u8; core::mem::size_of::<Handshake>()];
-        transport.read_exact(&mut reply)?;
+        transport.read_exact(&mut reply).map_err(|error| {
+            let hint = if password_hash.is_some() {
+                "the server may have rejected the password or expects no password"
+            } else {
+                "the server may require a password"
+            };
+            Error::Dbgsrv(format!("handshake failed ({hint}): {error}"))
+        })?;
         let reply = Handshake::parse(&reply)?;
         if reply.remote_object == 0 {
             return Err(Error::Dbgsrv(
