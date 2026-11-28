@@ -115,6 +115,12 @@ impl Render for Stop {
 
 fn print_stop(session: &mut Session, caches: &ReplCaches, stop: &Stop) {
     session.target.selected_frame = None;
+    if let Some(exit_code) = stop.exit_code() {
+        caches.clear_threads();
+        print_stop_separator();
+        outln!("process exited ({exit_code:#x})");
+        return;
+    }
     refresh_stop_caches_pre(session, caches);
     refresh_stop_caches_post(&session.target, caches);
     refresh_windows_thread_context_for_backend_thread(&mut session.target, &session.current_thread);

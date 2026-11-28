@@ -40,8 +40,9 @@ const S_FALSE: u32 = 0x0000_0001;
 /// `HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED)`.
 pub const E_ACCESSDENIED: u32 = 0x8007_0005;
 
-/// `HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER)`: what `AttachProcess` returns
-/// when no process has the requested PID.
+/// `HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER)`: observed from Windows
+/// `dbgsrv.exe` when `AttachProcess` is given a nonexistent PID (other servers
+/// or errors fall through with their raw `HRESULT`).
 pub const E_INVALIDARG: u32 = 0x8007_0057;
 
 /// Bytes of a 64-bit Windows `DEBUG_EVENT`: what the server requires the

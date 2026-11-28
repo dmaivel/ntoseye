@@ -38,7 +38,9 @@ connection passwords are refused with an explicit error).
 Once attached, the session is the user-mode one a minidump session has — `lm`,
 `~`, `r`, `bp`, `g`, `k`, `!peb`, `!teb`, `!dlls`, `!address` — with live
 memory and live threads, while the kernel-only commands (`!process`, `!pcr`,
-kernel `lm`) stay refused as `KernelRequired`.
+kernel `lm`) stay refused as `KernelRequired`. When the target process exits,
+the REPL reports `process exited (0x...)`, DAP emits `exited` and `terminated`
+events, and `ntoseye gdbserver` replies with `W<code>`.
 
 The server checks which revision of its `IUserDebugServices` interface a client
 speaks (`QueryInterface` with a code the interface generator derives) and

@@ -99,6 +99,10 @@ pub enum Error {
     #[error("target is running; `break` first, or wait for the next stop. {0}")]
     TargetRunning(&'static str),
 
+    /// A live user-mode process has already terminated.
+    #[error("the process exited ({0:#x})")]
+    ProcessExited(u32),
+
     #[error("the current backend does not support register writes")]
     RegisterWriteUnsupported,
 

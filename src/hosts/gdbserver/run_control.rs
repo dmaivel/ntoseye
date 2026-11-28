@@ -200,7 +200,7 @@ impl Server<'_> {
     /// are read from, as gdb assumes of every stop reply (it sends `Hg`
     /// only for another thread).
     fn stop_reply(&mut self, stop: Stop, interrupted: bool) -> Vec<u8> {
-        if let StopKind::ProcessExited { exit_code } = stop.kind {
+        if let Some(exit_code) = stop.exit_code() {
             self.note(format!("process exited ({exit_code:#x})"));
             let mut reply = Vec::new();
             StopReply::Exited {
@@ -343,8 +343,9 @@ impl Server<'_> {
                 self.planted.clear();
                 SIGTRAP
             }
-            StopKind::ProcessExited { .. } => {
-                unreachable!("process exit is answered with StopReply::Exited")
+            StopKind::ProcessExited { exit_code } => {
+                self.note(format!("process exited ({exit_code:#x})"));
+                SIGTRAP
             }
         };
         signal_only(signal)

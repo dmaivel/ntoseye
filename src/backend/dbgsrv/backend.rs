@@ -157,7 +157,8 @@ impl DbgsrvBackend {
                                 status: E_ACCESSDENIED,
                                 ..
                             } => Error::Dbgsrv(format!(
-                                "access denied attaching to process {pid} (HRESULT {E_ACCESSDENIED:#010x})"
+                                "access denied attaching to process {pid} (HRESULT {E_ACCESSDENIED:#010x}); \
+                                 ensure dbgsrv has permission (e.g. run as Administrator with SeDebugPrivilege)"
                             )),
                             other => other,
                         })?;
@@ -180,6 +181,11 @@ impl DbgsrvBackend {
                     "dbgsrv: created process {} (thread {:#x})",
                     created.pid, created.tid
                 ));
+                // `reload_threads` fetches fresh handles for every thread;
+                // close the initial one so it does not leak on the server.
+                if client.closes_handles() && created.thread_handle != 0 {
+                    let _ = client.server().close_handle(created.thread_handle);
+                }
                 (created.pid, created.process_handle, hint)
             }
         };
@@ -280,9 +286,28 @@ impl DbgsrvBackend {
 
     fn require_alive(&self) -> Result<()> {
         match self.exit {
-            Some(code) => Err(Error::Dbgsrv(format!("process exited: {code}"))),
+            Some(code) => Err(Error::ProcessExited(code)),
             None => Ok(()),
         }
+    }
+
+    fn close_handle(&self, handle: u64) {
+        if self.client.closes_handles() && handle != 0 {
+            let _ = self.client.server().close_handle(handle);
+        }
+    }
+
+    /// Close every tracked thread handle and the process handle on the server.
+    /// Idempotent so `ExitProcess`, `prepare_for_exit`, and `Drop` can each
+    /// call it without double-closing.
+    fn close_all_handles(&mut self) {
+        for thread in std::mem::take(&mut self.threads) {
+            self.close_handle(thread.handle);
+        }
+        self.current = 0;
+        self.sync_live_threads();
+        let process = self.process.swap(0, Ordering::AcqRel);
+        self.close_handle(process);
     }
 
     fn current_thread(&self) -> Result<&BackendThread> {
@@ -305,19 +330,25 @@ impl DbgsrvBackend {
     /// request once if it listed more than fit.
     fn reload_threads(&mut self) -> Result<()> {
         let mut wanted = THREAD_INFO_START;
+        let process = self.process_handle();
         let records = loop {
-            let (_, mut records, total) =
+            let (info_process, mut records, total) =
                 self.client
                     .server()
                     .process_info(self.pid, PROC_INFO_NO_SUSPEND, wanted)?;
+            if info_process != 0 && info_process != process {
+                self.close_handle(info_process);
+            }
             if total <= wanted || wanted >= MAX_PROCESS_THREADS {
                 records.truncate(wanted as usize);
                 break records;
             }
+            for record in records {
+                self.close_handle(record.handle);
+            }
             // Clamp to avoid trusting a corrupt count from the server.
             wanted = total.min(MAX_PROCESS_THREADS);
         };
-        let process = self.process_handle();
         let mut threads = Vec::with_capacity(records.len());
         for record in records {
             let teb = self
@@ -363,7 +394,10 @@ impl DbgsrvBackend {
     }
 
     fn add_thread(&mut self, tid: u32, handle: u64, teb: u64, start_address: u64) {
-        if self.threads.iter().any(|thread| thread.info.tid == tid) {
+        if let Some(existing) = self.threads.iter().find(|thread| thread.info.tid == tid) {
+            if handle != existing.handle {
+                self.close_handle(handle);
+            }
             return;
         }
         let start_address = (start_address != 0).then_some(start_address).or_else(|| {
@@ -400,9 +434,7 @@ impl DbgsrvBackend {
             if self.current >= self.threads.len() {
                 self.current = self.threads.len().saturating_sub(1);
             }
-            if self.client.closes_handles() && removed.handle != 0 {
-                let _ = self.client.server().close_handle(removed.handle);
-            }
+            self.close_handle(removed.handle);
             self.sync_live_threads();
         }
     }
@@ -563,7 +595,12 @@ impl DbgsrvBackend {
                 teb,
                 ..
             } => {
-                self.process.store(process_handle, Ordering::Release);
+                if process_handle != 0 {
+                    let previous = self.process.swap(process_handle, Ordering::AcqRel);
+                    if previous != process_handle {
+                        self.close_handle(previous);
+                    }
+                }
                 self.live_state.update(|info| {
                     info.image_base = (image_base != 0).then_some(image_base);
                 });
@@ -593,6 +630,8 @@ impl DbgsrvBackend {
             }
             DebugEvent::ExitProcess { exit_code, .. } => {
                 self.exit = Some(exit_code);
+                self.modules_changed = false;
+                self.close_all_handles();
                 Some(StopEvent {
                     process_exit: Some(exit_code),
                     ..StopEvent::default()
@@ -913,6 +952,7 @@ impl DebugBackend for DbgsrvBackend {
     }
 
     fn set_current_thread(&mut self, thread_id: &str) -> Result<()> {
+        self.require_alive()?;
         let tid = parse_backend_thread_id(thread_id).ok_or_else(|| {
             Error::Dbgsrv(format!(
                 "thread id '{thread_id}' is not a hexadecimal thread id"
@@ -929,6 +969,7 @@ impl DebugBackend for DbgsrvBackend {
     }
 
     fn stopped_thread_id(&mut self) -> Result<String> {
+        self.require_alive()?;
         if let Some(stop) = &self.stop
             && let Some(id) = &stop.thread_id
             && let Some(tid) = parse_backend_thread_id(id)
@@ -976,7 +1017,14 @@ impl DebugBackend for DbgsrvBackend {
         if self.exit.is_none() {
             let _ = self.client.server().detach_process(self.pid);
         }
+        self.close_all_handles();
         self.running = false;
         Ok(())
+    }
+}
+
+impl Drop for DbgsrvBackend {
+    fn drop(&mut self) {
+        self.close_all_handles();
     }
 }

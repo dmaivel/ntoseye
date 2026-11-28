@@ -767,6 +767,7 @@ struct MockServer {
     flags: u32,
     attach_status: Option<u32>,
     events: Vec<Vec<u8>>,
+    closed: Arc<Mutex<Vec<u64>>>,
 }
 
 impl MockServer {
@@ -774,9 +775,10 @@ impl MockServer {
         Self {
             info,
             threads,
-            flags: GENERIC_CODE_BREAKPOINTS | GENERIC_DATA_BREAKPOINTS,
+            flags: CLOSE_PROC_THREAD_HANDLES | GENERIC_CODE_BREAKPOINTS | GENERIC_DATA_BREAKPOINTS,
             attach_status: None,
             events: Vec::new(),
+            closed: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -834,7 +836,8 @@ impl ProcessServer for MockServer {
             thread_handle: THREAD,
         })
     }
-    fn close_handle(&mut self, _handle: u64) -> Result<()> {
+    fn close_handle(&mut self, handle: u64) -> Result<()> {
+        self.closed.lock().unwrap().push(handle);
         Ok(())
     }
     fn read_virtual(&mut self, _process: u64, address: u64, buf: &mut [u8]) -> Result<usize> {
@@ -1010,6 +1013,7 @@ fn exit_process_reports_process_exit_instead_of_exception() {
         TID,
         ExitDebugInfo { exit_code: 0x2a }.as_bytes(),
     ));
+    let closed = Arc::clone(&server.closed);
     let client = Arc::new(DbgsrvClient::with_server(Box::new(server), info).expect("a client"));
     let mut backend =
         DbgsrvBackend::connect(client, &DbgsrvTarget::Attach { pid: PID }, &mut |_| {})
@@ -1018,7 +1022,64 @@ fn exit_process_reports_process_exit_instead_of_exception() {
     let stop = backend.wait_for_stop().expect("exit stop");
     assert_eq!(stop.process_exit, Some(0x2a));
     assert_eq!(stop.exception_code, None);
-    assert!(backend.read_registers().is_err());
+    let error = backend.read_registers().expect_err("exited process");
+    assert!(matches!(error, Error::ProcessExited(0x2a)), "{error}");
+    assert_eq!(error.to_string(), "the process exited (0x2a)");
+    assert_eq!(*closed.lock().unwrap(), vec![THREAD, PROCESS]);
+    // prepare_for_exit and Drop must not double-close already-closed handles.
+    backend.prepare_for_exit(false).expect("prepare_for_exit");
+    drop(backend);
+    assert_eq!(*closed.lock().unwrap(), vec![THREAD, PROCESS]);
+}
+
+#[test]
+fn handles_are_closed_on_replacement_duplicate_and_drop() {
+    const EVENT_PROCESS: u64 = 0x5555;
+    const DUP_THREAD: u64 = 0x6666;
+
+    let info = TargetInfo {
+        machine_type: u32::from(IMAGE_FILE_MACHINE_AMD64),
+        processors: 1,
+        ..TargetInfo::default()
+    };
+    let mut server = MockServer::new(
+        info,
+        vec![ThreadRecord {
+            handle: THREAD,
+            tid: TID,
+        }],
+    );
+    server.events.push(debug_event(
+        CREATE_PROCESS_DEBUG_EVENT,
+        PID,
+        TID,
+        CreateProcessDebugInfo {
+            file: 0,
+            process_handle: EVENT_PROCESS,
+            thread_handle: DUP_THREAD,
+            image_base: 0x0040_0000,
+            debug_info_offset: 0,
+            debug_info_size: 0,
+            teb: TEB,
+            start_address: RIP,
+            image_name: 0,
+            image_name_wide: 0,
+            alignment: [0; 6],
+        }
+        .as_bytes(),
+    ));
+    let closed = Arc::clone(&server.closed);
+    let client = Arc::new(DbgsrvClient::with_server(Box::new(server), info).expect("a client"));
+    let backend = DbgsrvBackend::connect(client, &DbgsrvTarget::Attach { pid: PID }, &mut |_| {})
+        .expect("attach");
+    // CreateProcess replaced PROCESS with EVENT_PROCESS and saw duplicate TID handle DUP_THREAD.
+    assert_eq!(*closed.lock().unwrap(), vec![PROCESS, DUP_THREAD]);
+    // Dropping without prepare_for_exit closes the remaining tracked handles.
+    drop(backend);
+    assert_eq!(
+        *closed.lock().unwrap(),
+        vec![PROCESS, DUP_THREAD, THREAD, EVENT_PROCESS]
+    );
 }
 
 #[test]
