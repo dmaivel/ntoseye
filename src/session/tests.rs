@@ -5146,7 +5146,10 @@ fn a_process_server_target_opens_as_a_live_user_session() {
     // Leaving detaches: the process is the operator's again.
     let calls = server.calls.lock().unwrap();
     assert!(
-        calls.iter().any(|(stub, _)| *stub & 0xff == 15),
+        calls.iter().any(|(stub, _)| {
+            *stub
+                == crate::backend::dbgsrv::stub_index(crate::backend::dbgsrv::Method::DetachProcess)
+        }),
         "DetachProcess"
     );
 }

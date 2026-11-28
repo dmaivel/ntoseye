@@ -10,17 +10,25 @@
 
 use zerocopy::{FromBytes, IntoBytes, KnownLayout};
 
+use crate::backend::dbg_backend::ExceptionRecord;
 use crate::base::error::{Error, Result};
 
 use super::wire::wire_struct;
 
+/// Header bytes before the 8-byte-aligned union inside `DEBUG_EVENT`.
+pub const DEBUG_EVENT_HEADER_SIZE: usize = 16;
+
 /// Windows `DEBUG_EVENT`:
 /// `{ DWORD dwDebugEventCode; DWORD dwProcessId; DWORD dwThreadId; union { .. } }`,
-/// with the union eight-byte aligned, so it starts at offset 16.
+/// with the union eight-byte aligned, so it starts at offset
+/// [`DEBUG_EVENT_HEADER_SIZE`].
 pub const DEBUG_EVENT_SIZE: usize = 176;
 
 /// Bytes of the event's payload, the union.
-const PAYLOAD_SIZE: usize = DEBUG_EVENT_SIZE - 16;
+const PAYLOAD_SIZE: usize = DEBUG_EVENT_SIZE - DEBUG_EVENT_HEADER_SIZE;
+
+/// `EXCEPTION_MAXIMUM_PARAMETERS` in `EXCEPTION_RECORD64`.
+pub const EXCEPTION_MAXIMUM_PARAMETERS: usize = 15;
 
 // `dwDebugEventCode` values.
 pub const EXCEPTION_DEBUG_EVENT: u32 = 1;
@@ -42,7 +50,7 @@ wire_struct! {
         thread_id: u32,
         /// The hole before the eight-byte-aligned union.
         alignment: u32,
-    } = 16
+    } = DEBUG_EVENT_HEADER_SIZE
 }
 
 wire_struct! {
@@ -65,7 +73,7 @@ wire_struct! {
         number_parameters: u32,
         /// The hole before the eight-byte-aligned parameter array.
         alignment: u32,
-        parameters: [u64; 15],
+        parameters: [u64; EXCEPTION_MAXIMUM_PARAMETERS],
     } = 152
 }
 
@@ -158,12 +166,7 @@ pub enum DebugEvent {
     Exception {
         process_id: u32,
         thread_id: u32,
-        code: u32,
-        /// `ExceptionFlags`; `EXCEPTION_NONCONTINUABLE` is bit 0.
-        flags: u32,
-        address: u64,
-        /// `ExceptionInformation[..NumberParameters]`.
-        parameters: Vec<u64>,
+        record: ExceptionRecord,
         first_chance: bool,
     },
     /// The new thread's handle, its TEB, and the address it starts at.
@@ -240,20 +243,6 @@ impl DebugEvent {
             | Self::Rip { process_id, .. } => *process_id,
         }
     }
-
-    pub fn thread_id(&self) -> u32 {
-        match self {
-            Self::Exception { thread_id, .. }
-            | Self::CreateThread { thread_id, .. }
-            | Self::CreateProcess { thread_id, .. }
-            | Self::ExitThread { thread_id, .. }
-            | Self::ExitProcess { thread_id, .. }
-            | Self::LoadDll { thread_id, .. }
-            | Self::UnloadDll { thread_id, .. }
-            | Self::OutputDebugString { thread_id, .. }
-            | Self::Rip { thread_id, .. } => *thread_id,
-        }
-    }
 }
 
 /// Decode the `DEBUG_EVENT` bytes `WaitForEvent` returned. Trailing bytes
@@ -262,26 +251,28 @@ impl DebugEvent {
 pub fn decode(bytes: &[u8]) -> Result<DebugEvent> {
     let event =
         DebugEventRecord::read_from_bytes(bytes.get(..DEBUG_EVENT_SIZE).ok_or_else(|| {
-            Error::DebugInfo(format!(
-                "dbgsrv: the server returned {} bytes of a debug event, {DEBUG_EVENT_SIZE} \
-                 expected",
+            Error::Dbgsrv(format!(
+                "the server returned {} bytes of a debug event, {DEBUG_EVENT_SIZE} expected",
                 bytes.len()
             ))
         })?)
-        .map_err(|_| Error::DebugInfo("dbgsrv: the debug event does not decode".to_string()))?;
+        .map_err(|_| Error::Dbgsrv("the debug event does not decode".to_string()))?;
     let payload = &event.payload;
     let (process_id, thread_id) = (event.name.process_id, event.name.thread_id);
     Ok(match event.name.code {
         EXCEPTION_DEBUG_EVENT => {
             let info = read::<ExceptionDebugInfo>(payload, "exception record")?;
-            let count = (info.record.number_parameters as usize).min(15);
+            let count = (info.record.number_parameters as usize).min(EXCEPTION_MAXIMUM_PARAMETERS);
             DebugEvent::Exception {
                 process_id,
                 thread_id,
-                code: info.record.code,
-                flags: info.record.flags,
-                address: info.record.address,
-                parameters: info.record.parameters[..count].to_vec(),
+                record: ExceptionRecord {
+                    code: info.record.code,
+                    flags: info.record.flags,
+                    record: info.record.record,
+                    address: info.record.address,
+                    parameters: info.record.parameters[..count].to_vec(),
+                },
                 first_chance: info.first_chance != 0,
             }
         }
@@ -355,9 +346,7 @@ pub fn decode(bytes: &[u8]) -> Result<DebugEvent> {
             }
         }
         other => {
-            return Err(Error::DebugInfo(format!(
-                "dbgsrv: unknown debug event code {other}"
-            )));
+            return Err(Error::Dbgsrv(format!("unknown debug event code {other}")));
         }
     })
 }
@@ -366,9 +355,9 @@ pub fn decode(bytes: &[u8]) -> Result<DebugEvent> {
 fn read<T: FromBytes + KnownLayout + IntoBytes>(payload: &[u8], what: &'static str) -> Result<T> {
     let bytes = payload
         .get(..core::mem::size_of::<T>())
-        .ok_or_else(|| Error::DebugInfo(format!("dbgsrv: the debug event holds no {what}")))?;
+        .ok_or_else(|| Error::Dbgsrv(format!("the debug event holds no {what}")))?;
     T::read_from_bytes(bytes)
-        .map_err(|_| Error::DebugInfo(format!("dbgsrv: the debug event's {what} does not decode")))
+        .map_err(|_| Error::Dbgsrv(format!("the debug event's {what} does not decode")))
 }
 
 #[cfg(test)]
@@ -384,14 +373,14 @@ mod tests {
             alignment: 0,
         };
         let mut bytes = [0u8; DEBUG_EVENT_SIZE];
-        bytes[..16].copy_from_slice(name.as_bytes());
+        bytes[..DEBUG_EVENT_HEADER_SIZE].copy_from_slice(name.as_bytes());
         bytes
     }
 
     #[test]
     fn an_exception_event_carries_its_record_and_first_chance() {
         let mut bytes = event(EXCEPTION_DEBUG_EVENT, 0x1234, 0x5678);
-        let mut parameters = [0u64; 15];
+        let mut parameters = [0u64; EXCEPTION_MAXIMUM_PARAMETERS];
         parameters[0] = 7;
         parameters[1] = 9;
         let info = ExceptionDebugInfo {
@@ -407,16 +396,19 @@ mod tests {
             first_chance: 1,
             alignment: 0,
         };
-        bytes[16..].copy_from_slice(info.as_bytes());
+        bytes[DEBUG_EVENT_HEADER_SIZE..].copy_from_slice(info.as_bytes());
         assert_eq!(
             decode(&bytes).unwrap(),
             DebugEvent::Exception {
                 process_id: 0x1234,
                 thread_id: 0x5678,
-                code: STATUS_BREAKPOINT,
-                flags: 1,
-                address: 0x7ff6_1234_5678,
-                parameters: vec![7, 9],
+                record: ExceptionRecord {
+                    code: STATUS_BREAKPOINT,
+                    flags: 1,
+                    record: 0,
+                    address: 0x7ff6_1234_5678,
+                    parameters: vec![7, 9],
+                },
                 first_chance: true,
             }
         );
@@ -434,7 +426,9 @@ mod tests {
             image_name_wide: 1,
             alignment: [0; 6],
         };
-        bytes[16..16 + core::mem::size_of::<LoadDllDebugInfo>()].copy_from_slice(info.as_bytes());
+        bytes[DEBUG_EVENT_HEADER_SIZE
+            ..DEBUG_EVENT_HEADER_SIZE + core::mem::size_of::<LoadDllDebugInfo>()]
+            .copy_from_slice(info.as_bytes());
         assert_eq!(
             decode(&bytes).unwrap(),
             DebugEvent::LoadDll {
@@ -452,7 +446,7 @@ mod tests {
     #[test]
     fn a_short_event_is_an_error_rather_than_a_panic() {
         assert!(decode(&[1, 0, 0, 0]).is_err());
-        assert!(decode(&event(RIP_EVENT, 1, 1)[..16]).is_err());
+        assert!(decode(&event(RIP_EVENT, 1, 1)[..DEBUG_EVENT_HEADER_SIZE]).is_err());
     }
 
     #[test]

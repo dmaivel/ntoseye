@@ -1,9 +1,13 @@
-//! The memory of a live user-mode target: one process's address space behind
-//! a process server, read and written by virtual address through the server's
-//! own debug-memory calls.
+//! The backend-neutral interface for a live user-mode target: one process's
+//! address space read and written by virtual address, its thread id format,
+//! and the shared live process metadata updated by the backend as threads
+//! arrive and exit.
+
+use std::sync::{Arc, Mutex, PoisonError};
+
+use zerocopy::{FromBytes, Immutable, KnownLayout};
 
 use crate::base::error::{Error, Result};
-use zerocopy::{FromBytes, Immutable, KnownLayout};
 
 /// Windows `MEMORY_BASIC_INFORMATION` on a 64-bit target, as `VirtualQuery`
 /// fills it: `{ PVOID BaseAddress; PVOID AllocationBase; DWORD
@@ -50,17 +54,104 @@ impl MemoryBasicInformation {
     }
 }
 
-/// A live process's memory, as a process server serves it: by virtual
+/// The backend thread id of live thread `tid`: its id in hex, as WinDbg names
+/// a user-mode thread.
+pub fn backend_thread_id(tid: u32) -> String {
+    format!("{tid:x}")
+}
+
+/// Parse a backend thread id produced by [`backend_thread_id`].
+pub fn parse_backend_thread_id(id: &str) -> Option<u32> {
+    u32::from_str_radix(id, 16).ok()
+}
+
+/// One thread of a live user-mode process, free of any backend-private handle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveUserThread {
+    pub tid: u32,
+    /// The thread's `_TEB`, when the backend names it.
+    pub teb: Option<u64>,
+    /// The address the thread's function starts at, when the backend says.
+    pub start_address: Option<u64>,
+    /// The thread's description (`SetThreadDescription`), when it has one.
+    pub name: Option<String>,
+}
+
+/// Live process metadata shared between a user-mode backend and the Windows
+/// model above it, so thread creation and exit stay visible to inspection
+/// commands without copying or exposing backend handles.
+#[derive(Clone, Debug, Default)]
+pub struct LiveProcessInfo {
+    pub pid: u32,
+    /// The process's `_PEB`, when the backend names it.
+    pub peb: Option<u64>,
+    /// The image the process was created from, which is its only module until
+    /// its loader fills the lists.
+    pub image_base: Option<u64>,
+    /// The file name of the command line this session created, if one was.
+    pub image_hint: Option<String>,
+    pub threads: Vec<LiveUserThread>,
+}
+
+impl LiveProcessInfo {
+    /// The thread `tid` names.
+    pub fn thread_by_id(&self, tid: u32) -> Option<&LiveUserThread> {
+        self.threads.iter().find(|thread| thread.tid == tid)
+    }
+
+    /// The thread a backend id names (see [`backend_thread_id`]).
+    pub fn thread_by_backend_id(&self, backend_id: &str) -> Option<&LiveUserThread> {
+        self.thread_by_id(parse_backend_thread_id(backend_id)?)
+    }
+
+    /// The index of the thread a backend id names in the process's thread
+    /// list, which is the number `~` selects it by.
+    pub fn thread_index_by_backend_id(&self, backend_id: &str) -> Option<usize> {
+        let tid = parse_backend_thread_id(backend_id)?;
+        self.threads.iter().position(|thread| thread.tid == tid)
+    }
+}
+
+/// Shared handle to [`LiveProcessInfo`] owned by the backend and read by the
+/// target model.
+#[derive(Clone, Debug, Default)]
+pub struct LiveProcessState {
+    inner: Arc<Mutex<LiveProcessInfo>>,
+}
+
+impl LiveProcessState {
+    pub fn new(info: LiveProcessInfo) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(info)),
+        }
+    }
+
+    pub fn snapshot(&self) -> LiveProcessInfo {
+        self.with(Clone::clone)
+    }
+
+    pub fn with<R>(&self, f: impl FnOnce(&LiveProcessInfo) -> R) -> R {
+        let guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        f(&guard)
+    }
+
+    pub fn update<R>(&self, f: impl FnOnce(&mut LiveProcessInfo) -> R) -> R {
+        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        f(&mut guard)
+    }
+}
+
+/// A live process's memory, as a user-mode backend serves it: by virtual
 /// address, since the target is one process with one address space.
 pub trait UserLiveMemory: Send + Sync {
-    /// Read `buf` at `address` in `process`. A short read is an error.
-    fn read(&self, process: u64, address: u64, buf: &mut [u8]) -> Result<()>;
+    /// Read `buf` at `address`. A short read is an error.
+    fn read(&self, address: u64, buf: &mut [u8]) -> Result<()>;
 
-    /// Write `buf` at `address` in `process`. A short write is an error.
-    fn write(&self, process: u64, address: u64, buf: &[u8]) -> Result<()>;
+    /// Write `buf` at `address`. A short write is an error.
+    fn write(&self, address: u64, buf: &[u8]) -> Result<()>;
 
-    /// What `VirtualQuery` reports for `address` in `process`.
-    fn query(&self, process: u64, address: u64) -> Result<MemoryBasicInformation>;
+    /// What `VirtualQuery` reports for `address`.
+    fn query(&self, address: u64) -> Result<MemoryBasicInformation>;
 }
 
 #[cfg(test)]
@@ -99,5 +190,12 @@ mod tests {
     fn a_short_query_answer_is_refused() {
         assert!(MemoryBasicInformation::decode(&[0u8; 28]).is_err());
         assert!(MemoryBasicInformation::decode(&[]).is_err());
+    }
+
+    #[test]
+    fn thread_ids_round_trip_in_hex() {
+        assert_eq!(backend_thread_id(0x1a2c), "1a2c");
+        assert_eq!(parse_backend_thread_id("1a2c"), Some(0x1a2c));
+        assert_eq!(parse_backend_thread_id("not-hex"), None);
     }
 }

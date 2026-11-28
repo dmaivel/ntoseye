@@ -1119,20 +1119,12 @@ impl NtoseyeMcp {
                 }
                 let connect = connect
                     .ok_or_else(|| invalid_params("dbgsrv requires 'connect' (the endpoint)"))?;
-                let target = match (process, create) {
-                    (Some(pid), None) => crate::DbgsrvTarget::Attach { pid },
-                    (None, Some(command_line)) => crate::DbgsrvTarget::Create { command_line },
-                    (None, None) => {
-                        return Err(invalid_params(
-                            "dbgsrv requires exactly one of 'process' and 'create'",
-                        ));
-                    }
-                    (Some(_), Some(_)) => {
-                        return Err(invalid_params(
-                            "'process' and 'create' are mutually exclusive",
-                        ));
-                    }
-                };
+                let target = crate::DbgsrvTarget::from_options(process, create).map_err(|err| {
+                    invalid_params(match err {
+                        Error::InvalidArgument(message) => message,
+                        other => other.to_string(),
+                    })
+                })?;
                 TargetSpec::Dbgsrv { connect, target }
             }
             live => {

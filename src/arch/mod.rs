@@ -189,6 +189,10 @@ pub trait Architecture: Sync {
     /// Register holding the processor's status flags.
     fn flags_register(&self) -> &'static str;
 
+    /// Bit in [`Self::flags_register`] that arms hardware single-stepping
+    /// (`RFLAGS.TF` on x86/AMD64, `PSTATE.SS` on AArch64).
+    fn single_step_flag_mask(&self) -> u64;
+
     /// The general registers in the order the register grid and a step's
     /// changed-register line show them, flags last.
     fn general_registers(&self) -> &'static [&'static str];

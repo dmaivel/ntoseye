@@ -52,6 +52,9 @@ pub enum Error {
     #[error("KD protocol failure: kernel returned NTSTATUS {ntstatus:#x} for api {api:#x}")]
     KdStatus { ntstatus: u32, api: u32 },
 
+    #[error("dbgsrv protocol failure: {0}")]
+    Dbgsrv(String),
+
     #[error("breakpoint: {0}")]
     Breakpoint(String),
 

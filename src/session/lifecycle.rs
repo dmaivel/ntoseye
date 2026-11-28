@@ -9,7 +9,7 @@ use single_instance::SingleInstance;
 
 use crate::arch::Arch;
 use crate::backend::dbg_backend::{BugcheckInfo, DebugBackend, DebugCapability};
-use crate::backend::dbgsrv::{DbgSrvClient, DbgSrvUserMemory, DbgsrvBackend, DbgsrvTarget};
+use crate::backend::dbgsrv::{DbgsrvBackend, DbgsrvClient, DbgsrvTarget};
 use crate::backend::gdb::GdbClient;
 use crate::backend::kd::{KdBackend, KdMemorySource};
 use crate::backend::memory_backend::MemoryBackend;
@@ -213,40 +213,16 @@ impl Session {
         target: &DbgsrvTarget,
         progress: &mut dyn FnMut(&str),
     ) -> Result<Self> {
-        // A process server is one connection: two sessions on the same server
-        // would interleave their calls, and the second would attach the same
-        // process twice. The lock is taken before the server is touched, as
-        // KD's is, so a second attach fails fast without disturbing the first.
+        // A process server is one connection: take the instance lock before
+        // touching the server so a second attach fails fast without disturbing
+        // the first.
         let guard = Some(acquire_instance_guard(connect)?);
-        let client = Arc::new(DbgSrvClient::connect(connect, progress)?);
+        let client = Arc::new(DbgsrvClient::connect(connect, progress)?);
         let backend = DbgsrvBackend::connect(Arc::clone(&client), target, progress)?;
-        let (pid, arch, process) = (backend.pid(), backend.arch(), backend.process_handle());
-        let memory = Arc::new(DbgSrvUserMemory::new(Arc::clone(&client), process));
-        let phys = Arc::new(PhysMem::user_live(memory, process, arch));
-        let live = backend.live_process();
-        let mut debugger = Target::with_live_user_process(
-            phys,
-            crate::nt::target::LiveUserProcess {
-                pid,
-                process_handle: live.process,
-                peb: (live.peb != 0).then_some(live.peb),
-                modules: Vec::new(),
-                image_base: live.image_base,
-                image_hint: live.image_hint.clone(),
-                threads: live
-                    .threads
-                    .into_iter()
-                    .map(|thread| crate::nt::target::LiveUserThread {
-                        tid: thread.tid,
-                        handle: thread.handle,
-                        teb: (thread.teb != 0).then_some(thread.teb),
-                        start_address: thread.start_address,
-                        name: None,
-                    })
-                    .collect(),
-                selected_tid: live.selected_tid,
-            },
-        )?;
+        let phys = Arc::new(PhysMem::user_live(backend.user_memory(), backend.arch()));
+        let process =
+            crate::nt::target::LiveUserProcess::new(backend.live_state(), backend.selected_tid());
+        let mut debugger = Target::with_live_user_process(phys, process)?;
         // Ctrl+C raises the target's flag; the backend's stop wait polls it,
         // so one thread services a break-in.
         debugger.set_interrupt(backend.interrupt_flag());

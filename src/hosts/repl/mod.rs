@@ -599,15 +599,9 @@ impl<'a> ReplState<'a> {
     /// place in the process's list (`17`), as WinDbg's `0:017>` does.
     pub fn prompt_thread(&self) -> String {
         let thread = &self.ctx.current_thread;
-        let target = &self.ctx.target;
-        target
-            .user_dump_info()
-            .and_then(|info| info.thread_index(info.tid_for_backend_id(thread)?))
-            .or_else(|| {
-                target
-                    .live_user_process()?
-                    .thread_index_by_backend_id(thread)
-            })
+        self.ctx
+            .target
+            .user_thread_index_for_backend_id(thread)
             .map_or_else(|| thread_label(thread), |index| index.to_string())
     }
 
@@ -1044,8 +1038,8 @@ fn live_user_summary(target: &Target) -> Option<LiveUserSummary> {
         .first()
         .map(|module| format!("{} {:#x}", module.name, module.base_address.0));
     Some(LiveUserSummary {
-        process: format!("{:#x}", process.pid),
-        threads: process.threads.len(),
+        process: format!("{:#x}", process.pid()),
+        threads: process.thread_count(),
         modules: process.modules.len(),
         image,
     })

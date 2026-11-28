@@ -763,29 +763,15 @@ impl Target {
     /// the PEB its process server names, else its selected thread's.
     fn peb_scope(&self, address: Option<VirtAddr>) -> Result<(Dtb, VirtAddr, Option<VirtAddr>)> {
         match self.kind() {
-            // The PEB a minidump recorded is the one its selected thread's
-            // TEB names; there is no process server to ask.
-            TargetKind::UserDump => {
+            TargetKind::UserDump | TargetKind::UserLive => {
                 let dtb = self.current_dtb();
-                let view = self.user_mode_types(dtb)?;
-                match address {
-                    Some(address) => Ok((dtb, address, None)),
-                    None => {
-                        let teb = self.user_teb()?;
-                        let peb = self.user_peb(view, teb)?;
-                        Ok((dtb, peb, self.user_wow64_peb(view, teb)))
-                    }
-                }
-            }
-            TargetKind::UserLive => {
-                let process = self.live_user_process().ok_or_else(|| {
-                    Error::DebugInfo("this live target holds no process".to_string())
-                })?;
-                let dtb = self.current_dtb();
-                match address.or_else(|| process.peb.map(VirtAddr)) {
+                let known_peb = address.or_else(|| {
+                    self.live_user_process()
+                        .and_then(|process| process.peb())
+                        .map(VirtAddr)
+                });
+                match known_peb {
                     Some(peb) => Ok((dtb, peb, None)),
-                    // The process server names no PEB; the selected thread's
-                    // TEB does, once its symbols are loaded.
                     None => {
                         let view = self.user_mode_types(dtb)?;
                         let teb = self.user_teb()?;

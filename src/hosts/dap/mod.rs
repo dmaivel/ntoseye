@@ -885,20 +885,20 @@ fn target_spec(
         // names: attaching to a kernel over it is not a thing.
         let connect = arg_str(args, "connect")
             .ok_or_else(|| "dbgsrv requires 'connect' (the endpoint)".to_string())?;
-        let target = match (args.get("process"), arg_str(args, "create")) {
-            (Some(pid), None) => crate::DbgsrvTarget::Attach {
-                pid: pid
-                    .as_u64()
+        let process = args
+            .get("process")
+            .map(|pid| {
+                pid.as_u64()
                     .and_then(|pid| u32::try_from(pid).ok())
-                    .ok_or_else(|| "'process' must be a process id".to_string())?,
-            },
-            (None, Some(command_line)) => crate::DbgsrvTarget::Create {
-                command_line: command_line.to_string(),
-            },
-            _ => {
-                return Err("dbgsrv requires exactly one of 'process' and 'create'".to_string());
-            }
-        };
+                    .ok_or_else(|| "'process' must be a process id".to_string())
+            })
+            .transpose()?;
+        let create = arg_str(args, "create");
+        let target =
+            crate::DbgsrvTarget::from_options(process, create).map_err(|error| match error {
+                Error::InvalidArgument(message) => message,
+                other => other.to_string(),
+            })?;
         let spec = TargetSpec::Dbgsrv { connect, target };
         return spec.validate().map(|()| spec).map_err(|error| match error {
             Error::InvalidArgument(message) => message,

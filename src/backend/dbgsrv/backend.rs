@@ -1,35 +1,34 @@
 //! A live user-mode target behind a DbgRpc process server: one process, its
 //! threads, and its registers, with breakpoints patched into the process's
-//! own code.
+//! own code or delegated to the server.
 //!
 //! The server supplies the primitives (`ReadVirtual`, `GetContext`,
 //! `WaitForEvent`, ...); everything above — symbols, the Windows model,
-//! stacks, the REPL — is the same code that inspects a user-mode minidump,
-//! which is why this backend reports a user-mode context rather than a
-//! processor one.
+//! stacks, the REPL — shares the user-mode model with minidumps.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::arch::debug_registers::invalid_slot;
-use crate::arch::{Arch, Family, HardwareWatch, HwBreakpointAccess, RegisterMap};
+use crate::arch::{Arch, HardwareWatch, HwBreakpointAccess, RegisterMap};
 use crate::backend::dbg_backend::{
     BackendCapability, ContinueDisposition, DebugBackend, DebugCapability, DebugLog,
-    DebugOutputPage, ModuleEvent, ModuleNotification, StopEvent,
+    DebugOutputPage, ExceptionRecord, ModuleEvent, ModuleNotification, StopEvent,
 };
+use crate::backend::userlive::{
+    LiveProcessInfo, LiveProcessState, LiveUserThread, backend_thread_id, parse_backend_thread_id,
+};
+use crate::base::bytes::utf16le_nul_terminated;
 use crate::base::error::{Error, Result};
-use crate::base::ntstatus::STATUS_SINGLE_STEP;
+use crate::base::ntstatus::{DBG_CONTINUE, DBG_EXCEPTION_NOT_HANDLED, STATUS_SINGLE_STEP};
 use crate::base::types::VirtAddr;
 
-use super::client::DbgSrvClient;
+use super::client::{DbgsrvClient, DbgsrvUserMemory};
 use super::events::{self, DebugEvent};
-use super::service::{
-    DBG_CONTINUE, DBG_EXCEPTION_NOT_HANDLED, DEBUG_EVENT_SIZE, DEBUG_PROCESS_ONLY_THIS_PROCESS,
-    PROC_INFO_NO_SUSPEND,
-};
+use super::service::{DEBUG_PROCESS_ONLY_THIS_PROCESS, MAX_PROCESS_THREADS, PROC_INFO_NO_SUSPEND};
 
 /// How long one `WaitForEvent` may take, so a Ctrl+C seen between polls can
 /// break the process in without a second thread.
@@ -48,31 +47,16 @@ const BREAK_IN_TRIES: usize = 100;
 /// request.
 const THREAD_INFO_START: u32 = 64;
 
-/// One thread of the debuggee.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LiveThread {
-    pub tid: u32,
-    /// The process server's handle to the thread.
-    pub handle: u64,
-    /// The thread's `_TEB`, 0 when the server could not name it.
-    pub teb: u64,
-    /// The address the thread's function starts at, when the server says.
-    pub start_address: Option<u64>,
-}
+/// Retained debug-output lines (`OUTPUT_DEBUG_STRING_EVENT`), matching KD's
+/// ring capacity.
+const DEBUG_LOG_CAPACITY: usize = 4096;
 
-/// The process a [`DbgsrvBackend`] debugs.
-#[derive(Clone, Debug)]
-pub struct LiveProcessInfo {
-    pub pid: u32,
-    pub process: u64,
-    /// The process's `_PEB`, 0 when the server could not name it.
-    pub peb: u64,
-    pub threads: Vec<LiveThread>,
-    pub selected_tid: Option<u32>,
-    /// The image the process was created from, when the server named one.
-    pub image_base: Option<u64>,
-    /// The file name of the command line this session created, if any.
-    pub image_hint: Option<String>,
+/// One thread tracked by the backend: its server handle plus the public
+/// metadata mirrored to [`LiveProcessState`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BackendThread {
+    handle: u64,
+    info: LiveUserThread,
 }
 
 /// What the debugger is attached to: an existing process, or one it starts.
@@ -84,17 +68,40 @@ pub enum DbgsrvTarget {
     Create { command_line: String },
 }
 
+impl DbgsrvTarget {
+    /// Resolve the mutually exclusive `(process, create)` options shared by
+    /// the CLI, MCP, DAP, and Python SDK hosts.
+    pub fn from_options(process: Option<u32>, create: Option<String>) -> Result<Self> {
+        match (process, create) {
+            (Some(pid), None) => Ok(Self::Attach { pid }),
+            (None, Some(command_line)) => Ok(Self::Create { command_line }),
+            (None, None) => Err(Error::InvalidArgument(
+                "dbgsrv requires exactly one of 'process' and 'create'".to_string(),
+            )),
+            (Some(_), Some(_)) => Err(Error::InvalidArgument(
+                "'process' and 'create' are mutually exclusive".to_string(),
+            )),
+        }
+    }
+}
+
 pub struct DbgsrvBackend {
-    client: Arc<DbgSrvClient>,
+    client: Arc<DbgsrvClient>,
     pid: u32,
-    process: u64,
-    peb: u64,
+    /// The process server's handle to the process, shared with
+    /// [`DbgsrvUserMemory`] so a handle update from `CreateProcess` stays in
+    /// sync.
+    process: Arc<AtomicU64>,
     arch: Arch,
     register_map: RegisterMap,
-    threads: Vec<LiveThread>,
+    /// Shared live metadata (PEB, image base/hint, threads) read by `Target`.
+    live_state: LiveProcessState,
+    threads: Vec<BackendThread>,
     current: usize,
     /// The stop the target is held at, when it is not running.
     stop: Option<StopEvent>,
+    /// The exception record of the last exception stop, for `.exr -1`.
+    last_exception: Option<ExceptionRecord>,
     running: bool,
     /// The process's exit status, once it reported one.
     exit: Option<u32>,
@@ -109,41 +116,34 @@ pub struct DbgsrvBackend {
     /// Raised by the host (Ctrl+C) and by [`Self::interrupt`]'s caller: the
     /// stop wait breaks the process in when it sees it.
     interrupt: Arc<AtomicBool>,
-    /// The thread whose trap flag (AMD64) or single-step bit (ARM64) is armed
-    /// by a step that has not stopped yet.
+    /// The thread whose single-step flag is armed by a step that has not
+    /// stopped yet.
     armed_step: Option<u64>,
-    /// The watchpoints armed in this process's threads, by slot: the debug
-    /// registers are per thread, so a thread created later is armed from
-    /// here.
+    /// The watchpoints armed in this process's threads, by slot: debug
+    /// registers are per thread, so threads created later are armed from here.
     hardware: BTreeMap<usize, HardwareWatch>,
-    /// The image the process was created from, which is the only module a
-    /// process has before its loader runs.
-    image_base: Option<u64>,
-    /// The file name of the command line this session created, used to name
-    /// that image before its own headers can be read.
-    image_hint: Option<String>,
 }
 
 impl DbgsrvBackend {
     /// Attach to, or create, the process `target` names, and hold it at its
     /// first debug event.
     pub fn connect(
-        client: Arc<DbgSrvClient>,
+        client: Arc<DbgsrvClient>,
         target: &DbgsrvTarget,
         progress: &mut dyn FnMut(&str),
     ) -> Result<Self> {
         let arch = client.arch();
-        let mut backend_image_hint: Option<String> = None;
-        let (pid, process) = match target {
+        let (pid, process_handle, image_hint) = match target {
             DbgsrvTarget::Attach { pid } => {
                 // Attach first: enumerating the machine's processes is a
                 // separate privilege, and the attach itself says whether the
                 // process is there.
                 progress(&format!("dbgsrv: attaching to process {pid}"));
-                let attached = client.server().attach_process(*pid, 0).map_err(|error| {
-                    Error::DebugInfo(format!("dbgsrv process {pid} not found: {error}"))
-                })?;
-                (*pid, attached.handle)
+                let attached = client
+                    .server()
+                    .attach_process(*pid, 0)
+                    .map_err(|error| Error::Dbgsrv(format!("process {pid} not found: {error}")))?;
+                (*pid, attached.handle, None)
             }
             DbgsrvTarget::Create { command_line } => {
                 progress(&format!("dbgsrv: creating '{command_line}'"));
@@ -162,37 +162,46 @@ impl DbgsrvBackend {
                     "dbgsrv: created process {} (thread {:#x})",
                     created.pid, created.tid
                 ));
-                backend_image_hint = hint;
-                (created.pid, created.process_handle)
+                (created.pid, created.process_handle, hint)
             }
         };
-        let mut backend = Self {
-            client: client.clone(),
+        let peb = client
+            .server()
+            .process_data_offset(process_handle)
+            .ok()
+            .filter(|peb| *peb != 0);
+        progress(&format!(
+            "dbgsrv: process {pid} attached (handle {process_handle:#x}, PEB {:#x})",
+            peb.unwrap_or(0)
+        ));
+        let live_state = LiveProcessState::new(LiveProcessInfo {
             pid,
-            process,
-            peb: 0,
+            peb,
+            image_base: None,
+            image_hint,
+            threads: Vec::new(),
+        });
+        let mut backend = Self {
+            client: Arc::clone(&client),
+            pid,
+            process: Arc::new(AtomicU64::new(process_handle)),
             arch,
             register_map: arch.register_map().clone(),
+            live_state,
             threads: Vec::new(),
             current: 0,
             stop: None,
+            last_exception: None,
             running: false,
             exit: None,
             patched: HashMap::new(),
             service_plants: HashMap::new(),
-            debug_log: DebugLog::new(4096),
+            debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
             modules_changed: false,
             interrupt: Arc::new(AtomicBool::new(false)),
             armed_step: None,
             hardware: BTreeMap::new(),
-            image_base: None,
-            image_hint: backend_image_hint.take(),
         };
-        backend.peb = client.server().process_data_offset(process).unwrap_or(0);
-        progress(&format!(
-            "dbgsrv: process {pid} attached (handle {process:#x}, PEB {:#x})",
-            backend.peb
-        ));
         backend.reload_threads()?;
         progress(&format!("dbgsrv: {} thread(s)", backend.threads.len()));
         if backend.threads.is_empty() {
@@ -202,20 +211,12 @@ impl DbgsrvBackend {
         }
         // The process's creation is already queued: it is the stop the target
         // sits at until a run command.
-        let first = backend.next_stop(ATTACH_EVENT_MS)?;
-        let Some(stop) = first else {
-            return Err(Error::DebugInfo(
-                "dbgsrv attach produced no initial debug event".to_string(),
-            ));
-        };
+        let stop = backend
+            .next_stop(ATTACH_EVENT_MS)?
+            .ok_or_else(|| Error::Dbgsrv("attach produced no initial debug event".to_string()))?;
         backend.stop = Some(stop);
         backend.running = false;
         Ok(backend)
-    }
-
-    /// The stop the target is held at, if it has stopped since it last ran.
-    pub fn current_stop(&self) -> Option<&StopEvent> {
-        self.stop.as_ref()
     }
 
     pub fn arch(&self) -> Arch {
@@ -226,23 +227,27 @@ impl DbgsrvBackend {
         self.pid
     }
 
-    /// The process server's handle to the process, which its memory calls
-    /// name.
+    /// The process server's handle to the process.
     pub fn process_handle(&self) -> u64 {
-        self.process
+        self.process.load(Ordering::Acquire)
     }
 
-    /// The live process as the target records it.
-    pub fn live_process(&self) -> LiveProcessInfo {
-        LiveProcessInfo {
-            pid: self.pid,
-            process: self.process,
-            peb: self.peb,
-            threads: self.threads.clone(),
-            selected_tid: self.threads.get(self.current).map(|thread| thread.tid),
-            image_base: self.image_base,
-            image_hint: self.image_hint.clone(),
-        }
+    /// The virtual-memory adapter bound to this process.
+    pub fn user_memory(&self) -> Arc<DbgsrvUserMemory> {
+        Arc::new(DbgsrvUserMemory::new(
+            Arc::clone(&self.client),
+            Arc::clone(&self.process),
+        ))
+    }
+
+    /// The shared live process metadata read by `Target`.
+    pub fn live_state(&self) -> LiveProcessState {
+        self.live_state.clone()
+    }
+
+    /// The thread id selected at open time, if any.
+    pub fn selected_tid(&self) -> Option<u32> {
+        self.threads.get(self.current).map(|thread| thread.info.tid)
     }
 
     /// The flag a host raises to interrupt work on this target: the stop wait
@@ -251,112 +256,176 @@ impl DbgsrvBackend {
         Arc::clone(&self.interrupt)
     }
 
-    pub fn client(&self) -> &Arc<DbgSrvClient> {
+    pub fn client(&self) -> &Arc<DbgsrvClient> {
         &self.client
-    }
-
-    /// The backend id of `tid`, as `~` prints it: the thread id in hex.
-    pub fn backend_thread_id(tid: u32) -> String {
-        format!("{tid:x}")
     }
 
     fn require_alive(&self) -> Result<()> {
         match self.exit {
-            Some(code) => Err(Error::DebugInfo(format!("dbgsrv process exited: {code}"))),
+            Some(code) => Err(Error::Dbgsrv(format!("process exited: {code}"))),
             None => Ok(()),
         }
     }
 
-    fn current_thread(&self) -> Result<&LiveThread> {
-        self.threads.get(self.current).ok_or_else(|| {
-            Error::DebugInfo(format!(
-                "dbgsrv process {} has no thread to inspect",
-                self.pid
-            ))
-        })
+    fn current_thread(&self) -> Result<&BackendThread> {
+        self.threads
+            .get(self.current)
+            .ok_or_else(|| Error::Dbgsrv(format!("process {} has no thread to inspect", self.pid)))
+    }
+
+    fn sync_live_threads(&self) {
+        self.live_state.update(|info| {
+            info.threads = self
+                .threads
+                .iter()
+                .map(|thread| thread.info.clone())
+                .collect();
+        });
     }
 
     /// Ask the server for the process's threads and their TEBs, growing the
     /// request once if it listed more than fit.
     fn reload_threads(&mut self) -> Result<()> {
         let mut wanted = THREAD_INFO_START;
-        let (_, mut records, mut total) =
-            self.client
-                .server()
-                .process_info(self.pid, PROC_INFO_NO_SUSPEND, wanted)?;
-        if total > wanted {
-            // A server naming more threads than a process can have is
-            // corrupt: ask for the cap instead of allocating for the number.
-            wanted = total.min(super::service::MAX_PROCESS_THREADS);
-            let (_, more, count) =
+        let records = loop {
+            let (_, mut records, total) =
                 self.client
                     .server()
                     .process_info(self.pid, PROC_INFO_NO_SUSPEND, wanted)?;
-            records = more;
-            total = count;
-        }
-        let _ = total;
-        records.truncate(wanted as usize);
+            if total <= wanted || wanted >= MAX_PROCESS_THREADS {
+                records.truncate(wanted as usize);
+                break records;
+            }
+            // Clamp to avoid trusting a corrupt count from the server.
+            wanted = total.min(MAX_PROCESS_THREADS);
+        };
+        let process = self.process_handle();
         let mut threads = Vec::with_capacity(records.len());
         for record in records {
             let teb = self
                 .client
                 .server()
                 .thread_data_offset(record.handle)
-                .unwrap_or(0);
+                .ok()
+                .filter(|teb| *teb != 0);
             let start_address = self
                 .client
                 .server()
-                .thread_start_address(self.process, record.handle)
+                .thread_start_address(process, record.handle)
                 .ok()
                 .filter(|address| *address != 0);
-            threads.push(LiveThread {
-                tid: record.tid,
+            threads.push(BackendThread {
                 handle: record.handle,
-                teb,
-                start_address,
+                info: LiveUserThread {
+                    tid: record.tid,
+                    teb,
+                    start_address,
+                    name: None,
+                },
             });
         }
         if let Some(current) = self.threads.get(self.current)
-            && let Some(index) = threads.iter().position(|thread| thread.tid == current.tid)
+            && let Some(index) = threads
+                .iter()
+                .position(|thread| thread.info.tid == current.info.tid)
         {
             self.current = index;
         } else if self.current >= threads.len() {
             self.current = 0;
         }
         self.threads = threads;
+        self.sync_live_threads();
         Ok(())
     }
 
     /// Read the debuggee's memory through the server.
     fn read_virtual(&self, address: u64, buf: &mut [u8]) -> Result<()> {
-        self.client.read_virtual(self.process, address, buf)
+        self.client
+            .read_virtual(self.process_handle(), address, buf)
     }
 
-    fn add_thread(&mut self, tid: u32, handle: u64, teb: u64) {
-        if self.threads.iter().any(|thread| thread.tid == tid) {
+    fn add_thread(&mut self, tid: u32, handle: u64, teb: u64, start_address: u64) {
+        if self.threads.iter().any(|thread| thread.info.tid == tid) {
             return;
         }
-        // The modern interface's `GetThreadBasicInfo` takes the process's
-        // handle and then the thread's.
-        let start_address = self
-            .client
-            .server()
-            .thread_start_address(self.process, handle)
-            .ok()
-            .filter(|address| *address != 0);
-        self.threads.push(LiveThread {
-            tid,
-            handle,
-            teb,
-            start_address,
+        let start_address = (start_address != 0).then_some(start_address).or_else(|| {
+            self.client
+                .server()
+                .thread_start_address(self.process_handle(), handle)
+                .ok()
+                .filter(|address| *address != 0)
         });
-        // The debug registers are per thread: a thread this process creates
-        // after a watchpoint was armed starts with none, so it is armed from
-        // the same slot state now.
+        self.threads.push(BackendThread {
+            handle,
+            info: LiveUserThread {
+                tid,
+                teb: (teb != 0).then_some(teb),
+                start_address,
+                name: None,
+            },
+        });
+        self.sync_live_threads();
+        // Debug registers are per thread: arm any existing watchpoints on the
+        // newly arrived thread.
         for (slot, watch) in self.hardware.clone() {
             let _ = self.arm_slot_on_thread(handle, slot, Some(watch));
         }
+    }
+
+    fn remove_thread(&mut self, tid: u32) {
+        if let Some(index) = self
+            .threads
+            .iter()
+            .position(|thread| thread.info.tid == tid)
+        {
+            let removed = self.threads.remove(index);
+            if self.current >= self.threads.len() {
+                self.current = self.threads.len().saturating_sub(1);
+            }
+            if self.client.closes_handles() && removed.handle != 0 {
+                let _ = self.client.server().close_handle(removed.handle);
+            }
+            self.sync_live_threads();
+        }
+    }
+
+    /// Read a thread's `CONTEXT` into the architecture's register buffer.
+    fn read_thread_context(&self, handle: u64) -> Result<Vec<u8>> {
+        let flags = self.arch.context_flags();
+        let (context, _used) = self.client.server().get_context(
+            handle,
+            flags.all,
+            flags.offset as u32,
+            self.arch.context_size() as u32,
+        )?;
+        Ok(self.arch.register_buffer(&context))
+    }
+
+    /// Write the `CONTEXT` prefix of `registers` back to `handle`.
+    fn write_thread_context(&self, handle: u64, registers: &[u8]) -> Result<()> {
+        let size = self.arch.context_size();
+        if registers.len() < size {
+            return Err(Error::Dbgsrv(format!(
+                "a register write needs a {size}-byte CONTEXT, {} bytes given",
+                registers.len()
+            )));
+        }
+        let _used = self
+            .client
+            .server()
+            .set_context(handle, &registers[..size])?;
+        Ok(())
+    }
+
+    /// Read `handle`'s context, apply `edit`, and write it back.
+    fn modify_thread_context(
+        &self,
+        handle: u64,
+        edit: impl FnOnce(&mut [u8]) -> Result<()>,
+    ) -> Result<()> {
+        let mut registers = self.read_thread_context(handle)?;
+        edit(&mut registers)?;
+        self.write_thread_context(handle, &registers)
     }
 
     /// Program slot `slot` in one thread's `CONTEXT`, or clear it.
@@ -366,25 +435,15 @@ impl DbgsrvBackend {
         slot: usize,
         watch: Option<HardwareWatch>,
     ) -> Result<()> {
-        let flags = self.arch.context_flags();
-        let size = self.arch.context_size() as u32;
-        let (context, _) =
-            self.client
-                .server()
-                .get_context(handle, flags.all, flags.offset as u32, size)?;
-        let mut registers = self.arch.register_buffer(&context);
-        self.arch
-            .debug_registers()
-            .arm(&self.register_map, &mut registers, slot, watch)?;
-        self.client
-            .server()
-            .set_context(handle, &registers[..self.arch.context_size()])?;
-        Ok(())
+        self.modify_thread_context(handle, |registers| {
+            self.arch
+                .debug_registers()
+                .arm(&self.register_map, registers, slot, watch)
+        })
     }
 
-    /// [`Self::arm_slot_on_thread`] on every thread of the process: a watch
-    /// has to be programmed in each thread's context, and a failure on any of
-    /// them is reported once the rest were tried.
+    /// [`Self::arm_slot_on_thread`] on every thread of the process; reports the
+    /// first failure after trying the rest.
     fn arm_slot_on_all_threads(&self, slot: usize, watch: Option<HardwareWatch>) -> Result<()> {
         let mut first_error = None;
         for thread in &self.threads {
@@ -394,54 +453,65 @@ impl DbgsrvBackend {
                 first_error = Some(error);
             }
         }
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        first_error.map_or(Ok(()), Err)
     }
 
-    fn remove_thread(&mut self, tid: u32) {
-        if let Some(index) = self.threads.iter().position(|thread| thread.tid == tid) {
-            self.threads.remove(index);
-            if self.current >= self.threads.len() {
-                self.current = self.threads.len().saturating_sub(1);
-            }
-        }
+    /// Set or clear the architecture's single-step flag on `handle` without
+    /// altering `self.current`.
+    fn set_step_flag(&self, handle: u64, enabled: bool) -> Result<()> {
+        let flags = self.arch.flags_register();
+        let mask = self.arch.single_step_flag_mask();
+        self.modify_thread_context(handle, |registers| {
+            let value = self.register_map.read_u64(flags, registers)?;
+            let updated = if enabled { value | mask } else { value & !mask };
+            self.register_map.write_u64(flags, registers, updated)
+        })
     }
 
-    /// One `WaitForEvent`, decoded into the stop it reports. Events that are
-    /// not stops (debug output, a thread the session will list anyway) are
-    /// absorbed here.
+    /// Record a freshly observed stop, mark the target halted, and clear any
+    /// armed single-step on the stopping thread.
+    fn record_stop(&mut self, stop: StopEvent) -> StopEvent {
+        self.stop = Some(stop.clone());
+        self.running = false;
+        if let Some(handle) = self.pending_step_thread(&stop) {
+            self.armed_step = None;
+            let _ = self.set_step_flag(handle, false);
+        }
+        stop
+    }
+
+    fn resume_with(&mut self, status: u32) -> Result<()> {
+        self.require_alive()?;
+        self.client.server().continue_event(status)?;
+        self.running = true;
+        self.stop = None;
+        Ok(())
+    }
+
+    /// One `WaitForEvent`, decoded into the stop it reports. Non-stop events
+    /// (debug output, thread creations and exits, other processes) are
+    /// absorbed and continued here so the target never stalls on them.
     fn next_stop(&mut self, timeout_ms: u32) -> Result<Option<StopEvent>> {
         loop {
-            // The connection lock must die with this statement: `absorb`
-            // makes calls of its own, and a `let ... else` keeps the
-            // initializer's temporaries alive for the whole block.
+            // Release the connection lock before `absorb` issues follow-up RPCs.
             let event = self.client.server().wait_for_event(timeout_ms);
             let Some(bytes) = event? else {
                 return Ok(None);
             };
-            match self.absorb(&bytes)? {
-                Some(stop) => return Ok(Some(stop)),
-                None => continue,
+            if let Some(stop) = self.absorb(&bytes)? {
+                return Ok(Some(stop));
             }
         }
     }
 
     /// Fold one debug event into the target's state: `Some` when it is a stop
-    /// the session should see.
+    /// the session should see, `None` after continuing an absorbed event.
     fn absorb(&mut self, bytes: &[u8]) -> Result<Option<StopEvent>> {
-        if bytes.len() < DEBUG_EVENT_SIZE as usize {
-            return Err(Error::DebugInfo(format!(
-                "dbgsrv: the server returned {} bytes of a debug event, {DEBUG_EVENT_SIZE} expected",
-                bytes.len()
-            )));
-        }
         let event = events::decode(bytes)?;
         let event_pid = event.process_id();
         if event_pid != self.pid && event_pid != 0 {
-            // Another process the server also debugs: take its events off the
-            // queue and continue it, so its threads are not left stopped.
+            // Another process the server also debugs: continue it so its
+            // threads are not left frozen.
             let status = match event {
                 DebugEvent::Exception { .. } => DBG_EXCEPTION_NOT_HANDLED,
                 _ => DBG_CONTINUE,
@@ -452,22 +522,22 @@ impl DbgsrvBackend {
         Ok(match event {
             DebugEvent::Exception {
                 thread_id,
-                code,
-                flags,
-                address,
-                parameters,
+                record,
                 first_chance,
                 ..
             } => {
-                let mut event = empty_stop();
-                event.thread_id = Some(Self::backend_thread_id(thread_id));
-                event.exception_code = Some(code);
-                event.first_chance = Some(first_chance);
-                event.exception_address = Some(address);
-                event.program_counter = Some(address);
-                event.watchpoint_address = self.watchpoint_address(thread_id, code);
-                let _ = (flags, parameters);
-                Some(event)
+                let watchpoint_address = self.watchpoint_address(thread_id, record.code);
+                let stop = StopEvent {
+                    thread_id: Some(backend_thread_id(thread_id)),
+                    exception_code: Some(record.code),
+                    first_chance: Some(first_chance),
+                    exception_address: Some(record.address),
+                    program_counter: Some(record.address),
+                    watchpoint_address,
+                    ..StopEvent::default()
+                };
+                self.last_exception = Some(record);
+                Some(stop)
             }
             DebugEvent::CreateProcess {
                 thread_id,
@@ -477,14 +547,17 @@ impl DbgsrvBackend {
                 teb,
                 ..
             } => {
-                self.process = process_handle;
-                self.image_base = (image_base != 0).then_some(image_base);
-                self.add_thread(thread_id, thread_handle, teb);
+                self.process.store(process_handle, Ordering::Release);
+                self.live_state.update(|info| {
+                    info.image_base = (image_base != 0).then_some(image_base);
+                });
+                self.add_thread(thread_id, thread_handle, teb, 0);
                 self.modules_changed = true;
-                let mut event = empty_stop();
-                event.thread_id = Some(Self::backend_thread_id(thread_id));
-                event.program_counter = Some(image_base);
-                Some(event)
+                Some(StopEvent {
+                    thread_id: Some(backend_thread_id(thread_id)),
+                    program_counter: Some(image_base),
+                    ..StopEvent::default()
+                })
             }
             DebugEvent::CreateThread {
                 thread_id,
@@ -493,48 +566,24 @@ impl DbgsrvBackend {
                 start_address,
                 ..
             } => {
-                self.add_thread(thread_id, handle, teb);
-                let mut event = empty_stop();
-                event.thread_id = Some(Self::backend_thread_id(thread_id));
-                event.program_counter = (start_address != 0).then_some(start_address);
-                Some(event)
+                self.add_thread(thread_id, handle, teb, start_address);
+                self.client.server().continue_event(DBG_CONTINUE)?;
+                None
             }
             DebugEvent::ExitThread { thread_id, .. } => {
                 self.remove_thread(thread_id);
+                self.client.server().continue_event(DBG_CONTINUE)?;
                 None
             }
             DebugEvent::ExitProcess { exit_code, .. } => {
                 self.exit = Some(exit_code);
-                let mut event = empty_stop();
-                event.exception_code = Some(exit_code);
-                Some(event)
+                Some(StopEvent {
+                    exception_code: Some(exit_code),
+                    ..StopEvent::default()
+                })
             }
-            DebugEvent::LoadDll { base, .. } => {
-                self.modules_changed = true;
-                let mut event = empty_stop();
-                event.modules_changed = true;
-                event.module_event = Some(ModuleNotification {
-                    kind: ModuleEvent::Load,
-                    base: VirtAddr(base),
-                    size: 0,
-                    path: None,
-                    process: Some(u64::from(self.pid)),
-                });
-                Some(event)
-            }
-            DebugEvent::UnloadDll { base, .. } => {
-                self.modules_changed = true;
-                let mut event = empty_stop();
-                event.modules_changed = true;
-                event.module_event = Some(ModuleNotification {
-                    kind: ModuleEvent::Unload,
-                    base: VirtAddr(base),
-                    size: 0,
-                    path: None,
-                    process: Some(u64::from(self.pid)),
-                });
-                Some(event)
-            }
+            DebugEvent::LoadDll { base, .. } => Some(self.module_stop(ModuleEvent::Load, base)),
+            DebugEvent::UnloadDll { base, .. } => Some(self.module_stop(ModuleEvent::Unload, base)),
             DebugEvent::OutputDebugString {
                 address,
                 wide,
@@ -543,31 +592,43 @@ impl DbgsrvBackend {
             } => {
                 let text = self.read_debug_string(address, wide, length);
                 self.debug_log.record(&text);
+                self.client.server().continue_event(DBG_CONTINUE)?;
                 None
             }
             DebugEvent::Rip { error, kind, .. } => {
-                return Err(Error::DebugInfo(format!(
-                    "dbgsrv: the process server lost the process (RIP event {kind}, error {error})"
+                return Err(Error::Dbgsrv(format!(
+                    "the process server lost the process (RIP event {kind}, error {error})"
                 )));
             }
         })
     }
 
-    /// The data address a hardware data breakpoint trapped on, when the stop
-    /// is one: [`STATUS_SINGLE_STEP`] is what a debug-register trap reports,
-    /// and the server can say where.
+    fn module_stop(&mut self, kind: ModuleEvent, base: u64) -> StopEvent {
+        self.modules_changed = true;
+        StopEvent {
+            modules_changed: true,
+            module_event: Some(ModuleNotification {
+                kind,
+                base: VirtAddr(base),
+                size: 0,
+                path: None,
+                process: Some(u64::from(self.pid)),
+            }),
+            ..StopEvent::default()
+        }
+    }
+
+    /// The data address a hardware data breakpoint trapped on, when the server
+    /// manages data breakpoints itself.
     fn watchpoint_address(&mut self, tid: u32, code: u32) -> Option<u64> {
-        // A single step is how both `t` and a `ba` hit report; only a server
-        // that keeps data breakpoints of its own can name the address, and
-        // the session reads it from the thread's DR6 anyway.
         if code != STATUS_SINGLE_STEP || self.client.generic_data_breakpoints() {
             return None;
         }
-        let thread = self.threads.iter().find(|thread| thread.tid == tid)?;
+        let thread = self.threads.iter().find(|thread| thread.info.tid == tid)?;
         let (address, _access) = self
             .client
             .server()
-            .last_data_breakpoint_hit(self.process, thread.handle)
+            .last_data_breakpoint_hit(self.process_handle(), thread.handle)
             .ok()?;
         Some(address)
     }
@@ -577,108 +638,58 @@ impl DbgsrvBackend {
         if address == 0 || length == 0 {
             return Vec::new();
         }
-        let bytes = if wide {
-            (length as usize) * 2
+        let byte_len = if wide {
+            usize::from(length) * 2
         } else {
-            length as usize
+            usize::from(length)
         };
-        let mut buffer = vec![0u8; bytes];
+        let mut buffer = vec![0u8; byte_len];
         if self.read_virtual(address, &mut buffer).is_err() {
             return Vec::new();
         }
         if wide {
-            let pairs = buffer.as_chunks::<2>().0;
-            let wide: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
-            let text = String::from_utf16_lossy(&wide);
-            let mut bytes = text.into_bytes();
+            let mut bytes = utf16le_nul_terminated(&buffer).into_bytes();
             bytes.push(b'\n');
             return bytes;
         }
         buffer
     }
 
-    /// Arm the trap flag (AMD64) or the single-step bit (ARM64) on the current
-    /// thread.
-    fn arm_step(&mut self) -> Result<()> {
-        let mut registers = self.read_registers()?;
-        let flags = self.arch.flags_register();
-        let mask = match self.arch.family() {
-            Family::X86 => 1u64 << 8,
-            Family::Arm => 1u64 << 21,
-        };
-        let value = self.register_map.read_u64(flags, &registers)?;
-        self.register_map
-            .write_u64(flags, &mut registers, value | mask)?;
-        self.write_registers(&registers)?;
-        self.armed_step = Some(self.current_thread()?.handle);
+    /// The thread handle whose step trap this stop ended, if any.
+    fn pending_step_thread(&self, stop: &StopEvent) -> Option<u64> {
+        let armed = self.armed_step?;
+        let tid = parse_backend_thread_id(stop.thread_id.as_deref()?)?;
+        let thread = self.threads.iter().find(|thread| thread.info.tid == tid)?;
+        (thread.handle == armed).then_some(armed)
+    }
+
+    /// Write the architecture's breakpoint instruction over the site's first
+    /// bytes, keeping what it displaced.
+    fn patch_site(&mut self, address: u64) -> Result<()> {
+        if self.patched.contains_key(&address) {
+            return Ok(());
+        }
+        let instruction = self.arch.breakpoint_instruction();
+        let mut original = vec![0u8; instruction.len()];
+        self.read_virtual(address, &mut original)?;
+        self.client
+            .write_virtual(self.process_handle(), address, instruction)?;
+        self.patched.insert(address, original);
         Ok(())
     }
 
-    /// Clear an armed step on `handle`, the thread a stop reported.
-    fn disarm_step(&mut self, handle: u64) {
-        if self.armed_step != Some(handle) {
-            return;
-        }
-        self.armed_step = None;
-        let Ok(mut registers) = self.current_or(handle).and_then(|_| self.read_registers()) else {
-            return;
+    /// Put the instruction [`Self::patch_site`] displaced back.
+    fn restore_site(&mut self, address: u64) -> Result<()> {
+        let Some(original) = self.patched.remove(&address) else {
+            return Ok(());
         };
-        let flags = self.arch.flags_register();
-        let mask = match self.arch.family() {
-            Family::X86 => 1u64 << 8,
-            Family::Arm => 1u64 << 21,
-        };
-        let Ok(value) = self.register_map.read_u64(flags, &registers) else {
-            return;
-        };
-        if self
-            .register_map
-            .write_u64(flags, &mut registers, value & !mask)
-            .is_err()
-        {
-            return;
-        }
-        let _ = self.write_registers(&registers);
-    }
-
-    /// Select the thread `handle` names, for the length of one register
-    /// access.
-    fn current_or(&mut self, handle: u64) -> Result<()> {
-        if self.threads.get(self.current).map(|thread| thread.handle) != Some(handle) {
-            let index = self
-                .threads
-                .iter()
-                .position(|thread| thread.handle == handle)
-                .ok_or_else(|| {
-                    Error::DebugInfo(format!(
-                        "dbgsrv process {} has no thread with handle {handle:#x}",
-                        self.pid
-                    ))
-                })?;
-            self.current = index;
-        }
-        Ok(())
-    }
-}
-
-/// A [`StopEvent`] with every field at its inert value: what a stop that
-/// carries only what its event said starts from.
-fn empty_stop() -> StopEvent {
-    StopEvent {
-        thread_id: None,
-        exception_code: None,
-        first_chance: None,
-        exception_address: None,
-        program_counter: None,
-        watchpoint_address: None,
-        is_bugcheck: false,
-        break_in: false,
-        bugcheck: None,
-        target_reloaded: false,
-        target_kernel_base_hint: None,
-        modules_changed: false,
-        module_event: None,
-        assisted_breakin: false,
+        self.client
+            .write_virtual(self.process_handle(), address, &original)
+            .map_err(|error| {
+                Error::Dbgsrv(format!(
+                    "cannot restore the instruction at {address:#x}: {error}"
+                ))
+            })
     }
 }
 
@@ -695,61 +706,19 @@ impl DebugBackend for DbgsrvBackend {
         true
     }
 
+    fn last_exception_record(&self) -> Option<ExceptionRecord> {
+        self.last_exception.clone()
+    }
+
     fn capabilities(&self) -> Vec<BackendCapability> {
         use DebugCapability::*;
-        [
-            MemoryIntrospection,
-            ExecutionControl,
-            InterruptTarget,
-            SingleStep,
-            ReadRegisters,
-            WriteRegisters,
-            ThreadList,
-            ThreadSelection,
-            KernelBreakpoints,
-            UserModeBreakpoints,
-            Watchpoints,
-            TargetReloadDetection,
-            KernelBaseHint,
-            BugcheckDetection,
-            BugcheckDetails,
-            ModuleLoadEvents,
-            DebugOutput,
-            Msr,
-            IoPorts,
-            PciConfig,
-            TargetControl,
-            TargetFileIo,
-        ]
-        .into_iter()
-        .map(|capability| {
-            let supported = match capability {
-                MemoryIntrospection
-                | ExecutionControl
-                | InterruptTarget
-                | SingleStep
-                | ReadRegisters
-                | WriteRegisters
-                | ThreadList
-                | ThreadSelection
-                | UserModeBreakpoints
-                // The service's `LoadDll`/`UnloadDll` events mark the module
-                // list stale, and an `OUTPUT_DEBUG_STRING_EVENT` is kept in
-                // the debug log. Both are a live process's own, not a
-                // kernel's.
-                | ModuleLoadEvents
-                | DebugOutput => true,
-                // `CONTEXT` carries the thread's debug registers, unless the
-                // architecture's record has none.
-                Watchpoints => self.supports_watchpoints(),
-                _ => false,
-            };
-            BackendCapability {
-                capability,
-                supported,
-            }
+        DebugCapability::matrix(|capability| match capability {
+            MemoryIntrospection | ExecutionControl | InterruptTarget | SingleStep
+            | ReadRegisters | WriteRegisters | ThreadList | ThreadSelection
+            | UserModeBreakpoints | ModuleLoadEvents | DebugOutput => true,
+            Watchpoints => self.supports_watchpoints(),
+            _ => false,
         })
-        .collect()
     }
 
     fn read_debug_output(&self, since_seq: u64) -> DebugOutputPage {
@@ -758,39 +727,20 @@ impl DebugBackend for DbgsrvBackend {
 
     fn read_registers(&mut self) -> Result<Vec<u8>> {
         self.require_alive()?;
-        let thread = self.current_thread()?.handle;
-        let flags = self.arch.context_flags();
-        let (context, _used) = self.client.server().get_context(
-            thread,
-            flags.all,
-            flags.offset as u32,
-            self.arch.context_size() as u32,
-        )?;
-        Ok(self.arch.register_buffer(&context))
+        let handle = self.current_thread()?.handle;
+        self.read_thread_context(handle)
     }
 
     fn write_registers(&mut self, data: &[u8]) -> Result<()> {
         self.require_alive()?;
-        let thread = self.current_thread()?.handle;
-        let size = self.arch.context_size();
-        if data.len() < size {
-            return Err(Error::DebugInfo(format!(
-                "dbgsrv: a register write needs a {size}-byte CONTEXT, {} bytes given",
-                data.len()
-            )));
-        }
-        let _used = self.client.server().set_context(thread, &data[..size])?;
-        Ok(())
+        let handle = self.current_thread()?.handle;
+        self.write_thread_context(handle, data)
     }
 
     fn supports_user_mode_breakpoints(&self) -> bool {
         true
     }
 
-    /// Whether this backend can install data watchpoints. A user-mode
-    /// `CONTEXT` carries the thread's debug registers, so a slot is armed in
-    /// each thread of the process; a target whose `ContextFlags` record no
-    /// them (ARM64 wearing a WOW64 thread, say) cannot.
     fn supports_watchpoints(&self) -> bool {
         self.arch.debug_registers().exposed_in(&self.register_map)
     }
@@ -838,9 +788,6 @@ impl DebugBackend for DbgsrvBackend {
     }
 
     fn reclaims_abandoned_breakpoints(&self) -> bool {
-        // Nothing replants what this session leaves: a journal entry is
-        // keyed by the kernel a boot's pages belong to, which a user-mode
-        // process has none of.
         true
     }
 
@@ -853,7 +800,7 @@ impl DebugBackend for DbgsrvBackend {
             return Ok(());
         }
         let storage = self.client.server().insert_code_breakpoint(
-            self.process,
+            self.process_handle(),
             addr,
             self.client.info().machine_type,
         )?;
@@ -869,7 +816,7 @@ impl DebugBackend for DbgsrvBackend {
             return Ok(());
         };
         self.client.server().remove_code_breakpoint(
-            self.process,
+            self.process_handle(),
             addr,
             self.client.info().machine_type,
             &storage,
@@ -881,35 +828,22 @@ impl DebugBackend for DbgsrvBackend {
     }
 
     fn continue_execution(&mut self) -> Result<()> {
-        self.require_alive()?;
-        self.client.server().continue_event(DBG_CONTINUE)?;
-        self.running = true;
-        self.stop = None;
-        Ok(())
+        self.resume_with(DBG_CONTINUE)
     }
 
     fn continue_execution_with_disposition(
         &mut self,
         disposition: ContinueDisposition,
     ) -> Result<()> {
-        let status = match disposition {
-            ContinueDisposition::Handled => DBG_CONTINUE,
-            ContinueDisposition::NotHandled => DBG_EXCEPTION_NOT_HANDLED,
-        };
-        self.require_alive()?;
-        self.client.server().continue_event(status)?;
-        self.running = true;
-        self.stop = None;
-        Ok(())
+        self.resume_with(disposition.ntstatus())
     }
 
     fn step(&mut self) -> Result<()> {
         self.require_alive()?;
-        self.arm_step()?;
-        self.client.server().continue_event(DBG_CONTINUE)?;
-        self.running = true;
-        self.stop = None;
-        Ok(())
+        let handle = self.current_thread()?.handle;
+        self.set_step_flag(handle, true)?;
+        self.armed_step = Some(handle);
+        self.resume_with(DBG_CONTINUE)
     }
 
     fn interrupt(&mut self) -> Result<StopEvent> {
@@ -919,17 +853,16 @@ impl DebugBackend for DbgsrvBackend {
             return Ok(stop.clone());
         }
         self.require_alive()?;
-        self.client.server().request_break_in(self.process)?;
+        self.client
+            .server()
+            .request_break_in(self.process_handle())?;
         for _ in 0..BREAK_IN_TRIES {
             if let Some(stop) = self.next_stop(EVENT_POLL_MS)? {
-                self.stop = Some(stop.clone());
-                self.running = false;
-                return Ok(stop);
+                return Ok(self.record_stop(stop));
             }
         }
-        Err(Error::DebugInfo(format!(
-            "dbgsrv: the process did not break in after {} tries",
-            BREAK_IN_TRIES
+        Err(Error::Dbgsrv(format!(
+            "the process did not break in after {BREAK_IN_TRIES} tries"
         )))
     }
 
@@ -942,15 +875,12 @@ impl DebugBackend for DbgsrvBackend {
         let interrupt = Arc::clone(&self.interrupt);
         loop {
             if let Some(stop) = self.next_stop(EVENT_POLL_MS)? {
-                self.stop = Some(stop.clone());
-                self.running = false;
-                if let Some(handle) = self.pending_step_thread(&stop) {
-                    self.disarm_step(handle);
-                }
-                return Ok(stop);
+                return Ok(self.record_stop(stop));
             }
             if interrupt.swap(false, Ordering::SeqCst) {
-                self.client.server().request_break_in(self.process)?;
+                self.client
+                    .server()
+                    .request_break_in(self.process_handle())?;
             }
         }
     }
@@ -965,12 +895,7 @@ impl DebugBackend for DbgsrvBackend {
         let Some(stop) = self.next_stop(timeout.max(1))? else {
             return Ok(None);
         };
-        self.stop = Some(stop.clone());
-        self.running = false;
-        if let Some(handle) = self.pending_step_thread(&stop) {
-            self.disarm_step(handle);
-        }
-        Ok(Some(stop))
+        Ok(Some(self.record_stop(stop)))
     }
 
     fn stop_kept(&self) -> bool {
@@ -981,25 +906,22 @@ impl DebugBackend for DbgsrvBackend {
         Ok(self
             .threads
             .iter()
-            .map(|thread| Self::backend_thread_id(thread.tid))
+            .map(|thread| backend_thread_id(thread.info.tid))
             .collect())
     }
 
     fn set_current_thread(&mut self, thread_id: &str) -> Result<()> {
-        let tid = u32::from_str_radix(thread_id, 16).map_err(|_| {
-            Error::DebugInfo(format!(
-                "dbgsrv thread id '{thread_id}' is not a hexadecimal thread id"
+        let tid = parse_backend_thread_id(thread_id).ok_or_else(|| {
+            Error::Dbgsrv(format!(
+                "thread id '{thread_id}' is not a hexadecimal thread id"
             ))
         })?;
         self.current = self
             .threads
             .iter()
-            .position(|thread| thread.tid == tid)
+            .position(|thread| thread.info.tid == tid)
             .ok_or_else(|| {
-                Error::DebugInfo(format!(
-                    "dbgsrv process {} has no thread {thread_id}",
-                    self.pid
-                ))
+                Error::Dbgsrv(format!("process {} has no thread {thread_id}", self.pid))
             })?;
         Ok(())
     }
@@ -1007,24 +929,23 @@ impl DebugBackend for DbgsrvBackend {
     fn stopped_thread_id(&mut self) -> Result<String> {
         if let Some(stop) = &self.stop
             && let Some(id) = &stop.thread_id
-            && let Ok(tid) = u32::from_str_radix(id, 16)
-            && let Some(index) = self.threads.iter().position(|thread| thread.tid == tid)
+            && let Some(tid) = parse_backend_thread_id(id)
+            && let Some(index) = self
+                .threads
+                .iter()
+                .position(|thread| thread.info.tid == tid)
         {
             self.current = index;
             return Ok(id.clone());
         }
         self.threads
             .get(self.current)
-            .map(|thread| Self::backend_thread_id(thread.tid))
-            .ok_or_else(|| Error::DebugInfo(format!("dbgsrv process {} has no threads", self.pid)))
+            .map(|thread| backend_thread_id(thread.info.tid))
+            .ok_or_else(|| Error::Dbgsrv(format!("process {} has no threads", self.pid)))
     }
 
     fn is_running(&self) -> bool {
         self.running
-    }
-
-    fn target_kernel_location(&mut self) -> Result<Option<crate::base::types::KernelLocation>> {
-        Ok(None)
     }
 
     fn take_modules_changed(&mut self) -> bool {
@@ -1032,76 +953,28 @@ impl DebugBackend for DbgsrvBackend {
     }
 
     fn prepare_for_exit(&mut self, _leave_running: bool) -> Result<()> {
-        // The process outlives this session: put back every instruction this
-        // one displaced, then let go of the process so it runs on.
+        // The process outlives this session: restore every breakpoint and
+        // watchpoint we planted, then detach so the process runs on cleanly.
+        let process = self.process_handle();
+        let machine_type = self.client.info().machine_type;
         for (address, original) in std::mem::take(&mut self.patched) {
-            let _ = self.client.write_virtual(self.process, address, &original);
+            let _ = self.client.write_virtual(process, address, &original);
         }
-        self.service_plants.clear();
+        for (address, storage) in std::mem::take(&mut self.service_plants) {
+            let _ = self.client.server().remove_code_breakpoint(
+                process,
+                address,
+                machine_type,
+                &storage,
+            );
+        }
+        for slot in std::mem::take(&mut self.hardware).into_keys() {
+            let _ = self.arm_slot_on_all_threads(slot, None);
+        }
         if self.exit.is_none() {
             let _ = self.client.server().detach_process(self.pid);
         }
         self.running = false;
         Ok(())
-    }
-}
-
-impl DbgsrvBackend {
-    /// The thread handle whose step trap this stop ended, if any.
-    fn pending_step_thread(&self, stop: &StopEvent) -> Option<u64> {
-        let armed = self.armed_step?;
-        let reported = stop.thread_id.as_deref()?;
-        let tid = u32::from_str_radix(reported, 16).ok()?;
-        let thread = self.threads.iter().find(|thread| thread.tid == tid)?;
-        (thread.handle == armed).then_some(armed)
-    }
-
-    /// Write the architecture's breakpoint instruction over the site's first
-    /// bytes, keeping what it displaced.
-    fn patch_site(&mut self, address: u64) -> Result<()> {
-        if self.patched.contains_key(&address) {
-            return Ok(());
-        }
-        let instruction = self.arch.breakpoint_instruction().to_vec();
-        let mut original = vec![0u8; instruction.len()];
-        self.read_virtual(address, &mut original)?;
-        self.client
-            .write_virtual(self.process, address, &instruction)?;
-        self.patched.insert(address, original);
-        Ok(())
-    }
-
-    /// Put the instruction a [`Self::patch_site`] displaced back.
-    fn restore_site(&mut self, address: u64) -> Result<()> {
-        let Some(original) = self.patched.remove(&address) else {
-            return Ok(());
-        };
-        self.client
-            .write_virtual(self.process, address, &original)
-            .map_err(|error| {
-                Error::DebugInfo(format!(
-                    "dbgsrv: cannot restore the instruction at {address:#x}: {error}"
-                ))
-            })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_backend_thread_id_is_the_thread_id_in_hex() {
-        assert_eq!(DbgsrvBackend::backend_thread_id(0x1a2c), "1a2c");
-        assert_eq!(DbgsrvBackend::backend_thread_id(0x404), "404");
-    }
-
-    #[test]
-    fn a_stop_starts_inert() {
-        let stop = empty_stop();
-        assert!(stop.thread_id.is_none());
-        assert!(!stop.is_bugcheck);
-        assert!(stop.module_event.is_none());
-        assert!(!stop.modules_changed);
     }
 }

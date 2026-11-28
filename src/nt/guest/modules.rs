@@ -5,7 +5,7 @@ use super::vad::{VadTreeOffsets, vad_root_offset, vad_tree_link};
 use super::{Guest, KeptModules, ModuleInfo, ProcessInfo, ProcessModulesDetail};
 use crate::{
     base::{
-        bytes::{read_u16, read_u32, utf16le_lossy},
+        bytes::{read_u16, read_u32, read_u64, utf16le_lossy},
         error::{Error, Result},
         memory,
         memory::MemoryOps,
@@ -144,15 +144,67 @@ fn read_loader_pointer(
     }
 }
 
-fn read_unicode32(memory: &impl MemoryOps<VirtAddr>, length: usize, buffer: u32) -> Option<String> {
+fn read_unicode(memory: &impl MemoryOps<VirtAddr>, length: usize, buffer: u64) -> Option<String> {
+    let length = length & !1;
     if length == 0 || buffer == 0 {
         return None;
     }
     let mut bytes = vec![0u8; length];
-    memory
-        .read_bytes(VirtAddr(u64::from(buffer)), &mut bytes)
-        .ok()?;
+    memory.read_bytes(VirtAddr(buffer), &mut bytes).ok()?;
     Some(utf16le_lossy(&bytes))
+}
+
+/// `_PEB.Ldr` offset in the fixed 64-bit Windows ABI.
+pub const PEB64_LDR_OFFSET: u64 = 0x18;
+
+/// Walk the 64-bit `InLoadOrderModuleList` from `_PEB.Ldr` using the fixed
+/// 64-bit Windows loader ABI, without needing PDB symbols: `InLoadOrderLinks`
+/// +0x00, `DllBase` +0x30, `EntryPoint` +0x38, `SizeOfImage` +0x40,
+/// `FullDllName` +0x48, `BaseDllName` +0x58. Each entry is read in one memory
+/// access so walking a process over a remote transport costs one read per DLL.
+pub fn walk_loader_list64(
+    memory: &impl MemoryOps<VirtAddr>,
+    ldr: u64,
+) -> (Vec<ModuleInfo>, ListTermination) {
+    const IN_LOAD_ORDER_MODULE_LIST: u64 = 0x10;
+    const ENTRY_LEN: usize = 0x68;
+
+    if ldr == 0 {
+        return (Vec::new(), ListTermination::Null);
+    }
+    let head = VirtAddr(ldr + IN_LOAD_ORDER_MODULE_LIST);
+    let mut cursor = ListCursor::new(head, MAX_LOADER_MODULES);
+    cursor.advance(read_loader_pointer(memory, head, 8).map_err(|error| error.to_string()));
+    let mut modules = Vec::new();
+    while let Some(current) = cursor.take_current() {
+        let mut entry = [0u8; ENTRY_LEN];
+        if let Err(error) = memory.read_bytes(current, &mut entry) {
+            cursor.advance(Err(error.to_string()));
+            break;
+        }
+        cursor.advance(Ok(VirtAddr(read_u64(&entry, 0x00))));
+
+        let dll_base = read_u64(&entry, 0x30);
+        if dll_base == 0 {
+            continue;
+        }
+        let read_str = |offset: usize| {
+            let len = usize::from(read_u16(&entry, offset).min(read_u16(&entry, offset + 2)));
+            let buffer = read_u64(&entry, offset + 8);
+            read_unicode(memory, len, buffer).filter(|value| !value.is_empty())
+        };
+        let full_path = read_str(0x48);
+        let loader_name = read_str(0x58);
+        let name = record_module_name(loader_name, full_path.clone());
+        let mut module = ModuleInfo::new(name, VirtAddr(dll_base), read_u32(&entry, 0x40));
+        module.path = full_path;
+        let entry_point = read_u64(&entry, 0x38);
+        if entry_point != 0 {
+            module.entry_point = Some(VirtAddr(entry_point));
+        }
+        modules.push(module);
+    }
+    (modules, cursor.finish())
 }
 
 /// Walk the native `InLoadOrderModuleList` of the `_PEB_LDR_DATA` at `ldr`,
@@ -229,10 +281,18 @@ pub fn walk_loader_list32(
         if dll_base == 0 {
             continue;
         }
-        let loader_name = read_unicode32(memory, usize::from(read_u16(&entry, 0x2c)), u32_at(0x30))
-            .filter(|name| !name.is_empty());
-        let full_path = read_unicode32(memory, usize::from(read_u16(&entry, 0x24)), u32_at(0x28))
-            .filter(|path| !path.is_empty());
+        let loader_name = read_unicode(
+            memory,
+            usize::from(read_u16(&entry, 0x2c)),
+            u64::from(u32_at(0x30)),
+        )
+        .filter(|name| !name.is_empty());
+        let full_path = read_unicode(
+            memory,
+            usize::from(read_u16(&entry, 0x24)),
+            u64::from(u32_at(0x28)),
+        )
+        .filter(|path| !path.is_empty());
         let name = record_module_name(loader_name, full_path.clone());
         let mut module = ModuleInfo::new(name, VirtAddr(u64::from(dll_base)), u32_at(0x20))
             .with_time_date_stamp(u32_at(0x44));

@@ -1,14 +1,16 @@
 //! The connection a live user-mode target is debugged over: one process
-//! server, one process, and the architecture the server reports.
+//! server, the architecture it reports, and the virtual-memory adapter bound
+//! to the attached process handle.
 
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use crate::arch::Arch;
+use crate::arch::{Arch, IMAGE_FILE_MACHINE_I386};
+use crate::backend::userlive::{MemoryBasicInformation, UserLiveMemory};
 use crate::base::error::{Error, Result};
 
 use super::service::{
-    CLOSE_PROC_THREAD_HANDLES, GENERIC_CODE_BREAKPOINTS, GENERIC_DATA_BREAKPOINTS,
-    IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64, IMAGE_FILE_MACHINE_I386, ProcessServer,
+    CLOSE_PROC_THREAD_HANDLES, GENERIC_CODE_BREAKPOINTS, GENERIC_DATA_BREAKPOINTS, ProcessServer,
     RpcService, TargetInfo,
 };
 
@@ -19,7 +21,7 @@ use super::service::{
 /// target is halted while a call is made, so there is nothing to poll in the
 /// background; `WaitForEvent` polls with a short timeout instead, which lets
 /// the same thread service a break-in request.
-pub struct DbgSrvClient {
+pub struct DbgsrvClient {
     server: Mutex<Box<dyn ProcessServer>>,
     endpoint: String,
     /// `DBGSVC_*` flags `Initialize` returned.
@@ -28,7 +30,7 @@ pub struct DbgSrvClient {
     arch: Arch,
 }
 
-impl DbgSrvClient {
+impl DbgsrvClient {
     /// Connect `endpoint`, initialize the server, and read the machine it
     /// debugs.
     pub fn connect(endpoint: &str, progress: &mut dyn FnMut(&str)) -> Result<Self> {
@@ -39,28 +41,28 @@ impl DbgSrvClient {
         let connection = server.connection_info()?;
         let info = server.target_info()?;
         let arch = arch_for(info.machine_type)?;
+        let machine = if connection.machine.is_empty() {
+            "the remote machine"
+        } else {
+            &connection.machine
+        };
+        let transport = if connection.transport.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", connection.transport)
+        };
+        let checked = if info.checked_build != 0 {
+            " (checked)"
+        } else {
+            ""
+        };
         progress(&format!(
-            "dbgsrv: {} target on {}{}, {} processor(s), Windows {}.{}.{}{}",
+            "dbgsrv: {} target on {machine}{transport}, {} processor(s), Windows {}.{}.{}{checked}",
             arch.label(),
-            if connection.machine.is_empty() {
-                "the remote machine".to_string()
-            } else {
-                connection.machine.clone()
-            },
-            if connection.transport.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", connection.transport)
-            },
             info.processors,
             info.major_version,
             info.minor_version,
             info.build_number,
-            if info.checked_build != 0 {
-                " (checked)"
-            } else {
-                ""
-            }
         ));
         Ok(Self {
             server: Mutex::new(server),
@@ -71,13 +73,14 @@ impl DbgSrvClient {
         })
     }
 
-    /// Build a client over an already-initialized server, for tests.
-    pub fn with_server(server: Box<dyn ProcessServer>, info: TargetInfo) -> Result<Self> {
+    /// Build a client over a pre-constructed server, for tests.
+    pub fn with_server(mut server: Box<dyn ProcessServer>, info: TargetInfo) -> Result<Self> {
         let arch = arch_for(info.machine_type)?;
+        let flags = server.initialize()?;
         Ok(Self {
             server: Mutex::new(server),
             endpoint: "mock".to_string(),
-            flags: GENERIC_CODE_BREAKPOINTS | GENERIC_DATA_BREAKPOINTS,
+            flags,
             info,
             arch,
         })
@@ -149,37 +152,69 @@ impl DbgSrvClient {
         Ok(())
     }
 
-    /// `VirtualQuery` at `address`: the `MEMORY_BASIC_INFORMATION` bytes and
-    /// how many of them the query filled.
-    pub fn query_virtual(&self, process: u64, address: u64) -> Result<(Vec<u8>, u32)> {
-        self.server().query_virtual(
-            process,
-            address,
-            crate::backend::userlive::MemoryBasicInformation::SIZE as u32,
-        )
+    /// `VirtualQuery` at `address`: the decoded `MEMORY_BASIC_INFORMATION`.
+    pub fn query_virtual(&self, process: u64, address: u64) -> Result<MemoryBasicInformation> {
+        let (bytes, used) =
+            self.server()
+                .query_virtual(process, address, MemoryBasicInformation::SIZE as u32)?;
+        let used = (used as usize).min(bytes.len());
+        MemoryBasicInformation::decode(&bytes[..used])
     }
 }
 
-/// The architecture a target machine type debugs: AMD64 or ARM64, the two
-/// ntoseye's register model has a context layout for.
+/// The memory of the attached process behind a [`DbgsrvClient`], holding the
+/// shared process handle internally so layers above never see server handles.
+pub struct DbgsrvUserMemory {
+    client: Arc<DbgsrvClient>,
+    process: Arc<AtomicU64>,
+}
+
+impl DbgsrvUserMemory {
+    pub fn new(client: Arc<DbgsrvClient>, process: Arc<AtomicU64>) -> Self {
+        Self { client, process }
+    }
+
+    fn process(&self) -> u64 {
+        self.process.load(Ordering::Acquire)
+    }
+}
+
+impl UserLiveMemory for DbgsrvUserMemory {
+    fn read(&self, address: u64, buf: &mut [u8]) -> Result<()> {
+        self.client.read_virtual(self.process(), address, buf)
+    }
+
+    fn write(&self, address: u64, buf: &[u8]) -> Result<()> {
+        self.client.write_virtual(self.process(), address, buf)
+    }
+
+    fn query(&self, address: u64) -> Result<MemoryBasicInformation> {
+        self.client.query_virtual(self.process(), address)
+    }
+}
+
+/// Map a Windows `IMAGE_FILE_MACHINE_*` value to an [`Arch`], naming x86/WOW64
+/// explicitly as unsupported.
 fn arch_for(machine_type: u32) -> Result<Arch> {
-    match machine_type {
-        IMAGE_FILE_MACHINE_AMD64 => Ok(Arch::Amd64),
-        IMAGE_FILE_MACHINE_ARM64 => Ok(Arch::Arm64),
-        IMAGE_FILE_MACHINE_I386 => Err(Error::DebugInfo(
-            "dbgsrv x86/WOW64 targets are not supported by ntoseye's current register model"
-                .to_string(),
-        )),
-        other => Err(Error::DebugInfo(format!(
-            "dbgsrv: the server reports machine type {other:#06x}, which is neither AMD64 nor \
-             ARM64"
-        ))),
+    if let Ok(machine) = u16::try_from(machine_type) {
+        if let Some(arch) = Arch::from_machine_type(machine) {
+            return Ok(arch);
+        }
+        if machine == IMAGE_FILE_MACHINE_I386 {
+            return Err(Error::Dbgsrv(
+                "x86/WOW64 targets are not supported by ntoseye's current register model"
+                    .to_string(),
+            ));
+        }
     }
+    Err(Error::Dbgsrv(format!(
+        "the server reports machine type {machine_type:#06x}, which is neither AMD64 nor ARM64"
+    )))
 }
 
-impl std::fmt::Debug for DbgSrvClient {
+impl std::fmt::Debug for DbgsrvClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DbgSrvClient")
+        f.debug_struct("DbgsrvClient")
             .field("endpoint", &self.endpoint)
             .field("arch", &self.arch)
             .field("flags", &self.flags)

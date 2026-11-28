@@ -654,14 +654,9 @@ fn run(cli: Cli) -> Result<i32> {
 
 fn live_spec(args: &TargetOptions, backend: Backend) -> TargetSpec {
     if backend == Backend::DbgSrv {
-        // Exactly one of --process and --create was accepted above, and the
-        // endpoint is required: `--dump` opened a file instead of getting
-        // here, so a dump session never takes this path.
-        let target = match (args.process, args.create.clone()) {
-            (Some(pid), _) => crate::DbgsrvTarget::Attach { pid },
-            (None, Some(command_line)) => crate::DbgsrvTarget::Create { command_line },
-            (None, None) => crate::DbgsrvTarget::Attach { pid: 0 },
-        };
+        // Exactly one of --process and --create was validated above.
+        let target = crate::DbgsrvTarget::from_options(args.process, args.create.clone())
+            .expect("dbgsrv target validated above");
         return TargetSpec::Dbgsrv {
             connect: args.connect.clone().unwrap_or_default(),
             target,

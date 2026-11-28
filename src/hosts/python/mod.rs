@@ -257,23 +257,8 @@ fn attach(
                      connect=\"tcp:server=<host>,port=<port>\"",
                 )
             })?;
-            let target = match (process, create) {
-                (Some(pid), None) => crate::DbgsrvTarget::Attach { pid },
-                (None, Some(command_line)) => crate::DbgsrvTarget::Create {
-                    command_line: command_line.to_string(),
-                },
-                (None, None) => {
-                    return Err(PyValueError::new_err(
-                        "the dbgsrv backend needs exactly one of process=<pid> and \
-                         create=<command line>",
-                    ));
-                }
-                (Some(_), Some(_)) => {
-                    return Err(PyValueError::new_err(
-                        "process and create are mutually exclusive",
-                    ));
-                }
-            };
+            let target = crate::DbgsrvTarget::from_options(process, create.map(str::to_string))
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
             TargetSpec::Dbgsrv {
                 connect: connect.to_string(),
                 target,

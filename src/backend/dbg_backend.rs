@@ -9,6 +9,7 @@ use crate::arch::{Arch, Family, HwBreakpointAccess, RegisterMap};
 use crate::backend::debugger_data::DebuggerDataCandidate;
 use crate::backend::phys::PhysMem;
 use crate::base::error::{Error, Result};
+use crate::base::ntstatus::{DBG_CONTINUE, DBG_EXCEPTION_NOT_HANDLED};
 use crate::base::types::{KernelLocation, VirtAddr};
 
 /// A captured line of guest debug output (DbgPrint, kernel printf).
@@ -173,6 +174,15 @@ impl ContinueDisposition {
             Self::NotHandled => "not handled",
         }
     }
+
+    /// Windows debug continuation status (`DBG_CONTINUE` or
+    /// `DBG_EXCEPTION_NOT_HANDLED`) used by KD and DbgRpc process servers.
+    pub const fn ntstatus(self) -> u32 {
+        match self {
+            Self::Handled => DBG_CONTINUE,
+            Self::NotHandled => DBG_EXCEPTION_NOT_HANDLED,
+        }
+    }
 }
 
 impl std::str::FromStr for ContinueDisposition {
@@ -205,7 +215,7 @@ impl LastEvent {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 /// Backend-neutral stop event
 ///
 /// `first_chance` and `exception_address` are populated only when the
@@ -361,6 +371,43 @@ pub enum DebugCapability {
 }
 
 impl DebugCapability {
+    /// Every capability in the order reported by capability matrices.
+    pub const ALL: [Self; 22] = [
+        Self::MemoryIntrospection,
+        Self::ExecutionControl,
+        Self::InterruptTarget,
+        Self::SingleStep,
+        Self::ReadRegisters,
+        Self::WriteRegisters,
+        Self::ThreadList,
+        Self::ThreadSelection,
+        Self::KernelBreakpoints,
+        Self::UserModeBreakpoints,
+        Self::Watchpoints,
+        Self::TargetReloadDetection,
+        Self::KernelBaseHint,
+        Self::BugcheckDetection,
+        Self::BugcheckDetails,
+        Self::ModuleLoadEvents,
+        Self::DebugOutput,
+        Self::Msr,
+        Self::IoPorts,
+        Self::PciConfig,
+        Self::TargetControl,
+        Self::TargetFileIo,
+    ];
+
+    /// Build a full capability matrix from a support predicate.
+    pub fn matrix(supported: impl Fn(Self) -> bool) -> Vec<BackendCapability> {
+        Self::ALL
+            .into_iter()
+            .map(|capability| BackendCapability {
+                capability,
+                supported: supported(capability),
+            })
+            .collect()
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::MemoryIntrospection => "memory introspection",
@@ -439,40 +486,11 @@ impl BackendCapability {
 /// written for.
 pub fn snapshot_capabilities(bugchecks: bool) -> Vec<BackendCapability> {
     use DebugCapability::*;
-    [
-        MemoryIntrospection,
-        ReadRegisters,
-        ExecutionControl,
-        InterruptTarget,
-        SingleStep,
-        WriteRegisters,
-        ThreadList,
-        ThreadSelection,
-        KernelBreakpoints,
-        UserModeBreakpoints,
-        Watchpoints,
-        TargetReloadDetection,
-        KernelBaseHint,
-        BugcheckDetection,
-        BugcheckDetails,
-        ModuleLoadEvents,
-        DebugOutput,
-        Msr,
-        IoPorts,
-        PciConfig,
-        TargetControl,
-        TargetFileIo,
-    ]
-    .into_iter()
-    .map(|capability| BackendCapability {
-        capability,
-        supported: match capability {
-            MemoryIntrospection | ReadRegisters | ThreadList | ThreadSelection => true,
-            BugcheckDetection | BugcheckDetails => bugchecks,
-            _ => false,
-        },
+    DebugCapability::matrix(|capability| match capability {
+        MemoryIntrospection | ReadRegisters | ThreadList | ThreadSelection => true,
+        BugcheckDetection | BugcheckDetails => bugchecks,
+        _ => false,
     })
-    .collect()
 }
 
 /// The refusal of `operation` by `snapshot`, a static snapshot such as "crash
@@ -503,7 +521,7 @@ pub struct TrapState {
 impl TrapState {
     /// Nothing for [`clear_trap_flag`] to write.
     pub fn is_clean(&self) -> bool {
-        self.eflags & (1 << 8) == 0 && self.dr6 & 0b1111 == 0
+        self.eflags & Arch::Amd64.single_step_flag_mask() == 0 && self.dr6 & 0b1111 == 0
     }
 }
 
@@ -531,9 +549,10 @@ pub fn clear_trap_flag(
     }
     if let Ok(mut regs) = backend.read_registers() {
         let mut dirty = false;
-        if let Ok(eflags) = register_map.read_u64("eflags", &regs) {
-            let cleared = eflags & !(1u64 << 8);
-            if cleared != eflags && register_map.write_u64("eflags", &mut regs, cleared).is_ok() {
+        let flags = arch.flags_register();
+        if let Ok(eflags) = register_map.read_u64(flags, &regs) {
+            let cleared = eflags & !arch.single_step_flag_mask();
+            if cleared != eflags && register_map.write_u64(flags, &mut regs, cleared).is_ok() {
                 dirty = true;
             }
         }

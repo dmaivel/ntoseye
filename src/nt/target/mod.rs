@@ -53,6 +53,7 @@ pub mod wdf;
 pub mod workqueue;
 pub mod zombies;
 
+pub use crate::backend::userlive::LiveUserThread;
 pub use list::{
     ListCursor, ListTermination, bounded_list_walk, bounded_record_list_walk, links_back_to,
 };
@@ -62,7 +63,7 @@ pub use memory::{
 };
 pub use symbols::ReloadScope;
 pub use userdump::{TargetKind, UserProcess};
-pub use userlive::{LiveUserProcess, LiveUserThread};
+pub use userlive::LiveUserProcess;
 pub use vtl::{
     BreakpointStop, CodeExtent, ForeignCode, ForeignModules, GuestCode, HYPERVISOR_CONTEXT,
     SavedVtlContext, ServedVp, VP_STATE_REGISTERS, exit_registers,

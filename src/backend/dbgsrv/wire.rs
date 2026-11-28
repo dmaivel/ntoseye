@@ -1,16 +1,12 @@
-//! The DbgRpc wire format: the handshake, the call header, and the cursors
-//! every call body is written and read with.
+//! The DbgRpc wire format: the handshake, the call header, the
+//! `IUserDebugServices` method table, and the cursors every call body is
+//! written and read with.
 //!
-//! Each C structure is a `#[repr(C)]` type whose field order and types are
-//! the generated proxy's, so the compiler lays the bytes out and the
+//! Each multi-field C structure is a `#[repr(C)]` type whose field order and
+//! types are the generated proxy's, so the compiler lays the bytes out and the
 //! `const` sizes are the proof. `dbgrpc/dbgrpc.hpp`, `dbgrpc/dbgrpc.cpp` and
 //! the proxy `rremgen.pl` generates from `dbgsvc/dbgsvc.h` are the
 //! authorities; the wire is little-endian, as every host ntoseye runs on is.
-//!
-//! Call bodies are not one structure: the proxy aligns each argument to its
-//! own size, and a variable-length buffer sits between fixed arguments. Those
-//! are written as a sequence of [`Writer::segment`]s and padded where the
-//! proxy pads.
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -64,8 +60,7 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// this client speaks, which the server checks in `QueryInterface`. The
 /// generator derives it from the interface's methods and parameters, so a
 /// server built against a different `dbgsvc.h` refuses it with
-/// `RPC_E_VERSION_MISMATCH`, and its calls would otherwise be decoded with
-/// the wrong field order.
+/// `RPC_E_VERSION_MISMATCH`.
 ///
 /// Measured from `dbgeng.dll` 10.0.26100 (`IUserDebugServicesN`, whose proxy
 /// `ProxyIUserDebugServicesN` was read out of its PDB) and confirmed against
@@ -80,53 +75,72 @@ pub const INTERFACE_INDEX: u16 = 192;
 
 /// The stub index of method `method` of `IUserDebugServices`
 /// (`DBGRPC_STUB_INDEX(DBGRPC_SIF_IUserDebugServices, method)`).
-pub const fn stub_index(method: u16) -> u16 {
-    (INTERFACE_INDEX << 8) | method
+pub const fn stub_index(method: Method) -> u16 {
+    (INTERFACE_INDEX << 8) | (method as u16)
 }
 
-/// `DBGRPC_SMTH_IUserDebugServices_*`: the method's index in the interface's
-/// vtable, which numbers `QueryInterface` from zero and skips `AddRef` (the
-/// generator does not remote it).
-pub mod method {
+/// Declares the `IUserDebugServices` method table in one place so vtable
+/// indices and display names can never drift.
+macro_rules! define_methods {
+    (
+        $( $(#[$doc:meta])* $variant:ident = $index:expr => $name:literal ),* $(,)?
+    ) => {
+        /// `DBGRPC_SMTH_IUserDebugServices_*`: the method's index in the
+        /// interface's vtable, which numbers `QueryInterface` from zero and
+        /// skips `AddRef` (the generator does not remote it).
+        #[repr(u16)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum Method {
+            $( $(#[$doc])* $variant = $index ),*
+        }
+
+        impl Method {
+            /// The wire stub index combining [`INTERFACE_INDEX`] and this
+            /// method's vtable slot.
+            pub const fn stub_index(self) -> u16 {
+                stub_index(self)
+            }
+
+            /// The method's name, for diagnostics and errors.
+            pub const fn name(self) -> &'static str {
+                match self {
+                    $( Self::$variant => $name ),*
+                }
+            }
+        }
+    };
+}
+
+define_methods! {
     /// `QueryInterface`, the only way to learn which revision of the
     /// interface the server implements.
-    pub const QUERY_INTERFACE: u16 = 0;
-    pub const INITIALIZE: u16 = 2;
-    pub const UNINITIALIZE: u16 = 3;
-    pub const GET_TARGET_INFO: u16 = 4;
+    QueryInterface = 0 => "QueryInterface",
+    Initialize = 2 => "Initialize",
+    GetTargetInfo = 4 => "GetTargetInfo",
     /// `GetConnectionInfo`: what the server must be told before it will
     /// attach a process (the names it reports onward).
-    pub const GET_CONNECTION_INFO: u16 = 5;
-    pub const GET_PROCESS_IDS: u16 = 11;
-    pub const GET_PROCESS_INFO: u16 = 14;
-    pub const ATTACH_PROCESS: u16 = 15;
-    pub const DETACH_PROCESS: u16 = 16;
-    pub const CREATE_PROCESS_W: u16 = 17;
-    pub const GET_PROCESS_EXIT_CODE: u16 = 20;
-    pub const CLOSE_HANDLE: u16 = 21;
-    pub const SET_PROCESS_OPTIONS: u16 = 22;
-    pub const SET_DEBUG_OBJECT_OPTIONS: u16 = 23;
-    pub const GET_PROCESS_DEBUG_OBJECT: u16 = 24;
-    pub const READ_VIRTUAL: u16 = 26;
-    pub const WRITE_VIRTUAL: u16 = 27;
-    pub const QUERY_VIRTUAL: u16 = 28;
-    pub const SUSPEND_THREADS: u16 = 33;
-    pub const RESUME_THREADS: u16 = 34;
+    GetConnectionInfo = 5 => "GetConnectionInfo",
+    GetProcessInfo = 14 => "GetProcessInfo",
+    AttachProcess = 15 => "AttachProcess",
+    DetachProcess = 16 => "DetachProcess",
+    CreateProcessW = 17 => "CreateProcessW",
+    CloseHandle = 21 => "CloseHandle",
+    ReadVirtual = 26 => "ReadVirtual",
+    WriteVirtual = 27 => "WriteVirtual",
+    QueryVirtual = 28 => "QueryVirtual",
     /// `GetThreadBasicInfo`: the modern interface's replacement for
     /// `GetThreadStartAddress`, which is gone.
-    pub const GET_THREAD_BASIC_INFO: u16 = 35;
-    pub const GET_CONTEXT: u16 = 36;
-    pub const SET_CONTEXT: u16 = 37;
-    pub const GET_PROCESS_DATA_OFFSET: u16 = 38;
-    pub const GET_THREAD_DATA_OFFSET: u16 = 39;
-    pub const REQUEST_BREAK_IN: u16 = 47;
-    pub const WAIT_FOR_EVENT: u16 = 48;
-    pub const CONTINUE_EVENT: u16 = 49;
-    pub const INSERT_CODE_BREAKPOINT: u16 = 50;
-    pub const REMOVE_CODE_BREAKPOINT: u16 = 51;
-    pub const INSERT_DATA_BREAKPOINT: u16 = 52;
-    pub const REMOVE_DATA_BREAKPOINT: u16 = 53;
-    pub const GET_LAST_DATA_BREAKPOINT_HIT: u16 = 54;
+    GetThreadBasicInfo = 35 => "GetThreadBasicInfo",
+    GetContext = 36 => "GetContext",
+    SetContext = 37 => "SetContext",
+    GetProcessDataOffset = 38 => "GetProcessDataOffset",
+    GetThreadDataOffset = 39 => "GetThreadDataOffset",
+    RequestBreakIn = 47 => "RequestBreakIn",
+    WaitForEvent = 48 => "WaitForEvent",
+    ContinueEvent = 49 => "ContinueEvent",
+    InsertCodeBreakpoint = 50 => "InsertCodeBreakpoint",
+    RemoveCodeBreakpoint = 51 => "RemoveCodeBreakpoint",
+    GetLastDataBreakpointHit = 54 => "GetLastDataBreakpointHit",
 }
 
 /// `DBGRPC_RETURN`: the call header carries a reply.
@@ -143,12 +157,11 @@ pub const IDENTITY_LENGTH: usize = 128;
 
 /// `DBGRPC_SHAKE_FULL_REMOTE_UNKNOWN`.
 pub const SHAKE_FULL_REMOTE_UNKNOWN: u32 = 0x0000_0001;
-
-/// The `Flags` a client sends. Besides
-/// [`SHAKE_FULL_REMOTE_UNKNOWN`], current debuggers set bit 1, which the
-/// server this was measured against (`dbgsrv.exe` 10.0.26100) accepts and an
-/// older one ignores (§the header only defines bit 0).
-pub const SHAKE_CLIENT_FLAGS: u32 = SHAKE_FULL_REMOTE_UNKNOWN | 0x0000_0002;
+/// Extended client handshake flag observed from current Windows debuggers
+/// (`cdb` / `dbgeng` 10.0.26100), ignored by older servers.
+pub const SHAKE_EXTENDED_CLIENT: u32 = 0x0000_0002;
+/// The `Flags` a client sends in its handshake.
+pub const SHAKE_CLIENT_FLAGS: u32 = SHAKE_FULL_REMOTE_UNKNOWN | SHAKE_EXTENDED_CLIENT;
 
 wire_struct! {
     /// A COM interface id in Windows' `GUID` layout: `Data1`, `Data2` and
@@ -208,22 +221,22 @@ impl Handshake {
     /// speaks to.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let handshake = Self::read_from_bytes(bytes).map_err(|_| {
-            Error::DebugInfo(format!(
-                "dbgsrv handshake is {} bytes, {} expected",
+            Error::Dbgsrv(format!(
+                "handshake is {} bytes, {} expected",
                 bytes.len(),
                 core::mem::size_of::<Self>()
             ))
         })?;
         if handshake.signature != SIGNATURE {
-            return Err(Error::DebugInfo(format!(
-                "dbgsrv handshake signature is {:02x?}, expected {:02x?}; the endpoint is not a \
+            return Err(Error::Dbgsrv(format!(
+                "handshake signature is {:02x?}, expected {:02x?}; the endpoint is not a \
                  DbgRpc process server",
                 handshake.signature, SIGNATURE
             )));
         }
         if handshake.protocol_version != PROTOCOL_VERSION {
-            return Err(Error::DebugInfo(format!(
-                "dbgsrv protocol version mismatch: expected {PROTOCOL_VERSION}, got {}",
+            return Err(Error::Dbgsrv(format!(
+                "protocol version mismatch: expected {PROTOCOL_VERSION}, got {}",
                 handshake.protocol_version
             )));
         }
@@ -254,6 +267,22 @@ impl Call {
     }
 }
 
+/// Wire byte size of a fixed structure `T` as a `u32`.
+pub const fn size_of_wire<T>() -> u32 {
+    core::mem::size_of::<T>() as u32
+}
+
+/// Round `size` up to the next multiple of `align` (a power of two).
+pub const fn align_up_u32(size: u32, align: u32) -> u32 {
+    size.saturating_add(align - 1) & !(align - 1)
+}
+
+/// Reply size for a variable buffer of `size` bytes followed by a 4-byte
+/// aligned trailing `ULONG` used-count.
+pub const fn sized_buffer_reply_size(size: u32) -> u32 {
+    align_up_u32(size, 4).saturating_add(size_of_wire::<u32>())
+}
+
 /// Builds a call body the way the generated proxy does: fixed arguments as
 /// their own structures, a variable-length buffer padded to its own
 /// alignment, and padding wherever the proxy aligns the next argument.
@@ -269,8 +298,10 @@ impl Writer {
 
     /// Pad up to `align` (`INT_ALIGN2`), a power of two.
     pub fn align(&mut self, align: usize) -> &mut Self {
-        while !self.buffer.len().is_multiple_of(align) {
-            self.buffer.push(0);
+        debug_assert!(align.is_power_of_two());
+        let rem = self.buffer.len() & (align - 1);
+        if rem != 0 {
+            self.buffer.resize(self.buffer.len() + (align - rem), 0);
         }
         self
     }
@@ -281,6 +312,14 @@ impl Writer {
         self
     }
 
+    pub fn write_u32(&mut self, value: u32) -> &mut Self {
+        self.segment(&value)
+    }
+
+    pub fn write_u64(&mut self, value: u64) -> &mut Self {
+        self.segment(&value)
+    }
+
     /// A variable-length argument, whose length the interface sent as a
     /// separate `ULONG`, aligned where the proxy aligns it.
     pub fn buffer(&mut self, bytes: &[u8], align: usize) -> &mut Self {
@@ -289,18 +328,10 @@ impl Writer {
         self
     }
 
-    /// A fixed argument after a variable-length buffer, aligned like one.
-    pub fn tail(&mut self, value: &(impl IntoBytes + Immutable), align: usize) -> &mut Self {
-        self.align(align);
-        self.segment(value)
-    }
-
-    pub fn len(&self) -> usize {
-        self.buffer.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.buffer.is_empty()
+    /// A variable-length input buffer followed by the 4-byte aligned `ULONG`
+    /// length trailer that DbgRpc's write calls append.
+    pub fn sized_buffer(&mut self, bytes: &[u8], size: u32) -> &mut Self {
+        self.buffer(bytes, 1).align(4).write_u32(size)
     }
 
     pub fn into_inner(self) -> Vec<u8> {
@@ -317,18 +348,20 @@ pub struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
-    pub fn new(bytes: &'a [u8], method: &'static str) -> Self {
+    pub fn new(bytes: &'a [u8], method: Method) -> Self {
         Self {
             bytes,
             position: 0,
-            method,
+            method: method.name(),
         }
     }
 
     /// Pad up to `align`, as the proxy does before the next argument.
     pub fn align(&mut self, align: usize) -> &mut Self {
-        while !self.position.is_multiple_of(align) {
-            self.position += 1;
+        debug_assert!(align.is_power_of_two());
+        let rem = self.position & (align - 1);
+        if rem != 0 {
+            self.position = self.position.saturating_add(align - rem);
         }
         self
     }
@@ -336,15 +369,23 @@ impl<'a> Reader<'a> {
     /// One fixed field or structure.
     pub fn take<T: FromBytes + KnownLayout + IntoBytes>(&mut self) -> Result<T> {
         let size = core::mem::size_of::<T>();
+        let start = self.position;
         let bytes = self.next(size)?;
         T::read_from_bytes(bytes).map_err(|_| {
-            Error::DebugInfo(format!(
-                "dbgsrv {}: reply holds no {} at offset {}",
+            Error::Dbgsrv(format!(
+                "{}: reply holds no {} at offset {start}",
                 self.method,
                 std::any::type_name::<T>(),
-                self.position - size
             ))
         })
+    }
+
+    pub fn read_u32(&mut self) -> Result<u32> {
+        self.take()
+    }
+
+    pub fn read_u64(&mut self) -> Result<u64> {
+        self.take()
     }
 
     /// `count` of the same fixed structure, which the proxy marshals as one
@@ -362,19 +403,30 @@ impl<'a> Reader<'a> {
         self.next(length)
     }
 
+    /// A variable-length output buffer of `size` bytes followed by a 4-byte
+    /// aligned `ULONG` reporting how many bytes the server filled.
+    pub fn sized_bytes(&mut self, size: usize) -> Result<(&'a [u8], u32)> {
+        let bytes = self.bytes(size, 1)?;
+        let used = self.align(4).read_u32()?;
+        Ok((bytes, used))
+    }
+
     fn next(&mut self, length: usize) -> Result<&'a [u8]> {
-        let bytes = self
-            .bytes
-            .get(self.position..self.position + length)
-            .ok_or_else(|| {
-                Error::DebugInfo(format!(
-                    "dbgsrv {}: reply body is {} bytes, {length} more expected at offset {}",
-                    self.method,
-                    self.bytes.len(),
-                    self.position
-                ))
-            })?;
-        self.position += length;
+        let end = self.position.checked_add(length).ok_or_else(|| {
+            Error::Dbgsrv(format!(
+                "{}: reply offset overflow at {}",
+                self.method, self.position
+            ))
+        })?;
+        let bytes = self.bytes.get(self.position..end).ok_or_else(|| {
+            Error::Dbgsrv(format!(
+                "{}: reply body is {} bytes, {length} more expected at offset {}",
+                self.method,
+                self.bytes.len(),
+                self.position
+            ))
+        })?;
+        self.position = end;
         Ok(bytes)
     }
 }

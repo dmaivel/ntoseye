@@ -224,8 +224,6 @@ enum Source {
     /// address space, but it can be written while the process is halted.
     UserLive {
         memory: Arc<dyn UserLiveMemory>,
-        /// The process the server's memory calls name.
-        process: u64,
         arch: Arch,
     },
     Remote(KdMemory),
@@ -346,14 +344,10 @@ impl PhysMem {
         Self::from_source(Source::UserDump(Box::new(dump)))
     }
 
-    /// A live user-mode process's memory, served by `memory` for `process`,
-    /// whose registers and pointers are `arch`'s.
-    pub fn user_live(memory: Arc<dyn UserLiveMemory>, process: u64, arch: Arch) -> Self {
-        Self::from_source(Source::UserLive {
-            memory,
-            process,
-            arch,
-        })
+    /// A live user-mode process's memory, served by `memory`, whose registers
+    /// and pointers are `arch`'s.
+    pub fn user_live(memory: Arc<dyn UserLiveMemory>, arch: Arch) -> Self {
+        Self::from_source(Source::UserLive { memory, arch })
     }
 
     pub fn remote(memory: KdMemory) -> Self {
@@ -421,22 +415,11 @@ impl PhysMem {
         }
     }
 
-    /// The process a live user-mode target's memory calls name, `None` for
-    /// every other source.
-    pub fn user_live_process(&self) -> Option<u64> {
-        match &self.source {
-            Source::UserLive { process, .. } => Some(*process),
-            _ => None,
-        }
-    }
-
     /// What `VirtualQuery` reports for `address` in a live user-mode
     /// process, `None` for every other source.
     pub fn user_live_query(&self, address: u64) -> Option<Result<MemoryBasicInformation>> {
         match &self.source {
-            Source::UserLive {
-                memory, process, ..
-            } => Some(memory.query(*process, address)),
+            Source::UserLive { memory, .. } => Some(memory.query(address)),
             _ => None,
         }
     }
@@ -661,9 +644,7 @@ impl MemoryOps<PhysAddr> for PhysMem {
             // One process, one address space: the root names nothing here.
             Source::UserDump(dump) => Some(dump.read_virtual(addr, buf)),
             // The same, served by the process server instead of a file.
-            Source::UserLive {
-                memory, process, ..
-            } => Some(memory.read(*process, addr.0, buf)),
+            Source::UserLive { memory, .. } => Some(memory.read(addr.0, buf)),
             // A host mapping is there to be read directly; that is the whole
             // point of selecting it.
             Source::Live { .. } | Source::Dmp(_) | Source::Partition { .. } => None,
@@ -675,9 +656,7 @@ impl MemoryOps<PhysAddr> for PhysMem {
             Source::UserDump(_) => Some(Err(Error::ReadOnlyDump)),
             // A live process is halted at its stop, so the server can write
             // the bytes into it.
-            Source::UserLive {
-                memory, process, ..
-            } => Some(memory.write(*process, addr.0, buf)),
+            Source::UserLive { memory, .. } => Some(memory.write(addr.0, buf)),
             _ if self.in_pte_self_map(addr) => None,
             Source::Live {
                 mediated: Some(kd), ..

@@ -104,15 +104,12 @@ impl DbgsrvEndpoint {
     pub fn connect(&self) -> Result<TcpTransport> {
         let Self::Tcp { server, port } = self;
         let address = format!("{server}:{port}");
-        let stream = TcpStream::connect(&address).map_err(|error| {
-            Error::DebugInfo(format!("dbgsrv: cannot connect to {address}: {error}"))
-        })?;
+        let stream = TcpStream::connect(&address)
+            .map_err(|error| Error::Dbgsrv(format!("cannot connect to {address}: {error}")))?;
         stream.set_nodelay(true).ok();
         stream
             .set_read_timeout(Some(CONNECT_TIMEOUT))
-            .map_err(|error| {
-                Error::DebugInfo(format!("dbgsrv: cannot configure {address}: {error}"))
-            })?;
+            .map_err(|error| Error::Dbgsrv(format!("cannot configure {address}: {error}")))?;
         Ok(TcpTransport {
             stream,
             address,
@@ -129,11 +126,6 @@ pub struct TcpTransport {
 }
 
 impl TcpTransport {
-    /// How the endpoint is named in messages.
-    pub fn describe(&self) -> &str {
-        &self.address
-    }
-
     /// Set the read timeout; `None` waits forever.
     ///
     /// [`crate::backend::dbgsrv::service::ProcessServer::wait_for_event`] is
@@ -143,7 +135,7 @@ impl TcpTransport {
         self.timeout = timeout;
         self.stream
             .set_read_timeout(timeout)
-            .map_err(|error| Error::DebugInfo(format!("dbgsrv: cannot set timeout: {error}")))
+            .map_err(|error| Error::Dbgsrv(format!("cannot set timeout: {error}")))
     }
 
     pub fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
@@ -151,24 +143,21 @@ impl TcpTransport {
             if error.kind() == std::io::ErrorKind::TimedOut
                 || error.kind() == std::io::ErrorKind::WouldBlock
             {
-                Error::DebugInfo(format!(
-                    "dbgsrv: {} did not answer within {:?}",
+                Error::Dbgsrv(format!(
+                    "{} did not answer within {:?}",
                     self.address,
                     self.timeout.unwrap_or_default()
                 ))
             } else {
-                Error::DebugInfo(format!(
-                    "dbgsrv: read from {} failed: {error}",
-                    self.address
-                ))
+                Error::Dbgsrv(format!("read from {} failed: {error}", self.address))
             }
         })
     }
 
     pub fn write_all(&mut self, buf: &[u8]) -> Result<()> {
-        self.stream.write_all(buf).map_err(|error| {
-            Error::DebugInfo(format!("dbgsrv: write to {} failed: {error}", self.address))
-        })
+        self.stream
+            .write_all(buf)
+            .map_err(|error| Error::Dbgsrv(format!("write to {} failed: {error}", self.address)))
     }
 }
 

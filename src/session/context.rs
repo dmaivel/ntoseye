@@ -57,11 +57,6 @@ impl Session {
         self.backend.set_current_thread(id)?;
         self.target.selected_frame = None;
         self.current_thread = id.to_string();
-        // A live process's selection is the target's too: `!teb`, `k`, and
-        // the `$teb` pseudo-register read it.
-        if self.target.phys.is_user_live() {
-            self.target.select_live_user_thread(id);
-        }
         self.refresh_context_for_current_thread();
         Ok(())
     }
@@ -568,14 +563,14 @@ impl Session {
     }
 
     /// The live process's threads, with the PC each would run at. Every
-    /// thread's `CONTEXT` is read through the backend in turn, which is why
-    /// the original selection is put back before returning.
+    /// thread's `CONTEXT` is read through the backend in turn, and the
+    /// caller's selected thread is restored before returning.
     fn live_user_threads(&mut self) -> Option<Vec<UserThreadSummary>> {
-        let threads = self.target.live_user_process()?.threads.clone();
-        let selected = self.backend.stopped_thread_id().ok();
+        let threads = self.target.live_user_process()?.threads();
+        let original = self.current_thread.clone();
         let mut summaries = Vec::with_capacity(threads.len());
         for (index, thread) in threads.iter().enumerate() {
-            let id = crate::nt::target::Target::user_live_backend_thread_id(thread.tid);
+            let id = crate::backend::userlive::backend_thread_id(thread.tid);
             let mut summary = UserThreadSummary {
                 index,
                 current: id.eq_ignore_ascii_case(&self.current_thread),
@@ -604,8 +599,8 @@ impl Session {
             }
             summaries.push(summary);
         }
-        if let Some(selected) = selected {
-            let _ = self.backend.set_current_thread(&selected);
+        if !original.is_empty() {
+            let _ = self.backend.set_current_thread(&original);
         }
         // Names are formatted once the selection is back where it was: the
         // lookup reads memory in the current scope.
@@ -944,11 +939,7 @@ pub fn refresh_windows_thread_context_for_backend_thread(
     // kernel thread object to walk: a dump's captured ones, or a live
     // process's.
     if debugger.is_user_target() {
-        if debugger.phys.is_user_live() {
-            debugger.select_live_user_thread(thread_id);
-        } else {
-            debugger.select_user_thread(thread_id);
-        }
+        debugger.select_user_mode_thread(thread_id);
         debugger.clear_current_windows_thread_context();
         return None;
     }

@@ -316,11 +316,9 @@ fn thread_trace_context(debugger: &Target, cr3: u64, process_modules: bool) -> T
     if debugger.is_user_target()
         && let Some(modules) = debugger.user_modules()
     {
-        let description = match (debugger.user_dump_info(), debugger.live_user_process()) {
-            (Some(info), _) => info.process_label(),
-            (None, Some(process)) => format!("process {:#x}", process.pid),
-            (None, None) => "user process".to_string(),
-        };
+        let description = debugger
+            .user_process_label()
+            .unwrap_or_else(|| "user process".to_string());
         return ThreadTraceContext {
             description,
             active_dtb: DTB_IDENTITY,

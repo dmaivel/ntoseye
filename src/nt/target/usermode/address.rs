@@ -509,8 +509,8 @@ impl Target {
         // the label, and the stack a dump captured when it recorded no TEB.
         let threads: Vec<UsageThread> = match self.live_user_process() {
             Some(process) => process
-                .threads
-                .iter()
+                .threads()
+                .into_iter()
                 .enumerate()
                 .map(|(index, thread)| UsageThread {
                     teb: thread.teb.unwrap_or(0),
@@ -590,11 +590,7 @@ impl Target {
     /// through the selected thread's TEB, else the first TEB the dump
     /// captured.
     pub fn user_process_peb(&self) -> Option<u64> {
-        if let Some(peb) = self
-            .live_user_process()
-            .and_then(|process| process.peb)
-            .filter(|peb| *peb != 0)
-        {
+        if let Some(peb) = self.live_user_process().and_then(|process| process.peb()) {
             return Some(peb);
         }
         let types = self.user_mode_types(self.current_dtb()).ok()?;

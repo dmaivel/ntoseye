@@ -8,113 +8,96 @@
 //! served by the process server. Unlike a dump it can be written, run, and
 //! stopped, which is what the backend above it provides.
 
+use std::sync::Arc;
+
 use crate::backend::phys::PhysMem;
-use crate::backend::userlive::MemoryBasicInformation;
+use crate::backend::userlive::{
+    LiveProcessState, LiveUserThread, MemoryBasicInformation, backend_thread_id,
+};
 use crate::base::error::{Error, Result};
-use crate::base::memory::{AddressSpace, DTB_IDENTITY, MemoryOps};
+use crate::base::memory::{DTB_IDENTITY, MemoryOps, PAGE_SIZE};
 use crate::base::notice::Notice;
 use crate::base::types::VirtAddr;
-use crate::nt::guest::{Guest, ModuleInfo, UNKNOWN_MODULE_NAME};
+use crate::nt::guest::{
+    Guest, ModuleInfo, PEB64_LDR_OFFSET, UNKNOWN_MODULE_NAME, walk_loader_list64,
+};
 use crate::nt::symbols::SymbolStore;
 use crate::nt::target::Target;
 use crate::nt::userdump::MemoryRegion;
 
-/// One thread of the live process.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LiveUserThread {
-    pub tid: u32,
-    /// The process server's handle to the thread, which its register calls
-    /// name.
-    pub handle: u64,
-    /// The thread's `_TEB`, when the server names it.
-    pub teb: Option<u64>,
-    /// The address the thread's function starts at, when the server says.
-    pub start_address: Option<u64>,
-    /// The thread's description (`SetThreadDescription`), when it has one.
-    pub name: Option<String>,
-}
-
-/// The live process a user-mode target inspects.
+/// The live process a user-mode target inspects: shared live metadata updated
+/// by the backend as threads arrive and exit, plus the target's module list
+/// and thread selection.
 #[derive(Clone, Debug)]
 pub struct LiveUserProcess {
-    pub pid: u32,
-    /// The process server's handle to the process.
-    pub process_handle: u64,
-    /// The process's `_PEB`, when the server names it.
-    pub peb: Option<u64>,
+    state: LiveProcessState,
     /// The process's modules, as its loader lists them; filled by
     /// [`Target::refresh_live_user_modules`].
     pub modules: Vec<ModuleInfo>,
-    /// The image the process was created from, which is its only module until
-    /// its loader fills the lists.
-    pub image_base: Option<u64>,
-    /// The file name of the command line this session created, if one was.
-    pub image_hint: Option<String>,
-    pub threads: Vec<LiveUserThread>,
     /// The thread selected for inspection (`~Ns`), by thread id.
     pub selected_tid: Option<u32>,
 }
 
 impl LiveUserProcess {
+    pub fn new(state: LiveProcessState, selected_tid: Option<u32>) -> Self {
+        Self {
+            state,
+            modules: Vec::new(),
+            selected_tid,
+        }
+    }
+
+    pub fn state(&self) -> &LiveProcessState {
+        &self.state
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.state.with(|info| info.pid)
+    }
+
+    pub fn peb(&self) -> Option<u64> {
+        self.state.with(|info| info.peb.filter(|peb| *peb != 0))
+    }
+
+    pub fn image_base(&self) -> Option<u64> {
+        self.state.with(|info| info.image_base)
+    }
+
+    pub fn image_hint(&self) -> Option<String> {
+        self.state.with(|info| info.image_hint.clone())
+    }
+
+    pub fn threads(&self) -> Vec<LiveUserThread> {
+        self.state.with(|info| info.threads.clone())
+    }
+
+    pub fn thread_count(&self) -> usize {
+        self.state.with(|info| info.threads.len())
+    }
+
     /// The thread selected for inspection.
-    pub fn thread(&self) -> Option<&LiveUserThread> {
+    pub fn thread(&self) -> Option<LiveUserThread> {
         let tid = self.selected_tid?;
-        self.threads.iter().find(|thread| thread.tid == tid)
+        self.thread_by_id(tid)
     }
 
     /// The thread `tid` names.
-    pub fn thread_by_id(&self, tid: u32) -> Option<&LiveUserThread> {
-        self.threads.iter().find(|thread| thread.tid == tid)
+    pub fn thread_by_id(&self, tid: u32) -> Option<LiveUserThread> {
+        self.state.with(|info| info.thread_by_id(tid).cloned())
     }
 
-    /// The thread a backend id names: its thread id in hex, as
-    /// [`Target::user_live_backend_thread_id`] writes it.
-    pub fn thread_by_backend_id(&self, backend_id: &str) -> Option<&LiveUserThread> {
-        let tid = u32::from_str_radix(backend_id, 16).ok()?;
-        self.thread_by_id(tid)
+    /// The thread a backend id names (see [`backend_thread_id`]).
+    pub fn thread_by_backend_id(&self, backend_id: &str) -> Option<LiveUserThread> {
+        self.state
+            .with(|info| info.thread_by_backend_id(backend_id).cloned())
     }
 
     /// The place the thread a backend id names holds in the process's thread
     /// list, which is the number `~` selects it by.
     pub fn thread_index_by_backend_id(&self, backend_id: &str) -> Option<usize> {
-        let tid = u32::from_str_radix(backend_id, 16).ok()?;
-        self.threads.iter().position(|thread| thread.tid == tid)
+        self.state
+            .with(|info| info.thread_index_by_backend_id(backend_id))
     }
-}
-
-/// The `_PEB` fields the loader walk needs, at the offsets every 64-bit
-/// Windows keeps them: the PEB's and loader data's own layouts are part of
-/// the loader ABI (the same reason
-/// [`walk_loader_list32`](crate::nt::guest::walk_loader_list32) uses fixed
-/// 32-bit offsets), so a process can be listed before any symbols are loaded.
-mod abi {
-    /// `_PEB.Ldr`.
-    pub const PEB_LDR: u64 = 0x18;
-    /// `_PEB_LDR_DATA.InLoadOrderModuleList`.
-    pub const LDR_IN_LOAD_ORDER: u64 = 0x10;
-    /// `_LDR_DATA_TABLE_ENTRY.InLoadOrderLinks`.
-    pub const ENTRY_IN_LOAD_ORDER_LINKS: u64 = 0x00;
-    /// `_LDR_DATA_TABLE_ENTRY.DllBase`.
-    pub const ENTRY_DLL_BASE: u64 = 0x30;
-    /// `_LDR_DATA_TABLE_ENTRY.EntryPoint`.
-    pub const ENTRY_ENTRY_POINT: u64 = 0x38;
-    /// `_LDR_DATA_TABLE_ENTRY.SizeOfImage`.
-    pub const ENTRY_SIZE_OF_IMAGE: u64 = 0x40;
-    /// `_LDR_DATA_TABLE_ENTRY.FullDllName`, a `UNICODE_STRING`.
-    pub const ENTRY_FULL_NAME: u64 = 0x48;
-    /// `_LDR_DATA_TABLE_ENTRY.BaseDllName`, a `UNICODE_STRING`.
-    pub const ENTRY_BASE_NAME: u64 = 0x58;
-}
-
-/// How many loader entries one walk may list before it gives up: a corrupt
-/// list must not spin forever.
-const MAX_LOADER_MODULES: usize = 1024;
-
-/// One loader entry's fixed fields, read out of the process.
-struct LoaderEntry {
-    base: u64,
-    entry_point: u64,
-    size_of_image: u32,
 }
 
 /// A live `VirtualQuery` answer as the dump model records a region: the same
@@ -138,22 +121,14 @@ impl Target {
     /// serves. No kernel is looked for, and the module list stays empty until
     /// [`Self::refresh_live_user_modules`] reads it from the process's own
     /// loader lists.
-    pub fn with_live_user_process(
-        phys: std::sync::Arc<crate::backend::phys::PhysMem>,
-        process: LiveUserProcess,
-    ) -> Result<Self> {
+    pub fn with_live_user_process(phys: Arc<PhysMem>, process: LiveUserProcess) -> Result<Self> {
         if !phys.is_user_live() {
             return Err(Error::DebugInfo(
                 "the memory source is not a live user-mode process".to_string(),
             ));
         }
-        let mut target = Self::from_parts(
-            phys,
-            std::sync::Arc::new(SymbolStore::new()),
-            None,
-            None,
-            Vec::new(),
-        );
+        let mut target =
+            Self::from_parts(phys, Arc::new(SymbolStore::new()), None, None, Vec::new());
         target.user_live = Some(process);
         Ok(target)
     }
@@ -169,9 +144,8 @@ impl Target {
         self.user_live.as_mut()
     }
 
-    /// Select the live thread a backend id names: the thread id in hex, as
-    /// [`Self::user_live_backend_thread_id`] writes it. An id no thread has
-    /// clears the selection.
+    /// Select the live thread a backend id names; an id no thread has clears
+    /// the selection.
     pub fn select_live_user_thread(&mut self, backend_id: &str) -> Option<u32> {
         let process = self.user_live.as_mut()?;
         process.selected_tid = process
@@ -180,14 +154,14 @@ impl Target {
         process.selected_tid
     }
 
-    /// The backend id of live thread `tid`: its id in hex, which is how
-    /// WinDbg names a user-mode thread.
+    /// The backend id of live thread `tid`, as WinDbg names a user-mode
+    /// thread.
     pub fn user_live_backend_thread_id(tid: u32) -> String {
-        format!("{tid:x}")
+        backend_thread_id(tid)
     }
 
     /// The live thread selected for inspection.
-    pub fn user_live_thread(&self) -> Option<&LiveUserThread> {
+    pub fn user_live_thread(&self) -> Option<LiveUserThread> {
         self.user_live.as_ref()?.thread()
     }
 
@@ -211,9 +185,12 @@ impl Target {
             .ok_or_else(|| Error::DebugInfo("the memory source has no architecture".into()))?;
         // A process stopped at its creation has no loader list to walk: its
         // image is the one module it has.
-        let peb = process.peb.filter(|peb| *peb != 0);
-        let mut modules = match peb {
-            Some(peb) => self.walk_live_loader_list(peb)?,
+        let mut modules = match process.peb() {
+            Some(peb) => {
+                let memory = self.context_memory();
+                let ldr = memory.read::<u64>(VirtAddr(peb + PEB64_LDR_OFFSET))?;
+                walk_loader_list64(&memory, ldr).0
+            }
             None => Vec::new(),
         };
         if modules.is_empty()
@@ -224,10 +201,6 @@ impl Target {
         if modules.is_empty() {
             return Err(Error::MissingPEB);
         }
-        // The image's own debug directory names its PDB, which is what the
-        // symbol store needs; the loader list only has to name the image.
-        // The list is recorded whatever the symbols do: `lm` must list the
-        // process's modules even when a PDB cannot be fetched.
         let report = Guest::load_module_symbols_or_fetch_later(
             &self.phys,
             &self.symbols,
@@ -247,107 +220,37 @@ impl Target {
         Ok(())
     }
 
-    /// Walk `peb`'s `InLoadOrderModuleList`, naming each module from its
-    /// `FullDllName` and its `BaseDllName`, without needing any symbols.
-    fn walk_live_loader_list(&self, peb: u64) -> Result<Vec<ModuleInfo>> {
-        let memory = self.context_memory();
-        let ldr = memory.read::<u64>(VirtAddr(peb + abi::PEB_LDR))?;
-        if ldr == 0 {
-            return Ok(Vec::new());
-        }
-        let head = ldr + abi::LDR_IN_LOAD_ORDER;
-        let mut modules = Vec::new();
-        let mut link = memory.read::<u64>(VirtAddr(head))?;
-        for _ in 0..MAX_LOADER_MODULES {
-            if link == 0 || link == head {
-                break;
-            }
-            let record = link - abi::ENTRY_IN_LOAD_ORDER_LINKS;
-            let entry = self.read_loader_entry(&memory, record)?;
-            if entry.base != 0 {
-                let full_path = read_loader_string(&memory, record + abi::ENTRY_FULL_NAME);
-                let base_name = read_loader_string(&memory, record + abi::ENTRY_BASE_NAME);
-                let name = full_path
-                    .as_deref()
-                    .and_then(|path| path.rsplit(['\\', '/']).next())
-                    .filter(|file| !file.is_empty())
-                    .map(str::to_string)
-                    .or_else(|| base_name.filter(|name| !name.is_empty()))
-                    .unwrap_or_else(|| UNKNOWN_MODULE_NAME.to_string());
-                let mut info = ModuleInfo::new(name, VirtAddr(entry.base), entry.size_of_image);
-                if !full_path.as_deref().unwrap_or_default().is_empty() {
-                    info.path = full_path;
-                }
-                if entry.entry_point != 0 {
-                    info.entry_point = Some(VirtAddr(entry.entry_point));
-                }
-                modules.push(info);
-            }
-            link = memory.read::<u64>(VirtAddr(record + abi::ENTRY_IN_LOAD_ORDER_LINKS))?;
-        }
-        Ok(modules)
-    }
-
-    fn read_loader_entry(
-        &self,
-        memory: &AddressSpace<'_, PhysMem>,
-        record: u64,
-    ) -> Result<LoaderEntry> {
-        let read = |at: u64| VirtAddr(record + at);
-        Ok(LoaderEntry {
-            base: memory.read::<u64>(read(abi::ENTRY_DLL_BASE))?,
-            entry_point: memory.read::<u64>(read(abi::ENTRY_ENTRY_POINT))?,
-            size_of_image: memory.read::<u32>(read(abi::ENTRY_SIZE_OF_IMAGE))?,
-        })
-    }
-
     /// The image a live process was created from, as a module: a process
     /// stopped at its creation has no loader list yet, and its image is still
     /// the one module it has.
     ///
-    /// The name comes from the image's own `CodeView` record, which its mapped
-    /// headers carry; a process whose command line this session created falls
-    /// back to that file name, and a stripped image to the unknown marker.
+    /// The name comes from the image's own `CodeView` record, falling back to
+    /// the command line file name and then the unknown marker.
     pub fn live_process_image(&self) -> Option<ModuleInfo> {
-        let base = self.live_user_process()?.image_base?;
+        let process = self.live_user_process()?;
+        let base = process.image_base()?;
         let memory = self.context_memory();
-        let characteristics = crate::nt::pe::read_pe_header_page(VirtAddr(base), &memory)
+        let probed = crate::nt::pe::read_pe_header_page(VirtAddr(base), &memory)
             .ok()
             .and_then(|headers| {
                 let view = pelite::PeView::from_bytes(&headers[..]).ok()?;
                 let characteristics = view.file_header().Characteristics;
-                let pdb = view
+                let name = view
                     .debug()
                     .ok()
                     .and_then(|debug| debug.pdb_file_name())
-                    .and_then(|name| name.to_str().ok().map(str::to_string));
+                    .and_then(|pdb| pdb.to_str().ok())
+                    .map(|pdb| crate::nt::pe::image_file_name(pdb, characteristics));
                 let size = match view.optional_header() {
                     pelite::Wrap::T32(optional) => optional.SizeOfImage,
                     pelite::Wrap::T64(optional) => optional.SizeOfImage,
                 };
-                Some((
-                    characteristics,
-                    pdb.map(|pdb| crate::nt::pe::image_file_name(&pdb, characteristics)),
-                    size,
-                ))
+                Some((name, size))
             });
-        let (name, size) = match characteristics {
-            Some((_, Some(name), size)) => (name, size),
-            Some((_, None, size)) => (
-                self.live_user_process()?
-                    .image_hint
-                    .clone()
-                    .unwrap_or_else(|| UNKNOWN_MODULE_NAME.to_string()),
-                size,
-            ),
-            None => (
-                self.live_user_process()?
-                    .image_hint
-                    .clone()
-                    .unwrap_or_else(|| UNKNOWN_MODULE_NAME.to_string()),
-                0,
-            ),
-        };
+        let (name, size) = probed.unwrap_or((None, 0));
+        let name = name
+            .or_else(|| process.image_hint())
+            .unwrap_or_else(|| UNKNOWN_MODULE_NAME.to_string());
         Some(ModuleInfo::new(name, VirtAddr(base), size))
     }
 
@@ -358,20 +261,15 @@ impl Target {
             .map(|process| process.modules.as_slice())
     }
 
-    /// The live process's address space, one region per `VirtualQuery`:
-    /// The live process's address space, one region per `VirtualQuery`:
-    /// the query's own answer, walked from the bottom of user space up.
+    /// The live process's address space, one region per `VirtualQuery`, walked
+    /// from the bottom of user space up.
     pub fn live_memory_regions(&self) -> Result<Vec<MemoryRegion>> {
         /// How many regions one walk may list: a process mapping every
         /// reservation separately still fits.
         const MAX_REGIONS: usize = 65_536;
-        /// How many times an unqueryable address is stepped over before the
-        /// walk gives up: a server that refuses a page must not end the
-        /// listing of everything above it, and a server that refuses all of
-        /// it must not spin.
+        /// How many times an unqueryable page is stepped over before the walk
+        /// gives up.
         const MAX_SKIPS: usize = 4_096;
-        /// The step taken over an address `VirtualQuery` refuses.
-        const SKIP: u64 = 0x1000;
 
         let arch = self
             .phys
@@ -383,14 +281,14 @@ impl Target {
         while !arch.paging().is_kernel_address(VirtAddr(address)) {
             let query = match self.phys.user_live_query(address) {
                 Some(Ok(query)) => query,
-                // Nothing answers here: step over the page rather than
-                // ending the listing of everything above it.
+                // Step over an unqueryable page rather than ending the listing
+                // of everything above it.
                 Some(Err(_)) | None => {
                     skips += 1;
                     if skips > MAX_SKIPS {
                         break;
                     }
-                    address = address.saturating_add(SKIP);
+                    address = address.saturating_add(PAGE_SIZE as u64);
                     continue;
                 }
             };
@@ -413,42 +311,6 @@ impl Target {
     }
 }
 
-/// The length, maximum length, and buffer of a `UNICODE_STRING` at
-/// `address`. The buffer is a pointer, so it is as wide as the target's:
-/// eight bytes on AMD64 and ARM64.
-fn read_unicode_string_header(
-    memory: &AddressSpace<'_, PhysMem>,
-    address: u64,
-) -> Result<(u16, u16, u64)> {
-    let length = memory.read::<u16>(VirtAddr(address))?;
-    let maximum = memory.read::<u16>(VirtAddr(address + 2))?;
-    let buffer = if memory.arch().pointer_size() == 8 {
-        memory.read::<u64>(VirtAddr(address + 8))?
-    } else {
-        u64::from(memory.read::<u32>(VirtAddr(address + 8))?)
-    };
-    Ok((length, maximum, buffer))
-}
-
-/// The string a `UNICODE_STRING` at `address` names, `None` when it is empty
-/// or unreadable.
-fn read_loader_string(memory: &AddressSpace<'_, PhysMem>, address: u64) -> Option<String> {
-    let (length, maximum, buffer) = read_unicode_string_header(memory, address).ok()?;
-    let length = length.min(maximum) as usize;
-    if length == 0 || buffer == 0 {
-        return None;
-    }
-    let mut bytes = vec![0u8; length & !1];
-    memory.read_bytes(VirtAddr(buffer), &mut bytes).ok()?;
-    let wide: Vec<u16> = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| u16::from_le_bytes(*pair))
-        .collect();
-    Some(String::from_utf16_lossy(&wide))
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -457,7 +319,7 @@ mod tests {
     use super::*;
     use crate::arch::Arch;
     use crate::backend::phys::PhysMem;
-    use crate::backend::userlive::UserLiveMemory;
+    use crate::backend::userlive::{LiveProcessInfo, UserLiveMemory};
 
     /// A process address space as a sparse map of bytes: reads inside a
     /// mapped page succeed, anything else faults like an unmapped address.
@@ -493,14 +355,12 @@ mod tests {
             self.put(buffer, &wide);
             self.put_u16(address, wide.len() as u16);
             self.put_u16(address + 2, wide.len() as u16 + 2);
-            // `UNICODE_STRING.Buffer` is a pointer: eight bytes on the
-            // 64-bit targets this walk supports.
             self.put_u64(address + 8, buffer);
         }
     }
 
     impl UserLiveMemory for FakeMemory {
-        fn read(&self, _process: u64, address: u64, buf: &mut [u8]) -> Result<()> {
+        fn read(&self, address: u64, buf: &mut [u8]) -> Result<()> {
             let map = self.bytes.lock().unwrap();
             for (offset, byte) in buf.iter_mut().enumerate() {
                 *byte = *map
@@ -510,19 +370,19 @@ mod tests {
             Ok(())
         }
 
-        fn write(&self, _process: u64, address: u64, buf: &[u8]) -> Result<()> {
+        fn write(&self, address: u64, buf: &[u8]) -> Result<()> {
             self.put(address, buf);
             Ok(())
         }
 
-        fn query(&self, _process: u64, address: u64) -> Result<MemoryBasicInformation> {
+        fn query(&self, address: u64) -> Result<MemoryBasicInformation> {
             Ok(MemoryBasicInformation {
                 base_address: address & !0xfff,
                 allocation_base: address & !0xffff,
                 allocation_protect: 0x04,
                 partition_id: 0,
                 reserved0: [0; 2],
-                region_size: 0x1000,
+                region_size: PAGE_SIZE as u64,
                 state: 0x1000,
                 protect: 0x04,
                 kind: 0x2_0000,
@@ -543,12 +403,12 @@ mod tests {
     /// way a 64-bit Windows keeps it.
     fn process() -> (Arc<FakeMemory>, Target) {
         let memory = Arc::new(FakeMemory::default());
-        // PEB.Ldr.
-        memory.put_u64(PEB + 0x18, LDR);
-        // The list head, then each entry's forward link: the head points at
-        // the first entry's InLoadOrderLinks, and the last entry back at the
-        // head.
+        memory.put_u64(PEB + PEB64_LDR_OFFSET, LDR);
         memory.put_u64(LDR_HEAD, ENTRY_BOOT);
+        // Zero-fill each 0x68-byte `_LDR_DATA_TABLE_ENTRY` so single-read
+        // walks read resident bytes for the whole record.
+        memory.put(ENTRY_BOOT, &[0u8; 0x68]);
+        memory.put(ENTRY_NTDLL, &[0u8; 0x68]);
         memory.put_u64(ENTRY_BOOT, ENTRY_NTDLL);
         memory.put_u64(ENTRY_NTDLL, LDR_HEAD);
         for (entry, base, size, name, path, path_buffer, name_buffer) in [
@@ -577,23 +437,20 @@ mod tests {
             memory.put_unicode_string(entry + 0x48, path_buffer, path);
             memory.put_unicode_string(entry + 0x58, name_buffer, name);
         }
-        let phys = Arc::new(PhysMem::user_live(memory.clone(), 1, Arch::Amd64));
-        let process = LiveUserProcess {
+        let phys = Arc::new(PhysMem::user_live(memory.clone(), Arch::Amd64));
+        let state = LiveProcessState::new(LiveProcessInfo {
             pid: 0x1234,
-            process_handle: 0x100,
             peb: Some(PEB),
-            modules: Vec::new(),
             image_base: None,
             image_hint: None,
             threads: vec![LiveUserThread {
                 tid: 0x5678,
-                handle: 0x200,
                 teb: Some(0x7ff0_1000),
                 start_address: Some(BOOT_BASE + 0x1000),
                 name: None,
             }],
-            selected_tid: Some(0x5678),
-        };
+        });
+        let process = LiveUserProcess::new(state, Some(0x5678));
         let target = Target::with_live_user_process(phys, process).expect("a live target");
         (memory, target)
     }
@@ -609,7 +466,7 @@ mod tests {
         ));
         assert!(target.user_dump().is_none());
         assert_eq!(
-            target.live_user_process().map(|process| process.pid),
+            target.live_user_process().map(LiveUserProcess::pid),
             Some(0x1234)
         );
         assert_eq!(
@@ -618,6 +475,16 @@ mod tests {
                 .and_then(|thread| thread.start_address),
             Some(BOOT_BASE + 0x1000)
         );
+    }
+
+    #[test]
+    fn live_user_pseudo_registers_report_process_and_selected_thread() {
+        let (_memory, target) = process();
+        assert_eq!(target.builtin_variable_value("pid"), Some(0x1234));
+        assert_eq!(target.builtin_variable_value("tpid"), Some(0x1234));
+        assert_eq!(target.builtin_variable_value("peb"), Some(PEB));
+        assert_eq!(target.builtin_variable_value("tid"), Some(0x5678));
+        assert_eq!(target.builtin_variable_value("teb"), Some(0x7ff0_1000));
     }
 
     #[test]
@@ -640,7 +507,11 @@ mod tests {
     #[test]
     fn a_process_the_server_gives_no_peb_for_keeps_its_module_list() {
         let (_memory, mut target) = process();
-        target.live_user_process_mut().expect("a live process").peb = None;
+        target
+            .live_user_process()
+            .expect("a live process")
+            .state()
+            .update(|info| info.peb = None);
         assert!(matches!(
             target.refresh_live_user_modules(),
             Err(Error::MissingPEB)
@@ -662,14 +533,15 @@ mod tests {
     #[test]
     fn a_process_with_no_loader_list_lists_its_creation_image() {
         let (_memory, mut target) = process();
-        {
-            let live = target.live_user_process_mut().expect("a live process");
-            live.peb = None;
-            live.image_base = Some(0x0040_0000);
-            live.image_hint = Some("boot.exe".to_string());
-        }
-        // No PEB means the loader lists are unreadable, which is the state a
-        // creation stop leaves the process in.
+        target
+            .live_user_process()
+            .expect("a live process")
+            .state()
+            .update(|info| {
+                info.peb = None;
+                info.image_base = Some(0x0040_0000);
+                info.image_hint = Some("boot.exe".to_string());
+            });
         let _ = target.refresh_live_user_modules();
         let modules = target.modules().expect("modules");
         assert_eq!(modules.len(), 1, "{modules:?}");
@@ -681,11 +553,9 @@ mod tests {
     fn a_virtual_query_walks_the_process_regions() {
         let (_memory, target) = process();
         let regions = target.live_memory_regions().expect("regions");
-        // The walk ends where the architecture's user half does; every
-        // query is a page in this fake, so it lists the pages up to it.
         assert!(!regions.is_empty());
         assert_eq!(regions[0].base, 0);
         assert_eq!(regions[0].state, 0x1000);
-        assert!(regions.iter().all(|region| region.size == 0x1000));
+        assert!(regions.iter().all(|region| region.size == PAGE_SIZE as u64));
     }
 }
