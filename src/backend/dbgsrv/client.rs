@@ -162,34 +162,78 @@ impl DbgsrvClient {
     }
 }
 
+/// Flag bit set in [`ProcessHandle::exit`] once the process has exited,
+/// distinguishing exit code 0 from a live process.
+const EXIT_RECORDED: u64 = 1 << 32;
+
+/// Shared process handle and exit status between [`super::DbgsrvBackend`] and
+/// [`DbgsrvUserMemory`].
+pub(super) struct ProcessHandle {
+    handle: AtomicU64,
+    exit: AtomicU64,
+}
+
+impl ProcessHandle {
+    pub(super) fn new(handle: u64) -> Self {
+        Self {
+            handle: AtomicU64::new(handle),
+            exit: AtomicU64::new(0),
+        }
+    }
+
+    pub(super) fn handle(&self) -> u64 {
+        self.handle.load(Ordering::Acquire)
+    }
+
+    pub(super) fn swap_handle(&self, handle: u64) -> u64 {
+        self.handle.swap(handle, Ordering::AcqRel)
+    }
+
+    pub(super) fn exit_code(&self) -> Option<u32> {
+        let raw = self.exit.load(Ordering::Acquire);
+        (raw & EXIT_RECORDED != 0).then_some(raw as u32)
+    }
+
+    pub(super) fn set_exited(&self, code: u32) {
+        self.exit
+            .store(EXIT_RECORDED | u64::from(code), Ordering::Release);
+    }
+
+    pub(super) fn require_alive(&self) -> Result<u64> {
+        if let Some(code) = self.exit_code() {
+            return Err(Error::ProcessExited(code));
+        }
+        Ok(self.handle())
+    }
+}
+
 /// The memory of the attached process behind a [`DbgsrvClient`], holding the
 /// shared process handle internally so layers above never see server handles.
 pub struct DbgsrvUserMemory {
     client: Arc<DbgsrvClient>,
-    process: Arc<AtomicU64>,
+    process: Arc<ProcessHandle>,
 }
 
 impl DbgsrvUserMemory {
-    pub fn new(client: Arc<DbgsrvClient>, process: Arc<AtomicU64>) -> Self {
+    pub(super) fn new(client: Arc<DbgsrvClient>, process: Arc<ProcessHandle>) -> Self {
         Self { client, process }
-    }
-
-    fn process(&self) -> u64 {
-        self.process.load(Ordering::Acquire)
     }
 }
 
 impl UserLiveMemory for DbgsrvUserMemory {
     fn read(&self, address: u64, buf: &mut [u8]) -> Result<()> {
-        self.client.read_virtual(self.process(), address, buf)
+        let process = self.process.require_alive()?;
+        self.client.read_virtual(process, address, buf)
     }
 
     fn write(&self, address: u64, buf: &[u8]) -> Result<()> {
-        self.client.write_virtual(self.process(), address, buf)
+        let process = self.process.require_alive()?;
+        self.client.write_virtual(process, address, buf)
     }
 
     fn query(&self, address: u64) -> Result<MemoryBasicInformation> {
-        self.client.query_virtual(self.process(), address)
+        let process = self.process.require_alive()?;
+        self.client.query_virtual(process, address)
     }
 }
 

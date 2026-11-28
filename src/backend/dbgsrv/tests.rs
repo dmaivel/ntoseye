@@ -768,6 +768,7 @@ struct MockServer {
     attach_status: Option<u32>,
     events: Vec<Vec<u8>>,
     closed: Arc<Mutex<Vec<u64>>>,
+    writes: Arc<Mutex<Vec<u64>>>,
 }
 
 impl MockServer {
@@ -779,6 +780,7 @@ impl MockServer {
             attach_status: None,
             events: Vec::new(),
             closed: Arc::new(Mutex::new(Vec::new())),
+            writes: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -846,7 +848,8 @@ impl ProcessServer for MockServer {
         }
         Ok(buf.len())
     }
-    fn write_virtual(&mut self, _process: u64, _address: u64, buf: &[u8]) -> Result<usize> {
+    fn write_virtual(&mut self, _process: u64, address: u64, buf: &[u8]) -> Result<usize> {
+        self.writes.lock().unwrap().push(address);
         Ok(buf.len())
     }
     fn query_virtual(
@@ -994,6 +997,8 @@ fn attach_errors_distinguish_missing_process_and_access_denied() {
 
 #[test]
 fn exit_process_reports_process_exit_instead_of_exception() {
+    use crate::backend::userlive::UserLiveMemory;
+
     let info = TargetInfo {
         machine_type: u32::from(IMAGE_FILE_MACHINE_AMD64),
         processors: 1,
@@ -1014,22 +1019,44 @@ fn exit_process_reports_process_exit_instead_of_exception() {
         ExitDebugInfo { exit_code: 0x2a }.as_bytes(),
     ));
     let closed = Arc::clone(&server.closed);
+    let writes = Arc::clone(&server.writes);
     let client = Arc::new(DbgsrvClient::with_server(Box::new(server), info).expect("a client"));
     let mut backend =
         DbgsrvBackend::connect(client, &DbgsrvTarget::Attach { pid: PID }, &mut |_| {})
             .expect("attach");
+    let memory = backend.user_memory();
+    backend.set_breakpoint(RIP).expect("plant breakpoint");
+    assert_eq!(writes.lock().unwrap().len(), 1);
+
     backend.continue_execution().expect("resume");
     let stop = backend.wait_for_stop().expect("exit stop");
     assert_eq!(stop.process_exit, Some(0x2a));
     assert_eq!(stop.exception_code, None);
-    let error = backend.read_registers().expect_err("exited process");
-    assert!(matches!(error, Error::ProcessExited(0x2a)), "{error}");
-    assert_eq!(error.to_string(), "the process exited (0x2a)");
-    assert_eq!(*closed.lock().unwrap(), vec![THREAD, PROCESS]);
-    // prepare_for_exit and Drop must not double-close already-closed handles.
+
+    // Registers and memory reads/writes/queries all report ProcessExited.
+    let reg_err = backend.read_registers().expect_err("exited registers");
+    assert!(matches!(reg_err, Error::ProcessExited(0x2a)), "{reg_err}");
+    assert_eq!(reg_err.to_string(), "the process exited (0x2a)");
+    let mut buf = [0u8; 4];
+    assert!(matches!(
+        memory.read(RIP, &mut buf),
+        Err(Error::ProcessExited(0x2a))
+    ));
+    assert!(matches!(
+        memory.write(RIP, &[0x90]),
+        Err(Error::ProcessExited(0x2a))
+    ));
+    assert!(matches!(memory.query(RIP), Err(Error::ProcessExited(0x2a))));
+
+    // Only the process handle is closed immediately on ExitProcess; surviving
+    // thread handles are deferred to prepare_for_exit / Drop.
+    assert_eq!(*closed.lock().unwrap(), vec![PROCESS]);
     backend.prepare_for_exit(false).expect("prepare_for_exit");
+    assert_eq!(*closed.lock().unwrap(), vec![PROCESS, THREAD]);
+    // prepare_for_exit must not try to restore breakpoints on an exited process.
+    assert_eq!(writes.lock().unwrap().len(), 1);
     drop(backend);
-    assert_eq!(*closed.lock().unwrap(), vec![THREAD, PROCESS]);
+    assert_eq!(*closed.lock().unwrap(), vec![PROCESS, THREAD]);
 }
 
 #[test]

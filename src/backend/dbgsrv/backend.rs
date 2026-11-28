@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::arch::debug_registers::invalid_slot;
@@ -26,7 +26,7 @@ use crate::base::error::{Error, Result};
 use crate::base::ntstatus::{DBG_CONTINUE, DBG_EXCEPTION_NOT_HANDLED};
 use crate::base::types::VirtAddr;
 
-use super::client::{DbgsrvClient, DbgsrvUserMemory};
+use super::client::{DbgsrvClient, DbgsrvUserMemory, ProcessHandle};
 use super::events::{self, DebugEvent};
 use super::service::{
     DEBUG_PROCESS_ONLY_THIS_PROCESS, E_ACCESSDENIED, E_INVALIDARG, MAX_PROCESS_THREADS,
@@ -91,23 +91,24 @@ impl DbgsrvTarget {
 pub struct DbgsrvBackend {
     client: Arc<DbgsrvClient>,
     pid: u32,
-    /// The process server's handle to the process, shared with
-    /// [`DbgsrvUserMemory`] so a handle update from `CreateProcess` stays in
-    /// sync.
-    process: Arc<AtomicU64>,
+    /// The process server's handle and exit status, shared with
+    /// [`DbgsrvUserMemory`] so handle updates and process exit stay in sync.
+    process: Arc<ProcessHandle>,
     arch: Arch,
     register_map: RegisterMap,
     /// Shared live metadata (PEB, image base/hint, threads) read by `Target`.
     live_state: LiveProcessState,
     threads: Vec<BackendThread>,
+    /// Thread handles deferred from `ExitProcess` so `g` returns immediately
+    /// instead of issuing N synchronous `CloseHandle` RPCs; drained on
+    /// `prepare_for_exit` / `Drop`.
+    pending_close: Vec<u64>,
     current: usize,
     /// The stop the target is held at, when it is not running.
     stop: Option<StopEvent>,
     /// The exception record of the last exception stop, for `.exr -1`.
     last_exception: Option<ExceptionRecord>,
     running: bool,
-    /// The process's exit status, once it reported one.
-    exit: Option<u32>,
     /// Sites this debugger patched into the process, and the instructions
     /// they displaced, when the server has no breakpoint implementation.
     patched: HashMap<u64, Vec<u8>>,
@@ -208,16 +209,16 @@ impl DbgsrvBackend {
         let mut backend = Self {
             client: Arc::clone(&client),
             pid,
-            process: Arc::new(AtomicU64::new(process_handle)),
+            process: Arc::new(ProcessHandle::new(process_handle)),
             arch,
             register_map: arch.register_map().clone(),
             live_state,
             threads: Vec::new(),
+            pending_close: Vec::new(),
             current: 0,
             stop: None,
             last_exception: None,
             running: false,
-            exit: None,
             patched: HashMap::new(),
             service_plants: HashMap::new(),
             debug_log: DebugLog::new(DEBUG_LOG_CAPACITY),
@@ -253,7 +254,7 @@ impl DbgsrvBackend {
 
     /// The process server's handle to the process.
     pub fn process_handle(&self) -> u64 {
-        self.process.load(Ordering::Acquire)
+        self.process.handle()
     }
 
     /// The virtual-memory adapter bound to this process.
@@ -285,10 +286,7 @@ impl DbgsrvBackend {
     }
 
     fn require_alive(&self) -> Result<()> {
-        match self.exit {
-            Some(code) => Err(Error::ProcessExited(code)),
-            None => Ok(()),
-        }
+        self.process.require_alive().map(|_| ())
     }
 
     fn close_handle(&self, handle: u64) {
@@ -297,16 +295,19 @@ impl DbgsrvBackend {
         }
     }
 
-    /// Close every tracked thread handle and the process handle on the server.
-    /// Idempotent so `ExitProcess`, `prepare_for_exit`, and `Drop` can each
-    /// call it without double-closing.
+    /// Close every tracked or deferred thread handle and the process handle on
+    /// the server. Idempotent so `ExitProcess`, `prepare_for_exit`, and `Drop`
+    /// can each call it without double-closing.
     fn close_all_handles(&mut self) {
+        for handle in std::mem::take(&mut self.pending_close) {
+            self.close_handle(handle);
+        }
         for thread in std::mem::take(&mut self.threads) {
             self.close_handle(thread.handle);
         }
         self.current = 0;
         self.sync_live_threads();
-        let process = self.process.swap(0, Ordering::AcqRel);
+        let process = self.process.swap_handle(0);
         self.close_handle(process);
     }
 
@@ -596,7 +597,7 @@ impl DbgsrvBackend {
                 ..
             } => {
                 if process_handle != 0 {
-                    let previous = self.process.swap(process_handle, Ordering::AcqRel);
+                    let previous = self.process.swap_handle(process_handle);
                     if previous != process_handle {
                         self.close_handle(previous);
                     }
@@ -629,9 +630,19 @@ impl DbgsrvBackend {
                 None
             }
             DebugEvent::ExitProcess { exit_code, .. } => {
-                self.exit = Some(exit_code);
+                self.process.set_exited(exit_code);
                 self.modules_changed = false;
-                self.close_all_handles();
+                // Defer closing surviving thread handles to `prepare_for_exit`
+                // / `Drop` so `g` returns without N synchronous RPCs.
+                self.pending_close.extend(
+                    std::mem::take(&mut self.threads)
+                        .into_iter()
+                        .map(|thread| thread.handle),
+                );
+                self.current = 0;
+                self.sync_live_threads();
+                let process = self.process.swap_handle(0);
+                self.close_handle(process);
                 Some(StopEvent {
                     process_exit: Some(exit_code),
                     ..StopEvent::default()
@@ -996,6 +1007,14 @@ impl DebugBackend for DbgsrvBackend {
     }
 
     fn prepare_for_exit(&mut self, _leave_running: bool) -> Result<()> {
+        self.running = false;
+        if self.process.exit_code().is_some() {
+            self.patched.clear();
+            self.service_plants.clear();
+            self.hardware.clear();
+            self.close_all_handles();
+            return Ok(());
+        }
         // The process outlives this session: restore every breakpoint and
         // watchpoint we planted, then detach so the process runs on cleanly.
         let process = self.process_handle();
@@ -1014,11 +1033,8 @@ impl DebugBackend for DbgsrvBackend {
         for slot in std::mem::take(&mut self.hardware).into_keys() {
             let _ = self.arm_slot_on_all_threads(slot, None);
         }
-        if self.exit.is_none() {
-            let _ = self.client.server().detach_process(self.pid);
-        }
+        let _ = self.client.server().detach_process(self.pid);
         self.close_all_handles();
-        self.running = false;
         Ok(())
     }
 }

@@ -5140,4 +5140,5 @@ fn process_exit_stop_surfaces_as_process_exited() {
         StopKind::ProcessExited { exit_code: 0x2a }
     ));
     assert!(stop.exception().is_none());
+    assert!(session.current_thread.is_empty());
 }

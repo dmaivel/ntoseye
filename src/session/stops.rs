@@ -387,6 +387,7 @@ impl Session {
 
         if let Some(exit_code) = event.process_exit {
             self.target.registers = None;
+            self.current_thread.clear();
             let resolution = StopResolution::ProcessExited { event, exit_code };
             self.record_visible_stop(&resolution);
             return Ok(Some(self.continue_outcome_from_resolution(resolution)));
@@ -453,6 +454,7 @@ impl Session {
 
         if let Some(exit_code) = event.process_exit {
             self.target.registers = None;
+            self.current_thread.clear();
             let resolution = StopResolution::ProcessExited { event, exit_code };
             self.record_visible_stop(&resolution);
             return Ok(resolution);
